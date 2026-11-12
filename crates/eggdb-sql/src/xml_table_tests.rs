@@ -73,3 +73,22 @@ fn sqlserver_xml_columns_answer_value_query_and_exist() {
         assert!(rows.contains(expected), "{expected} in {rows}");
     }
 }
+
+#[test]
+fn sqlserver_nodes_make_rows_whose_relative_paths_read_the_node() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    last(&mut session, "CREATE TABLE orders (id int, doc xml)");
+    last(
+        &mut session,
+        "INSERT INTO orders VALUES (1, '<order><line sku=\"egg\" qty=\"2\"/><line sku=\"milk\" qty=\"1\"/></order>')",
+    );
+    let rows = last(
+        &mut session,
+        "SELECT o.id, l.c.value('@sku', 'varchar(10)'), l.c.value('@qty', 'int') \
+         FROM orders o CROSS APPLY o.doc.nodes('/order/line') AS l(c)",
+    );
+    for expected in ["egg", "milk", "2"] {
+        assert!(rows.contains(expected), "{expected} in {rows}");
+    }
+}

@@ -3589,7 +3589,11 @@ impl<'t> Parser<'t> {
                     .at(position));
                 }
                 self.at += 2;
-                let mut table = self.table_or_function()?;
+                let mut table = if self.at_xml_nodes() {
+                    self.sqlserver_xml_nodes()?
+                } else {
+                    self.table_or_function()?
+                };
                 if let Some(derived) = &mut table.derived {
                     derived.lateral = true;
                 }

@@ -1196,10 +1196,16 @@ fn ordered(mut nodes: Vec<Target>) -> Vec<Target> {
 pub(crate) const QUERY: &str = "eggdb_xmlquery";
 /// The internal function SQL Server's `xml.value()` becomes, before its cast.
 pub(crate) const VALUE: &str = "eggdb_xml_value";
+/// The internal function SQL Server's `xml.query()` becomes.
+pub(crate) const NODE_QUERY: &str = "eggdb_xml_node_query";
+/// The internal function SQL Server's `xml.exist()` becomes.
+pub(crate) const NODE_EXIST: &str = "eggdb_xml_node_exist";
 
-pub(crate) const FUNCTIONS: [&str; 10] = [
+pub(crate) const FUNCTIONS: [&str; 12] = [
     QUERY,
     VALUE,
+    NODE_QUERY,
+    NODE_EXIST,
     "updatexml",
     "xpath",
     "xpath_exists",
@@ -1214,7 +1220,8 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "xpath" => SqlType::Array(ArrayElement::Text),
         "xpath_exists" | "xml_is_well_formed" | "xml_is_well_formed_document" | "xml_is_well_formed_content" => SqlType::Boolean,
-        "extractvalue" | "updatexml" | QUERY | VALUE => SqlType::Text,
+        "extractvalue" | "updatexml" | QUERY | VALUE | NODE_QUERY => SqlType::Text,
+        NODE_EXIST => SqlType::Integer,
         "existsnode" => SqlType::Integer,
         _ => return None,
     })
@@ -1222,6 +1229,32 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
 
 fn text_argument(value: &Value) -> Option<String> {
     value.to_text()
+}
+
+fn is_empty(outcome: &Outcome) -> bool {
+    matches!(outcome, Outcome::Nodes(nodes) if nodes.is_empty())
+}
+
+/// Evaluates `path` in an `xml` method's way: from the document node, and, when that selects
+/// nothing and the value is one element (a row of `nodes()`), from that element, so relative
+/// paths on a `nodes()` row read from its node.
+fn evaluated_from_node(xml: &str, path: &str) -> SqlResult<(Document, Outcome)> {
+    let (document, outcome) = evaluated(xml, path)?;
+    if !is_empty(&outcome) {
+        return Ok((document, outcome));
+    }
+    let elements: Vec<usize> = document.nodes[0]
+        .children
+        .iter()
+        .copied()
+        .filter(|child| matches!(document.nodes[*child].kind, Kind::Element { .. }))
+        .collect();
+    let [only] = elements.as_slice() else {
+        return Ok((document, outcome));
+    };
+    let compiled = XPath::compile(path)?;
+    let retried = document.evaluate(&compiled.expr, Context { target: Target::Node(*only), position: 1, size: 1 })?;
+    Ok((document, retried))
 }
 
 fn evaluated(xml: &str, path: &str) -> SqlResult<(Document, Outcome)> {
@@ -1287,7 +1320,19 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             }
             other => Value::Text(document.string_of(&other)),
         }),
-        (VALUE, [xml, path]) => evaluated(xml, path).map(|(document, outcome)| match outcome {
+        (NODE_QUERY, [xml, path]) => evaluated_from_node(xml, path).map(|(document, outcome)| match outcome {
+            Outcome::Nodes(nodes) => {
+                let mut out = String::new();
+                for node in nodes {
+                    document.serialize(node, &mut out);
+                }
+                Value::Text(out)
+            }
+            other => Value::Text(document.string_of(&other)),
+        }),
+        (NODE_EXIST, [xml, path]) => evaluated_from_node(xml, path)
+            .map(|(_, outcome)| Value::Integer(i32::from(Document::boolean_of(&outcome)))),
+        (VALUE, [xml, path]) => evaluated_from_node(xml, path).map(|(document, outcome)| match outcome {
             Outcome::Nodes(nodes) => nodes.first().map_or(Value::Null, |node| Value::Text(document.string_value(*node))),
             other => Value::Text(document.string_of(&other)),
         }),

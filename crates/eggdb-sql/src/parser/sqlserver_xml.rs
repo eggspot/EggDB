@@ -1,5 +1,5 @@
 use super::Parser;
-use crate::ast::{Expr, ExprKind, Literal, Name};
+use crate::ast::{Expr, ExprKind, GeneratedTable, Literal, Name, TableFunction, TableReference};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult};
 use crate::lexer::{TokenKind, tokenize_in};
@@ -69,16 +69,72 @@ impl Parser<'_> {
                     position,
                 }
             }
-            "query" => {
-                let empty_is_text = Expr {
-                    kind: ExprKind::Literal(Literal::Boolean(false)),
-                    position,
-                };
-                call(crate::xml_path::QUERY, vec![target, path, empty_is_text], position)
-            }
-            _ => call("existsnode", vec![target, path], position),
+            "query" => call(crate::xml_path::NODE_QUERY, vec![target, path], position),
+            _ => call(crate::xml_path::NODE_EXIST, vec![target, path], position),
         };
         self.expect(&TokenKind::RightParen)?;
         Ok(expr)
+    }
+
+    /// Whether a `CROSS APPLY` or `OUTER APPLY` item is an `xml` column's `nodes()` call:
+    /// `column.nodes(` or `table.column.nodes(`.
+    pub(super) fn at_xml_nodes(&self) -> bool {
+        let word = |ahead: usize| matches!(self.peek_kind_at(ahead), TokenKind::Word(_) | TokenKind::QuotedIdentifier(_));
+        let nodes_at = |ahead: usize| {
+            self.is_word_at(ahead, "nodes") && self.peek_kind_at(ahead + 1) == &TokenKind::LeftParen
+        };
+        word(0)
+            && self.peek_kind_at(1) == &TokenKind::Dot
+            && (nodes_at(2) || (word(2) && self.peek_kind_at(3) == &TokenKind::Dot && nodes_at(4)))
+    }
+
+    /// `column.nodes('path') AS t(c)`: one row per node the path selects, with the node in
+    /// column `c` for its `value()`, `query()` and `exist()`.
+    pub(super) fn sqlserver_xml_nodes(&mut self) -> SqlResult<TableReference> {
+        let position = self.position();
+        let first = self.name()?;
+        self.expect(&TokenKind::Dot)?;
+        let second = self.name()?;
+        let target = if second.text.eq_ignore_ascii_case("nodes") {
+            ExprKind::Column { qualifier: None, name: first.text }
+        } else {
+            self.expect(&TokenKind::Dot)?;
+            self.expect_word("nodes")?;
+            ExprKind::Column { qualifier: Some(first.text), name: second.text }
+        };
+        self.expect(&TokenKind::LeftParen)?;
+        let path = self.quoted_argument()?;
+        self.expect(&TokenKind::RightParen)?;
+        self.take_word("as");
+        let alias = self.name()?;
+        self.expect(&TokenKind::LeftParen)?;
+        let column = self.name()?;
+        self.expect(&TokenKind::RightParen)?;
+        let arguments = vec![
+            Expr { kind: target, position },
+            string(path, position),
+            string("X".to_owned(), position),
+            Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(Expr { kind: ExprKind::Literal(Literal::Null), position }),
+                    sql_type: crate::types::SqlType::Text,
+                },
+                position,
+            },
+            Expr { kind: ExprKind::Literal(Literal::Null), position },
+        ];
+        Ok(TableReference {
+            name: Name { text: alias.text.clone(), position },
+            alias: Some(alias.text),
+            derived: None,
+            generated: Some(Box::new(GeneratedTable::Function(TableFunction {
+                name: crate::xml_path::TABLE.to_owned(),
+                arguments,
+                ordinality: false,
+                column_names: vec![column],
+                position,
+            }))),
+            partition_selection: None,
+        })
     }
 }
