@@ -22,6 +22,10 @@ mod harness;
 mod measure;
 mod resp;
 mod workloads;
+mod ycsb;
+#[path = "../../eggdb-sqlite-compare/src/ycsb_mix.rs"]
+#[allow(dead_code)]
+mod ycsb_mix;
 
 use crate::harness::Benchmark;
 use std::process::ExitCode;
@@ -35,13 +39,24 @@ fn main() -> ExitCode {
     let title = format!("EggDB against the Redis-compatible server at {address}");
     println!("{title}");
     let set_address = address.clone();
-    let workloads: Vec<Benchmark<'_>> = vec![
+    let ycsb_workloads: [(&str, fn(&str) -> Result<Vec<baseline::Metric>, String>); 5] = [
+        (ycsb::A, ycsb::a),
+        (ycsb::B, ycsb::b),
+        (ycsb::C, ycsb::c),
+        (ycsb::D, ycsb::d),
+        (ycsb::F, ycsb::f),
+    ];
+    let mut benchmarks: Vec<Benchmark<'_>> = vec![
         (
             workloads::SET,
             Box::new(move || workloads::set(&set_address)),
         ),
-        (workloads::GET, Box::new(move || workloads::get(&address))),
     ];
-    let outcome = harness::run(&title, std::env::args().skip(1), workloads);
+    for (name, workload) in ycsb_workloads {
+        let address = address.clone();
+        benchmarks.push((name, Box::new(move || workload(&address))));
+    }
+    benchmarks.push((workloads::GET, Box::new(move || workloads::get(&address))));
+    let outcome = harness::run(&title, std::env::args().skip(1), benchmarks);
     harness::exit_code("eggdb-redis-compare", outcome)
 }

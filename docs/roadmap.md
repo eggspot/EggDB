@@ -494,7 +494,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The `server` profile split of the binary, with its own size, idle-memory and first-start targets
   (D230, D354), and `serve`'s time to its first line in `scripts/footprint.sh`. Check:
   `benchmarks/footprint.txt`.
-- YCSB workloads against SQLite and Redis (D7).
+- YCSB workloads against SQLite and Redis (D7). **Code written, unbuilt** (code-only mode, 2026-11-13, D954): A to F against SQLite,
+  A to D and F against Redis.
 - A published branch-coverage target for the core, rising every release toward SQLite's (D41).
 - Published descriptions of the CI runners the benchmarks use, a public results page, conformance
   and benchmark dashboards, and the farm's matrix of every driver and ORM version (D32, D252).
