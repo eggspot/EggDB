@@ -1,0 +1,73 @@
+name: sqllogictest
+
+on:
+  schedule:
+    - cron: "41 4 * * 6"
+  workflow_dispatch:
+    inputs:
+      minimum:
+        description: "The pass rate below which the run fails, in percent"
+        required: false
+        default: "0"
+
+concurrency:
+  group: sqllogictest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  SQLLOGICTEST_MINIMUM: ${{ inputs.minimum || vars.SQLLOGICTEST_MINIMUM || '0' }}
+
+jobs:
+  sqllogictest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-sqllogictest-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-sqllogictest-${{ runner.os }}-
+      - name: Fetch sqlite.org's sqllogictest corpus (public domain, test data only, never shipped)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fossil
+          mkdir -p "$RUNNER_TEMP/sqllogictest"
+          cd "$RUNNER_TEMP/sqllogictest"
+          fossil clone https://www.sqlite.org/sqllogictest sqllogictest.fossil
+          fossil open --force sqllogictest.fossil
+      - name: Run the corpus and publish the pass rate (D45, D664)
+        run: |
+          cargo build --release -p eggdb-sqllogictest
+          set -o pipefail
+          target/release/eggdb-sqllogictest "$RUNNER_TEMP/sqllogictest/test" --minimum "$SQLLOGICTEST_MINIMUM" | tee "$RUNNER_TEMP/sqllogictest-rates.txt"
+      - name: Summarise the rate
+        if: always()
+        run: |
+          {
+            echo "## sqllogictest"
+            echo
+            echo "Minimum: ${SQLLOGICTEST_MINIMUM}%"
+            echo
+            echo '```'
+            tail -n 1 "$RUNNER_TEMP/sqllogictest-rates.txt" 2>/dev/null || echo "no results"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the per-file rates
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sqllogictest-rates-${{ github.run_number }}
+          path: ${{ runner.temp }}/sqllogictest-rates.txt
+          retention-days: 90

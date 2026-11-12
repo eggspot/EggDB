@@ -642,8 +642,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `DROP COLUMN`: **code written, unbuilt** (code-only mode, 2026-11-12, D642). Left: renamed references in
   views and triggers.
 - sqllogictest run with its pass rate published and a stated minimum (D10, D45). The runner
-  (`eggdb-sqllogictest DIR --minimum PERCENT`): **code written, unbuilt** (code-only mode, 2026-11-12, D664).
-  Left: the CI job over sqlite.org's files, the published rate and the stated minimum.
+  (`eggdb-sqllogictest DIR --minimum PERCENT`): **code written, unbuilt** (code-only mode, 2026-11-12, D664). The
+  weekly job over sqlite.org's files with the rate in its summary and artifacts (`sqllogictest.yml`): **code written,
+  unbuilt** (code-only mode, 2026-11-13, D976). Left: the stated minimum, set from the first run.
 - `libsqlite3`: `sqlite3_create_function`, `sqlite3_backup_*` and the rest of the interface, with
   rows streamed per step (D181). Check: the sqlite3 shell and Python's `sqlite3` module in CI. Scalar
   `sqlite3_create_function[_v2]` with the `sqlite3_value_*` and `sqlite3_result_*` calls, and the status and
