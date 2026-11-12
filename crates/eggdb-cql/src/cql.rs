@@ -167,6 +167,10 @@ pub(crate) enum Term {
     Blob(String),
     Null,
     Marker(usize),
+    List(Vec<Term>),
+    Set(Vec<Term>),
+    Map(Vec<(Term, Term)>),
+    Tuple(Vec<Term>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,10 +297,13 @@ pub(crate) enum Statement {
     Batch(Vec<Statement>),
 }
 
+const MOST_NESTING: usize = 16;
+
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
     markers: usize,
+    depth: usize,
 }
 
 fn unsupported(what: &str) -> String {
@@ -412,18 +419,88 @@ impl Parser {
                     "{word} is not a value: functions in values are not supported yet"
                 )),
             },
-            Some(Token::Symbol("[" | "{")) => Err(unsupported("collection values")),
+            Some(Token::Symbol("[")) => Ok(Term::List(self.terms_until("]")?)),
+            Some(Token::Symbol("(")) => Ok(Term::Tuple(self.terms_until(")")?)),
+            Some(Token::Symbol("{")) => {
+                if self.eat_symbol("}") {
+                    return Ok(Term::Set(Vec::new()));
+                }
+                let first = self.nested_term()?;
+                if !self.eat_symbol(":") {
+                    let mut items = vec![first];
+                    while self.eat_symbol(",") {
+                        items.push(self.nested_term()?);
+                    }
+                    self.expect_symbol("}")?;
+                    return Ok(Term::Set(items));
+                }
+                let mut entries = vec![(first, self.nested_term()?)];
+                while self.eat_symbol(",") {
+                    let key = self.nested_term()?;
+                    self.expect_symbol(":")?;
+                    entries.push((key, self.nested_term()?));
+                }
+                self.expect_symbol("}")?;
+                Ok(Term::Map(entries))
+            }
             _ => Err("line 1: mismatched input, expecting a value".to_owned()),
         }
     }
 
-    fn cql_type(&mut self) -> Result<CqlType, String> {
-        let name = self.identifier()?;
-        if matches!(name.as_str(), "list" | "set" | "map" | "frozen" | "tuple") {
-            return Err(unsupported("collection, tuple and frozen types"));
+    fn nested_term(&mut self) -> Result<Term, String> {
+        self.depth += 1;
+        if self.depth > MOST_NESTING {
+            return Err("collection values are nested too deeply".to_owned());
         }
-        CqlType::from_name(&name)
-            .ok_or_else(|| format!("unknown type {name}: user-defined types are not supported yet"))
+        let term = self.term();
+        self.depth -= 1;
+        term
+    }
+
+    fn terms_until(&mut self, close: &str) -> Result<Vec<Term>, String> {
+        let mut items = Vec::new();
+        if self.eat_symbol(close) {
+            return Ok(items);
+        }
+        loop {
+            items.push(self.nested_term()?);
+            if self.eat_symbol(close) {
+                return Ok(items);
+            }
+            self.expect_symbol(",")?;
+        }
+    }
+
+    fn cql_type(&mut self) -> Result<CqlType, String> {
+        self.depth += 1;
+        if self.depth > MOST_NESTING {
+            return Err("types are nested too deeply".to_owned());
+        }
+        let parsed = self.cql_type_inner();
+        self.depth -= 1;
+        parsed
+    }
+
+    fn cql_type_inner(&mut self) -> Result<CqlType, String> {
+        let name = self.identifier()?.to_ascii_lowercase();
+        if !matches!(name.as_str(), "list" | "set" | "map" | "frozen" | "tuple") {
+            return CqlType::from_name(&name)
+                .ok_or_else(|| format!("unknown type {name}: user-defined types are not supported yet"));
+        }
+        self.expect_symbol("<")?;
+        let mut arguments = vec![self.cql_type()?];
+        while self.eat_symbol(",") {
+            arguments.push(self.cql_type()?);
+        }
+        self.expect_symbol(">")?;
+        match (name.as_str(), arguments.as_slice()) {
+            ("frozen", [inner]) => Ok(*inner),
+            ("list", [element]) => Ok(CqlType::List(crate::types::interned(*element)?)),
+            ("set", [element]) => Ok(CqlType::Set(crate::types::interned(*element)?)),
+            ("map", [key, value]) => Ok(CqlType::Map(crate::types::interned(*key)?, crate::types::interned(*value)?)),
+            ("tuple", items) => Ok(CqlType::Tuple(crate::types::interned_tuple(items.to_vec())?)),
+            _ => Err(format!("wrong number of type arguments for {name}")),
+        }
     }
 
     fn skip_options(&mut self) {
@@ -987,6 +1064,7 @@ pub(crate) fn parse(text: &str) -> Result<(Statement, usize), String> {
         tokens: tokenize(text)?,
         at: 0,
         markers: 0,
+        depth: 0,
     };
     let statement = parser.statement()?;
     while parser.eat_symbol(";") {}

@@ -754,3 +754,4 @@ its full title with its status.
 - [D727](decisions/D727.md) Code-only batch 375 (M13): GQL quantified path patterns of one relationship, with group variables
 - [D728](decisions/D728.md) Code-only batch 376 (M13): graph label and property indexes kept with every write and used by `MATCH`
 - [D729](decisions/D729.md) Code-only batch 377 (M13): `WHERE n.property = value` conditions use the graph indexes
+- [D730](decisions/D730.md) Code-only batch 378 (M16): CQL `list`, `set`, `map` and `tuple` columns, literals and binary values

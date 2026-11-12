@@ -1,5 +1,14 @@
+use eggdb_sql::json::{Json, Node, parse_document};
 use eggdb_sql::{SqlType, Value};
+use std::cmp::Ordering;
 use std::net::IpAddr;
+use std::sync::{Mutex, PoisonError};
+
+const MOST_INTERNED_TYPES: usize = 4096;
+const MOST_COLLECTION_ITEMS: usize = 65_535;
+const MOST_TYPE_DEPTH: usize = 16;
+static INTERNED: Mutex<Vec<&'static CqlType>> = Mutex::new(Vec::new());
+static INTERNED_TUPLES: Mutex<Vec<&'static [CqlType]>> = Mutex::new(Vec::new());
 
 const UNIX_EPOCH_FROM_2000_DAYS: i64 = 10_957;
 const UNIX_EPOCH_FROM_2000_MS: i64 = 946_684_800_000;
@@ -26,6 +35,80 @@ pub(crate) enum CqlType {
     Time,
     SmallInt,
     TinyInt,
+    List(&'static CqlType),
+    Set(&'static CqlType),
+    Map(&'static CqlType, &'static CqlType),
+    Tuple(&'static [CqlType]),
+}
+
+/// The one shared copy of `cql`, so collection types stay `Copy`; at most 4,096 distinct ones.
+pub(crate) fn interned(cql: CqlType) -> Result<&'static CqlType, String> {
+    let mut known = INTERNED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(found) = known.iter().find(|found| ***found == cql) {
+        return Ok(*found);
+    }
+    if known.len() >= MOST_INTERNED_TYPES {
+        return Err(format!("at most {MOST_INTERNED_TYPES} distinct collection types are supported"));
+    }
+    let leaked: &'static CqlType = Box::leak(Box::new(cql));
+    known.push(leaked);
+    Ok(leaked)
+}
+
+/// The one shared copy of a tuple's item types.
+pub(crate) fn interned_tuple(items: Vec<CqlType>) -> Result<&'static [CqlType], String> {
+    let mut known = INTERNED_TUPLES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(found) = known.iter().find(|found| ***found == *items) {
+        return Ok(*found);
+    }
+    if known.len() >= MOST_INTERNED_TYPES {
+        return Err(format!("at most {MOST_INTERNED_TYPES} distinct tuple types are supported"));
+    }
+    let leaked: &'static [CqlType] = Box::leak(items.into_boxed_slice());
+    known.push(leaked);
+    Ok(leaked)
+}
+
+fn split_arguments(text: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (at, character) in text.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                parts.push(text[start..at].trim());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    (depth == 0).then(|| {
+        parts.push(text[start..].trim());
+        parts
+    })
+}
+
+fn parse_type(text: &str, depth: usize) -> Option<CqlType> {
+    if depth > MOST_TYPE_DEPTH {
+        return None;
+    }
+    let text = text.trim();
+    let Some(open) = text.find('<') else {
+        return CqlType::from_name(text);
+    };
+    let inner = text.strip_suffix('>')?.get(open + 1..)?;
+    let arguments = split_arguments(inner)?;
+    let parsed: Vec<CqlType> = arguments.iter().map(|argument| parse_type(argument, depth + 1)).collect::<Option<_>>()?;
+    match (text[..open].trim().to_ascii_lowercase().as_str(), parsed.as_slice()) {
+        ("frozen", [inner]) => Some(*inner),
+        ("list", [element]) => Some(CqlType::List(interned(*element).ok()?)),
+        ("set", [element]) => Some(CqlType::Set(interned(*element).ok()?)),
+        ("map", [key, value]) => Some(CqlType::Map(interned(*key).ok()?, interned(*value).ok()?)),
+        ("tuple", items) if !items.is_empty() => Some(CqlType::Tuple(interned_tuple(items.to_vec()).ok()?)),
+        _ => None,
+    }
 }
 
 const NAMES: [(&str, CqlType); 20] = [
@@ -59,13 +142,28 @@ impl CqlType {
             .map(|(_, cql)| *cql)
     }
 
-    pub(crate) fn name(self) -> &'static str {
+    /// The type written as CQL writes it: `int`, `list<text>`, `map<text, int>`,
+    /// `tuple<int, text>`.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        parse_type(text, 0)
+    }
+
+    pub(crate) fn is_collection(self) -> bool {
+        matches!(self, CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_))
+    }
+
+    pub(crate) fn name(self) -> String {
         match self {
-            CqlType::Varchar => "text",
+            CqlType::Varchar => "text".to_owned(),
+            CqlType::List(element) => format!("list<{}>", element.name()),
+            CqlType::Set(element) => format!("set<{}>", element.name()),
+            CqlType::Map(key, value) => format!("map<{}, {}>", key.name(), value.name()),
+            CqlType::Tuple(items) => format!("tuple<{}>", items.iter().map(|item| item.name()).collect::<Vec<_>>().join(", ")),
             other => NAMES
                 .iter()
                 .find(|(_, cql)| *cql == other)
-                .map_or("text", |(name, _)| name),
+                .map_or("text", |(name, _)| name)
+                .to_owned(),
         }
     }
 
@@ -90,6 +188,10 @@ impl CqlType {
             CqlType::Time => 0x0012,
             CqlType::SmallInt => 0x0013,
             CqlType::TinyInt => 0x0014,
+            CqlType::List(_) => 0x0020,
+            CqlType::Map(..) => 0x0021,
+            CqlType::Set(_) => 0x0022,
+            CqlType::Tuple(_) => 0x0031,
         }
     }
 
@@ -97,6 +199,7 @@ impl CqlType {
     pub(crate) fn sql(self) -> &'static str {
         match self {
             CqlType::Ascii | CqlType::Varchar | CqlType::Inet => "text",
+            CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) => "text",
             CqlType::BigInt | CqlType::Counter => "bigint",
             CqlType::Blob => "bytea",
             CqlType::Boolean => "boolean",
@@ -397,8 +500,279 @@ pub(crate) fn parameter_text(bytes: Option<&[u8]>, cql: CqlType) -> Result<Optio
             16 => IpAddr::from(fixed::<16>(bytes, cql)?).to_string(),
             other => return Err(format!("an inet value must be 4 or 16 bytes, not {other}")),
         },
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) => collection_json(bytes, cql, 0)?,
     };
     Ok(Some(text))
+}
+
+pub(crate) fn quote_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn element_json(bytes: &[u8], cql: CqlType, depth: usize) -> Result<String, String> {
+    if cql.is_collection() {
+        return collection_json(bytes, cql, depth + 1);
+    }
+    let text = parameter_text(Some(bytes), cql)?.unwrap_or_default();
+    Ok(match cql {
+        CqlType::Int | CqlType::BigInt | CqlType::Counter | CqlType::SmallInt | CqlType::TinyInt | CqlType::Varint | CqlType::Decimal => text,
+        CqlType::Double | CqlType::Float if text.parse::<f64>().is_ok_and(f64::is_finite) => text,
+        CqlType::Boolean => text,
+        _ => quote_json(&text),
+    })
+}
+
+struct Cursor<'b> {
+    bytes: &'b [u8],
+    at: usize,
+}
+
+impl<'b> Cursor<'b> {
+    fn int(&mut self) -> Result<i32, String> {
+        let raw = self.bytes.get(self.at..self.at + 4).ok_or("a collection value is cut short")?;
+        self.at += 4;
+        Ok(i32::from_be_bytes(raw.try_into().map_err(|_| "a collection value is cut short")?))
+    }
+
+    fn element(&mut self) -> Result<Option<&'b [u8]>, String> {
+        let length = self.int()?;
+        if length < 0 {
+            return Ok(None);
+        }
+        let length = length as usize;
+        let raw = self.bytes.get(self.at..self.at + length).ok_or("a collection element is cut short")?;
+        self.at += length;
+        Ok(Some(raw))
+    }
+
+    fn count(&mut self) -> Result<usize, String> {
+        let count = self.int()?;
+        usize::try_from(count)
+            .ok()
+            .filter(|count| *count <= MOST_COLLECTION_ITEMS)
+            .ok_or_else(|| format!("a collection may hold at most {MOST_COLLECTION_ITEMS} items"))
+    }
+}
+
+fn compare_json(left: &str, right: &str) -> Ordering {
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(left), Ok(right)) => left.total_cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+/// A collection's binary value as the JSON text a collection column stores: a list or set as
+/// an array (a set sorted, without repeats), a map as an array of `[key, value]` pairs sorted
+/// by key, a tuple as an array with `null` for missing items.
+fn collection_json(bytes: &[u8], cql: CqlType, depth: usize) -> Result<String, String> {
+    if depth > MOST_TYPE_DEPTH {
+        return Err("collections are nested too deeply".to_owned());
+    }
+    let mut cursor = Cursor { bytes, at: 0 };
+    let items: Vec<String> = match cql {
+        CqlType::List(element) | CqlType::Set(element) => {
+            let count = cursor.count()?;
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                let raw = cursor.element()?.ok_or("a collection cannot hold null")?;
+                items.push(element_json(raw, *element, depth)?);
+            }
+            if matches!(cql, CqlType::Set(_)) {
+                items.sort_by(|left, right| compare_json(left, right));
+                items.dedup();
+            }
+            items
+        }
+        CqlType::Map(key, value) => {
+            let count = cursor.count()?;
+            let mut pairs: Vec<(String, String)> = Vec::with_capacity(count);
+            for _ in 0..count {
+                let raw_key = cursor.element()?.ok_or("a map key cannot be null")?;
+                let raw_value = cursor.element()?.ok_or("a map value cannot be null")?;
+                pairs.push((element_json(raw_key, *key, depth)?, element_json(raw_value, *value, depth)?));
+            }
+            pairs.sort_by(|left, right| compare_json(&left.0, &right.0));
+            pairs.dedup_by(|later, earlier| later.0 == earlier.0);
+            pairs.into_iter().map(|(key, value)| format!("[{key},{value}]")).collect()
+        }
+        CqlType::Tuple(types) => {
+            let mut items = Vec::with_capacity(types.len());
+            for item in types {
+                items.push(match (cursor.at < bytes.len()).then(|| cursor.element()).transpose()?.flatten() {
+                    Some(raw) => element_json(raw, *item, depth)?,
+                    None => "null".to_owned(),
+                });
+            }
+            items
+        }
+        _ => return Err(format!("{} is not a collection", cql.name())),
+    };
+    Ok(format!("[{}]", items.join(",")))
+}
+
+fn json_scalar_text(node: &Node) -> Result<String, String> {
+    match &node.value {
+        Json::String(text) | Json::Number(text) => Ok(text.clone()),
+        Json::Boolean(flag) => Ok(flag.to_string()),
+        Json::Null => Err("a collection cannot hold null".to_owned()),
+        _ => Err("a collection item does not fit its type".to_owned()),
+    }
+}
+
+fn push_element(out: &mut Vec<u8>, bytes: Option<Vec<u8>>) {
+    match bytes {
+        Some(bytes) => {
+            out.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+            out.extend_from_slice(&bytes);
+        }
+        None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+    }
+}
+
+fn encode_json(node: &Node, cql: CqlType, depth: usize) -> Result<Vec<u8>, String> {
+    if depth > MOST_TYPE_DEPTH {
+        return Err("collections are nested too deeply".to_owned());
+    }
+    if !cql.is_collection() {
+        return encode_text(&json_scalar_text(node)?, cql);
+    }
+    let Json::Array(items) = &node.value else {
+        return Err(format!("a {} value must be a JSON array", cql.name()));
+    };
+    let mut out = Vec::new();
+    match cql {
+        CqlType::List(element) | CqlType::Set(element) => {
+            out.extend_from_slice(&(items.len() as i32).to_be_bytes());
+            for item in items {
+                push_element(&mut out, Some(encode_json(item, *element, depth + 1)?));
+            }
+        }
+        CqlType::Map(key, value) => {
+            out.extend_from_slice(&(items.len() as i32).to_be_bytes());
+            for item in items {
+                let Json::Array(pair) = &item.value else {
+                    return Err("a map entry must be a [key, value] pair".to_owned());
+                };
+                let [stored_key, stored_value] = pair.as_slice() else {
+                    return Err("a map entry must be a [key, value] pair".to_owned());
+                };
+                push_element(&mut out, Some(encode_json(stored_key, *key, depth + 1)?));
+                push_element(&mut out, Some(encode_json(stored_value, *value, depth + 1)?));
+            }
+        }
+        CqlType::Tuple(types) => {
+            for (at, item) in types.iter().enumerate() {
+                let bytes = match items.get(at) {
+                    Some(node) if node.value != Json::Null => Some(encode_json(node, *item, depth + 1)?),
+                    _ => None,
+                };
+                push_element(&mut out, bytes);
+            }
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn date_days(text: &str) -> Option<i64> {
+    let mut parts = text.splitn(3, '-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    ((1..=12).contains(&month) && (1..=31).contains(&day)).then(|| days_from_civil(year, month, day))
+}
+
+fn time_nanos(text: &str) -> Option<i64> {
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let mut parts = whole.split(':');
+    let hour: i64 = parts.next()?.parse().ok()?;
+    let minute: i64 = parts.next().unwrap_or("0").parse().ok()?;
+    let second: i64 = parts.next().unwrap_or("0").parse().ok()?;
+    if fraction.len() > 9 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let nanos: i64 = if fraction.is_empty() { 0 } else { format!("{fraction:0<9}").parse().ok()? };
+    ((0..24).contains(&hour) && (0..60).contains(&minute) && (0..60).contains(&second))
+        .then(|| ((hour * 60 + minute) * 60 + second) * 1_000_000_000 + nanos)
+}
+
+fn timestamp_millis(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (date, rest) = match text.find([' ', 'T']) {
+        Some(at) => (&text[..at], text[at + 1..].trim()),
+        None => (text, ""),
+    };
+    let days = date_days(date)?;
+    let (time, offset) = match rest.find(['+', 'Z', 'z']).or_else(|| rest.rfind('-')) {
+        Some(at) => (&rest[..at], &rest[at..]),
+        None => (rest, ""),
+    };
+    let nanos = if time.is_empty() { 0 } else { time_nanos(time)? };
+    let offset_seconds = match offset {
+        "" | "Z" | "z" => 0,
+        signed => {
+            let sign = if signed.starts_with('-') { -1 } else { 1 };
+            let digits = signed[1..].replace(':', "");
+            let (hours, minutes) = match digits.len() {
+                2 => (digits.parse::<i64>().ok()?, 0),
+                4 => (digits[..2].parse::<i64>().ok()?, digits[2..].parse::<i64>().ok()?),
+                _ => return None,
+            };
+            sign * (hours * 3600 + minutes * 60)
+        }
+    };
+    Some((days * 86_400 - offset_seconds) * 1000 + nanos / 1_000_000)
+}
+
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    let digits = text.strip_prefix("\\x").or_else(|| text.strip_prefix("0x")).unwrap_or(text);
+    if digits.len() % 2 == 1 {
+        return None;
+    }
+    (0..digits.len()).step_by(2).map(|at| u8::from_str_radix(digits.get(at..at + 2)?, 16).ok()).collect()
+}
+
+/// A value's text form (as a CQL literal or a collection's JSON item carries it) in the binary
+/// form of `cql`.
+pub(crate) fn encode_text(text: &str, cql: CqlType) -> Result<Vec<u8>, String> {
+    let wrong = || format!("{text} does not fit the CQL type {}", cql.name());
+    Ok(match cql {
+        CqlType::Ascii | CqlType::Varchar => text.as_bytes().to_vec(),
+        CqlType::Boolean => vec![u8::from(text.eq_ignore_ascii_case("true"))],
+        CqlType::Uuid | CqlType::TimeUuid => {
+            let bytes = hex_bytes(&text.replace('-', "")).filter(|bytes| bytes.len() == 16).ok_or_else(wrong)?;
+            bytes
+        }
+        CqlType::Timestamp => timestamp_millis(text).ok_or_else(wrong)?.to_be_bytes().to_vec(),
+        CqlType::Date => u32::try_from(date_days(text).ok_or_else(wrong)? + DATE_CENTER).map_err(|_| wrong())?.to_be_bytes().to_vec(),
+        CqlType::Time => time_nanos(text).ok_or_else(wrong)?.to_be_bytes().to_vec(),
+        CqlType::Blob => hex_bytes(text).ok_or_else(wrong)?,
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) => {
+            let node = parse_document(text).map_err(|error| error.message)?;
+            encode_json(&node, cql, 0)?
+        }
+        _ => encode_value(&Value::Text(text.to_owned()), cql)?.unwrap_or_default(),
+    })
 }
 
 fn integer(value: &Value) -> Option<i64> {
@@ -519,6 +893,9 @@ pub(crate) fn encode_value(value: &Value, cql: CqlType) -> Result<Option<Vec<u8>
             Ok(IpAddr::V6(address)) => address.octets().to_vec(),
             Err(_) => return Err(mismatch(value, cql)),
         },
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) => {
+            encode_text(&value.to_text().unwrap_or_default(), cql)?
+        }
     };
     Ok(Some(bytes))
 }

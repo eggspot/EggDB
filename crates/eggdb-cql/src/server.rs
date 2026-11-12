@@ -110,11 +110,27 @@ enum ColumnKind {
     Map(CqlType, CqlType),
 }
 
+fn write_type(out: &mut Out, cql: CqlType) {
+    out.short(cql.id());
+    match cql {
+        CqlType::List(element) | CqlType::Set(element) => write_type(out, *element),
+        CqlType::Map(key, value) => {
+            write_type(out, *key);
+            write_type(out, *value);
+        }
+        CqlType::Tuple(items) => {
+            out.short(u16::try_from(items.len()).unwrap_or(u16::MAX));
+            for item in items {
+                write_type(out, *item);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn write_kind(out: &mut Out, kind: ColumnKind) {
     match kind {
-        ColumnKind::Simple(cql) => {
-            out.short(cql.id());
-        }
+        ColumnKind::Simple(cql) => write_type(out, cql),
         ColumnKind::Set(element) => {
             out.short(0x0022).short(element.id());
         }
@@ -277,7 +293,7 @@ impl Catalog for SessionCatalog<'_, '_> {
             Some(row) if row.len() == 4 => {
                 for entry in lines(&row[3]) {
                     if let Some((column, type_name)) = entry.split_once('\t')
-                        && let Some(cql) = CqlType::from_name(type_name)
+                        && let Some(cql) = CqlType::parse(type_name)
                         && let Some(found) = columns.iter_mut().find(|(name, _)| name == column)
                     {
                         found.1 = cql;
@@ -516,7 +532,8 @@ impl<'s> Connection<'_, 's> {
             .string(&keyspace)
             .string(&table);
         for (name, cql) in &markers {
-            out.string(name).short(cql.id());
+            out.string(name);
+            write_type(&mut out, *cql);
         }
         out.int(4).int(0);
         Ok(out.bytes)
@@ -949,7 +966,7 @@ impl<'s> Connection<'_, 's> {
                             Some(column.as_bytes().to_vec()),
                             text(kind),
                             Some(position.to_be_bytes().to_vec()),
-                            text(cql.name()),
+                            text(&cql.name()),
                         ]);
                     }
                 }

@@ -124,6 +124,16 @@ impl Builder {
     }
 
     fn term(&mut self, term: &Term, name: &str, cql: CqlType) -> Result<(), String> {
+        if matches!(term, Term::List(_) | Term::Set(_) | Term::Map(_) | Term::Tuple(_)) {
+            if !cql.is_collection() {
+                return Err(format!("a collection value cannot go in the {} column {name}", cql.name()));
+            }
+            let json = term_json(term, cql, 0)?;
+            let bytes = crate::types::encode_text(&json, cql)?;
+            let canonical = crate::types::parameter_text(Some(&bytes), cql)?.unwrap_or_default();
+            self.sql(&format!("{}::text", literal(&canonical)));
+            return Ok(());
+        }
         match term {
             Term::Marker(index) => {
                 let slot = self
@@ -153,8 +163,60 @@ impl Builder {
             Term::Boolean(flag) => self.sql(if *flag { "TRUE" } else { "FALSE" }),
             Term::Blob(hex) => self.sql(&format!("'\\x{hex}'::bytea")),
             Term::Null => self.sql("NULL"),
+            Term::List(_) | Term::Set(_) | Term::Map(_) | Term::Tuple(_) => {}
         }
         Ok(())
+    }
+}
+
+const MOST_TERM_DEPTH: usize = 16;
+
+/// A collection literal as the JSON text its column stores, before it is checked against the
+/// column's type and put in canonical order.
+fn term_json(term: &Term, cql: CqlType, depth: usize) -> Result<String, String> {
+    if depth > MOST_TERM_DEPTH {
+        return Err("collection values are nested too deeply".to_owned());
+    }
+    let items = |terms: &[Term], element: CqlType| -> Result<String, String> {
+        let parts: Result<Vec<String>, String> = terms.iter().map(|item| term_json(item, element, depth + 1)).collect();
+        Ok(format!("[{}]", parts?.join(",")))
+    };
+    match (term, cql) {
+        (Term::List(terms), CqlType::List(element)) | (Term::Set(terms), CqlType::Set(element)) => items(terms, *element),
+        (Term::Set(terms), CqlType::Map(..)) if terms.is_empty() => Ok("[]".to_owned()),
+        (Term::Map(entries), CqlType::Map(key, value)) => {
+            let mut parts = Vec::with_capacity(entries.len());
+            for (entry_key, entry_value) in entries {
+                parts.push(format!("[{},{}]", term_json(entry_key, *key, depth + 1)?, term_json(entry_value, *value, depth + 1)?));
+            }
+            Ok(format!("[{}]", parts.join(",")))
+        }
+        (Term::Tuple(terms), CqlType::Tuple(types)) => {
+            if terms.len() > types.len() {
+                return Err(format!("a {} value has too many items", cql.name()));
+            }
+            let mut parts = Vec::with_capacity(terms.len());
+            for (item, item_type) in terms.iter().zip(types.iter()) {
+                parts.push(match item {
+                    Term::Null => "null".to_owned(),
+                    other => term_json(other, *item_type, depth + 1)?,
+                });
+            }
+            Ok(format!("[{}]", parts.join(",")))
+        }
+        (Term::Marker(_), _) => Err("bind markers inside collection values are not supported yet".to_owned()),
+        (Term::Null, _) => Err("a collection cannot hold null".to_owned()),
+        (Term::Text(text) | Term::Uuid(text), _) => Ok(crate::types::quote_json(text)),
+        (Term::Blob(hex), _) => Ok(crate::types::quote_json(&format!("\\x{hex}"))),
+        (Term::Boolean(flag), _) => Ok(flag.to_string()),
+        (Term::Number(number), _) => {
+            if number.parse::<f64>().is_ok_and(f64::is_finite) {
+                Ok(number.clone())
+            } else {
+                Ok(crate::types::quote_json(number))
+            }
+        }
+        (_, _) => Err(format!("the value does not fit the CQL type {}", cql.name())),
     }
 }
 
@@ -286,17 +348,25 @@ fn upsert(
         builder.sql("NOTHING");
         return Ok(());
     }
-    let updates: Vec<String> = assignments
-        .iter()
-        .map(|(name, assignment)| match assignment {
-            Assignment::Set(_) => format!("{} = EXCLUDED.{}", identifier(name), identifier(name)),
-            Assignment::Add(_) => format!(
+    let mut updates: Vec<String> = Vec::with_capacity(assignments.len());
+    for (name, assignment) in assignments {
+        updates.push(match (assignment, column(info, name)?) {
+            (Assignment::Set(_), _) => format!("{} = EXCLUDED.{}", identifier(name), identifier(name)),
+            (Assignment::Add(_), CqlType::List(_)) => format!(
+                "{0} = (COALESCE({1}.{0}, '[]')::jsonb || EXCLUDED.{0}::jsonb)::text",
+                identifier(name),
+                identifier(&info.table)
+            ),
+            (Assignment::Add(_), cql) if cql.is_collection() => {
+                return Err(format!("adding to a {} column is not supported yet; set the whole value", cql.name()));
+            }
+            (Assignment::Add(_), _) => format!(
                 "{0} = COALESCE({1}.{0}, 0) + EXCLUDED.{0}",
                 identifier(name),
                 identifier(&info.table)
             ),
-        })
-        .collect();
+        });
+    }
     builder.sql(&format!("UPDATE SET {}", updates.join(", ")));
     Ok(())
 }
