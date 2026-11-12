@@ -718,7 +718,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Kerberos/GSSAPI logins (D22, D185).
 - TLS client certificates, requested and verified by the TLS layer (D22, D161, D185). Check:
   psql with `sslcert` in the `tls-clients` job.
-- LDAP search-and-bind, StartTLS and LDAPS (D185).
+- LDAP search-and-bind, StartTLS and LDAPS (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D802).
+  Left: a directory in CI.
 - PostgreSQL 18's `OAUTHBEARER` mechanism (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D801).
   Left: libpq's device flow checked against EggDB in CI.
 - SAML, API keys and multi-factor sign-in for interactive tools (D22).

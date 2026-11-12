@@ -3,8 +3,11 @@
 //! password. Each line is `<user|all> <method> [name=value ...]`; `#` starts a remark.
 //!
 //! - `scram-sha-256`: the password stored in the database (the default).
-//! - `ldap server=host:port prefix=uid= suffix=,ou=people,dc=example,dc=org [timeout=5]`: a
-//!   simple bind against a directory.
+//! - `ldap server=[ldap://|ldaps://]host:port prefix=uid= suffix=,ou=people,dc=example,dc=org
+//!   [timeout=5] [starttls=1] [ca=ca.pem]`: a simple bind against a directory, over TLS with
+//!   `ldaps://` or `starttls=1` (both need `ca=`); with `basedn=dc=example,dc=org
+//!   [search_attribute=uid] [bind_dn=...] [bind_password=...]` it searches for the user's entry
+//!   first and binds as it.
 //! - `jwt jwks=keys.json issuer=https://login.example audience=eggdb [user_claim=sub]
 //!   [leeway=60]`: an OpenID Connect token sent as the password, its signature checked with the
 //!   key set file (relative to the rule file).
@@ -14,7 +17,7 @@
 //! - `reject`: the user may not log in.
 
 use crate::jwt::{JwtKeys, JwtPolicy};
-use crate::ldap::LdapConfig;
+use crate::ldap::{LdapConfig, LdapSearch, LdapSecurity};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
@@ -161,12 +164,60 @@ impl AuthRules {
             let method = match method {
                 "scram-sha-256" => AuthMethod::ScramSha256,
                 "reject" => AuthMethod::Reject,
-                "ldap" => AuthMethod::Ldap(LdapConfig {
-                    server: required(&found, "server", line)?.to_owned(),
-                    prefix: found.get("prefix").copied().unwrap_or_default().to_owned(),
-                    suffix: found.get("suffix").copied().unwrap_or_default().to_owned(),
-                    timeout: Duration::from_secs(seconds(&found, "timeout", 5, line)?),
-                }),
+                "ldap" => {
+                    let written = required(&found, "server", line)?;
+                    let (server, mut security) = if let Some(rest) = written.strip_prefix("ldaps://") {
+                        (rest.to_owned(), LdapSecurity::Ldaps)
+                    } else {
+                        (
+                            written.strip_prefix("ldap://").unwrap_or(written).to_owned(),
+                            LdapSecurity::Plain,
+                        )
+                    };
+                    if found.get("starttls").copied() == Some("1") {
+                        if security == LdapSecurity::Ldaps {
+                            return Err(RulesError {
+                                line,
+                                message: "starttls=1 does not go with an ldaps:// server".to_owned(),
+                            });
+                        }
+                        security = LdapSecurity::StartTls;
+                    }
+                    let trusted_pem = match found.get("ca") {
+                        Some(path) => Some(read_key_set(Path::new(path)).map_err(|error| {
+                            RulesError {
+                                line,
+                                message: format!("cannot read {path}: {error}"),
+                            }
+                        })?),
+                        None if security != LdapSecurity::Plain => {
+                            return Err(RulesError {
+                                line,
+                                message: "TLS to the directory needs ca=<certificate authority file>".to_owned(),
+                            });
+                        }
+                        None => None,
+                    };
+                    let search = found.get("basedn").map(|base_dn| LdapSearch {
+                        base_dn: (*base_dn).to_owned(),
+                        attribute: found
+                            .get("search_attribute")
+                            .copied()
+                            .unwrap_or("uid")
+                            .to_owned(),
+                        bind_dn: found.get("bind_dn").map(|dn| (*dn).to_owned()),
+                        bind_password: found.get("bind_password").map(|secret| (*secret).to_owned()),
+                    });
+                    AuthMethod::Ldap(LdapConfig {
+                        server,
+                        prefix: found.get("prefix").copied().unwrap_or_default().to_owned(),
+                        suffix: found.get("suffix").copied().unwrap_or_default().to_owned(),
+                        timeout: Duration::from_secs(seconds(&found, "timeout", 5, line)?),
+                        security,
+                        trusted_pem,
+                        search,
+                    })
+                }
                 "jwt" | "oauth" => {
                     let path = required(&found, "jwks", line)?;
                     let document = read_key_set(Path::new(path)).map_err(|error| RulesError {

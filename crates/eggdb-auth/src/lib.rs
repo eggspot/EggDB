@@ -19,5 +19,5 @@ pub mod sigv2;
 pub mod sigv4;
 
 pub use jwt::{JwtError, JwtKeys, JwtPolicy};
-pub use ldap::{LdapConfig, LdapError};
+pub use ldap::{LdapConfig, LdapError, LdapSearch, LdapSecurity};
 pub use rules::{AuthMethod, AuthRules, RulesError};

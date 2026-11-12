@@ -6,6 +6,15 @@ pub(crate) const BIND_REQUEST: u8 = 0x60;
 pub(crate) const BIND_RESPONSE: u8 = 0x61;
 pub(crate) const SIMPLE_AUTHENTICATION: u8 = 0x80;
 pub(crate) const UNBIND_REQUEST: u8 = 0x42;
+pub(crate) const BOOLEAN: u8 = 0x01;
+pub(crate) const SEARCH_REQUEST: u8 = 0x63;
+pub(crate) const SEARCH_RESULT_ENTRY: u8 = 0x64;
+pub(crate) const SEARCH_RESULT_DONE: u8 = 0x65;
+pub(crate) const SEARCH_RESULT_REFERENCE: u8 = 0x73;
+pub(crate) const EQUALITY_MATCH: u8 = 0xa3;
+pub(crate) const EXTENDED_REQUEST: u8 = 0x77;
+pub(crate) const EXTENDED_RESPONSE: u8 = 0x78;
+pub(crate) const EXTENDED_REQUEST_NAME: u8 = 0x80;
 
 pub(crate) fn element(tag: u8, content: &[u8]) -> Vec<u8> {
     let mut out = vec![tag];
