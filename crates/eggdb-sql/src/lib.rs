@@ -105,6 +105,7 @@ mod mysql_date_parts;
 mod mysql_errors;
 mod mysql_named_locks;
 mod mysql_set;
+mod mysql_spatial;
 mod mysql_variables;
 mod name_resolution;
 mod wasm_routines;
@@ -397,6 +398,7 @@ mod with_statement_tests;
 mod xml_functions;
 mod xml_path;
 
+pub use mysql_spatial::mysql_geometry_bytes;
 pub use arrays::{ArrayElement, ArrayValue};
 pub use bulk_load::{
     BcpCharacterReader, BcpFileFormat, BcpFileReader, BcpFileWriter, BcpFormat, BcpTableWritten,

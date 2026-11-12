@@ -103,6 +103,8 @@ pub const TYPE_TINY_BLOB: u8 = 249;
 pub const TYPE_BLOB: u8 = 252;
 /// `MYSQL_TYPE_NEWDECIMAL`.
 pub const TYPE_NEWDECIMAL: u8 = 246;
+/// `MYSQL_TYPE_GEOMETRY`.
+pub const TYPE_GEOMETRY: u8 = 255;
 /// `MYSQL_TYPE_VAR_STRING`.
 pub const TYPE_VAR_STRING: u8 = 253;
 

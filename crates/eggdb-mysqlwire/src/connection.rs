@@ -2,7 +2,7 @@ use crate::auth::{CACHING_SHA2_PASSWORD, MYSQL_NATIVE_PASSWORD, NONCE_BYTES};
 use crate::packets::{
     BoundValue, CLIENT_LOCAL_FILES, CLIENT_MULTI_STATEMENTS, CLIENT_PLUGIN_AUTH, CLIENT_SSL, ColumnDefinition, Command,
     ParameterType, Payload, SERVER_CAPABILITIES, STATUS_AUTOCOMMIT, STATUS_IN_TRANSACTION,
-    STATUS_MORE_RESULTS, TYPE_BLOB, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON,
+    STATUS_MORE_RESULTS, TYPE_BLOB, TYPE_GEOMETRY, TYPE_DATE, TYPE_DATETIME, TYPE_DOUBLE, TYPE_FLOAT, TYPE_JSON,
     TYPE_LONG, TYPE_LONGLONG, TYPE_NEWDECIMAL, TYPE_SHORT, TYPE_TIME, TYPE_TIMESTAMP, TYPE_TINY,
     TYPE_TINY_BLOB, TYPE_VAR_STRING, UTF8MB4_0900_AI_CI, column_definition_packet, eof_packet,
     err_packet, is_ssl_request, ok_packet, parse_command, parse_execute, parse_handshake_response,
@@ -963,6 +963,9 @@ fn column_for(
             precision.unwrap_or(0),
         ),
         Some(SqlType::Bytea) => (TYPE_BLOB, 65_535, 0),
+        Some(SqlType::Defined(defined)) if defined.oid == eggdb_sql::DefinedType::GEOMETRY.oid => {
+            (TYPE_GEOMETRY, u32::MAX, 0)
+        }
         _ => (TYPE_VAR_STRING, 262_140, 0),
     };
     ColumnDefinition {
@@ -1026,6 +1029,9 @@ fn binary_row(columns: &[ColumnDefinition], row: &[Value]) -> Result<Vec<u8>, Sq
             _ => match value {
                 Value::Bytea(bytes) => {
                     values.length_encoded_bytes(bytes);
+                }
+                other if eggdb_sql::mysql_geometry_bytes(other).is_some() => {
+                    values.length_encoded_bytes(&eggdb_sql::mysql_geometry_bytes(other).unwrap_or_default());
                 }
                 other => {
                     let text = Dialect::MySql.value_text(other).unwrap_or_default();
@@ -1121,6 +1127,10 @@ fn text_row(row: &[Value]) -> Vec<u8> {
     for value in row {
         if let Value::Bytea(bytes) = value {
             payload.length_encoded_bytes(bytes);
+            continue;
+        }
+        if let Some(bytes) = eggdb_sql::mysql_geometry_bytes(value) {
+            payload.length_encoded_bytes(&bytes);
             continue;
         }
         match Dialect::MySql.value_text(value) {

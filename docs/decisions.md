@@ -1015,3 +1015,4 @@ its full title with its status.
 - [D988](decisions/D988.md) Code-only batch 636 (M9): eggdb follow for MongoDB through its change streams
 - [D989](decisions/D989.md) Code-only batch 637 (M9): MongoDB collations in writes and aggregate
 - [D990](decisions/D990.md) Code-only batch 638 (M9): GridFS checks with pymongo
+- [D991](decisions/D991.md) Code-only batch 639 (M10): MySQL's spatial types

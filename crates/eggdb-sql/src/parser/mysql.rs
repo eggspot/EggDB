@@ -648,12 +648,9 @@ impl<'t> Parser<'t> {
                     .at(token.start));
                 }
             },
-            "geometry" | "point" => {
-                return Err(SqlError::not_supported(format!(
-                    "type {} is not supported yet",
-                    word.to_ascii_uppercase()
-                ))
-                .at(token.start));
+            word if crate::mysql_spatial::is_spatial_type(word) => {
+                self.take_spatial_srid()?;
+                SqlType::Defined(crate::types::DefinedType::GEOMETRY)
             }
             _ => {
                 return Err(SqlError::new(
@@ -1189,6 +1186,13 @@ impl<'t> Parser<'t> {
         format!("{user}@localhost")
     }
 
+    fn take_spatial_srid(&mut self) -> SqlResult<()> {
+        if self.is_word("srid") && matches!(self.peek_kind_at(1), TokenKind::Integer(_)) {
+            self.at += 2;
+        }
+        Ok(())
+    }
+
     pub(super) fn mysql_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let position = name.position;
         let renamed = match name.text.as_str() {
@@ -1234,6 +1238,9 @@ impl<'t> Parser<'t> {
                 return Ok(Some(clock_call("mysql_curtime", position)));
             }
             "ifnull" => "coalesce",
+            other if crate::mysql_spatial::postgis_name(other).is_some() => {
+                crate::mysql_spatial::postgis_name(other).unwrap_or_default()
+            }
             "length" | "octet_length" => "octet_length",
             "ucase" => "upper",
             "lcase" => "lower",
