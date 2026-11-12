@@ -486,7 +486,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-13, D939); the Dart package's (`KeyValue`): **code written, unbuilt** (code-only mode,
   2026-11-13, D940). Every driver now has it.
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
-  Check: the compare job, gated.
+  Check: the compare job, gated. A speedtest1-style scripted workload, `sqlite_compare.speedtest`: **code written, unbuilt**
+  (code-only mode, 2026-11-13, D953). Left: the `embedded` profile build of it.
 - On-disk overhead per row and per index entry, measured with a target beside the others (D6,
   D354). **Code written, unbuilt** (code-only mode, 2026-11-13, D952):
   `footprint.disk`, targets 64 bytes per row and 40 per index entry.

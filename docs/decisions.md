@@ -977,3 +977,4 @@ its full title with its status.
 - [D950](decisions/D950.md) Code-only batch 598 (M3): pg_export_snapshot in a read-write block
 - [D951](decisions/D951.md) Code-only batch 599 (M4): EggDB in memory against SQLite's :memory: in the compare job
 - [D952](decisions/D952.md) Code-only batch 600 (M4): on-disk overhead per row and per index entry with targets
+- [D953](decisions/D953.md) Code-only batch 601 (M4): a speedtest1-style workload in the compare job
