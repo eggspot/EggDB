@@ -10,6 +10,7 @@ const MESSAGE: u8 = b'M';
 const CONSUMER: u8 = b'C';
 const CONSUMER_STATE: u8 = b'P';
 const DEDUPLICATION: u8 = b'D';
+const SUBJECT_INDEX: u8 = b'L';
 
 const API_PREFIX: &str = "$JS.API.";
 const ACK_PREFIX: &str = "$JS.ACK.";
@@ -25,6 +26,9 @@ const DEFAULT_MAX_ACK_PENDING: i64 = 1_000;
 const LONGEST_PULL_WAIT: Duration = Duration::from_secs(3_600);
 const DEFAULT_PULL_WAIT: Duration = Duration::from_secs(30);
 const NO_MESSAGES: &[u8] = b"NATS/1.0 404 No Messages\r\n\r\n";
+const MESSAGE_NOT_FOUND: &[u8] = b"NATS/1.0 404 Message Not Found\r\n\r\n";
+const ROLLUP_NOT_ALLOWED: (u16, u32, &str) = (400, 10_003, "rollups are not allowed on this stream");
+const ROLLUP_REFUSED: &str = "rollup refused";
 
 const STREAM_NOT_FOUND: (u16, u32, &str) = (404, 10_059, "stream not found");
 const CONSUMER_NOT_FOUND: (u16, u32, &str) = (404, 10_014, "consumer not found");
@@ -65,9 +69,14 @@ struct StreamConfig {
     max_bytes: i64,
     max_age: i64,
     max_msg_size: i64,
+    max_msgs_per_subject: i64,
     discard_new: bool,
     duplicate_window: i64,
     memory: bool,
+    allow_direct: bool,
+    allow_rollup: bool,
+    deny_delete: bool,
+    deny_purge: bool,
     created: i64,
 }
 
@@ -84,6 +93,7 @@ enum DeliverPolicy {
     All,
     Last,
     New,
+    LastPerSubject,
     ByStartSequence(u64),
 }
 
@@ -267,6 +277,44 @@ fn message_key(stream: &str, seq: u64) -> Vec<u8> {
     key
 }
 
+fn subject_prefix(stream: &str, subject: &str) -> Vec<u8> {
+    let mut key = key(SUBJECT_INDEX, &[stream.as_bytes(), subject.as_bytes()]);
+    key.push(0);
+    key
+}
+
+fn subject_key(stream: &str, subject: &str, seq: u64) -> Vec<u8> {
+    let mut key = subject_prefix(stream, subject);
+    key.extend_from_slice(&seq.to_be_bytes());
+    key
+}
+
+fn seq_at_end(key: &[u8]) -> u64 {
+    key.get(key.len().saturating_sub(8)..).and_then(|raw| raw.try_into().ok()).map_or(0, u64::from_be_bytes)
+}
+
+fn subject_seqs(keys: &dyn KeysRead, stream: &str, subject: &str) -> Result<Vec<u64>, String> {
+    Ok(keys.scan(&subject_prefix(stream, subject))?.iter().map(|(found, _)| seq_at_end(found)).collect())
+}
+
+fn last_per_subject(keys: &dyn KeysRead, stream: &str, filter: Option<&str>) -> Result<Vec<u64>, String> {
+    let mut prefix = key(SUBJECT_INDEX, &[stream.as_bytes()]);
+    prefix.push(0);
+    let mut last: std::collections::BTreeMap<Vec<u8>, u64> = std::collections::BTreeMap::new();
+    for (found, _) in keys.scan(&prefix)? {
+        let Some(subject) = found.get(prefix.len()..found.len().saturating_sub(9)) else {
+            continue;
+        };
+        let wanted = std::str::from_utf8(subject).is_ok_and(|subject| filter.is_none_or(|filter| subject_matches(filter, subject)));
+        if wanted {
+            last.insert(subject.to_vec(), seq_at_end(&found));
+        }
+    }
+    let mut seqs: Vec<u64> = last.into_values().collect();
+    seqs.sort_unstable();
+    Ok(seqs)
+}
+
 fn message_prefix(stream: &str) -> Vec<u8> {
     let mut key = key(MESSAGE, &[stream.as_bytes()]);
     key.push(0);
@@ -412,6 +460,11 @@ impl StreamConfig {
             max_bytes: integer(node, "max_bytes", -1),
             max_age: integer(node, "max_age", 0),
             max_msg_size: integer(node, "max_msg_size", -1),
+            max_msgs_per_subject: integer(node, "max_msgs_per_subject", -1),
+            allow_direct: flag(node, "allow_direct"),
+            allow_rollup: flag(node, "allow_rollup_hdrs"),
+            deny_delete: flag(node, "deny_delete"),
+            deny_purge: flag(node, "deny_purge"),
             discard_new: text(node, "discard") == Some("new"),
             duplicate_window: match integer(node, "duplicate_window", 0) {
                 0 => DEFAULT_DUPLICATE_WINDOW_NANOS,
@@ -424,7 +477,7 @@ impl StreamConfig {
 
     fn json(&self) -> String {
         format!(
-            "{{\"name\":{},\"subjects\":[{}],\"retention\":\"{}\",\"max_consumers\":-1,\"max_msgs\":{},\"max_bytes\":{},\"max_age\":{},\"max_msgs_per_subject\":-1,\"max_msg_size\":{},\"discard\":\"{}\",\"storage\":\"{}\",\"num_replicas\":1,\"duplicate_window\":{}}}",
+            "{{\"name\":{},\"subjects\":[{}],\"retention\":\"{}\",\"max_consumers\":-1,\"max_msgs\":{},\"max_bytes\":{},\"max_age\":{},\"max_msgs_per_subject\":{},\"max_msg_size\":{},\"discard\":\"{}\",\"storage\":\"{}\",\"num_replicas\":1,\"duplicate_window\":{},\"allow_direct\":{},\"allow_rollup_hdrs\":{},\"deny_delete\":{},\"deny_purge\":{}}}",
             quote(&self.name),
             self.subjects.iter().map(|subject| quote(subject)).collect::<Vec<_>>().join(","),
             match self.retention {
@@ -435,10 +488,15 @@ impl StreamConfig {
             self.max_msgs,
             self.max_bytes,
             self.max_age,
+            self.max_msgs_per_subject,
             self.max_msg_size,
             if self.discard_new { "new" } else { "old" },
             if self.memory { "memory" } else { "file" },
-            self.duplicate_window
+            self.duplicate_window,
+            self.allow_direct,
+            self.allow_rollup,
+            self.deny_delete,
+            self.deny_purge
         )
     }
 
@@ -469,6 +527,7 @@ impl ConsumerConfig {
             "all" => DeliverPolicy::All,
             "last" => DeliverPolicy::Last,
             "new" => DeliverPolicy::New,
+            "last_per_subject" => DeliverPolicy::LastPerSubject,
             "by_start_sequence" => DeliverPolicy::ByStartSequence(integer(config, "opt_start_seq", 1).max(1) as u64),
             _ => return Err(BAD_REQUEST),
         };
@@ -518,6 +577,7 @@ impl ConsumerConfig {
             DeliverPolicy::All => "\"deliver_policy\":\"all\"".to_owned(),
             DeliverPolicy::Last => "\"deliver_policy\":\"last\"".to_owned(),
             DeliverPolicy::New => "\"deliver_policy\":\"new\"".to_owned(),
+            DeliverPolicy::LastPerSubject => "\"deliver_policy\":\"last_per_subject\"".to_owned(),
             DeliverPolicy::ByStartSequence(seq) => format!("\"deliver_policy\":\"by_start_sequence\",\"opt_start_seq\":{seq}"),
         });
         fields.push(format!(
@@ -626,7 +686,11 @@ fn remove_message(keys: &mut dyn KeysWrite, stream: &str, seq: u64, state: &mut 
         return Ok(false);
     };
     keys.delete(&message_key)?;
-    let size = StoredMessage::decode(&raw).map_or(0, |message| message.size());
+    let decoded = StoredMessage::decode(&raw);
+    if let Some(message) = &decoded {
+        keys.delete(&subject_key(stream, &message.subject, seq))?;
+    }
+    let size = decoded.map_or(0, |message| message.size());
     state.messages = state.messages.saturating_sub(1);
     state.bytes = state.bytes.saturating_sub(size);
     if seq == state.first_seq {
@@ -782,7 +846,9 @@ impl<'k> JetStream<'k> {
             ["STREAM", "UPDATE", name] => self.create_stream(name, &request, true),
             ["STREAM", "INFO", name] => self.stream_info(name, "stream_info_response"),
             ["STREAM", "DELETE", name] => self.delete_stream(name),
-            ["STREAM", "PURGE", name] => self.purge_stream(name),
+            ["STREAM", "PURGE", name] => self.purge_stream(name, &request),
+            ["DIRECT", "GET", stream] => return self.direct_get(stream, None, &request, reply),
+            ["DIRECT", "GET", stream, subject @ ..] => return self.direct_get(stream, Some(subject.join(".")), &request, reply),
             ["STREAM", "NAMES"] => self.stream_list(false),
             ["STREAM", "LIST"] => self.stream_list(true),
             ["STREAM", "MSG", "GET", name] => self.get_message(name, &request),
@@ -877,7 +943,13 @@ impl<'k> JetStream<'k> {
                 return Ok(error_json("stream_delete_response", STREAM_NOT_FOUND));
             }
             let mut doomed: Vec<Vec<u8>> = vec![key(STREAM, &[name.as_bytes()]), key(STREAM_STATE, &[name.as_bytes()])];
-            for prefix in [message_prefix(name), key(CONSUMER, &[name.as_bytes(), b""]), key(CONSUMER_STATE, &[name.as_bytes(), b""]), key(DEDUPLICATION, &[name.as_bytes(), b""])] {
+            for prefix in [
+                message_prefix(name),
+                key(CONSUMER, &[name.as_bytes(), b""]),
+                key(CONSUMER_STATE, &[name.as_bytes(), b""]),
+                key(DEDUPLICATION, &[name.as_bytes(), b""]),
+                key(SUBJECT_INDEX, &[name.as_bytes(), b""]),
+            ] {
                 doomed.extend(keys.scan(&prefix)?.into_iter().map(|(found, _)| found));
             }
             for found in doomed {
@@ -889,20 +961,41 @@ impl<'k> JetStream<'k> {
         answer
     }
 
-    fn purge_stream(&self, name: &str) -> Result<String, String> {
+    fn purge_stream(&self, name: &str, request: &Node) -> Result<String, String> {
         write(self.keyspace, |keys| {
-            if stream_config(&*keys, name)?.is_none() {
+            let Some(config) = stream_config(&*keys, name)? else {
                 return Ok(error_json("stream_purge_response", STREAM_NOT_FOUND));
+            };
+            if config.deny_purge {
+                return Ok(error_json("stream_purge_response", (400, 10_003, "purge is not allowed on this stream")));
             }
-            let found = keys.scan(&message_prefix(name))?;
-            let purged = found.len();
-            for (message, _) in found {
-                keys.delete(&message)?;
+            let filter = text(request, "filter");
+            let below = integer(request, "seq", 0).max(0) as u64;
+            let keep = integer(request, "keep", 0).max(0) as usize;
+            let mut seqs: Vec<u64> = Vec::new();
+            keys.visit_prefix(&message_prefix(name), &mut |found, raw| {
+                let wanted = filter.is_none_or(|filter| StoredMessage::decode(raw).is_some_and(|message| subject_matches(filter, &message.subject)));
+                if wanted {
+                    seqs.push(seq_at_end(found));
+                }
+                Ok(true)
+            })?;
+            if below > 0 {
+                seqs.retain(|seq| *seq < below);
+            }
+            if keep > 0 {
+                seqs.truncate(seqs.len().saturating_sub(keep));
             }
             let mut state = stream_state(&*keys, name)?;
-            state.first_seq = state.last_seq + 1;
-            state.messages = 0;
-            state.bytes = 0;
+            let mut purged = 0u64;
+            for seq in seqs {
+                if remove_message(keys, name, seq, &mut state)? {
+                    purged += 1;
+                }
+            }
+            if state.messages == 0 {
+                state.first_seq = state.last_seq + 1;
+            }
             keys.put(&key(STREAM_STATE, &[name.as_bytes()]), &state.encode())?;
             Ok(format!("{{\"type\":\"io.nats.jetstream.api.v1.stream_purge_response\",\"success\":true,\"purged\":{purged}}}"))
         })
@@ -970,10 +1063,61 @@ impl<'k> JetStream<'k> {
         })
     }
 
+    fn direct_get(&self, stream: &str, subject: Option<String>, request: &Node, reply: &str) -> Vec<Outgoing> {
+        let found = read(self.keyspace, |keys| {
+            let last_of = |subject: &str| -> Result<Option<u64>, String> {
+                if subject.contains(['*', '>']) {
+                    return Ok(last_per_subject(keys, stream, Some(subject))?.into_iter().max());
+                }
+                Ok(subject_seqs(keys, stream, subject)?.into_iter().max())
+            };
+            let seq = match (subject.as_deref(), text(request, "last_by_subj"), text(request, "next_by_subj")) {
+                (Some(subject), _, _) | (None, Some(subject), _) => last_of(subject)?,
+                (None, None, Some(subject)) => {
+                    let from = integer(request, "seq", 1).max(1) as u64;
+                    let mut next = None;
+                    keys.visit_prefix(&message_prefix(stream), &mut |found, raw| {
+                        let seq = seq_at_end(found);
+                        if seq >= from && StoredMessage::decode(raw).is_some_and(|message| subject_matches(subject, &message.subject)) {
+                            next = Some(seq);
+                            return Ok(false);
+                        }
+                        Ok(true)
+                    })?;
+                    next
+                }
+                (None, None, None) => Some(integer(request, "seq", 0).max(0) as u64),
+            };
+            let Some(seq) = seq else {
+                return Ok(None);
+            };
+            Ok(keys.get(&message_key(stream, seq))?.and_then(|raw| StoredMessage::decode(&raw)).map(|message| (seq, message)))
+        });
+        let Ok(Some((seq, message))) = found else {
+            return vec![Outgoing { subject: reply.to_owned(), reply: None, headers: MESSAGE_NOT_FOUND.to_vec(), payload: Vec::new() }];
+        };
+        let mut headers = format!(
+            "NATS/1.0\r\nNats-Stream: {stream}\r\nNats-Subject: {}\r\nNats-Sequence: {seq}\r\nNats-Time-Stamp: {}\r\n",
+            message.subject,
+            timestamp(message.time)
+        );
+        if let Ok(original) = std::str::from_utf8(&message.headers) {
+            for line in original.lines().skip(1).filter(|line| !line.trim().is_empty()) {
+                headers.push_str(line);
+                headers.push_str("\r\n");
+            }
+        }
+        headers.push_str("\r\n");
+        vec![Outgoing { subject: reply.to_owned(), reply: None, headers: headers.into_bytes(), payload: message.payload }]
+    }
+
     fn delete_message(&self, name: &str, request: &Node) -> Result<String, String> {
         write(self.keyspace, |keys| {
-            if stream_config(&*keys, name)?.is_none() {
+            let Some(config) = stream_config(&*keys, name)? else {
                 return Ok(error_json("stream_msg_delete_response", STREAM_NOT_FOUND));
+            };
+            if config.deny_delete {
+                return Ok(error_json("stream_msg_delete_response", (400, 10_003, "message delete is not allowed on this stream")));
             }
             let mut state = stream_state(&*keys, name)?;
             let removed = remove_message(keys, name, integer(request, "seq", 0).max(0) as u64, &mut state)?;
@@ -1013,14 +1157,20 @@ impl<'k> JetStream<'k> {
                     let start = match config.deliver_policy {
                         DeliverPolicy::All => stream_state.first_seq.saturating_sub(1),
                         DeliverPolicy::Last => stream_state.last_seq.saturating_sub(1),
-                        DeliverPolicy::New => stream_state.last_seq,
+                        DeliverPolicy::New | DeliverPolicy::LastPerSubject => stream_state.last_seq,
                         DeliverPolicy::ByStartSequence(seq) => seq.saturating_sub(1),
                     };
-                    let state = ConsumerState {
+                    let mut state = ConsumerState {
                         delivered_stream_seq: start,
                         ack_floor_stream_seq: start,
                         ..ConsumerState::default()
                     };
+                    if config.deliver_policy == DeliverPolicy::LastPerSubject {
+                        for seq in last_per_subject(&*keys, stream, config.filter_subject.as_deref())? {
+                            state.consumer_seq += 1;
+                            state.pending.push(Pending { stream_seq: seq, consumer_seq: state.consumer_seq, deliveries: 0, deadline: 0 });
+                        }
+                    }
                     (config, state)
                 }
             };
@@ -1102,8 +1252,11 @@ impl<'k> JetStream<'k> {
             let stream_state = stream_state(&*keys, stream)?;
             let now = now_nanos();
             let mut chosen: Vec<(Pending, StoredMessage)> = Vec::new();
-            if config.ack_policy != AckPolicy::None {
-                let mut expired: Vec<usize> = (0..state.pending.len()).filter(|at| state.pending[*at].deadline <= now).collect();
+            {
+                let mut expired: Vec<usize> = (0..state.pending.len())
+                    .filter(|at| state.pending[*at].deadline <= now)
+                    .filter(|at| config.ack_policy != AckPolicy::None || state.pending[*at].deliveries == 0)
+                    .collect();
                 expired.sort_by_key(|at| state.pending[*at].stream_seq);
                 for at in expired {
                     if chosen.len() >= most {
@@ -1116,10 +1269,12 @@ impl<'k> JetStream<'k> {
                         state.pending[at].deadline = i64::MAX;
                         continue;
                     };
+                    if pending.deliveries > 0 {
+                        state.redelivered += 1;
+                    }
                     pending.deliveries += 1;
-                    pending.deadline = now.saturating_add(config.ack_wait);
+                    pending.deadline = if config.ack_policy == AckPolicy::None { i64::MAX } else { now.saturating_add(config.ack_wait) };
                     state.pending[at] = pending;
-                    state.redelivered += 1;
                     chosen.push((pending, message));
                 }
                 state.pending.retain(|pending| pending.deadline != i64::MAX);
@@ -1275,6 +1430,7 @@ impl<'k> JetStream<'k> {
         let now = now_nanos();
         let message_id = header_value(headers, "Nats-Msg-Id").map(str::to_owned);
         let expected_stream = header_value(headers, "Nats-Expected-Stream").map(str::to_owned);
+        let rollup = header_value(headers, "Nats-Rollup").map(str::to_ascii_lowercase);
         let stored = write(self.keyspace, |keys| {
             let Some(config) = stream_config(&*keys, &stream)? else {
                 return Ok(Err(STREAM_NOT_FOUND));
@@ -1310,6 +1466,29 @@ impl<'k> JetStream<'k> {
             state.messages += 1;
             state.bytes += message.size();
             keys.put(&message_key(&stream, seq), &message.encode())?;
+            keys.put(&subject_key(&stream, subject, seq), &[])?;
+            match rollup.as_deref() {
+                None => {}
+                Some(_) if !config.allow_rollup => return Err(ROLLUP_REFUSED.to_owned()),
+                Some("all") => {
+                    let older: Vec<u64> = keys.scan(&message_prefix(&stream))?.iter().map(|(found, _)| seq_at_end(found)).filter(|older| *older < seq).collect();
+                    for older in older {
+                        remove_message(keys, &stream, older, &mut state)?;
+                    }
+                }
+                Some(_) => {
+                    for older in subject_seqs(&*keys, &stream, subject)?.into_iter().filter(|older| *older < seq) {
+                        remove_message(keys, &stream, older, &mut state)?;
+                    }
+                }
+            }
+            if config.max_msgs_per_subject > 0 {
+                let seqs = subject_seqs(&*keys, &stream, subject)?;
+                let extra = seqs.len().saturating_sub(config.max_msgs_per_subject as usize);
+                for older in seqs.into_iter().take(extra) {
+                    remove_message(keys, &stream, older, &mut state)?;
+                }
+            }
             if let Some(id) = &message_id {
                 let mut value = seq.to_be_bytes().to_vec();
                 value.extend_from_slice(&now.to_be_bytes());
@@ -1328,6 +1507,7 @@ impl<'k> JetStream<'k> {
                     if *duplicate { ",\"duplicate\":true" } else { "" }
                 ),
                 Ok(Err(problem)) => error_json("pub_ack_response", *problem),
+                Err(problem) if problem == ROLLUP_REFUSED => error_json("pub_ack_response", ROLLUP_NOT_ALLOWED),
                 Err(_) => error_json("pub_ack_response", NO_STREAM_FOR_SUBJECT),
             };
             out.push(Outgoing::json(reply, answer));
@@ -1445,5 +1625,23 @@ mod tests {
         assert!(info.contains("\"num_ack_pending\":1"), "{info}");
         let empty = jetstream.request("$JS.API.CONSUMER.MSG.NEXT.ORDERS.worker", Some("_INBOX.5"), br#"{"batch":1,"no_wait":true}"#);
         assert_eq!(empty[0].headers, NO_MESSAGES);
+    }
+
+    #[test]
+    fn key_value_buckets_keep_one_value_per_key_and_read_it_directly() {
+        let keyspace = MemoryKeyspace::default();
+        let jetstream = JetStream::new(&keyspace);
+        answer(
+            &jetstream,
+            "$JS.API.STREAM.CREATE.KV_settings",
+            r#"{"name":"KV_settings","subjects":["$KV.settings.>"],"max_msgs_per_subject":1,"allow_direct":true,"allow_rollup_hdrs":true}"#,
+        );
+        jetstream.store("$KV.settings.color", None, b"", b"red");
+        jetstream.store("$KV.settings.color", None, b"", b"blue");
+        let got = jetstream.request("$JS.API.DIRECT.GET.KV_settings.$KV.settings.color", Some("_INBOX.6"), b"");
+        assert_eq!(got[0].payload, b"blue");
+        assert!(String::from_utf8_lossy(&got[0].headers).contains("Nats-Sequence: 2"));
+        let info = answer(&jetstream, "$JS.API.STREAM.INFO.KV_settings", "");
+        assert!(info.contains("\"messages\":1"), "{info}");
     }
 }

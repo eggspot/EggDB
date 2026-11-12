@@ -747,3 +747,4 @@ its full title with its status.
 - [D720](decisions/D720.md) Code-only batch 368 (M13): Cypher temporal and spatial values, and Bolt's structures for them
 - [D721](decisions/D721.md) Code-only batch 369 (M13): Cypher temporal arithmetic, `duration.between` and `point.distance`
 - [D722](decisions/D722.md) Code-only batch 370 (M16): NATS JetStream streams and durable consumers kept in the database
+- [D723](decisions/D723.md) Code-only batch 371 (M16): JetStream per-subject limits, rollups, filtered purges, `last_per_subject` and direct gets for key-value buckets
