@@ -6,6 +6,7 @@ use eggdb_keyspace::{KeysRead, KeysWrite};
 const VALIDITY_COUNTER: &[u8] = b"\x00validity";
 const MAILBOX: u8 = b'B';
 const MESSAGE: u8 = b'M';
+const UPLOAD: u8 = b'U';
 const MAX_MAILBOX_NAME_BYTES: usize = 1024;
 
 /// The mailbox every account has and new mail arrives in.
@@ -283,6 +284,68 @@ pub fn set_flags(keys: &mut dyn KeysWrite, name: &str, uid: u32, flags: &[String
 /// Removes message `uid` from mailbox `name`.
 pub fn remove(keys: &mut dyn KeysWrite, name: &str, uid: u32) -> MailResult<bool> {
     keys.delete(&message_key(&canonical(name), uid)).map_err(storage)
+}
+
+fn upload_key(id: &str) -> Vec<u8> {
+    let mut key = vec![UPLOAD];
+    key.extend_from_slice(id.as_bytes());
+    key
+}
+
+/// An uploaded blob (JMAP's upload, RFC 8620 section 6.1): its media type, when it came and
+/// its bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upload {
+    /// Its media type as the client gave it.
+    pub content_type: String,
+    /// When it was uploaded, in seconds since 1970.
+    pub uploaded_at: u64,
+    /// Its bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Keeps an uploaded blob under `id`.
+pub fn put_upload(keys: &mut dyn KeysWrite, id: &str, upload: &Upload) -> MailResult<()> {
+    let content_type = upload.content_type.as_bytes();
+    let length = u16::try_from(content_type.len()).map_err(|_| MailError("the media type is too long".to_owned()))?;
+    let mut value = upload.uploaded_at.to_be_bytes().to_vec();
+    value.extend_from_slice(&length.to_be_bytes());
+    value.extend_from_slice(content_type);
+    value.extend_from_slice(&upload.bytes);
+    keys.put(&upload_key(id), &value).map_err(storage)
+}
+
+/// The uploaded blob `id`, if it is still kept.
+pub fn upload(keys: &dyn KeysRead, id: &str) -> MailResult<Option<Upload>> {
+    let Some(value) = keys.get(&upload_key(id)).map_err(storage)? else {
+        return Ok(None);
+    };
+    let read = || -> Option<Upload> {
+        let uploaded_at = u64::from_be_bytes(value.get(..8)?.try_into().ok()?);
+        let length = usize::from(u16::from_be_bytes(value.get(8..10)?.try_into().ok()?));
+        let content_type = String::from_utf8(value.get(10..10 + length)?.to_vec()).ok()?;
+        Some(Upload {
+            content_type,
+            uploaded_at,
+            bytes: value.get(10 + length..)?.to_vec(),
+        })
+    };
+    Ok(read())
+}
+
+/// Removes the uploads made before `before`; returns how many.
+pub fn remove_uploads_before(keys: &mut dyn KeysWrite, before: u64) -> MailResult<usize> {
+    let mut stale = Vec::new();
+    for (key, value) in keys.scan(&[UPLOAD]).map_err(storage)? {
+        let uploaded_at = value.get(..8).and_then(|bytes| bytes.try_into().ok()).map_or(0, u64::from_be_bytes);
+        if uploaded_at < before {
+            stale.push(key);
+        }
+    }
+    for key in &stale {
+        keys.delete(key).map_err(storage)?;
+    }
+    Ok(stale.len())
 }
 
 #[cfg(test)]

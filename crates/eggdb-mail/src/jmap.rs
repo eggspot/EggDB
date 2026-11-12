@@ -16,6 +16,7 @@ const ACCOUNT: &str = "a";
 const MAX_CALLS: usize = 64;
 const MAX_OBJECTS: usize = 1000;
 const PREVIEW_CHARS: usize = 256;
+const UPLOAD_KEPT_SECONDS: u64 = 24 * 3600;
 const CORE: &str = "urn:ietf:params:jmap:core";
 const MAIL: &str = "urn:ietf:params:jmap:mail";
 /// The largest JMAP request body.
@@ -321,6 +322,15 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             }
             return self.api(&request.body);
         }
+        if let Some(rest) = path.strip_prefix("/jmap/upload/") {
+            if request.method != "POST" {
+                return problem(405, "about:blank", "uploads take POST");
+            }
+            return match rest.trim_end_matches('/') {
+                ACCOUNT => self.upload(request),
+                _ => problem(404, "about:blank", "no such account"),
+            };
+        }
         if let Some(rest) = path.strip_prefix("/jmap/download/") {
             let parts: Vec<&str> = rest.split('/').collect();
             if let [account, blob, ..] = parts.as_slice()
@@ -335,7 +345,7 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
     fn session(&self) -> Response {
         let state = self.snapshot().map(|store| Self::state(&store)).unwrap_or_default();
         let core = format!(
-            "{{\"maxSizeUpload\":0,\"maxConcurrentUpload\":1,\"maxSizeRequest\":{MAX_REQUEST_BYTES},\"maxConcurrentRequests\":4,\"maxCallsInRequest\":{MAX_CALLS},\"maxObjectsInGet\":{MAX_OBJECTS},\"maxObjectsInSet\":{MAX_OBJECTS},\"collationAlgorithms\":[\"i;ascii-casemap\"]}}"
+            "{{\"maxSizeUpload\":{MAX_REQUEST_BYTES},\"maxConcurrentUpload\":1,\"maxSizeRequest\":{MAX_REQUEST_BYTES},\"maxConcurrentRequests\":4,\"maxCallsInRequest\":{MAX_CALLS},\"maxObjectsInGet\":{MAX_OBJECTS},\"maxObjectsInSet\":{MAX_OBJECTS},\"collationAlgorithms\":[\"i;ascii-casemap\"]}}"
         );
         let mail = "{\"maxMailboxesPerEmail\":1,\"maxMailboxDepth\":null,\"maxSizeMailboxName\":1024,\"maxSizeAttachmentsPerEmail\":0,\"emailQuerySortOptions\":[\"receivedAt\",\"size\"],\"mayCreateTopLevelMailbox\":true}";
         json_reply(
@@ -350,7 +360,130 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
         )
     }
 
+    fn upload(&self, request: &Request) -> Response {
+        let digest = eggdb_crypto::sha256(&request.body);
+        let id = format!("u{}", digest[..16].iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        let content_type = request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map_or_else(|| "application/octet-stream".to_owned(), |(_, value)| value.clone());
+        let now = crate::now_seconds();
+        let upload = store::Upload {
+            content_type: content_type.clone(),
+            uploaded_at: now,
+            bytes: request.body.clone(),
+        };
+        let stored = self.change(&mut |keys| {
+            store::remove_uploads_before(keys, now.saturating_sub(UPLOAD_KEPT_SECONDS))?;
+            store::put_upload(keys, &id, &upload)
+        });
+        match stored {
+            Ok(()) => json_reply(
+                201,
+                format!(
+                    "{{\"accountId\":\"{ACCOUNT}\",\"blobId\":{},\"type\":{},\"size\":{}}}",
+                    string(&id),
+                    string(&content_type),
+                    request.body.len()
+                ),
+            ),
+            Err(_) => problem(500, "about:blank", "the upload could not be kept"),
+        }
+    }
+
+    fn blob_bytes(&self, blob: &str) -> Option<Vec<u8>> {
+        if blob.starts_with('u') {
+            let mut found = None;
+            self.keyspace
+                .read(0, &mut |keys| {
+                    found = store::upload(keys, blob).map_err(|error| error.0)?;
+                    Ok(())
+                })
+                .ok()?;
+            return found.map(|upload| upload.bytes);
+        }
+        let store = self.snapshot().ok()?;
+        store.find(blob).map(|(_, message)| message.raw.clone())
+    }
+
+    fn email_import(&self, arguments: &Json) -> Result<Json, String> {
+        let old_state = Self::state(&self.snapshot().map_err(|_| "serverFail".to_owned())?);
+        let failure = |kind: &str| Json::Object(vec![("type".to_owned(), Json::String(kind.to_owned()))]);
+        let mut created = Vec::new();
+        let mut not_created = Vec::new();
+        if let Some(Json::Object(emails)) = arguments.get("emails") {
+            for (creation, email) in emails {
+                let Some(raw) = email.get("blobId").and_then(Json::as_str).and_then(|blob| self.blob_bytes(blob)) else {
+                    not_created.push((creation.clone(), failure("blobNotFound")));
+                    continue;
+                };
+                let targets: Vec<String> = match email.get("mailboxIds") {
+                    Some(Json::Object(ids)) => ids.iter().filter(|(_, value)| *value == Json::Bool(true)).filter_map(|(id, _)| mailbox_of_id(id)).collect(),
+                    _ => Vec::new(),
+                };
+                let [target] = targets.as_slice() else {
+                    not_created.push((creation.clone(), failure("invalidProperties")));
+                    continue;
+                };
+                let flags: Vec<String> = match email.get("keywords") {
+                    Some(Json::Object(keywords)) => keywords.iter().filter(|(_, value)| *value == Json::Bool(true)).map(|(keyword, _)| flag_of(keyword)).collect(),
+                    _ => Vec::new(),
+                };
+                let received = email.get("receivedAt").and_then(Json::as_str).and_then(parse_rfc3339).unwrap_or_else(crate::now_seconds);
+                let mut uid = 0;
+                let outcome = self.change(&mut |keys| {
+                    if store::canonical(target) != INBOX && store::mailbox(&*keys, target)?.is_none() {
+                        return Err(MailError("invalidProperties".to_owned()));
+                    }
+                    uid = store::append(keys, target, &flags, received, &raw)?;
+                    Ok(())
+                });
+                match outcome {
+                    Ok(()) => {
+                        let id = email_id(target, uid);
+                        created.push((
+                            creation.clone(),
+                            Json::Object(vec![
+                                ("id".to_owned(), Json::String(id.clone())),
+                                ("blobId".to_owned(), Json::String(id.clone())),
+                                ("threadId".to_owned(), Json::String(format!("t{}", &id[1..]))),
+                                ("size".to_owned(), Json::Number(raw.len() as f64)),
+                            ]),
+                        ));
+                    }
+                    Err(kind) => not_created.push((creation.clone(), failure(if kind == "invalidProperties" { "invalidProperties" } else { "serverFail" }))),
+                }
+            }
+        }
+        let new_state = Self::state(&self.snapshot().map_err(|_| "serverFail".to_owned())?);
+        Ok(Json::Object(vec![
+            ("accountId".to_owned(), Json::String(ACCOUNT.to_owned())),
+            ("oldState".to_owned(), Json::String(old_state)),
+            ("newState".to_owned(), Json::String(new_state)),
+            ("created".to_owned(), if created.is_empty() { Json::Null } else { Json::Object(created) }),
+            ("notCreated".to_owned(), if not_created.is_empty() { Json::Null } else { Json::Object(not_created) }),
+        ]))
+    }
+
     fn download(&self, blob: &str) -> Response {
+        if blob.starts_with('u') {
+            let mut found = None;
+            let read = self.keyspace.read(0, &mut |keys| {
+                found = store::upload(keys, blob).map_err(|error| error.0)?;
+                Ok(())
+            });
+            return match (read, found) {
+                (Ok(()), Some(upload)) => Response {
+                    status: 200,
+                    content_type: upload.content_type,
+                    body: upload.bytes,
+                    headers: Vec::new(),
+                },
+                (Ok(()), None) => text_reply(404, "no such blob"),
+                (Err(_), _) => text_reply(500, "the store could not be read"),
+            };
+        }
         let Ok(store) = self.snapshot() else {
             return text_reply(500, "the store could not be read");
         };
@@ -454,6 +587,7 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             "Email/query" => self.email_query(arguments),
             "Email/get" => self.email_get(arguments),
             "Email/set" => self.email_set(arguments),
+            "Email/import" => self.email_import(arguments),
             "Thread/get" => self.thread_get(arguments),
             _ => return method_error("unknownMethod"),
         };
@@ -979,5 +1113,41 @@ mod tests {
         assert!(answered.contains("\"value\":\"Café menu\""), "{answered}");
         let pdf = call(&endpoint, "GET", &format!("/jmap/download/{ACCOUNT}/{id}p2/menu.pdf"), "");
         assert_eq!(pdf, "%PDF-1");
+    }
+
+    #[test]
+    fn uploaded_messages_import_into_a_mailbox() {
+        let keyspace = MemoryKeyspace::default();
+        let config = ServerConfig {
+            user: "eggdb".to_owned(),
+            password_sha256: eggdb_crypto::sha256(b"secret"),
+            max_connections: 4,
+            max_message_bytes: 1 << 20,
+        };
+        let endpoint = Endpoint::new(&keyspace, config);
+        let upload = endpoint.answer(&Request {
+            method: "POST".to_owned(),
+            path: format!("/jmap/upload/{ACCOUNT}/"),
+            query: None,
+            headers: vec![
+                ("authorization".to_owned(), format!("Basic {}", eggdb_crypto::base64_encode(b"eggdb:secret"))),
+                ("content-type".to_owned(), "message/rfc822".to_owned()),
+            ],
+            body: b"Subject: Imported\r\n\r\nHello\r\n".to_vec(),
+        });
+        assert_eq!(upload.status, 201);
+        let uploaded = parse(&String::from_utf8_lossy(&upload.body)).unwrap();
+        let blob = uploaded.get("blobId").and_then(Json::as_str).unwrap().to_owned();
+        assert_eq!(call(&endpoint, "GET", &format!("/jmap/download/{ACCOUNT}/{blob}/m.eml"), ""), "Subject: Imported\r\n\r\nHello\r\n");
+        let inbox = mailbox_id(INBOX);
+        let imported = call(
+            &endpoint,
+            "POST",
+            "/jmap/api",
+            &format!(r#"{{"using":["urn:ietf:params:jmap:mail"],"methodCalls":[["Email/import",{{"emails":{{"k1":{{"blobId":"{blob}","mailboxIds":{{"{inbox}":true}},"keywords":{{"$seen":true}}}},"k2":{{"blobId":"missing","mailboxIds":{{"{inbox}":true}}}}}}}},"i"],["Email/query",{{"filter":{{"hasKeyword":"$seen"}}}},"q"]]}}"#),
+        );
+        assert!(imported.contains("\"k1\":{\"id\":"), "{imported}");
+        assert!(imported.contains("\"k2\":{\"type\":\"blobNotFound\"}"), "{imported}");
+        assert!(imported.contains("\"total\":1"), "{imported}");
     }
 }
