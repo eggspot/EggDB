@@ -11,6 +11,8 @@ pub(crate) const SCAN: &str = "sqlite_compare.scan";
 pub(crate) const BATCH_PUT: &str = "sqlite_compare.batch_put";
 pub(crate) const BATCH_PUT_NORMAL: &str = "sqlite_compare.batch_put_normal";
 pub(crate) const DURABLE_COMMIT: &str = "sqlite_compare.durable_commit";
+pub(crate) const MEMORY_GET: &str = "sqlite_compare.memory_get";
+pub(crate) const MEMORY_BATCH_PUT: &str = "sqlite_compare.memory_batch_put";
 
 const ENTRIES: u64 = 100_000;
 const DURABLE_ENTRIES: u64 = 1000;
@@ -52,7 +54,18 @@ fn sqlite_get(
 }
 
 pub(crate) fn get() -> Result<Vec<Metric>, String> {
-    let stores = Stores::open("get", Durability::Normal, ENTRIES)?;
+    get_from(GET, Stores::open("get", Durability::Normal, ENTRIES)?, RatioGate::Gated)
+}
+
+pub(crate) fn memory_get() -> Result<Vec<Metric>, String> {
+    get_from(MEMORY_GET, Stores::in_memory(ENTRIES)?, RatioGate::Reported)
+}
+
+fn get_from(
+    benchmark: &'static str,
+    stores: Stores,
+    gate: RatioGate,
+) -> Result<Vec<Metric>, String> {
     let mut select = prepare(&stores.sqlite, SELECT_VALUE)?;
     black_box(eggdb_get(&stores.eggdb, 0, ENTRIES, ENTRIES)?);
     black_box(sqlite_get(&mut select, 0, ENTRIES, ENTRIES)?);
@@ -70,9 +83,9 @@ pub(crate) fn get() -> Result<Vec<Metric>, String> {
         },
     )?;
     Ok(paired_metrics(
-        GET,
+        benchmark,
         measured,
-        RatioGate::Gated,
+        gate,
         ["ns_per_get", "sqlite_ns_per_get"],
     ))
 }
@@ -228,12 +241,23 @@ pub(crate) fn batch_put_normal() -> Result<Vec<Metric>, String> {
     batch_put_with(BATCH_PUT_NORMAL, Durability::Normal, RatioGate::Reported)
 }
 
+pub(crate) fn memory_batch_put() -> Result<Vec<Metric>, String> {
+    batch_put_into(MEMORY_BATCH_PUT, Stores::in_memory(ENTRIES)?, RatioGate::Reported)
+}
+
 fn batch_put_with(
     benchmark: &'static str,
     durability: Durability,
     gate: RatioGate,
 ) -> Result<Vec<Metric>, String> {
-    let stores = Stores::open(benchmark, durability, ENTRIES)?;
+    batch_put_into(benchmark, Stores::open(benchmark, durability, ENTRIES)?, gate)
+}
+
+fn batch_put_into(
+    benchmark: &'static str,
+    stores: Stores,
+    gate: RatioGate,
+) -> Result<Vec<Metric>, String> {
     let mut writer = SqliteWriter::new(&stores.sqlite)?;
     let (mut eggdb_next, mut sqlite_next) = (ENTRIES, ENTRIES);
     let per_batch = measure::paired_calibrated_from(

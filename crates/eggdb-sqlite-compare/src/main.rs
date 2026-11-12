@@ -93,12 +93,14 @@ use std::process::ExitCode;
 
 type Workload = fn() -> Result<Vec<crate::baseline::Metric>, String>;
 
-const WORKLOADS: [(&str, Workload); 16] = [
+const WORKLOADS: [(&str, Workload); 18] = [
     (workloads::GET, workloads::get),
     (workloads::SCAN, workloads::scan),
     (workloads::BATCH_PUT, workloads::batch_put),
     (workloads::BATCH_PUT_NORMAL, workloads::batch_put_normal),
     (workloads::DURABLE_COMMIT, workloads::durable_commit),
+    (workloads::MEMORY_GET, workloads::memory_get),
+    (workloads::MEMORY_BATCH_PUT, workloads::memory_batch_put),
     (sql_workloads::POINT_SELECT, sql_workloads::point_select),
     (sql_workloads::INDEXED_LOOKUP, sql_workloads::indexed_lookup),
     (sql_workloads::BULK_INSERT, sql_workloads::bulk_insert),

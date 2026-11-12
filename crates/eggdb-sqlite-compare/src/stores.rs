@@ -15,8 +15,8 @@ pub(crate) fn failed<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> String +
 pub(crate) struct Stores {
     pub(crate) eggdb: Database,
     pub(crate) sqlite: Connection,
-    _eggdb_file: BenchFile,
-    _sqlite_file: SqliteFile,
+    _eggdb_file: Option<BenchFile>,
+    _sqlite_file: Option<SqliteFile>,
 }
 
 struct SqliteFile {
@@ -44,8 +44,33 @@ impl Stores {
         let stores = Self {
             eggdb,
             sqlite,
-            _eggdb_file: eggdb_file,
-            _sqlite_file: sqlite_file,
+            _eggdb_file: Some(eggdb_file),
+            _sqlite_file: Some(sqlite_file),
+        };
+        stores.fill(entries)?;
+        Ok(stores)
+    }
+
+    pub(crate) fn in_memory(entries: u64) -> Result<Self, String> {
+        let options = Options::new()
+            .cache_bytes(CACHE_BYTES)
+            .page_size_bytes(PAGE_BYTES)
+            .durability(Durability::Off);
+        let eggdb = Database::in_memory_with(options).map_err(failed("open EggDB in memory"))?;
+        let sqlite = Connection::open_in_memory().map_err(failed("open SQLite in memory"))?;
+        sqlite
+            .execute_batch(&format!(
+                "PRAGMA page_size = {PAGE_BYTES};
+                 PRAGMA cache_size = -{};
+                 CREATE TABLE kv(k BLOB PRIMARY KEY, v BLOB) WITHOUT ROWID, STRICT;",
+                CACHE_BYTES / 1024,
+            ))
+            .map_err(failed("configure SQLite in memory"))?;
+        let stores = Self {
+            eggdb,
+            sqlite,
+            _eggdb_file: None,
+            _sqlite_file: None,
         };
         stores.fill(entries)?;
         Ok(stores)

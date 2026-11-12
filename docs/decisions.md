@@ -975,3 +975,4 @@ its full title with its status.
 - [D948](decisions/D948.md) Code-only batch 596 (M1): the page cache placed on a NUMA node
 - [D949](decisions/D949.md) Code-only batch 597 (M3): a benchmark of bulk writes inside a transaction per dialect
 - [D950](decisions/D950.md) Code-only batch 598 (M3): pg_export_snapshot in a read-write block
+- [D951](decisions/D951.md) Code-only batch 599 (M4): EggDB in memory against SQLite's :memory: in the compare job
