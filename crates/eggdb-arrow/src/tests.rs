@@ -576,3 +576,63 @@ fn sparse_union_columns_read_each_rows_member() {
     );
     assert!(read(&unknown).is_err());
 }
+
+fn nested_dictionary_stream(with_dictionary: bool) -> Vec<u8> {
+    use crate::flatbuffer::{Builder, Field};
+    let mut builder = Builder::new();
+    let item_name = builder.string("item");
+    let text_type = builder.table(&[]);
+    let index_type = builder.table(&[Some(Field::I32(8)), Some(Field::Bool(true))]);
+    let encoding = builder.table(&[
+        Some(Field::I64(9)),
+        Some(Field::Offset(index_type)),
+        Some(Field::Bool(false)),
+    ]);
+    let no_children = builder.offsets(&[]);
+    let item = builder.table(&[
+        Some(Field::Offset(item_name)),
+        Some(Field::Bool(true)),
+        Some(Field::U8(5)),
+        Some(Field::Offset(text_type)),
+        Some(Field::Offset(encoding)),
+        Some(Field::Offset(no_children)),
+    ]);
+    let field = parent_field(&mut builder, "colors", 12, &[], &[item]);
+    let fields = builder.offsets(&[field]);
+    let schema = builder.table(&[Some(Field::I16(0)), Some(Field::Offset(fields))]);
+    let mut out = Vec::new();
+    crate::frame(&crate::message(builder, crate::HEADER_SCHEMA, schema, 0), &[], &mut out);
+    if with_dictionary {
+        let (metadata, body) = dictionary_message(9, &["red", "green"], false);
+        crate::frame(&metadata, &body, &mut out);
+    }
+    let mut body = crate::Body {
+        bytes: Vec::new(),
+        buffers: Vec::new(),
+    };
+    body.push(&[]);
+    body.push(&[0, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]);
+    body.push(&[]);
+    body.push(&[1, 0, 1]);
+    let mut builder = Builder::new();
+    let batch = batch_table(&mut builder, 2, &[[2, 0], [3, 0]], &body);
+    let metadata = crate::message(builder, crate::HEADER_RECORD_BATCH, batch, body.bytes.len() as i64);
+    crate::frame(&metadata, &body.bytes, &mut out);
+    out.extend_from_slice(&crate::CONTINUATION);
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out
+}
+
+#[test]
+fn dictionary_encoded_values_inside_lists_read_through_their_dictionary() {
+    let columns = read(&nested_dictionary_stream(true)).expect("the stream reads");
+    assert_eq!(columns[0].column_type, ColumnType::Text);
+    assert_eq!(
+        columns[0].cells,
+        vec![
+            Cell::Bytes(b"[\"green\",\"red\"]".to_vec()),
+            Cell::Bytes(b"[\"green\"]".to_vec())
+        ]
+    );
+    assert!(read(&nested_dictionary_stream(false)).is_err());
+}

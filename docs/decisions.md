@@ -921,3 +921,4 @@ its full title with its status.
 - [D894](decisions/D894.md) Code-only batch 542 (M16): JMAP over the email store
 - [D895](decisions/D895.md) Code-only batch 543 (M16): WebDAV, CalDAV and CardDAV
 - [D896](decisions/D896.md) Code-only batch 544 (M11): ORC union columns
+- [D897](decisions/D897.md) Code-only batch 545 (M11): dictionary-encoded values inside nested Arrow columns
