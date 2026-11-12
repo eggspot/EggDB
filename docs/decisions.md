@@ -958,3 +958,4 @@ its full title with its status.
 - [D931](decisions/D931.md) Code-only batch 579 (M4): key-value transactions and collections in the Go driver
 - [D932](decisions/D932.md) Code-only batch 580 (M4): key-value transactions and collections in the Node.js driver
 - [D933](decisions/D933.md) Code-only batch 581 (M4): key-value transactions and collections in the .NET driver
+- [D934](decisions/D934.md) Code-only batch 582 (M4): key-value transactions and collections in the C++ header

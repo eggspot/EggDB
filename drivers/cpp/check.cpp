@@ -29,6 +29,31 @@ int main(int argc, char **argv) {
     } catch (const eggdb::error &failure) {
         require(failure.sqlstate().size() == 5, "the error has a SQLSTATE");
     }
+    {
+        auto store = eggdb::key_value::open(":memory:");
+        {
+            auto txn = store.write();
+            require(txn.create_collection("sessions"), "the collection is made");
+            txn.put(eggdb::to_bytes("s:1"), eggdb::to_bytes("ada"), "sessions");
+            txn.put(eggdb::to_bytes("plain"), eggdb::to_bytes("default"));
+            txn.commit();
+        }
+        {
+            auto txn = store.read();
+            require(txn.get(eggdb::to_bytes("s:1"), "sessions") == eggdb::to_bytes("ada"), "the collection holds its key");
+            require(!txn.get(eggdb::to_bytes("s:1")).has_value(), "the default key space does not");
+            eggdb::scan_options prefix;
+            prefix.prefix = eggdb::to_bytes("s:");
+            require(txn.scan(prefix, "sessions").size() == 1, "the prefix scan finds one key");
+            require(txn.stats("sessions").entries == 1, "the collection counts one entry");
+        }
+        {
+            auto txn = store.write();
+            txn.rename_collection("sessions", "logins");
+            txn.commit();
+        }
+        require(store.read().collections() == std::vector<std::string>{"logins"}, "the collection was renamed");
+    }
     std::puts("c++ driver check: passed");
     return 0;
 }
