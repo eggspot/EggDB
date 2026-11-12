@@ -517,3 +517,30 @@ fn live_queries_send_server_sent_events() {
         "event: next\ndata: {\"data\":{\"readings\":[{\"id\":1},{\"id\":2}]}}\n\nevent: complete\ndata: \n\n"
     );
 }
+
+#[test]
+fn ogc_features_filter_with_cql2() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE cities (id integer PRIMARY KEY, name text, population integer, geom geometry)",
+        "INSERT INTO cities VALUES (1, 'Berlin', 3600000, ST_SetSRID(ST_MakePoint(13.4, 52.5), 4326)), (2, 'Bonn', 330000, ST_SetSRID(ST_MakePoint(7.1, 50.7), 4326)), (3, 'Paris', 2100000, ST_SetSRID(ST_MakePoint(2.35, 48.85), 4326))",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let filtered = call(
+        &endpoint,
+        "GET",
+        "/ogc/collections/cities/items?filter=population%20%3E%201000000%20AND%20S_INTERSECTS(geom%2C%20BBOX(5%2C45%2C15%2C55))",
+        "",
+        None,
+    );
+    assert_eq!(filtered.status, 200, "{}", text(&filtered));
+    assert!(text(&filtered).contains("\"numberReturned\":1"), "{}", text(&filtered));
+    assert!(text(&filtered).contains("Berlin"), "{}", text(&filtered));
+    let queryables = call(&endpoint, "GET", "/ogc/collections/cities/queryables", "", None);
+    assert!(text(&queryables).contains("\"population\":{\"type\":\"integer\"}"), "{}", text(&queryables));
+    let refused = call(&endpoint, "GET", "/ogc/collections/cities/items?filter=secret%20%3D%201", "", None);
+    assert_eq!(refused.status, 400);
+}

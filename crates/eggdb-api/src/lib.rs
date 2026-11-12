@@ -13,6 +13,7 @@
 //! PostgREST and Hasura are trademarks of their owners; EggDB is compatible with their
 //! conventions.
 
+mod cql2;
 mod graphql;
 mod graphql_execute;
 mod graphql_schema;
