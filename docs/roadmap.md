@@ -1001,7 +1001,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-12, D674); Indonesian: **code written, unbuilt** (code-only mode, 2026-11-12, D687); Romanian: **code
   written, unbuilt** (code-only mode, 2026-11-12, D718). Left: Turkish and the others, and word segmentation.
 - Synonyms, stop words, and fuzzy and phonetic matching (D30). Fuzzy and phonetic functions:
-  **code written, unbuilt** (code-only mode, 2026-11-11, D470).
+  **code written, unbuilt** (code-only mode, 2026-11-11, D470); Elasticsearch analyzers with stop words and synonyms:
+  **code written, unbuilt** (code-only mode, 2026-11-12, D739). Left: synonyms and stop words in SQL text search
+  configurations.
 - MySQL's `MATCH ... AGAINST` with `FULLTEXT` keys, SQL Server's `CONTAINS` and `FREETEXT`, and
   SQLite's FTS5 (D10, D195). `MATCH ... AGAINST` without keys: **code written, unbuilt** (code-only
   mode, 2026-11-11, D513). `CONTAINS` and `FREETEXT` without full-text indexes: **code written,

@@ -49,6 +49,8 @@ pub(crate) struct MappedField {
 pub(crate) struct FieldTypes {
     fields: HashMap<String, MappedField>,
     vector_similarities: HashMap<String, String>,
+    analyzer_names: HashMap<String, (Option<String>, Option<String>)>,
+    analysis: crate::analysis::Analysis,
 }
 
 fn member<'n>(node: &'n Node, name: &str) -> Option<&'n Node> {
@@ -90,6 +92,11 @@ impl FieldTypes {
             } else {
                 format!("{prefix}.{name}")
             };
+            let index_analyzer = member(spec, "analyzer").and_then(text).map(str::to_owned);
+            let search_analyzer = member(spec, "search_analyzer").and_then(text).map(str::to_owned);
+            if index_analyzer.is_some() || search_analyzer.is_some() {
+                self.analyzer_names.entry(path.clone()).or_insert((index_analyzer, search_analyzer));
+            }
             if let Some(kind) = member(spec, "type").and_then(text) {
                 self.fields.entry(path.clone()).or_insert(MappedField {
                     kind: FieldType::named(kind),
@@ -118,6 +125,25 @@ impl FieldTypes {
                 self.add_properties(nested, &path, depth + 1);
             }
         }
+    }
+
+    /// Reads an index's `settings`, for the analyzers its `analysis` defines.
+    pub(crate) fn add_settings(&mut self, settings: &Node) {
+        self.analysis.add_settings(settings);
+    }
+
+    /// Each field's index-time analyzer, for the documents' text.
+    pub(crate) fn field_analyzers(&self) -> HashMap<String, crate::analysis::Analyzer> {
+        self.analyzer_names
+            .iter()
+            .filter_map(|(field, (index, _))| Some((field.clone(), self.analysis.analyzer(index.as_deref()?)?)))
+            .collect()
+    }
+
+    /// The analyzer a query on `field` uses: its `search_analyzer`, else its `analyzer`.
+    pub(crate) fn search_analyzer(&self, field: &str) -> Option<crate::analysis::Analyzer> {
+        let (index, search) = self.analyzer_names.get(field)?;
+        self.analysis.analyzer(search.as_deref().or(index.as_deref())?)
     }
 
     /// The similarity a `dense_vector` field's mapping names, `cosine` when it names none or
@@ -233,15 +259,22 @@ pub(crate) fn apply(query: Query, types: &FieldTypes, now_millis: i64) -> Query 
             field: source_of(field),
             prefix,
         },
-        Query::MatchPhrase { field, terms } => Query::MatchPhrase {
-            field: source_of(field),
-            terms,
-        },
-        Query::Match { fields, terms, all } => Query::Match {
-            fields: fields.into_iter().map(source_of).collect(),
-            terms,
-            all,
-        },
+        Query::MatchPhrase { field, terms } => {
+            let field = source_of(field);
+            let terms = match types.search_analyzer(&field) {
+                Some(analyzer) => analyzer.refine(terms),
+                None => terms,
+            };
+            Query::MatchPhrase { field, terms }
+        }
+        Query::Match { fields, terms, all } => {
+            let fields: Vec<String> = fields.into_iter().map(source_of).collect();
+            let terms = match fields.first().and_then(|field| types.search_analyzer(field)) {
+                Some(analyzer) => analyzer.refine(terms),
+                None => terms,
+            };
+            Query::Match { fields, terms, all }
+        }
         Query::Bool {
             must,
             filter,

@@ -1,5 +1,5 @@
 use super::{
-    Answer, Api, document_key, document_prefix, error, index_key, json, missing_index,
+    Answer, Api, document_key, document_prefix, error, index_key, json, missing_index, settings_key,
     over_memory_budget, query_flag, read, resolve_indices, script_error, scripted, stored,
     unstored, validation, write,
 };
@@ -449,6 +449,14 @@ impl Api<'_> {
             {
                 types.add_mappings(&mappings);
             }
+            if let Some(settings) = keys
+                .get(&settings_key(index))?
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .and_then(|text| parse_document(&text).ok())
+            {
+                types.add_settings(&settings);
+            }
+            let _analyzers = crate::analysis::enter(types.field_analyzers());
             let query = crate::mappings::apply(options.query.clone(), &types, super::now_millis());
             let prefix = document_prefix(index);
             let mut matched = Vec::new();

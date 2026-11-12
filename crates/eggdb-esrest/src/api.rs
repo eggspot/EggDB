@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const INDEX_RECORD: u8 = 1;
 const DOCUMENT_RECORD: u8 = 2;
+const SETTINGS_RECORD: u8 = 8;
 const DEFAULT_SIZE: usize = 10;
 const MAX_RESULT_WINDOW: usize = 10_000;
 const VERSION: &str = "2.11.0";
@@ -153,6 +154,12 @@ fn document_prefix(index: &str) -> Vec<u8> {
     let mut key = vec![DOCUMENT_RECORD];
     key.extend_from_slice(index.as_bytes());
     key.push(0);
+    key
+}
+
+fn settings_key(index: &str) -> Vec<u8> {
+    let mut key = vec![SETTINGS_RECORD];
+    key.extend_from_slice(index.as_bytes());
     key
 }
 
@@ -728,6 +735,10 @@ impl<'k> Api<'k> {
             Some(parse_document(&body)?)
         };
         let requested_mappings = parsed.as_ref().and_then(|parsed| member_of(parsed, "mappings"));
+        let requested_settings: Option<String> = parsed
+            .as_ref()
+            .and_then(|parsed| member_of(parsed, "settings"))
+            .and_then(|settings| body.get(settings.start..settings.end).map(str::to_owned));
         let requested_aliases: Vec<String> = parsed
             .as_ref()
             .and_then(|parsed| member_of(parsed, "aliases"))
@@ -741,6 +752,9 @@ impl<'k> Api<'k> {
             let applied = templates::template_for(keys, index)?;
             let mappings = templates::mappings_text(&applied, requested_mappings.as_ref());
             keys.put(&index_key(index), mappings.as_bytes())?;
+            if let Some(settings) = &requested_settings {
+                keys.put(&settings_key(index), settings.as_bytes())?;
+            }
             for alias in applied.aliases.iter().chain(&requested_aliases) {
                 aliases::add_alias(keys, alias, index)?;
             }
@@ -771,6 +785,7 @@ impl<'k> Api<'k> {
                 keys.delete(&document_key(index, &id))?;
             }
             keys.delete(&index_key(index))?;
+            keys.delete(&settings_key(index))?;
             aliases::forget_index(keys, index)?;
             Ok(true)
         })?;
@@ -1210,6 +1225,12 @@ impl<'k> Api<'k> {
             {
                 types.add_mappings(&mappings);
             }
+            if let Some(settings) = read(self.keyspace, |keys| keys.get(&settings_key(name)))?
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .and_then(|text| parse_document(&text).ok())
+            {
+                types.add_settings(&settings);
+            }
         }
         Ok(types)
     }
@@ -1362,6 +1383,7 @@ impl<'k> Api<'k> {
             .unzip();
         let query = expand_wildcard_fields(query, &documents);
         let field_types = self.field_types(gathered.iter().map(|(index, _, _)| index.as_str()))?;
+        let _analyzers = crate::analysis::enter(field_types.field_analyzers());
         if !documents.is_empty() {
             let sources: Vec<&Node> = documents.iter().map(|(_, source)| source).collect();
             if let Some(name) = presentation

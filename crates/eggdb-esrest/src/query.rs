@@ -478,7 +478,7 @@ impl Stats {
                 let tokens: Vec<String> = values_at(source, &field)
                     .into_iter()
                     .filter_map(text_of)
-                    .flat_map(|text| analyze(&text))
+                    .flat_map(|text| crate::analysis::analyze_field(&field, &text))
                     .collect();
                 field_stats.documents += 1;
                 field_stats.total_length += tokens.len() as u64;
@@ -539,7 +539,7 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
                 let tokens: Vec<String> = values_at(source, field)
                     .into_iter()
                     .filter_map(text_of)
-                    .flat_map(|text| analyze(&text))
+                    .flat_map(|text| crate::analysis::analyze_field(field, &text))
                     .collect();
                 let matched: Vec<&String> =
                     terms.iter().filter(|term| tokens.contains(term)).collect();
@@ -573,7 +573,7 @@ pub(crate) fn score(query: &Query, id: &str, source: &Node, stats: &Stats) -> Op
                 .into_iter()
                 .filter_map(text_of)
                 .any(|text| {
-                    let tokens = analyze(&text);
+                    let tokens = crate::analysis::analyze_field(field, &text);
                     !terms.is_empty()
                         && tokens
                             .windows(terms.len())

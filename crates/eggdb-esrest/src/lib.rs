@@ -7,6 +7,7 @@
 //! OpenSearch are trademarks of their owners; EggDB is compatible with their APIs.
 
 mod aggregations;
+mod analysis;
 mod api;
 mod highlight;
 mod json_out;
