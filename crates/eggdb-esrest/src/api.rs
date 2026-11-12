@@ -1,5 +1,6 @@
 mod aliases;
 mod by_query;
+mod dashboards;
 mod multi;
 mod pit;
 mod scroll;
@@ -531,7 +532,21 @@ impl<'k> Api<'k> {
         let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
         let method = request.method.as_str();
         let outcome = match (method, parts.as_slice()) {
-            ("GET" | "HEAD", []) => Ok(self.root()),
+            ("GET" | "HEAD", []) => Ok(self.root(dashboards::version_for(request))),
+            ("GET", ["_nodes", ..]) => Ok(self.nodes_info(request)),
+            ("GET", ["_cluster", "settings"]) => Ok(self.cluster_settings()),
+            ("PUT", ["_cluster", "settings"]) => self.put_cluster_settings(request),
+            ("GET", ["_cluster", "health", _]) => Ok(json(200, "{\"cluster_name\":\"eggdb\",\"status\":\"green\",\"timed_out\":false,\"number_of_nodes\":1,\"number_of_data_nodes\":1,\"active_primary_shards\":0,\"active_shards\":0,\"relocating_shards\":0,\"initializing_shards\":0,\"unassigned_shards\":0}".to_owned())),
+            ("GET", ["_mapping" | "_mappings"]) => self.get_mapping(None),
+            ("GET", ["_settings"]) => self.get_settings(None),
+            ("GET" | "POST", ["_field_caps"]) => self.field_caps(None),
+            ("GET", ["_resolve", "index", pattern]) => self.resolve_index(pattern),
+            ("GET", ["_cat", "templates" | "plugins" | "nodes" | "shards" | "segments", ..]) => Ok(self.empty_cat(request)),
+            ("GET", [index, "_mapping" | "_mappings"]) => self.get_mapping(Some(index)),
+            ("PUT" | "POST", [index, "_mapping" | "_mappings"]) => self.put_mapping(index, request),
+            ("GET", [index, "_settings"]) => self.get_settings(Some(index)),
+            ("PUT", [index, "_settings"]) => Ok(json(200, "{\"acknowledged\":true}".to_owned())),
+            ("GET" | "POST", [index, "_field_caps"]) => self.field_caps(Some(index)),
             ("GET", ["_cluster", "health"]) => Ok(json(200, "{\"cluster_name\":\"eggdb\",\"status\":\"green\",\"timed_out\":false,\"number_of_nodes\":1,\"number_of_data_nodes\":1,\"active_primary_shards\":0,\"active_shards\":0,\"relocating_shards\":0,\"initializing_shards\":0,\"unassigned_shards\":0}".to_owned())),
             ("GET", ["_cat", "indices"]) => self.cat_indices(),
             ("GET", ["_cat", "aliases"]) => self.cat_aliases(),
@@ -665,11 +680,11 @@ impl<'k> Api<'k> {
         })
     }
 
-    fn root(&self) -> Response {
+    fn root(&self, version: &str) -> Response {
         json(
             200,
             format!(
-                "{{\"name\":\"eggdb\",\"cluster_name\":\"eggdb\",\"cluster_uuid\":\"eggdb\",\"version\":{{\"distribution\":\"eggdb\",\"number\":\"{VERSION}\",\"minimum_wire_compatibility_version\":\"7.10.0\",\"minimum_index_compatibility_version\":\"7.0.0\"}},\"tagline\":\"EggDB, compatible with the Elasticsearch and OpenSearch REST APIs\"}}"
+                "{{\"name\":\"eggdb\",\"cluster_name\":\"eggdb\",\"cluster_uuid\":\"eggdb\",\"version\":{{\"distribution\":\"eggdb\",\"number\":\"{version}\",\"minimum_wire_compatibility_version\":\"7.10.0\",\"minimum_index_compatibility_version\":\"7.0.0\"}},\"tagline\":\"EggDB, compatible with the Elasticsearch and OpenSearch REST APIs\"}}"
             ),
         )
     }

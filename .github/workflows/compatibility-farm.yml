@@ -47,6 +47,7 @@ jobs:
           cargo build -p eggdb
           mkdir -p "$RUNNER_TEMP/matrix"
           scripts/compatibility.sh target/debug/eggdb "$RUNNER_TEMP/tools" "$RUNNER_TEMP/matrix/compatibility.md" "$RUNNER_TEMP"
+          scripts/dashboards.sh target/debug/eggdb "$RUNNER_TEMP/matrix/compatibility.md" "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/matrix/compatibility.md" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish the matrix
         uses: actions/upload-artifact@v7

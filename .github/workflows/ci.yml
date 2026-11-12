@@ -1540,7 +1540,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1569,6 +1569,11 @@ jobs:
         run: |
           cargo build -p eggdb
           scripts/compatibility.sh target/debug/eggdb "$RUNNER_TEMP/tools" "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP"
+      - name: Run OpenSearch Dashboards and Kibana against eggdb serve (D12, D196)
+        env:
+          EGGDB_PASSWORD: ci-compatibility
+          EGGDB_COMPATIBILITY_STRICT: "1"
+        run: scripts/dashboards.sh target/debug/eggdb "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP"
 
   arrow:
     needs: changes

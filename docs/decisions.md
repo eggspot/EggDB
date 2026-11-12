@@ -1008,3 +1008,4 @@ its full title with its status.
 - [D981](decisions/D981.md) Code-only batch 629 (M8): the turkish text search configuration with Snowball's Turkish stemmer
 - [D982](decisions/D982.md) Code-only batch 630 (M8): word segmentation for Chinese, Japanese, Korean and Thai
 - [D983](decisions/D983.md) Code-only batch 631 (M8): SQL text search dictionaries and configurations
+- [D984](decisions/D984.md) Code-only batch 632 (M8): OpenSearch Dashboards and Kibana against EggDB
