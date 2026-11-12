@@ -238,6 +238,8 @@ struct Shell<'s, 'db: 's> {
     spool_replaced: bool,
     spooling_to: Option<String>,
     binds: Vec<super::shell_sqlplus::BindVariable>,
+    server_output_on: bool,
+    bind_lines: Vec<String>,
     column_formats: super::shell_columns::ColumnFormats,
 }
 
@@ -289,6 +291,8 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             collection: None,
             spool: None,
             binds: Vec::new(),
+            server_output_on: false,
+            bind_lines: Vec::new(),
             column_formats: super::shell_columns::ColumnFormats::new(),
             spool_replaced: false,
             spooling_to: None,
@@ -591,8 +595,7 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             {
                 return Some(self.assign_bind(console, name.trim(), expression.trim()));
             }
-            let block = super::shell_sqlplus::with_binds(&format!("BEGIN {rest}; END;"), &self.binds);
-            return Some(self.run_sql(console, &block));
+            return Some(self.run_sql(console, &format!("BEGIN {rest}; END;")));
         }
         if super::shell_columns::is_column_command(&first) {
             return Some(
@@ -639,10 +642,12 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
         }
         Some(match ServerOutputSetting::parse(value) {
             Ok(ServerOutputSetting::On { buffer_bytes }) => {
+                self.server_output_on = true;
                 self.sql.enable_server_output(buffer_bytes);
                 Step::Continue(Exit::Done)
             }
             Ok(ServerOutputSetting::Off) => {
+                self.server_output_on = false;
                 self.sql.disable_server_output();
                 Step::Continue(Exit::Done)
             }
@@ -825,10 +830,36 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             show_copy_tag: false,
         };
         if self.sql.dialect() == Dialect::Oracle && !self.binds.is_empty() {
+            if let Some(block) = super::shell_sqlplus::block_with_output_binds(text, &self.binds) {
+                return self.run_block_with_output_binds(console, &block, files);
+            }
             let bound = super::shell_sqlplus::with_binds(text, &self.binds);
             return self.run_with_copy(console, &bound, files);
         }
         self.run_with_copy(console, text, files)
+    }
+
+    fn run_block_with_output_binds(&mut self, console: &mut Console<'_>, block: &str, files: CopyFiles) -> Step {
+        let enabled_here = !self.server_output_on;
+        if enabled_here {
+            self.sql.enable_server_output(None);
+        }
+        let step = self.run_with_copy(console, block, files);
+        if enabled_here {
+            self.sql.disable_server_output();
+        }
+        for line in std::mem::take(&mut self.bind_lines) {
+            let Some((name, value)) = super::shell_sqlplus::output_bind(&line) else {
+                continue;
+            };
+            if let Some(bind) = self.binds.iter_mut().find(|bind| bind.name == name) {
+                let value = value.map_or(eggdb_sql::Value::Null, eggdb_sql::Value::Text);
+                let (literal, shown) = super::shell_sqlplus::bound_value(&value, &bind.declared);
+                bind.literal = literal;
+                bind.shown = shown;
+            }
+        }
+        step
     }
 
     fn run_with_copy(&mut self, console: &mut Console<'_>, text: &str, files: CopyFiles) -> Step {
@@ -836,6 +867,8 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
         let (width, mode, color_err) = (self.width, self.mode, self.color_err);
         let dialect = self.sql.dialect();
         let server_output = (dialect == Dialect::Oracle).then(|| self.sql.server_output_reader());
+        let show_server_output = self.server_output_on;
+        let captured_binds: RefCell<Vec<String>> = RefCell::new(Vec::new());
         let column_formats = if dialect == Dialect::Oracle {
             self.column_formats.clone()
         } else {
@@ -869,7 +902,7 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
                     print_notice(&mut *stderr, color_err, notice);
                 }
                 if let Some(reader) = &server_output {
-                    print_server_output(&mut stdout.borrow_mut(), &reader.take_lines());
+                    route_server_output(&mut stdout.borrow_mut(), reader.take_lines(), show_server_output, &captured_binds);
                 }
                 if copied_out.replace(false)
                     && result.tag.starts_with("COPY ")
@@ -890,11 +923,10 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             &mut copy,
         );
         drop(copy);
-        if outcome.is_err()
-            && let Some(reader) = &server_output
-        {
-            print_server_output(&mut stdout.borrow_mut(), &reader.take_lines());
+        if let Some(reader) = &server_output {
+            route_server_output(&mut stdout.borrow_mut(), reader.take_lines(), show_server_output, &captured_binds);
         }
+        self.bind_lines = captured_binds.into_inner();
         if stdout.into_inner().finish().is_err() || closed {
             return Step::Quit;
         }
@@ -1676,10 +1708,14 @@ fn print_sql_error(
     let _ = messages.finish();
 }
 
-fn print_server_output(stdout: &mut Output<'_>, lines: &[String]) {
+fn route_server_output(stdout: &mut Output<'_>, lines: Vec<String>, shown: bool, binds: &RefCell<Vec<String>>) {
     for line in lines {
-        stdout.text(line);
-        stdout.text("\n");
+        if line.starts_with(super::shell_sqlplus::OUTPUT_BIND_MARKER) {
+            binds.borrow_mut().push(line);
+        } else if shown {
+            stdout.text(&line);
+            stdout.text("\n");
+        }
     }
 }
 

@@ -710,3 +710,4 @@ its full title with its status.
 - [D683](decisions/D683.md) Code-only batch 331 (M16): native histogram buckets and exemplars from remote write 2.0, and `query_exemplars`
 - [D684](decisions/D684.md) Code-only batch 332 (M10): MySQL `ENUM` members, `UNSIGNED` ranges and `YEAR`'s range as implicit checks
 - [D685](decisions/D685.md) Code-only batch 333 (M5): SQL*Plus `COLUMN` text wrapping (`WRAPPED`, `WORD_WRAPPED`, `TRUNCATED`) in `eggdb shell`
+- [D686](decisions/D686.md) Code-only batch 334 (M5): SQL*Plus output binds set inside PL/SQL blocks in `eggdb shell`

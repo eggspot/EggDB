@@ -70,8 +70,69 @@ pub(super) fn bound_value(value: &Value, declared: &str) -> (Option<String>, Opt
 /// `text` with each `:name` of a declared bind variable, outside quotes and comments, replaced
 /// by the variable's literal (`NULL` before it is set); `:=` and unknown names stay.
 pub(super) fn with_binds(text: &str, binds: &[BindVariable]) -> String {
+    replaced_binds(text, binds, |bind| bind.literal.clone().unwrap_or_else(|| "NULL".to_owned())).0
+}
+
+/// The start of a server output line that carries an output bind's value back to the shell.
+pub(super) const OUTPUT_BIND_MARKER: &str = "\u{1}eggdb-output-bind\u{1}";
+const LOCAL_PREFIX: &str = "eggdb_bind_";
+
+/// A PL/SQL block (`BEGIN ...` or `DECLARE ...`) that uses declared bind variables, rewritten
+/// so they are output binds: each becomes a local variable of the declared type set to its
+/// current value, the block runs nested inside, and each value is written back to server
+/// output after a marker for the shell to read. `None` for other text or a block with no
+/// binds.
+pub(super) fn block_with_output_binds(text: &str, binds: &[BindVariable]) -> Option<String> {
+    let trimmed = text.trim().trim_end_matches('/').trim_end();
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("begin") || lower.starts_with("declare")) {
+        return None;
+    }
+    let (renamed, used) = replaced_binds(trimmed, binds, |bind| format!("{LOCAL_PREFIX}{}", bind.name));
+    if used.is_empty() {
+        return None;
+    }
+    let mut out = String::from("DECLARE\n");
+    for bind in &used {
+        out.push_str(&format!(
+            "  {LOCAL_PREFIX}{} {} := {};\n",
+            bind.name,
+            bind.declared,
+            bind.literal.as_deref().unwrap_or("NULL")
+        ));
+    }
+    out.push_str("BEGIN\n");
+    out.push_str(&renamed);
+    if !renamed.ends_with(';') {
+        out.push(';');
+    }
+    out.push('\n');
+    for bind in &used {
+        out.push_str(&format!(
+            "  DBMS_OUTPUT.PUT_LINE('{OUTPUT_BIND_MARKER}{name}' || CASE WHEN {LOCAL_PREFIX}{name} IS NULL THEN '~' ELSE '=' || {LOCAL_PREFIX}{name} END);\n",
+            name = bind.name
+        ));
+    }
+    out.push_str("END;");
+    Some(out)
+}
+
+/// The variable name and value (`None` for null) an output bind line carries.
+pub(super) fn output_bind(line: &str) -> Option<(String, Option<String>)> {
+    let rest = line.strip_prefix(OUTPUT_BIND_MARKER)?;
+    let split = rest.find(['=', '~'])?;
+    let (name, value) = rest.split_at(split);
+    Some((name.to_owned(), value.strip_prefix('=').map(str::to_owned)))
+}
+
+fn replaced_binds<'b>(
+    text: &str,
+    binds: &'b [BindVariable],
+    replacement: impl Fn(&BindVariable) -> String,
+) -> (String, Vec<&'b BindVariable>) {
+    let mut used: Vec<&BindVariable> = Vec::new();
     if binds.is_empty() {
-        return text.to_owned();
+        return (text.to_owned(), used);
     }
     let mut out = String::with_capacity(text.len());
     let mut characters = text.char_indices().peekable();
@@ -95,7 +156,10 @@ pub(super) fn with_binds(text: &str, binds: &[BindVariable]) -> String {
         let name = &rest[..length];
         match binds.iter().find(|bind| !name.is_empty() && bind.name.eq_ignore_ascii_case(name)) {
             Some(bind) => {
-                out.push_str(bind.literal.as_deref().unwrap_or("NULL"));
+                out.push_str(&replacement(bind));
+                if !used.iter().any(|known| std::ptr::eq(*known, bind)) {
+                    used.push(bind);
+                }
                 for _ in 0..name.chars().count() {
                     characters.next();
                 }
@@ -103,7 +167,7 @@ pub(super) fn with_binds(text: &str, binds: &[BindVariable]) -> String {
             None => out.push(character),
         }
     }
-    out
+    (out, used)
 }
 
 /// What `PRINT` shows for one variable: its name as a heading, a rule and its value.
@@ -507,4 +571,18 @@ mod tests {
         assert!(printed_variable(&total).contains("42"));
     }
 
+    #[test]
+    fn blocks_assigning_binds_are_wrapped_and_their_values_read_back() {
+        let mut total = declared_variable("total NUMBER").unwrap();
+        total.literal = Some("1".to_owned());
+        let binds = vec![total];
+        let block = block_with_output_binds("BEGIN :total := :total + 1; END;\n/", &binds).unwrap();
+        assert!(block.starts_with("DECLARE\n  eggdb_bind_TOTAL NUMBER := 1;\nBEGIN\nBEGIN eggdb_bind_TOTAL := eggdb_bind_TOTAL + 1; END;\n"));
+        assert!(block.contains("DBMS_OUTPUT.PUT_LINE"));
+        assert!(block_with_output_binds("SELECT :total FROM dual", &binds).is_none());
+        assert!(block_with_output_binds("BEGIN NULL; END;", &binds).is_none());
+        assert_eq!(output_bind(&format!("{OUTPUT_BIND_MARKER}TOTAL=2")), Some(("TOTAL".to_owned(), Some("2".to_owned()))));
+        assert_eq!(output_bind(&format!("{OUTPUT_BIND_MARKER}TOTAL~")), Some(("TOTAL".to_owned(), None)));
+        assert_eq!(output_bind("plain output"), None);
+    }
 }
