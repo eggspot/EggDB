@@ -1052,7 +1052,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Text extracted from PDF files, and from PST files after D58's legal check, and OCR through ONNX
   models (D56, D249).
 
-### M9 Documents and MongoDB
+### M9 Documents and MongoDB PDF text: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D714). Left: PST and OCR.
 - Indexes used by queries, unique indexes and collations (D197). Unique indexes (by scanning): **code written,
   unbuilt** (code-only mode, 2026-11-11, D529). Left: indexes in the file used by queries, and
   collations.

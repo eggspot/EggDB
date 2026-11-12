@@ -2,12 +2,13 @@
 //! (RFC 1951), [`gunzip`] gzip (RFC 1952) and [`zlib_inflate`] the zlib format (RFC 1950) that
 //! HTTP's `deflate` coding names (D343), [`ZipArchive`] reads ZIP archives (PKWARE's APPNOTE, stored and deflated
 //! entries, CRC-checked), and [`extract_text`] returns the text of Office Open XML (ECMA-376:
-//! `.docx`, `.xlsx`, `.pptx`) and OpenDocument (OASIS ODF: `.odt`, `.ods`, `.odp`) files, [`read_sheet`]
+//! `.docx`, `.xlsx`, `.pptx`), OpenDocument (OASIS ODF: `.odt`, `.ods`, `.odp`) and PDF files, [`read_sheet`]
 //! and [`write_sheet`] read and write an `.xlsx` worksheet as rows of cells (D506), and
 //! [`write_stored`] writes a ZIP archive of uncompressed entries. Every
 //! reader bounds what it produces, so a hostile file cannot exhaust memory.
 
 mod inflate;
+mod pdf;
 mod sheet;
 mod text;
 mod zip;
@@ -29,9 +30,13 @@ impl std::fmt::Display for ContentError {
     }
 }
 
-/// The text of an Office Open XML or OpenDocument file, one paragraph per line, decompressing
-/// at most `limit` bytes over all its parts and refusing a text longer than `limit`.
+/// The text of an Office Open XML or OpenDocument file, one paragraph per line, or of a PDF
+/// file, one line per drawn text line, decompressing at most `limit` bytes per part and
+/// refusing a text longer than `limit`.
 pub fn extract_text(file: &[u8], limit: usize) -> Result<String, ContentError> {
+    if file.starts_with(b"%PDF-") {
+        return pdf::text(file, limit);
+    }
     text::extract(&ZipArchive::new(file)?, limit)
 }
 

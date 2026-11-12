@@ -3446,6 +3446,12 @@ files their headings and paragraphs. Files are read with EggDB's own ZIP and DEF
 part checked against its CRC-32 and limited to 64 MiB once decompressed; anything else (an
 encrypted, damaged or unsupported file) fails with SQLSTATE `22023`.
 
+PDF files give their pages' text in page order, one line per line of text the page draws (D714):
+objects are read directly and from object streams, content streams are decoded (Flate and
+ASCIIHex), and fonts with a `ToUnicode` map are read through it; other fonts' bytes are read as
+Latin-1. Encrypted PDFs, text drawn as images and fonts without a usable map give no or wrong
+text.
+
 ## Industry messages: FIX, HL7 v2 and EDIFACT
 
 Messages from trading, healthcare and supply-chain systems parse into `jsonb` with plain

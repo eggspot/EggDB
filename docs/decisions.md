@@ -738,3 +738,4 @@ its full title with its status.
 - [D711](decisions/D711.md) Code-only batch 359 (M12): `read_geotiff`, pixels of TIFF and GeoTIFF images
 - [D712](decisions/D712.md) Code-only batch 360 (M16): InfluxQL `SHOW SERIES`, `WITH MEASUREMENT`, `DROP MEASUREMENT`, `DROP SERIES` and `DELETE`
 - [D713](decisions/D713.md) Code-only batch 361 (M16): Flux row expressions, `filter` after transformations, `map`, `pivot`, `rename` and `duplicate`
+- [D714](decisions/D714.md) Code-only batch 362 (M8): text extracted from PDF files in `extract_text`
