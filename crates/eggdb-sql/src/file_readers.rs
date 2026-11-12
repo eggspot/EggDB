@@ -47,7 +47,7 @@ pub(crate) fn rows(
     names: &[String],
     types: &[Option<SqlType>],
     sink: &mut RecordSink<'_>,
-    arrow: bool,
+    function: &str,
 ) -> SqlResult<()> {
     let Some(path) = values.first() else {
         return Err(crate::json_to_record::definition_list_required());
@@ -56,11 +56,7 @@ pub(crate) fn rows(
         return Ok(());
     };
     let bytes = crate::new_files::read_file(&path, MOST_FILE_BYTES)?;
-    let columns = if arrow {
-        eggdb_arrow::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {error}")))?
-    } else {
-        eggdb_parquet::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {}", error.0)))?
-    };
+    let columns = columnar_file(function, &path, &bytes)?;
     let chosen: Vec<Option<&Column>> = names
         .iter()
         .map(|name| {
@@ -91,11 +87,28 @@ pub(crate) fn rows(
     Ok(())
 }
 
+fn columnar_file(function: &str, path: &str, bytes: &[u8]) -> SqlResult<Vec<Column>> {
+    let corrupted = |message: String| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {message}"));
+    match function {
+        "read_arrow" => eggdb_arrow::read(bytes).map_err(|error| corrupted(error.to_string())),
+        "read_orc" => crate::orc::read(bytes).map_err(corrupted),
+        _ => eggdb_parquet::read(bytes).map_err(|error| corrupted(error.0)),
+    }
+}
+
 /// Whether `name` is one of the file-reading functions.
 pub(crate) fn reads_files(name: &str) -> bool {
     matches!(
         name,
-        "read_parquet" | "read_arrow" | "read_csv" | "read_vcf" | "read_bam" | "read_netcdf" | "read_geotiff" | "read_zarr"
+        "read_parquet"
+            | "read_arrow"
+            | "read_orc"
+            | "read_csv"
+            | "read_vcf"
+            | "read_bam"
+            | "read_netcdf"
+            | "read_geotiff"
+            | "read_zarr"
     )
 }
 
@@ -623,11 +636,7 @@ pub(crate) fn discovered_columns(name: &str, path: &str) -> SqlResult<Vec<(Strin
             .collect());
     }
     let bytes = crate::new_files::read_file(path, MOST_FILE_BYTES)?;
-    let columns = if name == "read_arrow" {
-        eggdb_arrow::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {error}")))?
-    } else {
-        eggdb_parquet::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {}", error.0)))?
-    };
+    let columns = columnar_file(name, path, &bytes)?;
     Ok(columns.iter().map(|column| (column.name.clone(), sql_type_of(column.column_type))).collect())
 }
 

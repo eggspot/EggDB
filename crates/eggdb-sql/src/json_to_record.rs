@@ -7,8 +7,9 @@ use crate::types::{Conversion, DefinedKind, DefinedType, SqlType, Value, convert
 
 /// The functions that turn a JSON object (or an array of objects) into rows whose columns the
 /// caller declares in a column definition list: `AS x(a int, b text)`.
-pub(crate) const FUNCTIONS: [&str; 12] = [
+pub(crate) const FUNCTIONS: [&str; 13] = [
     "read_parquet",
+    "read_orc",
     "read_zarr",
     "read_geotiff",
     "read_netcdf",
@@ -94,8 +95,8 @@ pub(crate) fn rows(
     types: &[Option<SqlType>],
     sink: &mut RecordSink<'_>,
 ) -> SqlResult<()> {
-    if name == "read_parquet" || name == "read_arrow" {
-        return crate::file_readers::rows(values, names, types, sink, name == "read_arrow");
+    if matches!(name, "read_parquet" | "read_arrow" | "read_orc") {
+        return crate::file_readers::rows(values, names, types, sink, name);
     }
     if name == "read_csv" {
         return crate::file_readers::csv_rows(values, names, types, sink);
