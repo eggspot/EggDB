@@ -7,7 +7,7 @@ const MAX_LATITUDE: f64 = 85.051_128_779_806_6;
 const MAX_ZOOM: u32 = 30;
 const GEOHASH_ALPHABET: &[u8; 32] = b"0123456789bcdefghjkmnpqrstuvwxyz";
 
-fn map_coords(
+pub(crate) fn map_coords(
     geometry: &Geometry,
     map: &dyn Fn(Coord) -> Result<Coord, GeoError>,
 ) -> Result<Geometry, GeoError> {

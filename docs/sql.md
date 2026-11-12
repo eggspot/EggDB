@@ -3228,7 +3228,9 @@ Geometries are written as WKT or EWKT text (`'SRID=4326;POINT(-71.06 42.36)'`) o
   `ST_Equals`;
 - web maps (D250): `ST_TileEnvelope(zoom, x, y)` gives an XYZ map tile's square in Web
   Mercator (SRID 3857), `ST_Transform(geometry, srid)` projects between longitude/latitude
-  (4326) and Web Mercator (3857) on its sphere, and `ST_GeoHash(point [, precision])` gives a
+  (4326, and ETRS89's 4258 and NAD83's 4269 read as the same datum), Web Mercator (3857) on its sphere, World
+  Mercator (3395) and the UTM zones of WGS 84 (32601–32660 north, 32701–32760 south), ETRS89 (25828–25838) and
+  NAD83 (26901–26923) on their ellipsoids (D741), and `ST_GeoHash(point [, precision])` gives a
   point's geohash (20 characters unless a precision from 1 to 20 is given).
 
 Geometries of two different SRIDs are refused, as in PostGIS. Not yet: a stored geometry type

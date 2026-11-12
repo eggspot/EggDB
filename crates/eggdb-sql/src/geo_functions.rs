@@ -484,6 +484,9 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                 (Some(3857), Some(4326)) => {
                     eggdb_geo::from_web_mercator(&source.geometry).map_err(argument_error)?
                 }
+                (Some(from), Some(to)) if eggdb_geo::knows_srid(from) && eggdb_geo::knows_srid(to) => {
+                    eggdb_geo::transform(&source.geometry, from, to).map_err(argument_error)?
+                }
                 (None, _) => {
                     return Err(SqlError::new(
                         SqlState::INVALID_PARAMETER_VALUE,
@@ -494,7 +497,7 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                     return Err(SqlError::new(
                         SqlState::FEATURE_NOT_SUPPORTED,
                         format!(
-                            "ST_Transform from SRID {from} to {} is not supported yet; EggDB transforms between 4326 and 3857",
+                            "ST_Transform from SRID {from} to {} is not supported yet; EggDB transforms between 4326, 4258, 4269, 3857, 3395 and the WGS 84, ETRS89 and NAD83 UTM zones",
                             to.unwrap_or(0)
                         ),
                     ));

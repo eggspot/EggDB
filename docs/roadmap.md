@@ -1350,7 +1350,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `ST_Transform` between any projections, overlay operations (union, intersection, buffer) and
   validity checks (D204, D250). Check: the OGC test suite cases. Validity checks (rings and
   self-crossings) and 22 more functions: **code written, unbuilt** (code-only mode, 2026-11-11,
-  D438). Left: overlays, full validity, projections.
+  D438); World Mercator and UTM projections: **code written, unbuilt** (code-only mode, 2026-11-12, D741). Left:
+  overlays, full validity, other projections and datum shifts.
 - SQL Server's `geometry` and `geography` types with their methods (D19, D204).
 - Vector tiles (`ST_AsMVT`, `ST_AsMVTGeom`), and H3 and S2 indexes (D57, D250). `ST_AsMVTGeom`:
   **code written, unbuilt** (code-only mode, 2026-11-11, D520); `ST_AsMVT`: **code written, unbuilt** (code-only
