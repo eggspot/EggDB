@@ -427,6 +427,9 @@ pub(crate) fn metrics(
 ) -> Vec<(String, Vec<String>)> {
     let mut found = Vec::new();
     for (table, columns) in tables {
+        if table.ends_with(crate::remote_write::EXEMPLARS_SUFFIX) {
+            continue;
+        }
         let tags: Vec<String> = columns
             .iter()
             .filter(|(column, data_type)| data_type == "text" && column != "time")

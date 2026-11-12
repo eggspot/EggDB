@@ -259,9 +259,68 @@ fn remote_write_two_resolves_symbols_and_splits_histograms() {
         crate::remote_write::decode_v2(&eggdb_columnar::snappy_compress(&request)).unwrap();
     assert_eq!((written.samples, written.histograms), (1, 1));
     let names: Vec<&str> = points.iter().map(|point| point.measurement.as_str()).collect();
-    assert_eq!(names, vec!["latency", "latency_count", "latency_sum"]);
+    assert_eq!(names, vec!["latency", "latency_count", "latency_sum", "latency_bucket", "latency_bucket"]);
     assert_eq!(points[0].tags, vec![("job".to_owned(), "api".to_owned())]);
     assert_eq!(points[2].time_ns, 4_000_000_000);
+}
+
+#[test]
+fn remote_write_two_expands_native_buckets_and_keeps_exemplars() {
+    let mut series = Vec::new();
+    let mut references = Vec::new();
+    for reference in [1u64, 2] {
+        varint(reference, &mut references);
+    }
+    length_delimited(1, &references, &mut series);
+    let mut histogram = Vec::new();
+    varint(1 << 3, &mut histogram);
+    varint(5, &mut histogram);
+    let mut positive_span = Vec::new();
+    varint(2 << 3, &mut positive_span);
+    varint(2, &mut positive_span);
+    length_delimited(11, &positive_span, &mut histogram);
+    let mut deltas = Vec::new();
+    varint(6, &mut deltas);
+    varint(1, &mut deltas);
+    length_delimited(12, &deltas, &mut histogram);
+    varint(15 << 3, &mut histogram);
+    varint(1000, &mut histogram);
+    length_delimited(3, &histogram, &mut series);
+    let mut exemplar = Vec::new();
+    let mut exemplar_labels = Vec::new();
+    for reference in [3u64, 4] {
+        varint(reference, &mut exemplar_labels);
+    }
+    length_delimited(1, &exemplar_labels, &mut exemplar);
+    exemplar.push(2 << 3 | 1);
+    exemplar.extend_from_slice(&0.25f64.to_bits().to_le_bytes());
+    varint(3 << 3, &mut exemplar);
+    varint(1000, &mut exemplar);
+    length_delimited(4, &exemplar, &mut series);
+    let mut request = Vec::new();
+    for symbol in ["", "__name__", "latency", "trace_id", "abc"] {
+        length_delimited(4, symbol.as_bytes(), &mut request);
+    }
+    length_delimited(5, &series, &mut request);
+    let (points, written) =
+        crate::remote_write::decode_v2(&eggdb_columnar::snappy_compress(&request)).unwrap();
+    assert_eq!((written.histograms, written.exemplars), (1, 1));
+    let buckets: Vec<(String, f64)> = points
+        .iter()
+        .filter(|point| point.measurement == "latency_bucket")
+        .map(|point| {
+            let FieldValue::Float(value) = point.fields[0].1 else {
+                panic!("a float");
+            };
+            (point.tags[0].1.clone(), value)
+        })
+        .collect();
+    assert_eq!(
+        buckets,
+        vec![("0".to_owned(), 0.0), ("1".to_owned(), 3.0), ("2".to_owned(), 5.0), ("+Inf".to_owned(), 5.0)]
+    );
+    let exemplar = points.iter().find(|point| point.measurement == "latency_exemplars").unwrap();
+    assert_eq!(exemplar.fields[1], ("exemplar_trace_id".to_owned(), FieldValue::Text("abc".to_owned())));
 }
 
 pub(crate) fn evaluate(

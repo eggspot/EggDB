@@ -1522,8 +1522,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Flux's core: **code written, unbuilt** (code-only mode, 2026-11-12, D682). Left: the rest of Flux (`map`, `pivot`,
   `join`, variables, packages) and pushing its windows into SQL.
 - Remote write 2.0, native histograms and exemplars (D220). Remote write 2.0 with native histograms kept as
-  `_count` and `_sum`: **code written, unbuilt** (code-only mode, 2026-11-12, D665). Left: histogram buckets and
-  exemplars.
+  `_count` and `_sum`: **code written, unbuilt** (code-only mode, 2026-11-12, D665); histogram buckets and exemplars:
+  **code written, unbuilt** (code-only mode, 2026-11-12, D683).
 - PromQL's remaining functions and modifiers: the `@` modifier and negative offsets, `limitk`
   and `limit_ratio`, `clamp*`, `predict_linear`, `deriv`, `resets`, `changes`, `absent*`,
   `sort*`, date, trigonometric and the other `*_over_time` functions, string results, named

@@ -223,6 +223,7 @@ fn form(text: &str) -> Vec<(String, String)> {
 const MAX_LOG_ROWS_READ: usize = 1_000_000;
 const MAX_LOG_LIMIT: usize = 5000;
 const UNIX_EPOCH_FROM_2000_MICROS: i64 = 946_684_800_000_000;
+const MOST_EXEMPLARS: usize = 100_000;
 
 fn loki_time(text: Option<&str>, default_ns: i64) -> Result<i64, String> {
     let Some(text) = text else {
@@ -512,6 +513,12 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 self.query_range(value("query"), value("start"), value("end"), value("step"))
             }
             ("GET" | "POST", "/api/v1/labels") => self.labels(),
+            ("GET" | "POST", "/api/v1/query_exemplars") => {
+                match self.exemplars(value("query"), value("start"), value("end")) {
+                    Ok(body) => success(&body),
+                    Err(failure) => failed(&failure),
+                }
+            }
             ("GET" | "POST", "/api/v1/series") => {
                 let matches: Vec<&str> = parameters
                     .iter()
@@ -817,7 +824,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                     for (header, count) in [
                         ("X-Prometheus-Remote-Write-Samples-Written", written.samples),
                         ("X-Prometheus-Remote-Write-Histograms-Written", written.histograms),
-                        ("X-Prometheus-Remote-Write-Exemplars-Written", 0),
+                        ("X-Prometheus-Remote-Write-Exemplars-Written", written.exemplars),
                     ] {
                         response.headers.push((header.to_owned(), count.to_string()));
                     }
@@ -1090,6 +1097,106 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             }
         }
         Ok(found)
+    }
+
+    fn exemplars(&self, query: Option<&str>, start: Option<&str>, end: Option<&str>) -> Result<String, Failure> {
+        let query = query.ok_or_else(|| Failure::BadData("no query parameter provided".to_owned()))?;
+        let end = time_param(end, now_ms()).map_err(Failure::BadData)?;
+        let start = time_param(start, end.saturating_sub(promql::LOOKBACK_MS)).map_err(Failure::BadData)?;
+        let expr = promql::parse(query).map_err(Failure::BadData)?;
+        let promql::Expr::Selector(selector) = &expr else {
+            return Err(Failure::BadData("query_exemplars takes a series selector".to_owned()));
+        };
+        let mut session = self.session();
+        let tables = store::catalog(&mut session).map_err(Failure::Execution)?;
+        let mut fetched: Fetched = BTreeMap::new();
+        let mut held: BTreeMap<Labels, Vec<String>> = BTreeMap::new();
+        for (table, columns) in &tables {
+            let Some(metric) = table.strip_suffix(crate::remote_write::EXEMPLARS_SUFFIX) else {
+                continue;
+            };
+            if selector.name.as_deref().is_some_and(|name| name != metric) {
+                continue;
+            }
+            let tags: Vec<&String> = columns
+                .iter()
+                .filter(|(name, kind)| kind == "text" && name != "time")
+                .map(|(name, _)| name)
+                .collect();
+            let labels: Vec<&String> = columns
+                .iter()
+                .filter(|(name, _)| name.starts_with(crate::remote_write::EXEMPLAR_LABEL_PREFIX))
+                .map(|(name, _)| name)
+                .collect();
+            let selected: Vec<String> = ["\"time\"".to_owned(), "\"value\"".to_owned()]
+                .into_iter()
+                .chain(tags.iter().map(|tag| store::identifier(tag)))
+                .chain(labels.iter().map(|label| store::identifier(label)))
+                .collect();
+            let sql = format!(
+                "SELECT {} FROM {}.{} WHERE \"time\" >= {} AND \"time\" <= {} ORDER BY \"time\" LIMIT {}",
+                selected.join(", "),
+                store::SCHEMA,
+                store::identifier(table),
+                store::timestamp_literal(start.saturating_mul(1000)),
+                store::timestamp_literal(end.saturating_mul(1000)),
+                MOST_EXEMPLARS
+            );
+            let result = store::run(&mut session, &sql)
+                .map_err(Failure::Execution)?
+                .into_iter()
+                .rev()
+                .find(|result| result.columns.is_some())
+                .ok_or_else(|| Failure::Execution("the query returned no rows".to_owned()))?;
+            for row in &result.rows {
+                let Some(Value::TimestampTz(micros)) = row.first() else {
+                    continue;
+                };
+                let mut series_labels: Labels = vec![("__name__".to_owned(), metric.to_owned())];
+                for (tag, cell) in tags.iter().zip(row.iter().skip(2)) {
+                    if let Some(text) = cell.to_text().filter(|text| !text.is_empty()) {
+                        series_labels.push(((*tag).clone(), text));
+                    }
+                }
+                series_labels[1..].sort();
+                let exemplar_labels: Labels = labels
+                    .iter()
+                    .zip(row.iter().skip(2 + tags.len()))
+                    .filter_map(|(label, cell)| {
+                        let text = cell.to_text()?;
+                        Some((label.trim_start_matches(crate::remote_write::EXEMPLAR_LABEL_PREFIX).to_owned(), text))
+                    })
+                    .collect();
+                let value = row.get(1).and_then(Value::as_float).unwrap_or(f64::NAN);
+                let unix_ms = (micros + UNIX_EPOCH_FROM_2000_MICROS).div_euclid(1000);
+                let entry = format!(
+                    "{{\"labels\":{},\"value\":\"{}\",\"timestamp\":{}}}",
+                    labels_json(&exemplar_labels),
+                    number_text(value),
+                    unix_ms as f64 / 1000.0
+                );
+                let series = fetched.entry(metric.to_owned()).or_default();
+                if !series.iter().any(|known| known.labels == series_labels) {
+                    series.push(store::Series {
+                        labels: series_labels.clone(),
+                        samples: Vec::new(),
+                    });
+                }
+                held.entry(series_labels).or_default().push(entry);
+            }
+        }
+        let items: Vec<String> = promql::chosen(selector, &fetched)
+            .into_iter()
+            .filter_map(|series| {
+                let entries = held.get(&series.labels)?;
+                Some(format!(
+                    "{{\"seriesLabels\":{},\"exemplars\":[{}]}}",
+                    labels_json(&series.labels),
+                    entries.join(",")
+                ))
+            })
+            .collect();
+        Ok(format!("[{}]", items.join(",")))
     }
 
     fn series(&self, matches: &[&str], start: Option<&str>, end: Option<&str>) -> Response {
