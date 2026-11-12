@@ -417,6 +417,20 @@ impl Module {
         self.exports.iter().map(|(name, _)| name.as_str())
     }
 
+    /// The parameter and result types of the function exported as `name`; `None` when it is
+    /// not exported or uses a type outside the four number types.
+    pub fn export_types(&self, name: &str) -> Option<(Vec<ValueType>, Vec<ValueType>)> {
+        let index = self
+            .exports
+            .iter()
+            .find(|(export, _)| export == name)
+            .map(|(_, index)| *index)?;
+        let function = self.functions.get(index as usize)?;
+        let signature = self.types.get(function.type_index as usize)?;
+        let types = |codes: &[u8]| codes.iter().map(|code| ValueType::of(*code)).collect::<Option<Vec<_>>>();
+        Some((types(&signature.params)?, types(&signature.results)?))
+    }
+
     /// How many results the function exported as `name` returns; WebAssembly's multi-value
     /// proposal lets a function return several.
     pub fn export_result_count(&self, name: &str) -> Option<usize> {

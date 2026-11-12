@@ -59,3 +59,31 @@ fn mismatched_declarations_and_missing_exports_are_refused() {
     .expect_err("object files");
     assert!(plain.to_string().contains("loadable object file"), "{plain}");
 }
+
+const ECHO_MODULE: &str = "\\x0061736d01000000010d0260017f017f60027f7f027f7f030302000105030100010716020b65676764625f616c6c6f630000046563686f00010a0e0205004180080b0600200020010b";
+
+#[test]
+fn text_and_bytea_pass_through_the_modules_memory() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        &format!("CREATE FUNCTION wecho(t text) RETURNS text LANGUAGE wasm AS '{ECHO_MODULE}', 'echo'"),
+    )
+    .expect("created");
+    run(
+        &mut session,
+        &format!("CREATE FUNCTION wbytes(b bytea) RETURNS bytea LANGUAGE wasm AS '{ECHO_MODULE}', 'echo'"),
+    )
+    .expect("created");
+    let answer = run(&mut session, "SELECT wecho('héllo') AS echoed").expect("called");
+    assert!(answer.contains("héllo"), "{answer}");
+    let answer = run(&mut session, "SELECT wbytes('\\x0102ff'::bytea) = '\\x0102ff'::bytea AS same").expect("called");
+    assert!(answer.contains('t'), "{answer}");
+    let refused = run(
+        &mut session,
+        &format!("CREATE FUNCTION wshort(t text) RETURNS integer LANGUAGE wasm AS '{ECHO_MODULE}', 'echo'"),
+    )
+    .expect_err("one result is not two");
+    assert!(refused.to_string().contains("does not match"), "{refused}");
+}

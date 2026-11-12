@@ -87,6 +87,8 @@ fn parsed(written: &str) -> SqlResult<Rc<Module>> {
     Ok(module)
 }
 
+const ALLOCATOR_EXPORT: &str = "eggdb_alloc";
+
 fn wasm_type_of(sql_type: SqlType) -> Option<ValueType> {
     match sql_type {
         SqlType::Boolean | SqlType::SmallInt | SqlType::Integer => Some(ValueType::I32),
@@ -97,14 +99,31 @@ fn wasm_type_of(sql_type: SqlType) -> Option<ValueType> {
     }
 }
 
-fn shown(value_type: Option<ValueType>) -> &'static str {
-    match value_type {
-        Some(ValueType::I32) => "i32",
-        Some(ValueType::I64) => "i64",
-        Some(ValueType::F32) => "f32",
-        Some(ValueType::F64) => "f64",
-        None => "nothing",
+fn through_memory(sql_type: SqlType) -> bool {
+    matches!(sql_type, SqlType::Text | SqlType::Varchar(_) | SqlType::Bytea)
+}
+
+fn wasm_types_of(sql_type: SqlType) -> Option<Vec<ValueType>> {
+    if through_memory(sql_type) {
+        return Some(vec![ValueType::I32, ValueType::I32]);
     }
+    wasm_type_of(sql_type).map(|value_type| vec![value_type])
+}
+
+fn shown(value_types: &[ValueType]) -> String {
+    if value_types.is_empty() {
+        return "nothing".to_owned();
+    }
+    value_types
+        .iter()
+        .map(|value_type| match value_type {
+            ValueType::I32 => "i32",
+            ValueType::I64 => "i64",
+            ValueType::F32 => "f32",
+            ValueType::F64 => "f64",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn result_type(definition: &RoutineDefinition) -> SqlResult<Option<SqlType>> {
@@ -120,7 +139,9 @@ fn result_type(definition: &RoutineDefinition) -> SqlResult<Option<SqlType>> {
 /// Checks a `LANGUAGE wasm` routine when it is created: its module parses, exports the named
 /// function, and that function's WebAssembly types match the routine's SQL types (`boolean`,
 /// `smallint` and `integer` as `i32`, `bigint` as `i64`, `real` as `f32`, `double precision` as
-/// `f64`).
+/// `f64`; `text`, `varchar` and `bytea` as a pointer and a length, both `i32`, in the module's
+/// memory, which also needs an `eggdb_alloc(i32) -> i32` export when an argument is passed
+/// that way).
 pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
     if definition.kind != RoutineKind::Function {
         return Err(SqlError::not_supported(
@@ -129,16 +150,11 @@ pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
     }
     let (written, export) = parts(definition);
     let module = parsed(written)?;
-    let Some((params, result)) = module.export_signature(export) else {
+    let Some((params, results)) = module.export_types(export) else {
         return Err(invalid(format!(
-            "the WebAssembly module exports no function named \"{export}\""
+            "the WebAssembly module exports no function named \"{export}\" over number types"
         )));
     };
-    if module.export_result_count(export).unwrap_or(0) > 1 {
-        return Err(SqlError::not_supported(format!(
-            "the WebAssembly function \"{export}\" returns several values; a SQL function returns one"
-        )));
-    }
     if definition
         .parameters
         .iter()
@@ -148,34 +164,38 @@ pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
             "OUT parameters and defaults in LANGUAGE wasm functions are not supported yet",
         ));
     }
-    let wanted: Vec<Option<ValueType>> = definition
-        .parameters
-        .iter()
-        .map(|parameter| wasm_type_of(parameter.sql_type))
-        .collect();
-    if wanted.iter().any(Option::is_none) {
-        return Err(SqlError::not_supported(
-            "LANGUAGE wasm functions take only boolean, smallint, integer, bigint, real and double precision arguments",
-        ));
+    let mut wanted = Vec::new();
+    for parameter in &definition.parameters {
+        wanted.extend(wasm_types_of(parameter.sql_type).ok_or_else(|| {
+            SqlError::not_supported(
+                "LANGUAGE wasm functions take only boolean, smallint, integer, bigint, real, double precision, text, varchar and bytea arguments",
+            )
+        })?);
     }
     let returned = match result_type(definition)? {
-        Some(sql_type) => Some(wasm_type_of(sql_type).ok_or_else(|| {
+        Some(sql_type) => wasm_types_of(sql_type).ok_or_else(|| {
             SqlError::not_supported(
-                "LANGUAGE wasm functions return only boolean, smallint, integer, bigint, real or double precision",
+                "LANGUAGE wasm functions return only boolean, smallint, integer, bigint, real, double precision, text, varchar or bytea",
             )
-        })?),
-        None => None,
+        })?,
+        None => Vec::new(),
     };
-    let given: Vec<Option<ValueType>> = params.iter().copied().map(Some).collect();
-    if given != wanted || result != returned {
+    if params != wanted || results != returned {
         return Err(invalid(format!(
             "the WebAssembly function \"{export}\" takes ({}) and returns {}, which does not match the SQL declaration",
-            params
-                .iter()
-                .map(|value_type| shown(Some(*value_type)))
-                .collect::<Vec<_>>()
-                .join(", "),
-            shown(result),
+            shown(&params),
+            shown(&results),
+        )));
+    }
+    let passes_memory = definition
+        .parameters
+        .iter()
+        .any(|parameter| through_memory(parameter.sql_type));
+    if passes_memory
+        && module.export_types(ALLOCATOR_EXPORT) != Some((vec![ValueType::I32], vec![ValueType::I32]))
+    {
+        return Err(invalid(format!(
+            "a LANGUAGE wasm function that takes text or bytea needs the module to export {ALLOCATOR_EXPORT}(i32) -> i32, which returns where to write that many bytes"
         )));
     }
     Ok(())
@@ -199,11 +219,69 @@ fn argument(value: &Value, sql_type: SqlType) -> SqlResult<eggdb_wasm_vm::Value>
     })
 }
 
-fn result_value(value: Option<eggdb_wasm_vm::Value>, sql_type: Option<SqlType>) -> SqlResult<Value> {
+fn memory_bytes(value: &Value, sql_type: SqlType) -> SqlResult<Vec<u8>> {
+    let converted = crate::types::convert(value.clone(), sql_type, crate::types::Conversion::Assignment)?;
+    Ok(match converted {
+        Value::Bytea(bytes) => bytes,
+        other => other.to_text().unwrap_or_default().into_bytes(),
+    })
+}
+
+fn passed_in_memory(
+    instance: &mut Instance,
+    bytes: &[u8],
+    limits: &Limits,
+) -> SqlResult<[eggdb_wasm_vm::Value; 2]> {
+    let length = i32::try_from(bytes.len()).map_err(|_| {
+        SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            "a LANGUAGE wasm argument is larger than 2 GiB",
+        )
+    })?;
+    let at = match instance
+        .call(ALLOCATOR_EXPORT, &[eggdb_wasm_vm::Value::I32(length)], limits)
+        .map_err(trapped)?
+    {
+        Some(eggdb_wasm_vm::Value::I32(at)) => at,
+        _ => {
+            return Err(SqlError::new(
+                SqlState::EXTERNAL_ROUTINE_EXCEPTION,
+                "eggdb_alloc returned no address",
+            ));
+        }
+    };
+    instance.write_memory(at as u32, bytes).map_err(trapped)?;
+    Ok([eggdb_wasm_vm::Value::I32(at), eggdb_wasm_vm::Value::I32(length)])
+}
+
+fn result_value(results: &[eggdb_wasm_vm::Value], sql_type: Option<SqlType>, instance: &Instance) -> SqlResult<Value> {
     let Some(sql_type) = sql_type else {
         return Ok(Value::Null);
     };
-    let value = match (value, sql_type) {
+    if through_memory(sql_type) {
+        let [eggdb_wasm_vm::Value::I32(at), eggdb_wasm_vm::Value::I32(length)] = results else {
+            return Err(SqlError::new(
+                SqlState::EXTERNAL_ROUTINE_EXCEPTION,
+                "a LANGUAGE wasm function returning text or bytea must return an address and a length",
+            ));
+        };
+        crate::memory::check_value_bytes(*length as u32 as usize)?;
+        let bytes = instance
+            .read_memory(*at as u32, *length as u32)
+            .map_err(trapped)?
+            .to_vec();
+        return Ok(if sql_type == SqlType::Bytea {
+            Value::Bytea(bytes)
+        } else {
+            Value::Text(String::from_utf8(bytes).map_err(|_| {
+                SqlError::new(
+                    SqlState::CHARACTER_NOT_IN_REPERTOIRE,
+                    "a LANGUAGE wasm function returned text that is not UTF-8",
+                )
+            })?)
+        });
+    }
+    let value = match (results.first().copied(), sql_type) {
         (Some(eggdb_wasm_vm::Value::I32(number)), SqlType::Boolean) => Value::Boolean(number != 0),
         (Some(eggdb_wasm_vm::Value::I32(number)), SqlType::SmallInt) => {
             Value::SmallInt(i16::try_from(number).map_err(|_| {
@@ -247,10 +325,15 @@ pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>) -> S
         if value.is_null() {
             return Ok(Returned::Value(Value::Null));
         }
-        values.push(argument(value, parameter.sql_type)?);
+        if through_memory(parameter.sql_type) {
+            let bytes = memory_bytes(value, parameter.sql_type)?;
+            values.extend(passed_in_memory(&mut instance, &bytes, &limits)?);
+        } else {
+            values.push(argument(value, parameter.sql_type)?);
+        }
     }
-    let answer = instance.call(export, &values, &limits).map_err(trapped)?;
-    Ok(Returned::Value(result_value(answer, result_type(definition)?)?))
+    let results = instance.call_values(export, &values, &limits).map_err(trapped)?;
+    Ok(Returned::Value(result_value(&results, result_type(definition)?, &instance)?))
 }
 
 fn trapped(trap: eggdb_wasm_vm::Trap) -> SqlError {

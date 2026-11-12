@@ -327,6 +327,26 @@ impl Instance {
         Ok(instance)
     }
 
+    /// The `length` bytes of linear memory from `at`; out of bounds traps.
+    pub fn read_memory(&self, at: u32, length: u32) -> Result<&[u8], Trap> {
+        let start = at as usize;
+        start
+            .checked_add(length as usize)
+            .and_then(|end| self.memory.get(start..end))
+            .ok_or(Trap::MemoryOutOfBounds)
+    }
+
+    /// Writes `bytes` into linear memory from `at`; out of bounds traps.
+    pub fn write_memory(&mut self, at: u32, bytes: &[u8]) -> Result<(), Trap> {
+        let start = at as usize;
+        let slot = start
+            .checked_add(bytes.len())
+            .and_then(|end| self.memory.get_mut(start..end))
+            .ok_or(Trap::MemoryOutOfBounds)?;
+        slot.copy_from_slice(bytes);
+        Ok(())
+    }
+
     /// Calls the exported function `name` with `arguments`, within `limits`, and returns all
     /// of its results in order.
     pub fn call_values(

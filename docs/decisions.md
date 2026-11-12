@@ -886,3 +886,4 @@ its full title with its status.
 - [D859](decisions/D859.md) Code-only batch 507 (M10): Oracle DBMS_METADATA.GET_DDL for tables and views
 - [D860](decisions/D860.md) Code-only batch 508 (M11): Arrow Map, FixedSizeList and Union columns
 - [D861](decisions/D861.md) Code-only batch 509 (M5): WebAssembly multi-value results and typed blocks
+- [D862](decisions/D862.md) Code-only batch 510 (M5): text and bytea through a WebAssembly module's memory

@@ -566,8 +566,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-12, D861). Left: imports (host functions, with the next item), and the spec test suite in CI.
 - `CREATE FUNCTION ... LANGUAGE wasm`, with type mapping and host functions behind permissions
   (D27, D232). Scalar functions over numbers and booleans (`AS '\x<module>', '<export>'`): **code written,
-  unbuilt** (code-only mode, 2026-11-12, D793). Left: text, bytea and other types through the module's memory,
-  set-returning functions, host functions behind permissions, and per-role limits.
+  unbuilt** (code-only mode, 2026-11-12, D793); text and bytea through the module's memory: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D862). Left: set-returning functions, host functions behind permissions, and per-role
+  limits.
 - An extension API for types, index methods, functions and protocols, loaded as sandboxed
   WebAssembly with CPU, memory, time and output limits per role (D27, D45).
 - A native-code compiler for hot WebAssembly functions (D27, D232). Check: benchmarks against
