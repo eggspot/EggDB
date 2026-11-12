@@ -2222,7 +2222,13 @@ impl<'s> Session<'s> {
             }
             let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
             let audited = crate::audit_events::wanted()
-                .then(|| crate::audit_events::statement_kind(&statement))
+                .then(|| {
+                    crate::audit_events::statement_kind(&statement).or_else(|| {
+                        statement_tokens
+                            .is_some_and(crate::audit_events::names_audited_table)
+                            .then_some(crate::audit_events::AuditKind::AuditedRead)
+                    })
+                })
                 .flatten();
             let audited_text = audited.map(|_| {
                 let end = tokens.get(resume.0).map_or(text.len(), |token| token.start);

@@ -1858,11 +1858,15 @@ impl Session<'_> {
 }
 
 const AUDIT_VARIABLE: &str = "EGGDB_AUDIT";
+const AUDIT_TABLES_VARIABLE: &str = "EGGDB_AUDIT_TABLES";
 
 fn audit_server_events_from_environment(database: &std::path::Path) {
     let wanted = std::env::var(AUDIT_VARIABLE).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
     if !wanted {
         return;
+    }
+    if let Ok(tables) = std::env::var(AUDIT_TABLES_VARIABLE) {
+        eggdb_sql::audit_events::set_audited_tables(tables.split(',').map(|name| name.trim().to_owned()).collect());
     }
     let log = eggdb_mcp::audit::AuditLog::new(eggdb_mcp::audit::audit_path_for(database));
     eggdb_sql::audit_events::set_audit_sink(Box::new(move |event| {

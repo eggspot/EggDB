@@ -13,6 +13,8 @@ pub enum AuditKind {
     SchemaChange,
     /// A statement that changed who may do what: roles, grants, revokes and row-level security.
     PrivilegeChange,
+    /// A statement that names one of the tables chosen with [`set_audited_tables`].
+    AuditedRead,
 }
 
 impl AuditKind {
@@ -22,6 +24,7 @@ impl AuditKind {
             Self::Login => "login",
             Self::SchemaChange => "schema_change",
             Self::PrivilegeChange => "privilege_change",
+            Self::AuditedRead => "audited_read",
         }
     }
 }
@@ -47,6 +50,28 @@ pub struct AuditEvent<'a> {
 pub type AuditSink = Box<dyn Fn(&AuditEvent<'_>) + Send + Sync>;
 
 static SINK: OnceLock<AuditSink> = OnceLock::new();
+static AUDITED_TABLES: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Sets the tables whose reads are audited, by name without schema, in any case. The first call
+/// wins. A statement that is not already a schema or privilege change and names one of them,
+/// as a word or a quoted identifier anywhere in its text, is recorded as an
+/// [`AuditKind::AuditedRead`]: a column or alias of the same name is recorded too, so the audit
+/// errs toward more records, and a read through a view of another name is not seen.
+pub fn set_audited_tables(names: Vec<String>) {
+    let _ = AUDITED_TABLES.set(names.into_iter().map(|name| name.to_lowercase()).filter(|name| !name.is_empty()).collect());
+}
+
+pub(crate) fn names_audited_table(tokens: &[crate::lexer::Token<'_>]) -> bool {
+    use crate::lexer::TokenKind;
+    let Some(tables) = AUDITED_TABLES.get().filter(|tables| !tables.is_empty()) else {
+        return false;
+    };
+    tokens.iter().any(|token| match &token.kind {
+        TokenKind::Word(word) => tables.iter().any(|table| table.eq_ignore_ascii_case(word)),
+        TokenKind::QuotedIdentifier(name) => tables.iter().any(|table| table == &name.to_lowercase()),
+        _ => false,
+    })
+}
 
 /// Sets the process's audit sink. The first registration wins; until one is set, events go
 /// nowhere and cost nothing.
@@ -143,5 +168,17 @@ mod tests {
         assert_eq!(kind("SELECT 1"), None);
         assert_eq!(kind("INSERT INTO t VALUES (1)"), None);
         assert_eq!(AuditKind::PrivilegeChange.name(), "privilege_change");
+    }
+
+    #[test]
+    fn chosen_tables_are_found_by_name_in_any_case() {
+        set_audited_tables(vec!["Salaries".to_owned()]);
+        let names = |sql: &str| {
+            let tokens = crate::lexer::tokenize_in(sql, crate::dialect::Dialect::PostgreSql).expect("tokens");
+            names_audited_table(&tokens)
+        };
+        assert!(names("SELECT * FROM salaries"));
+        assert!(names("SELECT * FROM hr.\"Salaries\" s"));
+        assert!(!names("SELECT * FROM salary_bands"));
     }
 }
