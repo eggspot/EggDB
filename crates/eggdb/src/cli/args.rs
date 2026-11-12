@@ -292,6 +292,7 @@ impl CommandName {
             | OptionName::MysqlPipe
             | OptionName::TdsPipe
             | OptionName::TlsCertificate
+            | OptionName::TlsClientCa
             | OptionName::AuthRules
             | OptionName::TlsKey
             | OptionName::TlsSelfSigned
@@ -507,6 +508,7 @@ enum OptionName {
     MysqlPipe,
     TdsPipe,
     TlsCertificate,
+    TlsClientCa,
     AuthRules,
     TlsKey,
     TlsSelfSigned,
@@ -648,6 +650,7 @@ impl OptionName {
             b"mysql-pipe" => Self::MysqlPipe,
             b"tds-pipe" => Self::TdsPipe,
             b"tls-certificate" => Self::TlsCertificate,
+            b"tls-client-ca" => Self::TlsClientCa,
             b"auth-rules" => Self::AuthRules,
             b"tls-key" => Self::TlsKey,
             b"tls-self-signed" => Self::TlsSelfSigned,
@@ -991,6 +994,7 @@ pub(crate) struct ServeOptions {
     pub(crate) mysql_pipe: Option<String>,
     pub(crate) tds_pipe: Option<String>,
     pub(crate) tls_certificate: Option<PathBuf>,
+    pub(crate) tls_client_ca: Option<PathBuf>,
     pub(crate) auth_rules: Option<PathBuf>,
     pub(crate) tls_key: Option<PathBuf>,
     pub(crate) tls_self_signed: bool,
@@ -1716,6 +1720,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 }
                 request.serve.mysql_pipe = Some(name);
             }
+            OptionName::TlsClientCa => request.serve.tls_client_ca = Some(PathBuf::from(value)),
             OptionName::TlsCertificate => {
                 request.serve.tls_certificate = Some(PathBuf::from(value))
             }

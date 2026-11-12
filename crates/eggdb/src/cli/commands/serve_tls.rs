@@ -244,15 +244,21 @@ pub(super) fn tls_setup(
     })?;
     let minimum_version = options.tls_min_version.unwrap_or_default();
     config.minimum_version = minimum_version;
-    if let Some(path) = std::env::var_os(CLIENT_CA_VARIABLE).filter(|path| !path.is_empty()) {
+    let client_ca = match &options.tls_client_ca {
+        Some(path) => Some(("--tls-client-ca", path.clone().into_os_string())),
+        None => std::env::var_os(CLIENT_CA_VARIABLE)
+            .filter(|path| !path.is_empty())
+            .map(|path| (CLIENT_CA_VARIABLE, path)),
+    };
+    if let Some((source, path)) = client_ca {
         let text = std::fs::read_to_string(&path).map_err(|error| {
             usage(format!(
-                "cannot read {CLIENT_CA_VARIABLE} {}: {error}",
+                "cannot read {source} {}: {error}",
                 std::path::Path::new(&path).display()
             ))
         })?;
         let trust = eggdb_tls::verify::TrustStore::from_pem(&text)
-            .map_err(|error| usage(format!("{CLIENT_CA_VARIABLE}: {error}")))?;
+            .map_err(|error| usage(format!("{source}: {error}")))?;
         config.client_authentication = eggdb_tls::ClientAuthentication::Optional { trust };
     }
     config.fips_only = fips_requested(options);
