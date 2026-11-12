@@ -1,9 +1,10 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 19] = [
+pub(crate) const FUNCTIONS: [&str; 20] = [
     "eggdb_pdf_table",
     "eggdb_route_dijkstra",
+    "eggdb_route_astar",
     "eggdb_route_reach",
     "eggdb_route_components",
     "modbus_decode",
@@ -436,6 +437,23 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_reach takes edges, a start, a distance and whether the graph is directed")),
             },
             ("eggdb_route_components", Some(edges)) => crate::routing::connected_components(&edges).and_then(jsonb),
+            ("eggdb_route_astar", Some(edges)) => {
+                let real = |at: usize, default: f64| match values.get(at) {
+                    None => Some(default),
+                    Some(value) => value.to_text().and_then(|text| text.parse::<f64>().ok()),
+                };
+                match (whole(1), whole(2), flag(3), whole(4).or(Some(5)), real(5, 1.0), real(6, 1.0)) {
+                    (Some(start), Some(finish), Some(directed), Some(heuristic), Some(factor), Some(epsilon)) => {
+                        let estimate = crate::routing::Estimate {
+                            heuristic: u8::try_from(heuristic).unwrap_or(u8::MAX),
+                            factor,
+                            epsilon,
+                        };
+                        crate::routing::astar(&edges, start, finish, directed, estimate).and_then(jsonb)
+                    }
+                    _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_astar takes edges, a start, an end, whether the graph is directed, a heuristic, a factor and an epsilon")),
+                }
+            }
             _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes the edges as jsonb first"))),
         });
     }

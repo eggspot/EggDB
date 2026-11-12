@@ -856,3 +856,4 @@ its full title with its status.
 - [D829](decisions/D829.md) Code-only batch 477 (M6a): notices sent before an error
 - [D830](decisions/D830.md) Code-only batch 478 (D30): PostgreSQL single-byte encodings in COPY
 - [D831](decisions/D831.md) Code-only batch 479 (D57): pgRouting topology
+- [D832](decisions/D832.md) Code-only batch 480 (D57): pgRouting A*, dijkstraCost and bdDijkstra

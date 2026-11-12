@@ -143,6 +143,100 @@ pub(crate) fn dijkstra(edges_json: &str, start: i64, finish: i64, directed: bool
     Ok(format!("[{}]", steps.join(", ")))
 }
 
+/// How A* estimates the cost left from a node to the goal, from the difference of their
+/// coordinates, as pgRouting's `heuristic` numbers them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Estimate {
+    pub(crate) heuristic: u8,
+    pub(crate) factor: f64,
+    pub(crate) epsilon: f64,
+}
+
+impl Estimate {
+    fn left(self, from: (f64, f64), goal: (f64, f64)) -> f64 {
+        let (dx, dy) = ((goal.0 - from.0).abs() * self.factor, (goal.1 - from.1).abs() * self.factor);
+        let raw = match self.heuristic {
+            0 => 0.0,
+            1 => dx.max(dy),
+            2 => dx.min(dy),
+            3 => dx * dx + dy * dy,
+            4 => (dx * dx + dy * dy).sqrt(),
+            _ => dx + dy,
+        };
+        raw * self.epsilon
+    }
+}
+
+fn coordinates(edges_json: &str) -> SqlResult<HashMap<i64, (f64, f64)>> {
+    let document = parse_document(edges_json).map_err(|_| invalid("the edges are not JSON"))?;
+    let Json::Array(edges) = &document.value else {
+        return Err(invalid("the edges are a JSON array of objects"));
+    };
+    let mut places = HashMap::new();
+    for edge in edges {
+        let point = |x: &str, y: &str| -> SqlResult<(f64, f64)> {
+            match (number(edge, x), number(edge, y)) {
+                (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Ok((x, y)),
+                _ => Err(invalid("A* needs numeric x1, y1, x2 and y2 on every edge")),
+            }
+        };
+        places.insert(whole(edge, "source")?, point("x1", "y1")?);
+        places.insert(whole(edge, "target")?, point("x2", "y2")?);
+    }
+    Ok(places)
+}
+
+/// The path A* finds from `start` to `finish`, guided by each node's coordinates (`x1`, `y1`
+/// of an edge's source and `x2`, `y2` of its target), in [`dijkstra`]'s form. With heuristic 0,
+/// or an estimate that never overstates the cost left, it is a cheapest path; a larger
+/// `epsilon` trades that for speed, as in pgRouting.
+pub(crate) fn astar(edges_json: &str, start: i64, finish: i64, directed: bool, estimate: Estimate) -> SqlResult<String> {
+    if estimate.heuristic > 5 || !estimate.factor.is_finite() || estimate.factor <= 0.0 || !estimate.epsilon.is_finite() || estimate.epsilon < 1.0 {
+        return Err(invalid("the heuristic is 0 to 5, the factor above 0 and epsilon at least 1"));
+    }
+    let arcs = graph(edges_json, directed)?;
+    let places = coordinates(edges_json)?;
+    let goal = places.get(&finish).copied().unwrap_or((0.0, 0.0));
+    let guess = |node: i64| places.get(&node).map_or(0.0, |place| estimate.left(*place, goal));
+    let mut best: HashMap<i64, (f64, Option<(i64, i64, f64)>)> = HashMap::new();
+    let mut closed: HashSet<i64> = HashSet::new();
+    let mut heap = BinaryHeap::new();
+    best.insert(start, (0.0, None));
+    heap.push(Frontier { cost: guess(start), node: start });
+    while let Some(Frontier { node, .. }) = heap.pop() {
+        if !closed.insert(node) {
+            continue;
+        }
+        if node == finish {
+            break;
+        }
+        let spent = best.get(&node).map_or(0.0, |(known, _)| *known);
+        for arc in arcs.get(&node).map(Vec::as_slice).unwrap_or_default() {
+            let reached = spent + arc.cost;
+            let better = best.get(&arc.to).is_none_or(|(known, _)| reached < *known);
+            if better {
+                best.insert(arc.to, (reached, Some((node, arc.edge, arc.cost))));
+                heap.push(Frontier { cost: reached + guess(arc.to), node: arc.to });
+            }
+        }
+    }
+    let Some((total, _)) = best.get(&finish) else {
+        return Ok("[]".to_owned());
+    };
+    let mut steps = vec![format!("{{\"node\": {finish}, \"edge\": -1, \"cost\": 0, \"agg_cost\": {total}}}")];
+    let mut at = finish;
+    while let Some((_, Some((previous, edge, cost)))) = best.get(&at) {
+        let reached = best.get(previous).map_or(0.0, |(known, _)| *known);
+        steps.push(format!("{{\"node\": {previous}, \"edge\": {edge}, \"cost\": {cost}, \"agg_cost\": {reached}}}"));
+        at = *previous;
+        if steps.len() > best.len() + 1 {
+            return Err(invalid("the path does not end"));
+        }
+    }
+    steps.reverse();
+    Ok(format!("[{}]", steps.join(", ")))
+}
+
 /// Every node reachable from `start` within `distance`, with the edge it was reached by (-1 for
 /// `start`), that edge's cost and the cost from `start`, cheapest first.
 pub(crate) fn driving_distance(edges_json: &str, start: i64, distance: f64, directed: bool) -> SqlResult<String> {
@@ -215,5 +309,15 @@ mod tests {
             r#"[{"component": 1, "node": 1}, {"component": 1, "node": 2}, {"component": 1, "node": 3}, {"component": 1, "node": 4}, {"component": 7, "node": 7}, {"component": 7, "node": 8}]"#
         );
         assert!(dijkstra("[{\"id\": 1}]", 1, 2, true).is_err());
+    }
+
+    #[test]
+    fn astar_finds_the_cheapest_path_with_an_admissible_estimate() {
+        let grid = r#"[{"id": 1, "source": 1, "target": 2, "cost": 1, "x1": 0, "y1": 0, "x2": 1, "y2": 0}, {"id": 2, "source": 2, "target": 3, "cost": 1, "x1": 1, "y1": 0, "x2": 2, "y2": 0}, {"id": 3, "source": 1, "target": 4, "cost": 1, "x1": 0, "y1": 0, "x2": 0, "y2": 1}, {"id": 4, "source": 4, "target": 3, "cost": 5, "x1": 0, "y1": 1, "x2": 2, "y2": 0}]"#;
+        let estimate = Estimate { heuristic: 4, factor: 1.0, epsilon: 1.0 };
+        assert_eq!(astar(grid, 1, 3, true, estimate).unwrap(), dijkstra(grid, 1, 3, true).unwrap());
+        assert_eq!(astar(grid, 3, 1, true, estimate).unwrap(), "[]");
+        assert!(astar(grid, 1, 3, true, Estimate { heuristic: 9, ..estimate }).is_err());
+        assert!(astar(ROADS, 1, 3, true, estimate).is_err());
     }
 }

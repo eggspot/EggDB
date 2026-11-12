@@ -60,6 +60,39 @@ BEGIN
     END LOOP;
 END
 $$;
+CREATE FUNCTION public.pgr_astar(edges_sql text, start_vid bigint, end_vid bigint, directed boolean DEFAULT true, heuristic integer DEFAULT 5, factor double precision DEFAULT 1, epsilon double precision DEFAULT 1) RETURNS TABLE (seq integer, path_seq integer, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    step record;
+    counted integer := 0;
+BEGIN
+    FOR step IN SELECT s.value AS body FROM jsonb_array_elements(eggdb_route_astar(public.pgr_edges_json(edges_sql), start_vid, end_vid, directed, heuristic, factor, epsilon)) s LOOP
+        counted := counted + 1;
+        seq := counted;
+        path_seq := counted;
+        node := (step.body ->> 'node')::bigint;
+        edge := (step.body ->> 'edge')::bigint;
+        cost := (step.body ->> 'cost')::double precision;
+        agg_cost := (step.body ->> 'agg_cost')::double precision;
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
+CREATE FUNCTION public.pgr_dijkstracost(edges_sql text, from_vid bigint, to_vid bigint, directed boolean DEFAULT true) RETURNS TABLE (start_vid bigint, end_vid bigint, agg_cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    total double precision;
+BEGIN
+    SELECT p.agg_cost INTO total FROM public.pgr_dijkstra(edges_sql, from_vid, to_vid, directed) p WHERE p.edge = -1;
+    IF total IS NOT NULL THEN
+        start_vid := from_vid;
+        end_vid := to_vid;
+        agg_cost := total;
+        RETURN NEXT;
+    END IF;
+END
+$$;
+CREATE FUNCTION public.pgr_bddijkstra(edges_sql text, start_vid bigint, end_vid bigint, directed boolean DEFAULT true) RETURNS TABLE (seq integer, path_seq integer, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_dijkstra(edges_sql, start_vid, end_vid, directed)
+$$;
 CREATE FUNCTION public.pgr_vertex_near(vertices text, wanted_x double precision, wanted_y double precision, tolerance double precision) RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE
     found bigint;
@@ -163,5 +196,27 @@ mod tests {
         assert_eq!(run(&mut session, "SELECT pgr_createVerticesTable('roads') AS done").unwrap(), "done\nOK\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT count(*) AS n FROM roads_vertices_pgr").unwrap(), "n\n4\nSELECT 1");
         assert!(run(&mut session, "SELECT pgr_createTopology('roads', -1)").is_err());
+    }
+
+    #[test]
+    fn astar_and_dijkstra_cost_answer_like_dijkstra() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION pgrouting",
+            "CREATE TABLE ways (id bigint, source bigint, target bigint, cost double precision, x1 double precision, y1 double precision, x2 double precision, y2 double precision)",
+            "INSERT INTO ways VALUES (1, 1, 2, 1, 0, 0, 1, 0), (2, 2, 3, 1, 1, 0, 2, 0), (3, 1, 3, 5, 0, 0, 2, 0)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut session, "SELECT node, edge, agg_cost FROM pgr_aStar('SELECT * FROM ways', 1, 3)").unwrap(),
+            "node|edge|agg_cost\n1|1|0\n2|2|1\n3|-1|2\nSELECT 3"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT agg_cost FROM pgr_dijkstraCost('SELECT id, source, target, cost FROM ways', 1, 3)").unwrap(),
+            "agg_cost\n2\nSELECT 1"
+        );
+        assert_eq!(run(&mut session, "SELECT count(*) AS n FROM pgr_bdDijkstra('SELECT id, source, target, cost FROM ways', 1, 3)").unwrap(), "n\n3\nSELECT 1");
     }
 }
