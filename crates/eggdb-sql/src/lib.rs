@@ -218,6 +218,7 @@ mod standards;
 pub mod statement_statistics;
 mod standards_build;
 mod statistical_aggregates;
+mod column_statistics;
 mod statistics;
 mod step_times;
 mod store;

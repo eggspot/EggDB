@@ -1,5 +1,6 @@
 use crate::ast::Name;
-use crate::encoding::{NAMESPACE, TableDefinition, prefix_end, rows_prefix};
+use crate::column_statistics::{ColumnStatistics, EveryColumnStatistics, RowSample};
+use crate::encoding::{NAMESPACE, TableDefinition, decode_row, prefix_end, rows_prefix};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::TableCache;
 use crate::session::QueryResult;
@@ -9,6 +10,7 @@ use std::collections::HashMap;
 
 pub(crate) const STATISTICS_SPACE: u8 = 0x10;
 const RECORD_VERSION: u8 = 1;
+const RECORD_WITH_COLUMNS: u8 = 2;
 
 fn statistics_key(table: &str) -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
@@ -17,36 +19,64 @@ fn statistics_key(table: &str) -> Vec<u8> {
     key
 }
 
-fn encode(rows: u64) -> Vec<u8> {
-    let mut out = vec![RECORD_VERSION];
+fn encode(rows: u64, columns: &[ColumnStatistics]) -> Vec<u8> {
+    let mut out = vec![RECORD_WITH_COLUMNS];
     out.extend_from_slice(&rows.to_le_bytes());
+    crate::column_statistics::encode_into(&mut out, columns);
     out
 }
 
-fn decode(bytes: &[u8]) -> SqlResult<u64> {
-    match bytes {
-        [RECORD_VERSION, rest @ ..] if rest.len() == 8 => {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(rest);
-            Ok(u64::from_le_bytes(word))
+fn split(bytes: &[u8]) -> SqlResult<(u64, &[u8])> {
+    let (version, rest) = match bytes {
+        [version @ (RECORD_VERSION | RECORD_WITH_COLUMNS), rest @ ..] if rest.len() >= 8 => {
+            (*version, rest)
         }
-        _ => Err(crate::encoding::corrupt("table statistics")),
+        _ => return Err(crate::encoding::corrupt("table statistics")),
+    };
+    let (count, columns) = rest.split_at(8);
+    if version == RECORD_VERSION && !columns.is_empty() {
+        return Err(crate::encoding::corrupt("table statistics"));
     }
+    let mut word = [0u8; 8];
+    word.copy_from_slice(count);
+    Ok((u64::from_le_bytes(word), columns))
 }
 
-fn counted_rows(reader: &dyn KeyValueRead, table: &TableDefinition) -> SqlResult<u64> {
+fn decode(bytes: &[u8]) -> SqlResult<u64> {
+    split(bytes).map(|(rows, _)| rows)
+}
+
+fn decode_columns(bytes: &[u8]) -> SqlResult<Vec<ColumnStatistics>> {
+    let (_, columns) = split(bytes)?;
+    if columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::column_statistics::decode(columns)
+}
+
+fn sampled_rows(reader: &dyn KeyValueRead, table: &TableDefinition) -> SqlResult<RowSample> {
     let prefix = rows_prefix(table.id);
-    let mut rows = 0u64;
+    let mut sample = RowSample::new(u64::from(table.id).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let mut failure = None;
     reader.scan(
         &prefix,
         &prefix_end(&prefix),
         ScanDirection::Forward,
-        &mut |_, _| {
-            rows += 1;
-            Ok(true)
+        &mut |_, value| match decode_row(value, &table.columns) {
+            Ok(row) => {
+                sample.offer(row);
+                Ok(true)
+            }
+            Err(error) => {
+                failure = Some(error);
+                Ok(false)
+            }
         },
     )?;
-    Ok(rows)
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(sample),
+    }
 }
 
 pub(crate) fn analyze(
@@ -75,8 +105,12 @@ pub(crate) fn analyze(
         if crate::temp_tables::is_temp_table(&table.name) {
             continue;
         }
-        let rows = counted_rows(writer, &table)?;
-        writer.put(&statistics_key(&table.name), &encode(rows))?;
+        let sample = sampled_rows(writer, &table)?;
+        let columns = sample.statistics(&table.columns);
+        writer.put(
+            &statistics_key(&table.name),
+            &encode(sample.total_rows(), &columns),
+        )?;
         analyzed.push(table.name);
     }
     if crate::constraints::current_dialect() == crate::Dialect::MySql {
@@ -130,6 +164,40 @@ pub(crate) fn every_row_count(reader: &dyn KeyValueRead) -> SqlResult<HashMap<St
     match failure {
         Some(error) => Err(error),
         None => Ok(counts),
+    }
+}
+
+pub(crate) fn every_column_statistics(
+    reader: &dyn KeyValueRead,
+) -> SqlResult<EveryColumnStatistics> {
+    let prefix = statistics_key("");
+    let mut every = HashMap::new();
+    let mut failure = None;
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            let decoded = std::str::from_utf8(&key[prefix.len()..])
+                .map_err(|_| crate::encoding::corrupt("table statistics"))
+                .and_then(|table| Ok((table.to_owned(), decode_columns(value)?)));
+            match decoded {
+                Ok((table, columns)) => {
+                    if !columns.is_empty() {
+                        every.insert(table, columns);
+                    }
+                    Ok(true)
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    Ok(false)
+                }
+            }
+        },
+    )?;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(every),
     }
 }
 

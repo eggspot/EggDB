@@ -2518,6 +2518,10 @@ condition; run only once)` or `dependent` for a subquery), each with `  (cost=c 
 under `ANALYZE`, ` (actual time=a..b rows=n loops=n)` where EggDB measures. The estimates come
 from EggDB's own cost model over the row counts `ANALYZE TABLE` recorded (a table never analyzed
 is counted up to 10,000 rows), stated in D345, and differ from the numbers MySQL prints.
+`ANALYZE` also samples up to 30,000 rows of each table and keeps per-column statistics in
+PostgreSQL's form, shown by the `pg_stats` view (`null_frac`, `avg_width`, `n_distinct`,
+`most_common_vals`, `most_common_freqs`, `histogram_bounds`, `correlation`); an equality on a
+key column is estimated as one row in `n_distinct` instead of the fixed tenth (D786).
 `EXPLAIN FORMAT=JSON` answers MySQL 8's `query_block` document (`cost_info`,
 `ordering_operation`, `grouping_operation`, `table` or `nested_loop`, each table's
 `access_type`, `key`, `rows_examined_per_scan`, `rows_produced_per_join`, `filtered`,

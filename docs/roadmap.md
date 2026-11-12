@@ -478,7 +478,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Joules per query per workload and idle wake-ups, reported and then gated (D44, D252).
 
 ### M5 SQL engine, SQLite, C API and embedded drivers
-- Column statistics (`pg_stats`, histograms, correlation) gathered by `ANALYZE` (D40, D178).
+- Column statistics (`pg_stats`, histograms, correlation) gathered by `ANALYZE` (D40, D178). **Code written,
+  unbuilt** (code-only mode, 2026-11-12, D786). Left: extended statistics (`CREATE STATISTICS`), array element
+  statistics, and the cost-based optimizer using the histograms for ranges.
 - A cost-based optimizer that orders joins by cost (D40, D178). Check: TPC-H's joins, and the
   Linux join at 1.0 times SQLite's (D100).
 - Adaptive re-planning during execution (D40).

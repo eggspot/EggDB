@@ -67,6 +67,7 @@ pub(crate) enum MonitoringRelation {
     StatStatements,
     StatStatementsInfo,
     Policies,
+    Stats,
 }
 
 const POLICIES: [CatalogColumn; 8] = [
@@ -78,6 +79,23 @@ const POLICIES: [CatalogColumn; 8] = [
     column("cmd", SqlType::Text),
     column("qual", SqlType::Text),
     column("with_check", SqlType::Text),
+];
+
+const STATS: [CatalogColumn; 14] = [
+    column("schemaname", NAME),
+    column("tablename", NAME),
+    column("attname", NAME),
+    column("inherited", SqlType::Boolean),
+    column("null_frac", SqlType::Real),
+    column("avg_width", SqlType::Integer),
+    column("n_distinct", SqlType::Real),
+    column("most_common_vals", TEXTS),
+    column("most_common_freqs", SqlType::Array(ArrayElement::Real)),
+    column("histogram_bounds", TEXTS),
+    column("correlation", SqlType::Real),
+    column("most_common_elems", TEXTS),
+    column("most_common_elem_freqs", SqlType::Array(ArrayElement::Real)),
+    column("elem_count_histogram", SqlType::Array(ArrayElement::Real)),
 ];
 
 const STAT_STATEMENTS: [CatalogColumn; 12] = [
@@ -445,7 +463,7 @@ const OPFAMILY: [CatalogColumn; 5] = [
 ];
 
 impl MonitoringRelation {
-    pub(crate) const ALL: [Self; 34] = [
+    pub(crate) const ALL: [Self; 35] = [
         Self::StatActivity,
         Self::StatDatabase,
         Self::Locks,
@@ -480,6 +498,7 @@ impl MonitoringRelation {
         Self::StatStatements,
         Self::StatStatementsInfo,
         Self::Policies,
+        Self::Stats,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -518,6 +537,7 @@ impl MonitoringRelation {
             Self::StatStatements => "pg_stat_statements",
             Self::StatStatementsInfo => "pg_stat_statements_info",
             Self::Policies => "pg_policies",
+            Self::Stats => "pg_stats",
         }
     }
 
@@ -571,6 +591,7 @@ impl MonitoringRelation {
             Self::StatStatements => &STAT_STATEMENTS,
             Self::StatStatementsInfo => &STAT_STATEMENTS_INFO,
             Self::Policies => &POLICIES,
+            Self::Stats => &STATS,
         }
     }
 
@@ -593,6 +614,7 @@ impl MonitoringRelation {
                 | Self::StatStatements
                 | Self::StatStatementsInfo
                 | Self::Policies
+                | Self::Stats
         )
     }
 }
@@ -766,6 +788,7 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             })
             .collect(),
         MonitoringRelation::Tables => table_rows(snapshot),
+        MonitoringRelation::Stats => statistics_rows(snapshot),
         MonitoringRelation::Views => view_rows(snapshot),
         MonitoringRelation::Sequences => sequence_rows(snapshot),
         MonitoringRelation::StatStatements => statement_rows(snapshot),
@@ -896,6 +919,63 @@ fn table_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             )
         })
         .collect()
+}
+
+fn statistics_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let texts = |items: &[String]| {
+        if items.is_empty() {
+            return Value::Null;
+        }
+        Value::Array(Box::new(crate::arrays::ArrayValue::new(
+            ArrayElement::Text,
+            items.iter().cloned().map(Value::Text).collect(),
+        )))
+    };
+    let mut rows = Vec::new();
+    for entry in &snapshot.relations {
+        let Some(table) = entry.table() else {
+            continue;
+        };
+        let Some(columns) = snapshot.column_statistics.get(&table.name) else {
+            continue;
+        };
+        for column in &table.columns {
+            let Some(statistics) = columns.iter().find(|found| found.column == column.name) else {
+                continue;
+            };
+            let frequencies = if statistics.most_common_frequencies.is_empty() {
+                Value::Null
+            } else {
+                Value::Array(Box::new(crate::arrays::ArrayValue::new(
+                    ArrayElement::Real,
+                    statistics
+                        .most_common_frequencies
+                        .iter()
+                        .map(|frequency| Value::Real(*frequency))
+                        .collect(),
+                )))
+            };
+            rows.push(
+                CatalogRow::new(&STATS)
+                    .set("schemaname", Value::Text(entry.schema.clone()))
+                    .set("tablename", Value::Text(entry.name.clone()))
+                    .set("attname", Value::Text(column.name.clone()))
+                    .set("inherited", Value::Boolean(false))
+                    .set("null_frac", Value::Real(statistics.null_fraction))
+                    .set("avg_width", Value::Integer(statistics.average_width))
+                    .set("n_distinct", Value::Real(statistics.distinct))
+                    .set("most_common_vals", texts(&statistics.most_common_values))
+                    .set("most_common_freqs", frequencies)
+                    .set("histogram_bounds", texts(&statistics.histogram_bounds))
+                    .set(
+                        "correlation",
+                        statistics.correlation.map_or(Value::Null, Value::Real),
+                    )
+                    .done(),
+            );
+        }
+    }
+    rows
 }
 
 fn view_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {

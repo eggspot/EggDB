@@ -39,6 +39,18 @@ impl Estimate {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TableRows {
     counts: HashMap<u32, f64>,
+    equal_selectivity: HashMap<(u32, usize), f64>,
+}
+
+fn equal_selectivity_of(distinct: f32, rows: f64) -> Option<f64> {
+    let values = if distinct > 0.0 {
+        f64::from(distinct)
+    } else if distinct < 0.0 {
+        -f64::from(distinct) * rows
+    } else {
+        return None;
+    };
+    (values >= 1.0).then(|| (1.0 / values).clamp(0.0, 1.0))
 }
 
 fn collect_tables<'q>(query: &'q ExplainedQuery, out: &mut Vec<&'q TableDefinition>) {
@@ -73,7 +85,9 @@ impl TableRows {
             return Ok(Self::default());
         }
         let analyzed = crate::statistics::every_row_count(reader)?;
+        let column_statistics = crate::statistics::every_column_statistics(reader)?;
         let mut counts = HashMap::with_capacity(tables.len());
+        let mut equal_selectivity = HashMap::new();
         for table in tables {
             if counts.contains_key(&table.id) {
                 continue;
@@ -83,20 +97,35 @@ impl TableRows {
                 None => counted_rows(reader, table)?,
             };
             counts.insert(table.id, rows as f64);
+            if let Some(columns) = column_statistics.get(&table.name) {
+                for (at, column) in table.columns.iter().enumerate() {
+                    if let Some(found) = columns.iter().find(|found| found.column == column.name)
+                        && let Some(selectivity) = equal_selectivity_of(found.distinct, rows as f64)
+                    {
+                        equal_selectivity.insert((table.id, at), selectivity);
+                    }
+                }
+            }
         }
-        Ok(Self { counts })
+        Ok(Self {
+            counts,
+            equal_selectivity,
+        })
     }
 
     pub(crate) fn of(&self, table: &TableDefinition) -> f64 {
         self.counts.get(&table.id).copied().unwrap_or(0.0)
     }
-}
 
-fn condition_selectivity(operator: &str) -> f64 {
-    if operator == "=" {
-        EQUAL_SELECTIVITY
-    } else {
-        RANGE_SELECTIVITY
+    fn condition_selectivity(&self, table: &TableDefinition, column: usize, operator: &str) -> f64 {
+        if operator == "=" {
+            self.equal_selectivity
+                .get(&(table.id, column))
+                .copied()
+                .unwrap_or(EQUAL_SELECTIVITY)
+        } else {
+            RANGE_SELECTIVITY
+        }
     }
 }
 
@@ -110,7 +139,9 @@ pub(crate) fn scanned_rows(source: &ExplainedSource, table_rows: &TableRows) -> 
                 .access
                 .conditions
                 .iter()
-                .map(|(_, operator)| condition_selectivity(operator))
+                .map(|(column, operator)| {
+                    table_rows.condition_selectivity(&source.table, *column, operator)
+                })
                 .product();
             (table * fraction).min(table)
         }
