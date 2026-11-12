@@ -925,3 +925,4 @@ its full title with its status.
 - [D898](decisions/D898.md) Code-only batch 546 (M13): WHERE inside a GQL quantified group
 - [D899](decisions/D899.md) Code-only batch 547 (M14): a whole-database logical dump, eggdb export --dump
 - [D900](decisions/D900.md) Code-only batch 548 (M14): SQL Server SYSTEM_VERSIONING = ON in ALTER TABLE and history retention
+- [D901](decisions/D901.md) Code-only batch 549 (M16): CalDAV time-range filters over recurring events

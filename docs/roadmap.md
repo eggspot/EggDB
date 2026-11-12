@@ -1782,8 +1782,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   MIME parts and attachments, IMAP `IDLE`, JMAP uploads, submission and push, and TLS.
 - CalDAV, CardDAV and WebDAV (D56). iCalendar and vCard read as jCal and jCard (`icalendar_parse`,
   `vcard_parse`): **code written, unbuilt** (code-only mode, 2026-11-12, D702); the WebDAV, CalDAV and CardDAV server
-  (`eggdb-dav`, `--dav-listen`): **code written, unbuilt** (code-only mode, 2026-11-12, D895). Left: time ranges,
-  recurrences, scheduling and ACLs.
+  (`eggdb-dav`, `--dav-listen`): **code written, unbuilt** (code-only mode, 2026-11-12, D895); `time-range` filters
+  over recurring events: **code written, unbuilt** (code-only mode, 2026-11-12, D901). Left: `expand` in
+  `calendar-data`, time zones by `TZID`, scheduling and ACLs.
 - Digital asset management: EXIF and XMP metadata, and renditions with our own royalty-free
   codecs (D56). EXIF and XMP (`image_metadata`): **code written, unbuilt** (code-only mode, 2026-11-12, D731). Left:
   renditions.

@@ -1,9 +1,11 @@
 //! The WebDAV (RFC 4918), CalDAV (RFC 4791) and CardDAV (RFC 6352) server (D895): `OPTIONS`,
 //! `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL` (with RFC 5689's extended form), `MKCALENDAR`,
 //! `COPY`, `MOVE`, `PROPFIND`, `PROPPATCH`, `LOCK`, `UNLOCK` and `REPORT`
-//! (`calendar-query`, `calendar-multiget`, `addressbook-query`, `addressbook-multiget`,
-//! `sync-collection`), with the user's principal and calendar and address book homes.
+//! (`calendar-query` with `time-range` filters over recurring events, `calendar-multiget`,
+//! `addressbook-query`, `addressbook-multiget`, `sync-collection`), with the user's principal
+//! and calendar and address book homes.
 
+use crate::ical::{self, TimeRange};
 use crate::store::{self, Kind, Resource, normalized, parent};
 use crate::xml::{self, CALDAV, CARDDAV, DAV, escaped};
 use eggdb_http::{Request, Response};
@@ -776,6 +778,20 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             .filter(|name| !name.eq_ignore_ascii_case("VCALENDAR"))
             .map(str::to_ascii_uppercase)
             .collect();
+        let ranged: Vec<(String, TimeRange)> = filters
+            .iter()
+            .filter_map(|filter| {
+                let range = filter.child(CALDAV, "time-range")?;
+                let bound = |name: &str| range.attribute(name).and_then(ical::parse_moment).map(|moment| moment.seconds);
+                Some((
+                    filter.attribute("name")?.to_ascii_uppercase(),
+                    TimeRange {
+                        start: bound("start"),
+                        end: bound("end"),
+                    },
+                ))
+            })
+            .collect();
         let mut text_matches = Vec::new();
         document.descendants(CARDDAV, "text-match", &mut text_matches);
         let kept: Vec<&Resource> = resources
@@ -785,7 +801,13 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
                 let components_hold = components.iter().all(|name| body.contains(&format!("BEGIN:{name}")));
                 let lowered = body.to_lowercase();
                 let texts_hold = text_matches.iter().all(|filter| lowered.contains(&filter.text.trim().to_lowercase()));
-                components_hold && texts_hold
+                let ranges_hold = ranged.is_empty() || {
+                    let found = ical::components(&body);
+                    ranged.iter().all(|(name, range)| {
+                        found.iter().any(|component| &component.name == name && ical::overlaps(component, *range))
+                    })
+                };
+                components_hold && texts_hold && ranges_hold
             })
             .collect();
         let mut body: String = kept.iter().map(|resource| self.response_xml(resource, &wanted, &data)).collect();
@@ -872,5 +894,25 @@ mod tests {
         let text = String::from_utf8_lossy(&found.body).into_owned();
         assert!(text.contains("FN:Ann Example"), "{text}");
         assert!(text.contains("404 Not Found"), "{text}");
+    }
+
+    #[test]
+    fn calendar_queries_keep_the_events_in_their_time_range() {
+        let keyspace = MemoryKeyspace::default();
+        let endpoint = Endpoint::new(&keyspace, "eggdb", eggdb_crypto::sha256(b"secret"), false);
+        let standup = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:standup\r\nSUMMARY:Standup\r\nDTSTART:20260105T090000Z\r\nDURATION:PT15M\r\nRRULE:FREQ=DAILY;COUNT=5\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let review = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:review\r\nSUMMARY:Review\r\nDTSTART:20260201T090000Z\r\nDTEND:20260201T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        assert_eq!(call(&endpoint, "PUT", "/calendars/eggdb/calendar/standup.ics", &[], standup).status, 201);
+        assert_eq!(call(&endpoint, "PUT", "/calendars/eggdb/calendar/review.ics", &[], review).status, 201);
+        let query = |start: &str, end: &str| {
+            let body = format!(
+                "<C:calendar-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\"><D:prop><C:calendar-data/></D:prop><C:filter><C:comp-filter name=\"VCALENDAR\"><C:comp-filter name=\"VEVENT\"><C:time-range start=\"{start}\" end=\"{end}\"/></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>"
+            );
+            String::from_utf8_lossy(&call(&endpoint, "REPORT", "/calendars/eggdb/calendar/", &[("depth", "1")], &body).body).into_owned()
+        };
+        let week = query("20260107T000000Z", "20260108T000000Z");
+        assert!(week.contains("Standup") && !week.contains("Review"), "{week}");
+        let later = query("20260110T000000Z", "20260202T000000Z");
+        assert!(!later.contains("Standup") && later.contains("Review"), "{later}");
     }
 }
