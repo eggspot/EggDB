@@ -424,6 +424,22 @@ impl Session<'_> {
             }
             None => None,
         };
+        let sparql_listener = match options.sparql_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--sparql-listen {address}: the SPARQL endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for SPARQL on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let clickhouse_listener = match options.clickhouse_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -733,6 +749,7 @@ impl Session<'_> {
                 rest_listener.as_ref(),
                 clickhouse_listener.as_ref(),
                 trino_listener.as_ref(),
+                sparql_listener.as_ref(),
                 cql_listener.as_ref(),
                 stomp_listener.as_ref(),
                 nats_listener.as_ref(),
@@ -874,6 +891,17 @@ impl Session<'_> {
             db: &db,
             prefix: super::serve_resp::GRAPH_COLLECTIONS,
         };
+        let rdf_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::RDF_COLLECTIONS,
+        };
+        let sparql_endpoint = eggdb_rdf::Endpoint::new(
+            &rdf_database,
+            0,
+            &config.user,
+            server_password_sha256,
+            read_only,
+        );
         let kafka_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::KAFKA_COLLECTIONS,
@@ -1009,6 +1037,17 @@ impl Session<'_> {
                     &|request| clickhouse_endpoint.answer(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_clickhouse::MAX_REQUEST_BYTES, &memory_budget)
+                        .with_rate_limit(rate_limiter.as_ref())
+                        .decoding_content_encoding(),
+                ),
+                None => Ok(()),
+            });
+            let sparql_server = scope.spawn(|| match &sparql_listener {
+                Some(listener) => eggdb_http::serve_with_limits(
+                    listener,
+                    &|request| sparql_endpoint.answer(request),
+                    &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_rdf::MAX_REQUEST_BYTES, &memory_budget)
                         .with_rate_limit(rate_limiter.as_ref())
                         .decoding_content_encoding(),
                 ),
@@ -1305,6 +1344,7 @@ impl Session<'_> {
             let _ = rest_server.join();
             let _ = clickhouse_server.join();
             let _ = trino_server.join();
+            let _ = sparql_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = cdc_topic_delivery.join();
             let _ = sqs_server.join();

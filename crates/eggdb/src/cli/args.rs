@@ -256,6 +256,7 @@ impl CommandName {
             | OptionName::RestListen
             | OptionName::ClickhouseListen
             | OptionName::TrinoListen
+            | OptionName::SparqlListen
             | OptionName::DynamodbListen
             | OptionName::KafkaListen
             | OptionName::AmqpListen
@@ -461,6 +462,7 @@ enum OptionName {
     RestListen,
     ClickhouseListen,
     TrinoListen,
+    SparqlListen,
     DynamodbListen,
     KafkaListen,
     AmqpListen,
@@ -591,6 +593,7 @@ impl OptionName {
             b"rest-listen" => Self::RestListen,
             b"clickhouse-listen" => Self::ClickhouseListen,
             b"trino-listen" => Self::TrinoListen,
+            b"sparql-listen" => Self::SparqlListen,
             b"dynamodb-listen" => Self::DynamodbListen,
             b"kafka-listen" => Self::KafkaListen,
             b"amqp-listen" => Self::AmqpListen,
@@ -924,6 +927,7 @@ pub(crate) struct ServeOptions {
     pub(crate) rest_listen: Option<SocketAddr>,
     pub(crate) clickhouse_listen: Option<SocketAddr>,
     pub(crate) trino_listen: Option<SocketAddr>,
+    pub(crate) sparql_listen: Option<SocketAddr>,
     pub(crate) dynamodb_listen: Option<SocketAddr>,
     pub(crate) kafka_listen: Option<SocketAddr>,
     pub(crate) amqp_listen: Option<SocketAddr>,
@@ -1525,6 +1529,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::TrinoListen => {
                 request.serve.trino_listen =
                     Some(parse_listen(&option.spelled, value, 8080).map_err(usage)?);
+            }
+            OptionName::SparqlListen => {
+                request.serve.sparql_listen =
+                    Some(parse_listen(&option.spelled, value, 3030).map_err(usage)?);
             }
             OptionName::RestoreFrom => {
                 let url = value.to_str().unwrap_or_default();
