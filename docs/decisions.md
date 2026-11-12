@@ -1021,3 +1021,4 @@ its full title with its status.
 - [D994](decisions/D994.md) Code-only batch 642 (M10): MySQL's test suite run weekly with its pass rate published
 - [D995](decisions/D995.md) Code-only batch 643 (M10): SQL Server's @@DBTS and MIN_ACTIVE_ROWVERSION()
 - [D996](decisions/D996.md) Code-only batch 644 (M10): EF Core 9 and mssql-jdbc getSchemas() in tds-apps
+- [D997](decisions/D997.md) Code-only batch 645 (M10): Oracle database links to PostgreSQL, MySQL and SQL Server

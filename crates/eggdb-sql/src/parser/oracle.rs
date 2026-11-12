@@ -477,6 +477,7 @@ impl<'t> Parser<'t> {
         };
         let statement = match word.as_ref() {
             "drop" if self.is_word_at(1, "table") => self.oracle_drop_table()?,
+            "create" | "drop" if self.at_database_link() => self.database_link_statement()?,
             "create"
                 if self.is_word_at(1, "context")
                     || (self.is_word_at(1, "or")
@@ -2252,4 +2253,118 @@ pub(super) struct ConstraintStates {
 enum PartitioningClause {
     Skipped,
     KeptWhenSupported,
+}
+
+const DATABASE_LINK_SCHEMA_PREFIX: &str = "eggdb_dblink_";
+
+/// The local schema a database link's remote tables are imported into.
+pub(crate) fn database_link_schema(link: &str) -> String {
+    format!("{DATABASE_LINK_SCHEMA_PREFIX}{}", link.to_ascii_lowercase().replace('.', "_"))
+}
+
+/// The source URL a database link's `USING` string names; Oracle connect strings are refused,
+/// since EggDB does not speak Oracle's wire protocol (D10).
+pub(crate) fn database_link_source(using: &str, user: Option<&str>) -> SqlResult<String> {
+    let trimmed = using.trim();
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "a database link to an Oracle database needs Oracle's wire protocol, which EggDB does not speak; give USING a postgresql://, mysql:// or sqlserver:// URL",
+        )
+        .with_oracle_code(2019));
+    };
+    if !matches!(scheme, "postgres" | "postgresql" | "mysql" | "sqlserver") {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            format!("a database link cannot reach {scheme}:// sources; give USING a postgresql://, mysql:// or sqlserver:// URL"),
+        )
+        .with_oracle_code(2019));
+    }
+    let (authority, _) = rest.split_once('/').unwrap_or((rest, ""));
+    if authority.contains('@') {
+        if authority.split('@').next().is_some_and(|account| account.contains(':')) {
+            return Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                "keep the password out of the link's URL: the eggdb program reads it from EGGDB_FOREIGN_PASSFILE",
+            ));
+        }
+        return Ok(trimmed.to_owned());
+    }
+    match user {
+        Some(user) => Ok(format!("{scheme}://{user}@{rest}")),
+        None => Ok(trimmed.to_owned()),
+    }
+}
+
+impl Parser<'_> {
+    fn at_database_link(&self) -> bool {
+        let mut ahead = 1;
+        for optional in ["shared", "public"] {
+            if self.is_word_at(ahead, optional) {
+                ahead += 1;
+            }
+        }
+        self.is_word_at(ahead, "database") && self.is_word_at(ahead + 1, "link")
+    }
+
+    fn database_link_statement(&mut self) -> SqlResult<Statement> {
+        let creating = self.take_word("create");
+        if !creating {
+            self.expect_word("drop")?;
+        }
+        self.take_word("shared");
+        self.take_word("public");
+        self.expect_word("database")?;
+        self.expect_word("link")?;
+        let mut name = self.name()?;
+        while self.take(&TokenKind::Dot) {
+            let part = self.name()?;
+            name.text = format!("{}.{}", name.text, part.text);
+        }
+        name.text = name.text.to_ascii_lowercase();
+        if !creating {
+            return Ok(Statement::ForeignData(crate::foreign_tables::ForeignDataCommand::DropServer {
+                names: vec![name],
+                if_exists: false,
+                cascade: true,
+            }));
+        }
+        let mut user = None;
+        if self.take_word("connect") {
+            self.expect_word("to")?;
+            if !self.take_word("current_user") {
+                user = Some(self.name()?.text);
+                self.expect_word("identified")?;
+                self.expect_word("by")?;
+                self.at += 1;
+            }
+        }
+        self.expect_word("using")?;
+        let TokenKind::String(using) = self.peek_kind() else {
+            return Err(self.unexpected());
+        };
+        let source = database_link_source(using, user.as_deref())?;
+        self.at += 1;
+        Ok(Statement::ForeignData(crate::foreign_tables::ForeignDataCommand::CreateServer {
+            name,
+            wrapper: "oracle_dblink".to_owned(),
+            options: vec![("source".to_owned(), source)],
+            if_not_exists: false,
+        }))
+    }
+
+    pub(super) fn database_link_table(&mut self, table: Name) -> SqlResult<Name> {
+        let TokenKind::Variable(link) = self.peek_kind() else {
+            return Ok(table);
+        };
+        let Some(link) = link.strip_prefix('@').filter(|link| !link.starts_with('@')) else {
+            return Ok(table);
+        };
+        let schema = database_link_schema(link);
+        self.at += 1;
+        Ok(Name {
+            text: crate::schemas::written_qualified(&schema, crate::schemas::base_name(&table.text)),
+            position: table.position,
+        })
+    }
 }

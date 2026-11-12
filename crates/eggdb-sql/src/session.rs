@@ -1996,6 +1996,7 @@ impl<'s> Session<'s> {
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
         self.prepare_writer_snapshot(text)?;
+        self.prepare_database_links(text)?;
         let reader = self.file_reader;
         crate::new_files::with_reader(reader, || self.run_text_with_reader(text, parameters, on_result, client))
     }

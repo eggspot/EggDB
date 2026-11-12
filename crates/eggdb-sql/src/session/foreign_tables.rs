@@ -99,6 +99,65 @@ impl Session<'_> {
         Ok(())
     }
 
+    /// Imports, before an Oracle statement runs, each remote table it reads through a database
+    /// link (`table@link`) that is not imported yet, into the link's own local schema.
+    pub(super) fn prepare_database_links(&mut self, text: &str) -> SqlResult<()> {
+        if self.dialect != Dialect::Oracle || !text.contains('@') {
+            return Ok(());
+        }
+        let Ok(tokens) = crate::lexer::tokenize_in(text, Dialect::Oracle) else {
+            return Ok(());
+        };
+        let mut wanted: Vec<(String, Option<String>, String)> = Vec::new();
+        for (at, token) in tokens.iter().enumerate() {
+            let crate::lexer::TokenKind::Variable(variable) = &token.kind else {
+                continue;
+            };
+            let Some(link) = variable.strip_prefix('@').filter(|link| !link.starts_with('@')) else {
+                continue;
+            };
+            let word = |index: usize| match tokens.get(index).map(|token| &token.kind) {
+                Some(crate::lexer::TokenKind::Word(word)) => Some(word.to_string()),
+                Some(crate::lexer::TokenKind::QuotedIdentifier(name)) => Some(name.clone()),
+                _ => None,
+            };
+            let Some(table) = at.checked_sub(1).and_then(word) else {
+                continue;
+            };
+            let schema = match at.checked_sub(2).map(|index| &tokens[index].kind) {
+                Some(crate::lexer::TokenKind::Dot) => at.checked_sub(3).and_then(word),
+                _ => None,
+            };
+            let entry = (link.to_ascii_lowercase(), schema, table);
+            if !wanted.contains(&entry) {
+                wanted.push(entry);
+            }
+        }
+        for (link, schema, table) in wanted {
+            let local = crate::parser::database_link_schema(&link);
+            let name = crate::schemas::written_qualified(&local, &table);
+            let known = !self
+                .foreign_texts(&format!("SELECT name FROM {TABLES_TABLE} WHERE name = {}", literal(&name)))
+                .unwrap_or_default()
+                .is_empty();
+            if known {
+                continue;
+            }
+            self.foreign_sql(CREATE_REGISTRY)?;
+            let Some(source) = self.server_of(&link)? else {
+                return Err(SqlError::new(
+                    SqlState::UNDEFINED_OBJECT,
+                    format!("ORA-02019: connection description for remote database not found: {}", link.to_ascii_uppercase()),
+                )
+                .with_oracle_code(2019));
+            };
+            let remote_schema = schema.unwrap_or_else(|| default_remote_schema(&source));
+            self.foreign_sql(&format!("CREATE SCHEMA IF NOT EXISTS {}", crate::schema::quoted(&local)))?;
+            self.import_foreign_schema(&remote_schema, Some(&(false, vec![table])), &link, &local)?;
+        }
+        Ok(())
+    }
+
     fn server_of(&mut self, name: &str) -> SqlResult<Option<String>> {
         Ok(self
             .foreign_texts(&format!("SELECT source FROM {SERVERS_TABLE} WHERE name = {}", literal(name)))?
@@ -186,5 +245,16 @@ impl Session<'_> {
             }
         }
         Ok(QueryResult::command(command.tag()))
+    }
+}
+
+fn default_remote_schema(source: &str) -> String {
+    if source.starts_with("mysql://") {
+        let path = source.splitn(4, '/').nth(3).unwrap_or_default();
+        path.split('?').next().unwrap_or_default().to_owned()
+    } else if source.starts_with("sqlserver://") {
+        "dbo".to_owned()
+    } else {
+        "public".to_owned()
     }
 }

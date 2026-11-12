@@ -62,7 +62,7 @@ mod xml;
 
 pub(crate) use mysql_routines::mysql_program;
 pub use oracle::ORACLE_COMPATIBLE_VERSION;
-pub(crate) use oracle::{dialect_table_name, is_reserved as is_oracle_reserved, oracle_table_name};
+pub(crate) use oracle::{database_link_schema, dialect_table_name, is_reserved as is_oracle_reserved, oracle_table_name};
 pub(crate) use plpgsql::plpgsql_program;
 pub(crate) use plsql::{plsql_package_program, plsql_program};
 pub(crate) use routines::with_routine_settings_changed;
@@ -3164,6 +3164,7 @@ impl<'t> Parser<'t> {
         }
         let name_start = self.peek().start;
         let name = self.table_name()?;
+        let name = if self.oracle() { self.database_link_table(name)? } else { name };
         let name_text = self.slice(name_start, self.previous_end());
         let partition_selection = self.partition_selection()?;
         let system_time = self.system_time_clause()?;
