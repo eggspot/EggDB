@@ -629,6 +629,9 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         if tool.changes_keys() && tool.definition().offered(self.grants()) {
             return self.key_write_call(id, tool, &arguments, &arguments_text, link);
         }
+        if matches!(tool, Tool::MemoryAdd | Tool::MemoryDelete) && tool.definition().offered(self.grants()) {
+            return self.memory_write_call(id, tool, &arguments, &arguments_text);
+        }
         let call_id = self.next_call_id();
         let started = now_rfc3339();
         let (outcome, duration) =
@@ -682,6 +685,28 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             tools::write_sql(&request, destructive.as_ref(), call)
         });
         Some(self.finish_write(&pending, outcome, confirmation))
+    }
+
+    fn memory_write_call(
+        &mut self,
+        id: &str,
+        tool: Tool,
+        arguments: &Arguments<'_>,
+        arguments_text: &str,
+    ) -> Option<String> {
+        let pending = self.pending_write(id, tool, arguments_text);
+        let sql = match tools::memory_write_sql(tool, arguments) {
+            Ok(sql) => sql,
+            Err(error) => {
+                return Some(self.finish_write(&pending, unwritten(Err(error)), None));
+            }
+        };
+        if let Err(answer) = self.record_write_start(&pending) {
+            return Some(answer);
+        }
+        let request = tools::built_write_request(&sql);
+        let (outcome, _) = self.timed(tool.name(), |call| tools::write_sql(&request, None, call));
+        Some(self.finish_write(&pending, outcome, None))
     }
 
     fn key_write_call(

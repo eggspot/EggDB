@@ -1589,7 +1589,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A semantic cache (D31). **Code written, unbuilt** (code-only mode, 2026-11-12, D740).
 - Agent memory as a built-in model: first a memory table per agent (text, embedding, time)
   recalled by hybrid search and offered as MCP tools (D31, D205). Check: an MCP recall test. The memory table and
-  hybrid recall (`eggdb_ai`): **code written, unbuilt** (code-only mode, 2026-11-12, D740). Left: the MCP tools.
+  hybrid recall (`eggdb_ai`): **code written, unbuilt** (code-only mode, 2026-11-12, D740); the MCP tools and
+  `eggdb memory`: **code written, unbuilt** (code-only mode, 2026-11-13, D1005).
 - In-database training, first linear and logistic regression over a query's rows with predictions
   in SQL (D31). Check: fits compared with a reference on a public dataset. **Code written,
   unbuilt** (code-only mode, 2026-11-11, D439).

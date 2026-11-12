@@ -47,6 +47,7 @@ pub(crate) enum CommandName {
     Explain,
     Table,
     Row,
+    Memory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,14 @@ pub(crate) enum CollectionAction {
     Add,
     Delete,
     Move,
+}
+
+/// What `eggdb memory` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryVerb {
+    Add,
+    Get,
+    Delete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +85,7 @@ impl TableAction {
 
 impl CommandName {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 29] = [
+    pub(crate) const ALL: [Self; 30] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -100,6 +109,7 @@ impl CommandName {
         Self::Explain,
         Self::Table,
         Self::Row,
+        Self::Memory,
         Self::Serve,
         Self::Shell,
         Self::Restore,
@@ -145,6 +155,7 @@ impl CommandName {
             b"explain" => Self::Explain,
             b"table" => Self::Table,
             b"row" => Self::Row,
+            b"memory" => Self::Memory,
             _ => return None,
         })
     }
@@ -181,11 +192,12 @@ impl CommandName {
             Self::Explain => "explain",
             Self::Table => "table",
             Self::Row => "row",
+            Self::Memory => "memory",
         }
     }
 
     pub(crate) fn is_noun(self) -> bool {
-        matches!(self, Self::Collection | Self::Table | Self::Row)
+        matches!(self, Self::Collection | Self::Table | Self::Row | Self::Memory)
     }
 
     pub(crate) fn takes_format_option(self) -> bool {
@@ -341,7 +353,7 @@ impl CommandName {
             | OptionName::Unicode
             | OptionName::Native
             | OptionName::FormatFile => self == Self::Import,
-            OptionName::Limit => matches!(self, Self::Scan | Self::Audit | Self::Table | Self::Row),
+            OptionName::Limit => matches!(self, Self::Scan | Self::Audit | Self::Table | Self::Row | Self::Memory),
             OptionName::After => matches!(self, Self::Table | Self::Row),
             OptionName::Schema => matches!(self, Self::Table | Self::Follow),
             OptionName::Collection => matches!(
@@ -843,6 +855,7 @@ pub(crate) struct Request {
     pub(crate) collection_stats: bool,
     pub(crate) collection_action: Option<CollectionAction>,
     pub(crate) table_action: Option<TableAction>,
+    pub(crate) memory: Option<(MemoryVerb, String, String)>,
     pub(crate) table: Option<OsString>,
     pub(crate) schema: Option<String>,
     pub(crate) after: Option<String>,
@@ -1266,6 +1279,7 @@ fn noun_needs_a_verb(noun: CommandName) -> Failure {
     let message = match noun {
         CommandName::Table => TABLE_NEEDS_A_VERB,
         CommandName::Row => ROW_NEEDS_A_VERB,
+        CommandName::Memory => MEMORY_NEEDS_A_VERB,
         _ => COLLECTION_NEEDS_A_VERB,
     };
     Failure::usage(message, Some(noun))
@@ -2035,6 +2049,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if command == CommandName::Row {
         return row_request(request, tokens, arguments);
     }
+    if command == CommandName::Memory {
+        return memory_request(request, tokens, arguments);
+    }
     if request.swap.if_absent && request.swap.delete {
         return Err(usage(
             "--if-absent with --delete would change nothing: an absent key cannot be deleted"
@@ -2058,7 +2075,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Explain
         | CommandName::Collection
         | CommandName::Table
-        | CommandName::Row => (1, 1),
+        | CommandName::Row
+        | CommandName::Memory => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -2413,6 +2431,43 @@ const READ_ONLY_CANNOT_CREATE: &str =
     "--read-only cannot be combined with --create: a read-only open never creates a file";
 const TABLE_NEEDS_A_VERB: &str = "table needs list, show or sample";
 const ROW_NEEDS_A_VERB: &str = "row needs list";
+const MEMORY_NEEDS_A_VERB: &str = "memory needs add, get or delete";
+
+fn memory_request(
+    mut request: Request,
+    tokens: &Tokens<'_>,
+    arguments: &[&OsStr],
+) -> Result<Request, Failure> {
+    let command = CommandName::Memory;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    let verb = match arguments.first().map(|verb| verb.as_encoded_bytes()) {
+        Some(b"add") => MemoryVerb::Add,
+        Some(b"get") => MemoryVerb::Get,
+        Some(b"delete") => MemoryVerb::Delete,
+        _ => return Err(usage(MEMORY_NEEDS_A_VERB.to_owned())),
+    };
+    if arguments.len() < 4 {
+        return Err(usage("eggdb memory needs a file, an agent and a text".to_owned()));
+    }
+    if arguments.len() > 4 {
+        return Err(too_many_arguments(&arguments[4..], Some(command)));
+    }
+    if verb == MemoryVerb::Get {
+        request.scan.limit = given_limit(tokens)
+            .map(|(spelled, value)| parse_page_limit(spelled, value))
+            .transpose()
+            .map_err(usage)?;
+    }
+    let text = |at: usize| -> Result<String, Failure> {
+        arguments[at]
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| usage("the agent and the text are UTF-8".to_owned()))
+    };
+    request.file = PathBuf::from(arguments[1]);
+    request.memory = Some((verb, text(2)?, text(3)?));
+    Ok(request)
+}
 const COLLECTION_NEEDS_A_VERB: &str = "collection needs list, add, delete or move";
 pub(crate) const MOST_SAMPLE_ROWS: u64 = 1_000;
 

@@ -51,10 +51,13 @@ pub(crate) enum Tool {
     Cas,
     Expire,
     Persist,
+    MemoryAdd,
+    MemoryGet,
+    MemoryDelete,
 }
 
 impl Tool {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 18] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -70,6 +73,9 @@ impl Tool {
         Self::Cas,
         Self::Expire,
         Self::Persist,
+        Self::MemoryAdd,
+        Self::MemoryGet,
+        Self::MemoryDelete,
     ];
 
     pub(crate) fn definition(self) -> &'static ToolDefinition {
@@ -777,6 +783,58 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::Put | Tool::Del | Tool::Incr | Tool::Cas | Tool::Expire | Tool::Persist => {
             Err(key_writes_refused(call))
         }
+        Tool::MemoryGet => memory_get(arguments, call),
+        Tool::MemoryAdd | Tool::MemoryDelete => Err(writes_not_allowed()),
+    }
+}
+
+fn sql_text(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+fn memory_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
+    arguments.allow_tool(Tool::MemoryGet)?;
+    let agent = arguments.required_string("agent")?;
+    let text = arguments.required_string("text")?;
+    let limit = arguments.integer("limit", 100, 5)?;
+    let sql = format!(
+        "SELECT id, content, score, created_at FROM eggdb_ai.recall({}, {}, {limit})",
+        sql_text(agent),
+        sql_text(text)
+    );
+    call.with_database(|store, limits| {
+        let result = one_statement(store, limits, call, Dialect::PostgreSql, &sql, Some(limit.saturating_add(1)))?;
+        Ok(statement_success(result, Dialect::PostgreSql, limit))
+    })
+}
+
+/// The statement a memory tool that writes runs: `eggdb_ai.remember` or `eggdb_ai.forget`.
+pub(crate) fn memory_write_sql(tool: Tool, arguments: &Arguments<'_>) -> Result<String, ToolError> {
+    arguments.allow_tool(tool)?;
+    let agent = arguments.required_string("agent")?;
+    let text = arguments.required_string("text")?;
+    if text.len() > MAX_SQL_BYTES {
+        return Err(ToolError::invalid("text is longer than 1 MiB"));
+    }
+    Ok(match tool {
+        Tool::MemoryDelete => {
+            let id: i64 = text
+                .trim()
+                .parse()
+                .map_err(|_| ToolError::invalid("text is the id of the memory to forget, a whole number"))?;
+            format!("SELECT eggdb_ai.forget({}, {id}) AS forgotten", sql_text(agent))
+        }
+        _ => format!("SELECT eggdb_ai.remember({}, {}) AS id", sql_text(agent), sql_text(text)),
+    })
+}
+
+/// A write request for a statement the server built itself.
+pub(crate) fn built_write_request(sql: &str) -> WriteRequest<'_> {
+    WriteRequest {
+        sql,
+        dialect: Dialect::PostgreSql,
+        max_rows: 1,
+        confirm: false,
     }
 }
 
@@ -2189,7 +2247,10 @@ mod tests {
                 | Tool::Incr
                 | Tool::Cas
                 | Tool::Expire
-                | Tool::Persist => not_shipped(),
+                | Tool::Persist
+                | Tool::MemoryAdd
+                | Tool::MemoryGet
+                | Tool::MemoryDelete => not_shipped(),
             }
         }
 
@@ -2224,7 +2285,10 @@ mod tests {
                 | Tool::Incr
                 | Tool::Cas
                 | Tool::Expire
-                | Tool::Persist => not_shipped(),
+                | Tool::Persist
+                | Tool::MemoryAdd
+                | Tool::MemoryGet
+                | Tool::MemoryDelete => not_shipped(),
             }
         }
 
@@ -2267,7 +2331,10 @@ mod tests {
                 | Tool::Incr
                 | Tool::Cas
                 | Tool::Expire
-                | Tool::Persist => not_shipped(),
+                | Tool::Persist
+                | Tool::MemoryAdd
+                | Tool::MemoryGet
+                | Tool::MemoryDelete => not_shipped(),
             }
         }
 
@@ -2399,7 +2466,10 @@ mod tests {
                 | Tool::Incr
                 | Tool::Cas
                 | Tool::Expire
-                | Tool::Persist => not_shipped(),
+                | Tool::Persist
+                | Tool::MemoryAdd
+                | Tool::MemoryGet
+                | Tool::MemoryDelete => not_shipped(),
             }
             out.end_object();
             if !required.is_empty() {

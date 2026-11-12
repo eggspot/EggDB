@@ -23,6 +23,7 @@ mod explain;
 mod follow;
 mod follow_mongo;
 mod iceberg_io;
+mod memory;
 mod follow_mysql;
 mod follow_sql_server;
 mod follow_state;
@@ -207,6 +208,7 @@ fn execute_on(
         CommandName::Explain => session.explain(),
         CommandName::Table => session.table_command(),
         CommandName::Row => session.row_list(),
+        CommandName::Memory => session.memory_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();

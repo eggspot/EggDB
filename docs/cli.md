@@ -990,6 +990,20 @@ $ eggdb row list app.db orders --limit 2 --json
   sample <file> <view>`. A table that is not there is exit 1, `table_not_found`. A cursor that
   is not one, of `table list`, or of another table is a usage error (exit 2).
 
+## Agent memory: `eggdb memory`
+
+```
+eggdb memory add <file> <agent> <text>
+eggdb memory get <file> <agent> <text> [-n <count>]
+eggdb memory delete <file> <agent> <id>
+```
+
+What an AI agent remembers, kept by `CREATE EXTENSION eggdb_ai` (D740): `add` remembers a text with its
+embedding and prints its id, `get` prints the agent's memories that best match a text (reciprocal rank fusion
+of embedding distance and full-text rank, 5 by default, at most 100), and `delete` forgets one memory by id.
+Agents never see each other's memories. The same three are MCP tools of `eggdb mcp`: `memory_get` for every
+agent, `memory_add` and `memory_delete` with `--allow-write` (D1005).
+
 ## `eggdb shell`
 
 ```
