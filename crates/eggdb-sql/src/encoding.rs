@@ -2001,6 +2001,7 @@ const RANGE_TAG: u8 = 26;
 const CITEXT_TAG: u8 = 27;
 const HSTORE_TAG: u8 = 28;
 const VECTOR_TAG: u8 = 29;
+const GEOMETRY_TAG: u8 = 30;
 const HSTORE_NULL_VALUE: u8 = 0;
 const HSTORE_TEXT_VALUE: u8 = 1;
 const RANGE_EMPTY: u8 = 1;
@@ -2086,9 +2087,10 @@ fn put_nested(out: &mut Vec<u8>, value: &Value) {
                 out.extend_from_slice(&range.type_oid.to_le_bytes());
                 put_range(out, range);
             }
-            DefinedValue::Citext(_) | DefinedValue::Hstore(_) | DefinedValue::Vector(_) => {
-                encode_row_value(out, value)
-            }
+            DefinedValue::Citext(_)
+            | DefinedValue::Hstore(_)
+            | DefinedValue::Vector(_)
+            | DefinedValue::Geometry(_) => encode_row_value(out, value),
         },
         other => encode_row_value(out, other),
     }
@@ -2142,6 +2144,11 @@ fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Hstore(hstore) => {
                 out.push(HSTORE_TAG);
                 put_hstore(out, hstore);
+            }
+            DefinedValue::Geometry(ewkb) => {
+                out.push(GEOMETRY_TAG);
+                put_varint(out, ewkb.len() as u64);
+                out.extend_from_slice(ewkb);
             }
             DefinedValue::Vector(values) => {
                 out.push(VECTOR_TAG);
@@ -2332,6 +2339,18 @@ pub(crate) fn decode_row_into(
                 let hstore = reader.hstore()?;
                 if wanted { hstore } else { Value::Null }
             }
+            GEOMETRY_TAG => {
+                let count = reader.count()?;
+                if count > crate::geometry_type::MOST_GEOMETRY_BYTES {
+                    return Err(reader.damaged());
+                }
+                let bytes = reader.take(count)?;
+                if wanted {
+                    crate::geometry_type::value(bytes.to_vec())
+                } else {
+                    Value::Null
+                }
+            }
             VECTOR_TAG => {
                 let count = reader.count()?;
                 if count > crate::vector_type::MOST_DIMENSIONS {
@@ -2443,6 +2462,7 @@ fn value_tag(sql_type: SqlType) -> u8 {
         SqlType::Defined(defined) if defined == DefinedType::CITEXT => CITEXT_TAG,
         SqlType::Defined(defined) if defined == DefinedType::HSTORE => HSTORE_TAG,
         SqlType::Defined(defined) if defined == DefinedType::VECTOR => VECTOR_TAG,
+        SqlType::Defined(defined) if defined == DefinedType::GEOMETRY => GEOMETRY_TAG,
         SqlType::Defined(DefinedType {
             kind: DefinedKind::Enum,
             ..

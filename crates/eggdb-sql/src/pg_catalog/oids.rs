@@ -113,7 +113,7 @@ pub(crate) const REFCURSOR_TYPE: u32 = 1790;
 
 const REFCURSOR_ARRAY_TYPE: u32 = 2201;
 
-pub(crate) const BUILTIN_TYPES: [BuiltinType; 80] = [
+pub(crate) const BUILTIN_TYPES: [BuiltinType; 81] = [
     BuiltinType {
         oid: 16,
         typname: "bool",
@@ -1315,6 +1315,21 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 80] = [
         collation: 0,
     },
     BuiltinType {
+        oid: 9005,
+        typname: "geometry",
+        shown: "geometry",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'U',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'd',
+        storage: 'm',
+        collation: 0,
+    },
+    BuiltinType {
         oid: 9004,
         typname: "vector",
         shown: "vector",
@@ -1331,7 +1346,7 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 80] = [
     },
 ];
 
-pub(crate) const EXTENSION_TYPES: [u32; 5] = [9000, 9001, 9002, 9003, 9004];
+pub(crate) const EXTENSION_TYPES: [u32; 6] = [9000, 9001, 9002, 9003, 9004, 9005];
 
 pub(crate) fn builtin_type(oid: u32) -> Option<&'static BuiltinType> {
     BUILTIN_TYPES

@@ -1428,7 +1428,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `binary_quantize`, `subvector` and `sparsevec` text input: **code written, unbuilt** (code-only
   mode, 2026-11-11, D437). Left: the stored types and arithmetic.
 - An ANN benchmark (recall and queries per second) against pgvector (D203).
-- A stored geometry type (hex EWKB, the binary wire format, a catalog entry) (D204).
+- A stored geometry type (hex EWKB, the binary wire format, a catalog entry) (D204). **Code written, unbuilt** (code-only mode, 2026-11-12,
+  D845). Left: typmods (`geometry(Point, 4326)`), `geography`, and the spatial functions returning `geometry`.
 - R-tree spatial indexes, with MySQL's `SPATIAL` keys (D204, sql.md).
 - Z and M coordinates, and geography on the WGS 84 spheroid (D204).
 - `ST_Transform` between any projections, overlay operations (union, intersection, buffer) and

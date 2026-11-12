@@ -35,6 +35,7 @@ const RANGE_LOWER_INFINITE: u8 = 0x08;
 const RANGE_UPPER_INFINITE: u8 = 0x10;
 const HSTORE_OID: u32 = crate::hstore::HSTORE_OID;
 const VECTOR_OID: u32 = crate::vector_type::VECTOR_OID;
+const GEOMETRY_OID: u32 = crate::geometry_type::GEOMETRY_OID;
 
 const IDENTIFIER_OIDS: [u32; 7] = [26, 28, 24, 2205, 2206, 4089, 4096];
 
@@ -207,6 +208,10 @@ pub fn encode_pg_binary(value: &Value, oid: u32, zone: TimeZone) -> SqlResult<Op
         }
         HSTORE_OID => match crate::hstore::hstore_of(value) {
             Some(hstore) => hstore_binary(hstore).ok_or_else(|| cannot_send(value, oid))?,
+            None => return Err(cannot_send(value, oid)),
+        },
+        GEOMETRY_OID => match crate::geometry_type::geometry_of(value) {
+            Some(ewkb) => ewkb.to_vec(),
             None => return Err(cannot_send(value, oid)),
         },
         VECTOR_OID => match crate::vector_type::vector_of(value) {
@@ -649,6 +654,9 @@ pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
         },
         HSTORE_OID => {
             return hstore_from_binary(bytes).map(|hstore| crate::hstore::to_text(&hstore));
+        }
+        GEOMETRY_OID => {
+            return crate::geometry_type::from_binary(bytes).map(|ewkb| crate::geometry_type::to_text(&ewkb));
         }
         VECTOR_OID => {
             return crate::vector_type::from_binary(bytes)

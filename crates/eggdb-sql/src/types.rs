@@ -131,11 +131,18 @@ impl DefinedType {
         oid: crate::vector_type::VECTOR_OID,
     };
 
+    /// The type `geometry`: PostGIS's geometry, kept as EWKB.
+    pub const GEOMETRY: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::geometry_type::GEOMETRY_OID,
+    };
+
     pub(crate) fn builtin_base_named(name: &str) -> Option<Self> {
         match name {
             "citext" => Some(Self::CITEXT),
             "hstore" => Some(Self::HSTORE),
             "vector" => Some(Self::VECTOR),
+            "geometry" => Some(Self::GEOMETRY),
             _ => None,
         }
     }
@@ -145,6 +152,7 @@ impl DefinedType {
             crate::citext::CITEXT_OID => Some("citext"),
             crate::hstore::HSTORE_OID => Some("hstore"),
             crate::vector_type::VECTOR_OID => Some("vector"),
+            crate::geometry_type::GEOMETRY_OID => Some("geometry"),
             _ => None,
         }
     }
@@ -179,6 +187,8 @@ pub enum DefinedValue {
     Hstore(crate::hstore::HstoreValue),
     /// A `vector` value: its single-precision floats.
     Vector(Vec<f32>),
+    /// A `geometry` value: its extended well-known binary, with its SRID.
+    Geometry(Vec<u8>),
 }
 
 impl DefinedValue {
@@ -194,6 +204,7 @@ impl DefinedValue {
             Self::Citext(_) => SqlType::Defined(DefinedType::CITEXT),
             Self::Hstore(_) => SqlType::Defined(DefinedType::HSTORE),
             Self::Vector(_) => SqlType::Defined(DefinedType::VECTOR),
+            Self::Geometry(_) => SqlType::Defined(DefinedType::GEOMETRY),
         }
     }
 
@@ -206,6 +217,7 @@ impl DefinedValue {
             Self::Citext(text) => text.clone(),
             Self::Hstore(hstore) => crate::hstore::to_text(hstore),
             Self::Vector(values) => crate::vector_type::to_text(values),
+            Self::Geometry(ewkb) => crate::geometry_type::to_text(ewkb),
         }
     }
 }
@@ -1409,6 +1421,7 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (DefinedValue::Citext(a), DefinedValue::Citext(b)) => crate::citext::compare(a, b),
         (DefinedValue::Hstore(a), DefinedValue::Hstore(b)) => crate::hstore::compare(a, b),
         (DefinedValue::Vector(a), DefinedValue::Vector(b)) => crate::vector_type::compare(a, b),
+        (DefinedValue::Geometry(a), DefinedValue::Geometry(b)) => crate::geometry_type::compare(a, b),
         (DefinedValue::Enum(_), _) => Ordering::Less,
         (_, DefinedValue::Enum(_)) => Ordering::Greater,
         (DefinedValue::Record(_), _) => Ordering::Less,
@@ -1419,6 +1432,8 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (_, DefinedValue::Citext(_)) => Ordering::Greater,
         (DefinedValue::Hstore(_), _) => Ordering::Less,
         (_, DefinedValue::Hstore(_)) => Ordering::Greater,
+        (DefinedValue::Vector(_), _) => Ordering::Less,
+        (_, DefinedValue::Vector(_)) => Ordering::Greater,
     }
 }
 
@@ -1446,6 +1461,11 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
                 out.push(18);
                 out.extend_from_slice(&(folded.len() as u64).to_le_bytes());
                 out.extend_from_slice(folded.as_bytes());
+            }
+            DefinedValue::Geometry(ewkb) => {
+                out.push(21);
+                out.extend_from_slice(&(ewkb.len() as u64).to_le_bytes());
+                out.extend_from_slice(ewkb);
             }
             DefinedValue::Vector(values) => {
                 out.push(20);

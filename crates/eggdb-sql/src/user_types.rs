@@ -593,6 +593,8 @@ fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
         crate::hstore::parse_text(text).map(crate::hstore::value)
     } else if defined == DefinedType::VECTOR {
         crate::vector_type::parse_text(text).map(crate::vector_type::value)
+    } else if defined == DefinedType::GEOMETRY {
+        crate::geometry_type::parse_text(text).map(crate::geometry_type::value)
     } else {
         Err(crate::encoding::corrupt("type definition"))
     }
@@ -609,6 +611,13 @@ fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) ->
             Some(text) => text.to_owned(),
             None => value.to_text().unwrap_or_default(),
         }));
+    }
+    if target == DefinedType::GEOMETRY {
+        return match (&value, text) {
+            (Value::Bytea(bytes), _) => crate::geometry_type::from_binary(bytes).map(crate::geometry_type::value),
+            (_, Some(text)) => crate::geometry_type::parse_text(text).map(crate::geometry_type::value),
+            _ => Err(cannot_cast(&value, target)),
+        };
     }
     if target == DefinedType::VECTOR {
         return match (&value, text) {

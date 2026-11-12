@@ -103,6 +103,9 @@ fn spatial_of(value: &Value) -> SqlResult<Option<Spatial>> {
             Some(eggdb_geo::from_wkt(text).map_err(geo_error)?)
         }
         Value::Bytea(bytes) => Some(eggdb_geo::from_wkb(bytes).map_err(geo_error)?),
+        other if crate::geometry_type::geometry_of(other).is_some() => Some(
+            eggdb_geo::from_wkb(crate::geometry_type::geometry_of(other).unwrap_or_default()).map_err(geo_error)?,
+        ),
         other => {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_FUNCTION,

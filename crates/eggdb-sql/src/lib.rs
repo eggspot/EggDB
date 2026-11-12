@@ -138,6 +138,7 @@ mod routing;
 mod pgrouting;
 mod report_pdf;
 mod zarr;
+mod geometry_type;
 mod sqlserver_security;
 mod blosc;
 mod new_files;
