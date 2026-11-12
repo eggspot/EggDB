@@ -1167,6 +1167,10 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
         }
     }
     session.remember_connection_settings();
+    if let Err(error) = session.fire_login_event_triggers() {
+        fatal(&mut wire, error.state(), error.message());
+        return;
+    }
     if startup.minor > 0 || !unrecognized_options.is_empty() {
         wire.outbox
             .negotiate_protocol_version(0, &unrecognized_options);

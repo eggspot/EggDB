@@ -144,3 +144,36 @@ fn event_trigger_functions_are_refused_outside_triggers_and_definitions_are_chec
     answer(&mut session, "DROP EVENT TRIGGER e");
     assert!(answer(&mut session, "DROP EVENT TRIGGER IF EXISTS e").contains("DROP EVENT TRIGGER"));
 }
+
+#[test]
+fn login_triggers_fire_once_per_login_and_can_refuse_it() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(&mut session, LOG);
+    answer(&mut session, LOGGER);
+    let filtered = refusal(
+        &mut session,
+        "CREATE EVENT TRIGGER on_login ON login WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION log_ddl()",
+    );
+    assert_eq!(filtered.state().code(), "0A000");
+    answer(&mut session, "CREATE EVENT TRIGGER on_login ON login EXECUTE FUNCTION log_ddl()");
+    answer(&mut session, "CREATE TABLE after_login (a integer)");
+    let mut arriving = Session::new(&store);
+    arriving.fire_login_event_triggers().expect("the login triggers run");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM ddl_log WHERE event = 'login' AND tag = 'login'"),
+        answer(&mut session, "SELECT 1 AS count")
+    );
+    answer(
+        &mut session,
+        "CREATE FUNCTION no_entry() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'closed for maintenance'; END $$",
+    );
+    answer(&mut session, "CREATE EVENT TRIGGER zz_closed ON login EXECUTE FUNCTION no_entry()");
+    let mut refused = Session::new(&store);
+    let error = refused.fire_login_event_triggers().expect_err("the login is refused");
+    assert!(error.message().contains("closed for maintenance"), "{error}");
+    assert_eq!(
+        answer(&mut session, "SELECT count(*) FROM ddl_log WHERE event = 'login'"),
+        answer(&mut session, "SELECT 1 AS count")
+    );
+}

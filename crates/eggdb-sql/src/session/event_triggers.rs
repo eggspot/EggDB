@@ -98,6 +98,12 @@ impl Session<'_> {
                     )
                     .at(event.position));
                 }
+                if event.text == event_triggers::LOGIN && !tags.is_empty() {
+                    return Err(SqlError::new(
+                        SqlState::FEATURE_NOT_SUPPORTED,
+                        "tag filtering is not supported for login event triggers",
+                    ));
+                }
                 if event.text != event_triggers::TABLE_REWRITE
                     && let Some(refused) =
                         tags.iter().find_map(|tag| event_triggers::filter_tag_error(tag))
@@ -219,6 +225,32 @@ impl Session<'_> {
             Ok(QueryResult::command("SELECT"))
         })
         .map(drop)
+    }
+
+    /// Fires PostgreSQL's `login` event triggers once a connection has authenticated, as
+    /// PostgreSQL 17 does: in name order, in one transaction. An error from one of them fails
+    /// the login; a listener reports it and closes the connection. Only a PostgreSQL-dialect
+    /// session fires them.
+    pub fn fire_login_event_triggers(&mut self) -> SqlResult<()> {
+        if self.dialect != Dialect::PostgreSql {
+            return Ok(());
+        }
+        let checked_role = Arc::make_mut(&mut self.settings).checked_role.take();
+        let stored = self.stored_event_triggers();
+        Arc::make_mut(&mut self.settings).checked_role = checked_role;
+        let triggers: Vec<EventTrigger> = stored?
+            .into_iter()
+            .filter(|trigger| trigger.fires_on(event_triggers::LOGIN, event_triggers::LOGIN))
+            .collect();
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let fired = FiredStatement {
+            tag: event_triggers::LOGIN,
+            object: None,
+            dropped: &[],
+        };
+        self.atomically(|session| session.fire_event_triggers(&triggers, event_triggers::LOGIN, &fired))
     }
 
     /// Runs a statement, firing PostgreSQL's event triggers around it when it is a DDL command

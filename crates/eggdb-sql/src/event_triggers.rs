@@ -7,12 +7,14 @@ use crate::store::KeyValueWrite;
 use crate::types::{SqlType, Value};
 use std::cell::{Cell, RefCell};
 
-pub(crate) const EVENTS: [&str; 4] = [
+pub(crate) const EVENTS: [&str; 5] = [
     DDL_COMMAND_START,
     DDL_COMMAND_END,
     SQL_DROP,
     TABLE_REWRITE,
+    LOGIN,
 ];
+pub(crate) const LOGIN: &str = "login";
 pub(crate) const DDL_COMMAND_START: &str = "ddl_command_start";
 pub(crate) const DDL_COMMAND_END: &str = "ddl_command_end";
 pub(crate) const SQL_DROP: &str = "sql_drop";
