@@ -133,3 +133,37 @@ fn a_dump_in_each_dialect_restores_in_that_dialect_to_the_same_rows() {
         );
     }
 }
+
+#[test]
+fn a_postgresql_dump_carries_roles_grants_routines_and_triggers() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE ROLE reader;
+         CREATE ROLE ada LOGIN PASSWORD 'secret';
+         GRANT reader TO ada;
+         CREATE TABLE notes (id integer PRIMARY KEY, body text, touched integer DEFAULT 0);
+         GRANT SELECT ON notes TO reader;
+         CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.touched := 1; RETURN NEW; END $$;
+         CREATE TRIGGER notes_touch BEFORE INSERT ON notes FOR EACH ROW EXECUTE FUNCTION touch();
+         INSERT INTO notes (id, body) VALUES (1, 'hi');",
+    );
+    let mut dump = Vec::new();
+    let report = dump_sql(&mut session, Dialect::PostgreSql, &mut dump).unwrap();
+    assert_eq!((report.roles, report.routines, report.triggers), (2, 1, 1));
+    assert!(report.grants >= 1);
+    let text = String::from_utf8(dump).unwrap();
+    for expected in [
+        "CREATE ROLE reader NOLOGIN;",
+        "CREATE ROLE ada LOGIN PASSWORD 'SCRAM-SHA-256$",
+        "GRANT reader TO ada;",
+        "GRANT SELECT ON notes TO reader;",
+        "CREATE FUNCTION touch()",
+        "CREATE TRIGGER notes_touch",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(text.find("INSERT INTO notes").unwrap() < text.find("CREATE TRIGGER notes_touch").unwrap());
+    assert!(!text.contains("secret"));
+}

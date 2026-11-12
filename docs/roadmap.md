@@ -1505,7 +1505,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `eggdb dump`: one logical file of the whole database (schemas, rows, collections, roles,
   routines), where `eggdb export`'s eggdb-jsonl copies raw key-value entries (D24, D93).
 - `eggdb export --sql` with views, sequences, comments and every constraint (D24, PR #86). **Code written,
-  unbuilt** for the PostgreSQL dialect (code-only mode, 2026-11-11, D446).
+  unbuilt** for the PostgreSQL dialect (code-only mode, 2026-11-11, D446). Roles, memberships, table grants, routines and triggers
+  in the PostgreSQL dump: **code written, unbuilt** (code-only mode, 2026-11-12, D842).
 - Immutable (WORM) backups that ransomware can't alter (D53).
 - Backups through `eggdb serve`'s clients, compaction of a file `serve` holds, and progress
   reports (D141).

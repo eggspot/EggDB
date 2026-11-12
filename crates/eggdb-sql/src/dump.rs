@@ -25,6 +25,94 @@ pub struct DumpReport {
     pub constraints: u64,
     /// Views written.
     pub views: u64,
+    /// Roles written, with their memberships and password verifiers.
+    pub roles: u64,
+    /// Table privileges granted to roles.
+    pub grants: u64,
+    /// Functions and procedures written.
+    pub routines: u64,
+    /// Triggers written, after the rows so loading fires none.
+    pub triggers: u64,
+}
+
+fn sql_literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+fn write_roles(session: &mut Session<'_>, out: &mut dyn Write, report: &mut DumpReport) -> SqlResult<()> {
+    let roles = session.read(|reader, _| crate::roles::stored_roles(reader))?;
+    for role in &roles {
+        let mut options = Vec::new();
+        if role.superuser {
+            options.push("SUPERUSER".to_owned());
+        }
+        if role.create_database {
+            options.push("CREATEDB".to_owned());
+        }
+        options.push(if role.login { "LOGIN" } else { "NOLOGIN" }.to_owned());
+        if let Some(verifier) = &role.scram_verifier {
+            options.push(format!("PASSWORD {}", sql_literal(verifier)));
+        }
+        writeln!(out, "CREATE ROLE {} {};", name_in(Dialect::PostgreSql, &role.name), options.join(" ")).map_err(io_error)?;
+        report.roles += 1;
+    }
+    for role in &roles {
+        for parent in &role.member_of {
+            writeln!(out, "GRANT {} TO {};", name_in(Dialect::PostgreSql, parent), name_in(Dialect::PostgreSql, &role.name)).map_err(io_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_grants(session: &mut Session<'_>, out: &mut dyn Write, report: &mut DumpReport) -> SqlResult<()> {
+    let rows = query_rows(
+        session,
+        "SELECT grantee, table_schema, table_name, privilege_type FROM information_schema.role_table_grants WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name, grantee, privilege_type",
+    )?;
+    let roles: Vec<String> = session.read(|reader, _| crate::roles::stored_roles(reader))?.into_iter().map(|role| role.name).collect();
+    for row in rows {
+        let grantee = text_at(&row, 0);
+        if !roles.contains(&grantee) && grantee != "PUBLIC" {
+            continue;
+        }
+        let schema = text_at(&row, 1);
+        let table = if schema == crate::schemas::DEFAULT_SCHEMA {
+            name_in(Dialect::PostgreSql, &text_at(&row, 2))
+        } else {
+            format!("{}.{}", name_in(Dialect::PostgreSql, &schema), name_in(Dialect::PostgreSql, &text_at(&row, 2)))
+        };
+        let grantee = if grantee == "PUBLIC" { grantee } else { name_in(Dialect::PostgreSql, &grantee) };
+        writeln!(out, "GRANT {} ON {table} TO {grantee};", text_at(&row, 3)).map_err(io_error)?;
+        report.grants += 1;
+    }
+    Ok(())
+}
+
+fn statement_text(text: &str) -> String {
+    let trimmed = text.trim().trim_end_matches(';').trim_end();
+    format!("{trimmed};")
+}
+
+fn write_routines(session: &mut Session<'_>, out: &mut dyn Write, report: &mut DumpReport) -> SqlResult<()> {
+    let named = session.read(|reader, _| crate::routines::every_routine(reader))?;
+    for routines in named {
+        for routine in routines.routines.iter().filter(|routine| routine.dialect == Dialect::PostgreSql) {
+            writeln!(out, "\n{}", statement_text(&routine.text)).map_err(io_error)?;
+            report.routines += 1;
+        }
+    }
+    Ok(())
+}
+
+fn write_triggers(session: &mut Session<'_>, out: &mut dyn Write, report: &mut DumpReport) -> SqlResult<()> {
+    let tables = session.read(|reader, _| crate::triggers::every_trigger(reader))?;
+    for table in tables {
+        for trigger in table.triggers.iter().filter(|trigger| trigger.dialect == Dialect::PostgreSql) {
+            writeln!(out, "\n{}", statement_text(&trigger.text)).map_err(io_error)?;
+            report.triggers += 1;
+        }
+    }
+    Ok(())
 }
 
 fn query_rows(session: &mut Session<'_>, text: &str) -> SqlResult<Vec<Vec<Value>>> {
@@ -431,6 +519,7 @@ pub fn dump_sql(
         writeln!(out, "SET FOREIGN_KEY_CHECKS=0;").map_err(io_error)?;
     }
     if dialect == Dialect::PostgreSql {
+        write_roles(session, out, &mut report)?;
         write_sequences(session, out, &mut report)?;
     }
     for relation in &relations {
@@ -486,7 +575,10 @@ pub fn dump_sql(
     }
     if dialect == Dialect::PostgreSql {
         write_constraints(session, out, &mut report)?;
+        write_routines(session, out, &mut report)?;
         write_views(session, out, &mut report)?;
+        write_grants(session, out, &mut report)?;
+        write_triggers(session, out, &mut report)?;
     } else {
         report.views_skipped = relations
             .iter()
