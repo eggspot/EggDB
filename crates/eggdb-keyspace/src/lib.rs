@@ -63,6 +63,36 @@ pub trait KeysRead {
             }
         })
     }
+    /// Calls `visit` with each key from `start` up to but not including `end` (to the last key
+    /// when `end` is `None`) and its stored bytes, in key order, until it returns `false` or an
+    /// error. A keyspace on an ordered store seeks to `start` instead of reading the keys before.
+    fn visit_range(&self, start: &[u8], end: Option<&[u8]>, visit: &mut EntryVisitor<'_>) -> Result<(), String> {
+        self.visit_keys(&mut |key| {
+            if key.as_slice() < start {
+                return Ok(true);
+            }
+            if end.is_some_and(|end| key.as_slice() >= end) {
+                return Ok(false);
+            }
+            match self.get(&key)? {
+                Some(value) => visit(&key, &value),
+                None => Ok(true),
+            }
+        })
+    }
+}
+
+/// The first key after every key that starts with `prefix`, or `None` when no key comes after
+/// them all (the prefix is empty or only `0xFF` bytes).
+pub fn keys_after_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.pop() {
+        if last < u8::MAX {
+            end.push(last + 1);
+            return Some(end);
+        }
+    }
+    None
 }
 
 /// Changes one database's keys within a transaction.
@@ -152,6 +182,19 @@ impl KeysRead for MemoryKeys<'_> {
             .map
             .range(prefix.to_vec()..)
             .take_while(|(key, _)| key.starts_with(prefix))
+        {
+            if !visit(key, value)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_range(&self, start: &[u8], end: Option<&[u8]>, visit: &mut EntryVisitor<'_>) -> Result<(), String> {
+        for (key, value) in self
+            .map
+            .range(start.to_vec()..)
+            .take_while(|(key, _)| end.is_none_or(|end| key.as_slice() < end))
         {
             if !visit(key, value)? {
                 break;

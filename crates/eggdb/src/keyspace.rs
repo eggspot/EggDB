@@ -120,6 +120,16 @@ impl KeysRead for ReadKeys<'_> {
         };
         visit_entries(collection.scan_prefix(prefix), visit)
     }
+
+    fn visit_range(&self, start: &[u8], end: Option<&[u8]>, visit: &mut EntryVisitor<'_>) -> Result<(), String> {
+        let Some(collection) = &self.collection else {
+            return Ok(());
+        };
+        match end {
+            Some(end) => visit_entries(collection.scan(start..end), visit),
+            None => visit_entries(collection.scan(start..), visit),
+        }
+    }
 }
 
 struct WriteKeys<'t, 'db> {
@@ -154,6 +164,13 @@ impl KeysRead for WriteKeys<'_, '_> {
 
     fn visit_prefix(&self, prefix: &[u8], visit: &mut EntryVisitor<'_>) -> Result<(), String> {
         visit_entries(self.collection.scan_prefix(prefix), visit)
+    }
+
+    fn visit_range(&self, start: &[u8], end: Option<&[u8]>, visit: &mut EntryVisitor<'_>) -> Result<(), String> {
+        match end {
+            Some(end) => visit_entries(self.collection.scan(start..end), visit),
+            None => visit_entries(self.collection.scan(start..), visit),
+        }
     }
 }
 

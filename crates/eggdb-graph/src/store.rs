@@ -44,26 +44,62 @@ fn label_prefix(label: &str) -> Vec<u8> {
     key
 }
 
+const INTEGER_TAG: u8 = b'i';
+const FLOAT_TAG: u8 = b'f';
+const STRING_TAG: u8 = b's';
+const BOOLEAN_TAG: u8 = b'b';
+const STRING_END: [u8; 2] = [0, 1];
+const ESCAPED_ZERO: [u8; 2] = [0, 0xFF];
+const ORDERED_INDEXES: u8 = 2;
+
+fn ordered_integer(number: i64) -> [u8; 8] {
+    (number as u64 ^ (1 << 63)).to_be_bytes()
+}
+
+fn ordered_float(number: f64) -> [u8; 8] {
+    let bits = number.to_bits();
+    let ordered = if bits >> 63 == 1 { !bits } else { bits | (1 << 63) };
+    ordered.to_be_bytes()
+}
+
+fn tagged(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 1);
+    out.push(tag);
+    out.extend_from_slice(body);
+    out
+}
+
+fn escaped_text(text: &str, out: &mut Vec<u8>) {
+    for &byte in text.as_bytes() {
+        if byte == 0 {
+            out.extend_from_slice(&ESCAPED_ZERO);
+        } else {
+            out.push(byte);
+        }
+    }
+}
+
 fn index_bytes(value: &Value) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     match value {
         Value::Integer(number) => {
-            out.push(b'i');
-            out.extend_from_slice(&number.to_be_bytes());
+            out.push(INTEGER_TAG);
+            out.extend_from_slice(&ordered_integer(*number));
         }
         Value::Float(number) if number.fract() == 0.0 && (-9.2e18..9.2e18).contains(number) => {
-            out.push(b'i');
-            out.extend_from_slice(&(*number as i64).to_be_bytes());
+            out.push(INTEGER_TAG);
+            out.extend_from_slice(&ordered_integer(*number as i64));
         }
         Value::Float(number) if !number.is_nan() => {
-            out.push(b'f');
-            out.extend_from_slice(&number.to_bits().to_be_bytes());
+            out.push(FLOAT_TAG);
+            out.extend_from_slice(&ordered_float(*number));
         }
         Value::String(text) => {
-            out.push(b's');
-            out.extend_from_slice(text.as_bytes());
+            out.push(STRING_TAG);
+            escaped_text(text, &mut out);
+            out.extend_from_slice(&STRING_END);
         }
-        Value::Boolean(flag) => out.extend_from_slice(&[b'b', u8::from(*flag)]),
+        Value::Boolean(flag) => out.extend_from_slice(&[BOOLEAN_TAG, u8::from(*flag)]),
         _ => return None,
     }
     Some(out)
@@ -71,11 +107,32 @@ fn index_bytes(value: &Value) -> Option<Vec<u8>> {
 
 fn value_of_index_bytes(bytes: &[u8]) -> Option<Value> {
     let (tag, rest) = bytes.split_first()?;
-    Some(match tag {
-        b'i' => Value::Integer(i64::from_be_bytes(rest.try_into().ok()?)),
-        b'f' => Value::Float(f64::from_bits(u64::from_be_bytes(rest.try_into().ok()?))),
-        b's' => Value::String(String::from_utf8(rest.to_vec()).ok()?),
-        b'b' => Value::Boolean(rest.first().copied()? != 0),
+    Some(match *tag {
+        INTEGER_TAG => Value::Integer((u64::from_be_bytes(rest.try_into().ok()?) ^ (1 << 63)) as i64),
+        FLOAT_TAG => {
+            let ordered = u64::from_be_bytes(rest.try_into().ok()?);
+            let bits = if ordered >> 63 == 1 { ordered & !(1 << 63) } else { !ordered };
+            Value::Float(f64::from_bits(bits))
+        }
+        STRING_TAG => {
+            let body = rest.strip_suffix(&STRING_END)?;
+            let mut text = Vec::with_capacity(body.len());
+            let mut at = 0;
+            while at < body.len() {
+                if body[at] == 0 {
+                    if body.get(at + 1) != Some(&0xFF) {
+                        return None;
+                    }
+                    text.push(0);
+                    at += 2;
+                } else {
+                    text.push(body[at]);
+                    at += 1;
+                }
+            }
+            Value::String(String::from_utf8(text).ok()?)
+        }
+        BOOLEAN_TAG => Value::Boolean(rest.first().copied()? != 0),
         _ => return None,
     })
 }
@@ -158,6 +215,79 @@ impl IndexRange {
         self.unusable || (!self.impossible && self.lower.is_none() && self.upper.is_none() && self.prefix.is_none())
     }
 
+    /// The key ranges after a rule's prefix that hold every value in the range: one per kind
+    /// of value the bounds compare with (integers and floats are kept apart, so a number range
+    /// reads both), each from its lowest possible key to the first key after its highest.
+    fn key_ranges(&self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        if self.impossible {
+            return Vec::new();
+        }
+        if let Some(prefix) = &self.prefix {
+            let mut start = vec![STRING_TAG];
+            escaped_text(prefix, &mut start);
+            let end = eggdb_keyspace::keys_after_prefix(&start);
+            return vec![(start, end)];
+        }
+        let lower = self.lower.as_ref().map(|(value, _)| value);
+        let upper = self.upper.as_ref().map(|(value, _)| value);
+        let number = |value: &Value| match value {
+            Value::Integer(number) => Some(*number as f64),
+            Value::Float(number) => Some(*number),
+            _ => None,
+        };
+        let numeric = lower.or(upper).is_some_and(|value| number(value).is_some());
+        if numeric {
+            let low = lower.and_then(number);
+            let high = upper.and_then(number);
+            if low.is_some_and(f64::is_nan) || high.is_some_and(f64::is_nan) {
+                return Vec::new();
+            }
+            let integer_bound = |bound: f64| {
+                if bound <= i64::MIN as f64 {
+                    i64::MIN
+                } else if bound >= i64::MAX as f64 {
+                    i64::MAX
+                } else {
+                    bound as i64
+                }
+            };
+            let integers_start = low.map_or_else(
+                || vec![INTEGER_TAG],
+                |low| tagged(INTEGER_TAG, &ordered_integer(integer_bound(low.floor()))),
+            );
+            let integers_end = match high {
+                Some(high) => eggdb_keyspace::keys_after_prefix(&tagged(INTEGER_TAG, &ordered_integer(integer_bound(high.ceil())))),
+                None => Some(vec![INTEGER_TAG + 1]),
+            };
+            let floats_start = low.map_or_else(|| vec![FLOAT_TAG], |low| tagged(FLOAT_TAG, &ordered_float(low)));
+            let floats_end = match high {
+                Some(high) => eggdb_keyspace::keys_after_prefix(&tagged(FLOAT_TAG, &ordered_float(high))),
+                None => Some(vec![FLOAT_TAG + 1]),
+            };
+            return vec![(floats_start, floats_end), (integers_start, integers_end)];
+        }
+        let tag = match lower.or(upper) {
+            Some(Value::String(_)) => STRING_TAG,
+            Some(Value::Boolean(_)) => BOOLEAN_TAG,
+            _ => return Vec::new(),
+        };
+        let bound = |value: Option<&Value>| match value {
+            Some(Value::String(text)) => {
+                let mut key = vec![STRING_TAG];
+                escaped_text(text, &mut key);
+                Some(key)
+            }
+            Some(Value::Boolean(flag)) => Some(vec![BOOLEAN_TAG, u8::from(*flag)]),
+            _ => None,
+        };
+        let start = bound(lower).unwrap_or_else(|| vec![tag]);
+        let end = match bound(upper) {
+            Some(high) => eggdb_keyspace::keys_after_prefix(&high),
+            None => Some(vec![tag + 1]),
+        };
+        vec![(start, end)]
+    }
+
     fn holds(&self, value: &Value) -> bool {
         if self.impossible {
             return false;
@@ -184,13 +314,9 @@ impl IndexRange {
 }
 
 fn index_prefix(rule: &str, values: &[&Value]) -> Option<Vec<u8>> {
-    let mut key = vec![PROPERTY_INDEX];
-    key.extend_from_slice(rule.as_bytes());
-    key.push(0);
+    let mut key = rule_prefix(rule);
     for value in values {
-        let bytes = index_bytes(value)?;
-        key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-        key.extend_from_slice(&bytes);
+        key.extend_from_slice(&index_bytes(value)?);
     }
     Some(key)
 }
@@ -439,7 +565,7 @@ impl GraphRead<'_> {
     /// Whether the label and property indexes hold every node; until the first write after
     /// they came in, lookups scan instead.
     pub(crate) fn indexed(&self) -> GraphResult<bool> {
-        Ok(self.keys.get(INDEXES_BUILT).map_err(storage)?.is_some())
+        Ok(self.keys.get(INDEXES_BUILT).map_err(storage)?.as_deref() == Some(&[ORDERED_INDEXES][..]))
     }
 
     /// The nodes with `label`, from the label index, or `None` while it is not built.
@@ -470,23 +596,29 @@ impl GraphRead<'_> {
         }
         let prefix = rule_prefix(&rule.name);
         let mut found = Vec::new();
-        for (key, _) in self.keys.scan(&prefix).map_err(storage)? {
-            let Some(rest) = key.get(prefix.len()..) else {
-                continue;
+        for (start, end) in range.key_ranges() {
+            let start = [prefix.as_slice(), start.as_slice()].concat();
+            let end = match end {
+                Some(end) => Some([prefix.as_slice(), end.as_slice()].concat()),
+                None => eggdb_keyspace::keys_after_prefix(&prefix),
             };
-            let Some(length) = rest.get(..4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_be_bytes) else {
-                continue;
-            };
-            let length = length as usize;
-            let (Some(bytes), Some(id)) = (rest.get(4..4 + length), rest.get(4 + length..)) else {
-                continue;
-            };
-            let (Some(value), Ok(id)) = (value_of_index_bytes(bytes), <[u8; 8]>::try_from(id)) else {
-                continue;
-            };
-            if range.holds(&value) {
-                found.push(u64::from_be_bytes(id));
-            }
+            self.keys
+                .visit_range(&start, end.as_deref(), &mut |key, _| {
+                    let Some(rest) = key.get(prefix.len()..) else {
+                        return Ok(true);
+                    };
+                    let Some(split) = rest.len().checked_sub(8) else {
+                        return Ok(true);
+                    };
+                    let (bytes, id) = rest.split_at(split);
+                    if let (Some(value), Ok(id)) = (value_of_index_bytes(bytes), <[u8; 8]>::try_from(id))
+                        && range.holds(&value)
+                    {
+                        found.push(u64::from_be_bytes(id));
+                    }
+                    Ok(true)
+                })
+                .map_err(storage)?;
         }
         Ok(Some(found))
     }
@@ -528,6 +660,9 @@ impl GraphWrite<'_> {
         if self.read().indexed()? {
             return Ok(());
         }
+        for (entry, _) in self.keys.scan(&[PROPERTY_INDEX]).map_err(storage)? {
+            self.keys.delete(&entry).map_err(storage)?;
+        }
         let rules = self.read().schema_rules()?;
         for id in self.read().node_ids()? {
             if let Some(node) = self.read().node(id)? {
@@ -536,7 +671,7 @@ impl GraphWrite<'_> {
                 }
             }
         }
-        self.keys.put(INDEXES_BUILT, &[1]).map_err(storage)
+        self.keys.put(INDEXES_BUILT, &[ORDERED_INDEXES]).map_err(storage)
     }
 
     fn fill_rule_index(&mut self, rule: &SchemaRule) -> GraphResult<()> {
@@ -748,5 +883,39 @@ impl GraphWrite<'_> {
             }
         }
         self.keys.delete(&key(NODE, id)).map_err(storage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_keys_sort_as_their_values_and_read_back() {
+        let values = [
+            Value::Integer(i64::MIN),
+            Value::Integer(-5),
+            Value::Integer(0),
+            Value::Integer(7),
+            Value::Integer(i64::MAX),
+        ];
+        let keys: Vec<Vec<u8>> = values.iter().filter_map(index_bytes).collect();
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        let floats = [Value::Float(-2.5), Value::Float(-0.25), Value::Float(0.5), Value::Float(1e300)];
+        let keys: Vec<Vec<u8>> = floats.iter().filter_map(index_bytes).collect();
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        let texts = [Value::String("a".into()), Value::String("a\0b".into()), Value::String("ab".into()), Value::String("b".into())];
+        let keys: Vec<Vec<u8>> = texts.iter().filter_map(index_bytes).collect();
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        for value in values.iter().chain(&floats).chain(&texts) {
+            assert_eq!(value_of_index_bytes(&index_bytes(value).unwrap()).as_ref(), Some(value));
+        }
+        let mut range = IndexRange::default();
+        range.narrow(crate::cypher::Operator::GreaterOrEqual, Value::Float(1.5));
+        range.narrow(crate::cypher::Operator::Less, Value::Integer(4));
+        let ranges = range.key_ranges();
+        assert_eq!(ranges.len(), 2);
+        let two = index_bytes(&Value::Integer(2)).unwrap();
+        assert!(ranges.iter().any(|(start, end)| *start <= two && end.as_ref().is_none_or(|end| two < *end)));
     }
 }

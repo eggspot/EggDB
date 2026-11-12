@@ -1034,3 +1034,4 @@ its full title with its status.
 - [D1007](decisions/D1007.md) Code-only batch 655 (M13): SQL/PGQ property graphs and GRAPH_TABLE over tables
 - [D1008](decisions/D1008.md) Code-only batch 656 (M13): graph algorithms over SQL/PGQ property graphs
 - [D1009](decisions/D1009.md) Code-only batch 657 (M13): several path patterns and bounded quantified edges in GRAPH_TABLE
+- [D1010](decisions/D1010.md) Code-only batch 658 (M13): graph property indexes in an order-preserving encoding read as key ranges
