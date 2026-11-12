@@ -20,6 +20,7 @@ struct Node {
     kind: Kind,
     parent: Option<usize>,
     children: Vec<usize>,
+    span: (usize, usize),
 }
 
 /// A parsed XML document or content fragment, its nodes in document order.
@@ -134,6 +135,7 @@ impl Document {
             kind,
             parent: Some(parent),
             children: Vec::new(),
+            span: (0, 0),
         });
         self.nodes[parent].children.push(id);
         Ok(id)
@@ -146,12 +148,14 @@ impl Document {
                 kind: Kind::Document,
                 parent: None,
                 children: Vec::new(),
+                span: (0, text.len()),
             }],
         };
         let mut reader = Reader { text, at: 0 };
         let mut open: Vec<(usize, String)> = Vec::new();
         while reader.at < text.len() {
             let parent = open.last().map_or(0, |(id, _)| *id);
+            let start = reader.at;
             if reader.peek() != Some('<') {
                 let start = reader.at;
                 let end = reader.rest().find('<').map_or(text.len(), |found| start + found);
@@ -197,7 +201,7 @@ impl Document {
                     return Err(invalid("an end tag is not closed"));
                 }
                 match open.pop() {
-                    Some((_, expected)) if expected == name => {}
+                    Some((id, expected)) if expected == name => document.nodes[id].span.1 = reader.at,
                     Some((_, expected)) => return Err(invalid(format!("expected </{expected}>, found </{name}>"))),
                     None => return Err(invalid(format!("</{name}> closes nothing"))),
                 }
@@ -208,7 +212,8 @@ impl Document {
                 loop {
                     reader.skip_space();
                     if reader.eat("/>") {
-                        document.add(Kind::Element { name, attributes }, parent)?;
+                        let id = document.add(Kind::Element { name, attributes }, parent)?;
+                        document.nodes[id].span = (start, reader.at);
                         break;
                     }
                     if reader.eat(">") {
@@ -216,6 +221,7 @@ impl Document {
                             return Err(invalid(format!("XML may nest at most {MOST_DEPTH} elements")));
                         }
                         let id = document.add(Kind::Element { name: name.clone(), attributes }, parent)?;
+                        document.nodes[id].span = (start, reader.at);
                         open.push((id, name));
                         break;
                     }
@@ -1186,7 +1192,8 @@ fn ordered(mut nodes: Vec<Target>) -> Vec<Target> {
 }
 
 /// The internal names of the XPath functions.
-pub(crate) const FUNCTIONS: [&str; 7] = [
+pub(crate) const FUNCTIONS: [&str; 8] = [
+    "updatexml",
     "xpath",
     "xpath_exists",
     "xml_is_well_formed",
@@ -1200,7 +1207,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "xpath" => SqlType::Array(ArrayElement::Text),
         "xpath_exists" | "xml_is_well_formed" | "xml_is_well_formed_document" | "xml_is_well_formed_content" => SqlType::Boolean,
-        "extractvalue" => SqlType::Text,
+        "extractvalue" | "updatexml" => SqlType::Text,
         "existsnode" => SqlType::Integer,
         _ => return None,
     })
@@ -1252,6 +1259,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             Outcome::Nodes(nodes) => Value::Text(nodes.iter().map(|node| document.direct_text(*node)).collect::<Vec<_>>().join(" ")),
             other => Value::Text(document.string_of(&other)),
         }),
+        ("updatexml", [xml, path, replacement]) => evaluated(xml, path).map(|(document, outcome)| match outcome {
+            Outcome::Nodes(nodes) => match nodes.as_slice() {
+                [Target::Node(id)] if matches!(document.nodes[*id].kind, Kind::Element { .. }) => {
+                    let (start, end) = document.nodes[*id].span;
+                    Value::Text(format!("{}{replacement}{}", &xml[..start], &xml[end..]))
+                }
+                _ => Value::Text(xml.clone()),
+            },
+            _ => Value::Text(xml.clone()),
+        }),
         ("existsnode", [xml, path, ..]) => {
             evaluated(xml, path).map(|(_, outcome)| Value::Integer(i32::from(Document::boolean_of(&outcome))))
         }
@@ -1299,6 +1316,17 @@ mod tests {
             panic!("an array");
         };
         assert_eq!(nodes.items, vec![Value::Text("<price>2</price>".to_owned())]);
+        let updated = function(
+            "updatexml",
+            &[
+                Value::Text("<a><b>1</b>  <c/></a>".to_owned()),
+                Value::Text("/a/c".to_owned()),
+                Value::Text("<c>2</c>".to_owned()),
+            ],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(updated, Value::Text("<a><b>1</b>  <c>2</c></a>".to_owned()));
         let exists = function("xpath_exists", &[Value::Text("//item[@id=3]".to_owned()), Value::Text(xml.to_owned())]).unwrap().unwrap();
         assert_eq!(exists, Value::Boolean(false));
     }
