@@ -1,8 +1,11 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 16] = [
+pub(crate) const FUNCTIONS: [&str; 19] = [
     "eggdb_pdf_table",
+    "eggdb_route_dijkstra",
+    "eggdb_route_reach",
+    "eggdb_route_components",
     "modbus_decode",
     "spreadsheet_recalculate",
     "row_pattern_matches",
@@ -413,6 +416,27 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             [Value::Bytea(file)] if name == "geotiff_info" => crate::geotiff::info(file).and_then(jsonb),
             [Value::Bytea(payload)] => crate::sparkplug::decode(payload).and_then(jsonb),
             _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes bytea"))),
+        });
+    }
+    if name.starts_with("eggdb_route_") {
+        let edges = values.first().and_then(Value::to_text);
+        let whole = |at: usize| values.get(at).and_then(Value::as_integer);
+        let flag = |at: usize| match values.get(at) {
+            Some(Value::Boolean(flag)) => Some(*flag),
+            None => Some(true),
+            _ => None,
+        };
+        return Some(match (name, edges) {
+            ("eggdb_route_dijkstra", Some(edges)) => match (whole(1), whole(2), flag(3)) {
+                (Some(start), Some(finish), Some(directed)) => crate::routing::dijkstra(&edges, start, finish, directed).and_then(jsonb),
+                _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_dijkstra takes edges, a start, an end and whether the graph is directed")),
+            },
+            ("eggdb_route_reach", Some(edges)) => match (whole(1), values.get(2).and_then(|value| value.to_text()).and_then(|text| text.parse::<f64>().ok()), flag(3)) {
+                (Some(start), Some(distance), Some(directed)) => crate::routing::driving_distance(&edges, start, distance, directed).and_then(jsonb),
+                _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_reach takes edges, a start, a distance and whether the graph is directed")),
+            },
+            ("eggdb_route_components", Some(edges)) => crate::routing::connected_components(&edges).and_then(jsonb),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes the edges as jsonb first"))),
         });
     }
     if name == "modbus_decode" {

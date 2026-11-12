@@ -1381,7 +1381,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Raster, GeoTIFF and Cloud-Optimized GeoTIFF (D57). GeoTIFF headers (`geotiff_info`): **code written, unbuilt**
   (code-only mode, 2026-11-12, D710); pixels (`read_geotiff`): **code written, unbuilt** (code-only mode, 2026-11-12,
   D711). Left: raster types and operations.
-- Topology and routing at pgRouting's level (D57).
+- Topology and routing at pgRouting's level (D57). Routing (`pgr_dijkstra`, `pgr_drivingDistance`,
+  `pgr_connectedComponents`): **code written, unbuilt** (code-only mode, 2026-11-12, D782). Left: topology and the rest
+  of pgRouting's functions.
 - The OGC APIs (D57). OGC API - Features (Core, GeoJSON) on `--rest-listen`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D781). Left: CRS (Part 2), CQL2 filters, Tiles and Maps.
 - An ONNX runtime with `embed(model, text)` on local models (D31, D205).

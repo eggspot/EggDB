@@ -2720,6 +2720,7 @@ impl<'s> Session<'s> {
             "eggdb_shredding" => ("eggdb_shredding", crate::shredding::SHREDDING_SCRIPT),
             "eggdb_iot" => ("eggdb_iot", crate::iot::IOT_SCRIPT),
             "eggdb_advisor" => ("eggdb_advisor", crate::advisor::ADVISOR_SCRIPT),
+            "pgrouting" => ("pgrouting", crate::pgrouting::PGROUTING_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

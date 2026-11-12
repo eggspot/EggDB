@@ -3233,6 +3233,14 @@ Geometries are written as WKT or EWKT text (`'SRID=4326;POINT(-71.06 42.36)'`) o
   NAD83 (26901–26923) on their ellipsoids (D741), and `ST_GeoHash(point [, precision])` gives a
   point's geohash (20 characters unless a precision from 1 to 20 is given).
 
+Routing (D782): `CREATE EXTENSION pgrouting` adds pgRouting's `pgr_dijkstra(edges_sql, start, end [, directed])`
+(the cheapest path, one row per step with `seq`, `path_seq`, `node`, `edge`, `cost` and `agg_cost`, the last row's
+edge -1), `pgr_drivingDistance(edges_sql, start, distance [, directed])` (every node within the distance, with the edge
+it is reached by) and `pgr_connectedComponents(edges_sql)`, where `edges_sql` returns pgRouting's columns `id`,
+`source`, `target`, `cost` and optionally `reverse_cost` (a negative cost means no way in that direction). The graph
+code underneath is EggDB's own: `eggdb_route_dijkstra(edges, start, end, directed)`, `eggdb_route_reach(edges, start,
+distance, directed)` and `eggdb_route_components(edges)` take the edges as a JSON array and return JSON.
+
 Geometries of two different SRIDs are refused, as in PostGIS. Not yet: a stored geometry type
 (values are text, shown as EWKT rather than hex EWKB), spatial indexes (R-tree/GiST), Z and M
 coordinates, geography measures on the spheroid, transformations between other SRIDs, set operations

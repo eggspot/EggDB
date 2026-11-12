@@ -126,6 +126,8 @@ mod iot;
 mod modbus;
 mod remote_models;
 mod advisor;
+mod routing;
+mod pgrouting;
 mod report_pdf;
 mod zarr;
 mod new_files;
