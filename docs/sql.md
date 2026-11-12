@@ -3452,6 +3452,20 @@ ASCIIHex), and fonts with a `ToUnicode` map are read through it; other fonts' by
 Latin-1. Encrypted PDFs, text drawn as images and fonts without a usable map give no or wrong
 text.
 
+## Image metadata: image_metadata
+
+`image_metadata(file bytea)` returns a JPEG, PNG, TIFF or WebP image's metadata as `jsonb` (D731): its `format`,
+`width` and `height`, its EXIF tags under `exif` (`image` for the main directory, `exif` for camera settings such
+as `ExposureTime`, `FNumber`, `DateTimeOriginal` and `LensModel`, and `gps` with decimal `latitude` and
+`longitude` added), and its XMP packet as text under `xmp`:
+
+```sql
+SELECT id, image_metadata(body)->'exif'->'gps'->>'latitude' FROM photos;
+```
+
+Tags without a name in EggDB's table appear as `Tag0x1234`; maker notes are left out. Other files fail with
+SQLSTATE `22023`.
+
 ## Industry messages: FIX, HL7 v2 and EDIFACT
 
 Messages from trading, healthcare and supply-chain systems parse into `jsonb` with plain

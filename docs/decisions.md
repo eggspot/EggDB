@@ -755,3 +755,4 @@ its full title with its status.
 - [D728](decisions/D728.md) Code-only batch 376 (M13): graph label and property indexes kept with every write and used by `MATCH`
 - [D729](decisions/D729.md) Code-only batch 377 (M13): `WHERE n.property = value` conditions use the graph indexes
 - [D730](decisions/D730.md) Code-only batch 378 (M16): CQL `list`, `set`, `map` and `tuple` columns, literals and binary values
+- [D731](decisions/D731.md) Code-only batch 379 (M16): `image_metadata`, EXIF and XMP from JPEG, PNG, TIFF and WebP images

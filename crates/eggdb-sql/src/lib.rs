@@ -99,6 +99,7 @@ mod mysql_named_locks;
 mod mysql_set;
 mod mysql_variables;
 mod name_resolution;
+mod image_metadata;
 mod netcdf;
 mod zarr;
 mod new_files;

@@ -1,8 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 11] = [
+pub(crate) const FUNCTIONS: [&str; 12] = [
     "geotiff_info",
+    "image_metadata",
     "icalendar_parse",
     "vcard_parse",
     "dicom_parse",
@@ -395,8 +396,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if values.iter().any(Value::is_null) {
         return Some(Ok(Value::Null));
     }
-    if matches!(name, "dicom_parse" | "sparkplug_decode" | "geotiff_info") {
+    if matches!(name, "dicom_parse" | "sparkplug_decode" | "geotiff_info" | "image_metadata") {
         return Some(match values {
+            [Value::Bytea(file)] if name == "image_metadata" => crate::image_metadata::metadata(file).and_then(jsonb),
             [Value::Bytea(file)] if name == "dicom_parse" => crate::dicom::parse(file).and_then(jsonb),
             [Value::Bytea(file)] if name == "geotiff_info" => crate::geotiff::info(file).and_then(jsonb),
             [Value::Bytea(payload)] => crate::sparkplug::decode(payload).and_then(jsonb),

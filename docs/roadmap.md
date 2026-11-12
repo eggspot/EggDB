@@ -1602,7 +1602,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - CalDAV, CardDAV and WebDAV (D56). iCalendar and vCard read as jCal and jCard (`icalendar_parse`,
   `vcard_parse`): **code written, unbuilt** (code-only mode, 2026-11-12, D702). Left: the servers.
 - Digital asset management: EXIF and XMP metadata, and renditions with our own royalty-free
-  codecs (D56).
+  codecs (D56). EXIF and XMP (`image_metadata`): **code written, unbuilt** (code-only mode, 2026-11-12, D731). Left:
+  renditions.
 
 ### M17 Every platform
 - EggOS as a target, with its own backend in the platform layer (D8).
