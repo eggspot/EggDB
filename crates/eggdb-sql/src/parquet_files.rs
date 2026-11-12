@@ -91,6 +91,53 @@ pub(crate) fn rows(
     Ok(())
 }
 
+/// Whether `name` is one of the file-reading functions.
+pub(crate) fn reads_files(name: &str) -> bool {
+    matches!(name, "read_parquet" | "read_arrow" | "read_csv")
+}
+
+fn sql_type_of(column_type: ColumnType) -> SqlType {
+    match column_type {
+        ColumnType::Boolean => SqlType::Boolean,
+        ColumnType::Int32 => SqlType::Integer,
+        ColumnType::Int64 => SqlType::BigInt,
+        ColumnType::Float => SqlType::Real,
+        ColumnType::Double => SqlType::Double,
+        ColumnType::Text => SqlType::Text,
+        ColumnType::Binary => SqlType::Bytea,
+        ColumnType::Date => SqlType::Date,
+        ColumnType::Timestamp { utc: true } => SqlType::TimestampTz(None),
+        ColumnType::Timestamp { utc: false } => SqlType::Timestamp(None),
+        ColumnType::Decimal { precision, scale } => SqlType::Numeric(Some(crate::types::NumericModifier {
+            precision: u16::try_from(precision).unwrap_or(u16::MAX),
+            scale: i16::try_from(scale).unwrap_or(0),
+        })),
+    }
+}
+
+/// The columns of the file a `read_parquet`, `read_arrow` or `read_csv` call with no column
+/// definition list reads, as its parser reads them: the file's names and types (all `text` for
+/// a CSV file's header).
+pub(crate) fn discovered_columns(name: &str, path: &str) -> SqlResult<Vec<(String, SqlType)>> {
+    let bytes = crate::new_files::read_file(path, MOST_FILE_BYTES)?;
+    if name == "read_csv" {
+        let text = String::from_utf8_lossy(&bytes);
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let header_line = text.lines().next().unwrap_or_default();
+        let header = csv_records(header_line, delimiter_of(header_line))?.into_iter().next().unwrap_or_default();
+        return Ok(header
+            .into_iter()
+            .map(|column| (column.unwrap_or_default().trim().to_owned(), SqlType::Text))
+            .collect());
+    }
+    let columns = if name == "read_arrow" {
+        eggdb_arrow::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {error}")))?
+    } else {
+        eggdb_parquet::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {}", error.0)))?
+    };
+    Ok(columns.iter().map(|column| (column.name.clone(), sql_type_of(column.column_type))).collect())
+}
+
 fn delimiter_of(header: &str) -> char {
     [',', ';', '\t', '|']
         .into_iter()
@@ -240,6 +287,13 @@ mod tests {
         session.set_file_reader(&READER);
         let mut rows = Vec::new();
         session.execute(query, &mut |result| rows.extend(result.rows)).expect("reads");
+        let mut discovered = Vec::new();
+        session
+            .execute("SELECT * FROM read_parquet('people.parquet') ORDER BY 1", &mut |result| {
+                discovered.extend(result.columns.into_iter().flatten().map(|column| column.name));
+            })
+            .expect("reads its own columns");
+        assert_eq!(discovered, vec!["id".to_owned(), "Name".to_owned()]);
         assert_eq!(
             rows,
             vec![

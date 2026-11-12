@@ -346,9 +346,30 @@ impl Parser<'_> {
         } else {
             None
         };
+        let literal_path = match arguments.first().map(|argument| &argument.kind) {
+            Some(ExprKind::Literal(Literal::String(path))) => Some(path.clone()),
+            _ => None,
+        };
         let column_names = if to_record && self.peek_kind() == &TokenKind::LeftParen {
             let (names, placeholders) = self.column_definition_list()?;
             arguments.extend(placeholders);
+            names
+        } else if let Some(path) = literal_path.filter(|_| crate::parquet_files::reads_files(&name.text)) {
+            let discovered = crate::parquet_files::discovered_columns(&name.text, &path)?;
+            let mut names = Vec::with_capacity(discovered.len());
+            for (column, sql_type) in discovered {
+                arguments.push(Expr {
+                    kind: ExprKind::Cast {
+                        expr: Box::new(Expr {
+                            kind: ExprKind::Literal(Literal::Null),
+                            position,
+                        }),
+                        sql_type,
+                    },
+                    position,
+                });
+                names.push(Name { text: column, position });
+            }
             names
         } else if alias.is_some() && self.peek_kind() == &TokenKind::LeftParen {
             self.name_list()?
