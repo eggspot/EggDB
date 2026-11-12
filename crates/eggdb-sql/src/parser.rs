@@ -4624,11 +4624,33 @@ impl<'t> Parser<'t> {
             let case_insensitive = self.is_word("ilike") || self.sqlite();
             self.at += 1;
             let mut pattern = self.expression_above(Level::Other)?;
+            let mut escape = None;
             if self.take_word("escape") {
-                let mut escape = self.expression_above(Level::Other)?;
+                let mut given = self.expression_above(Level::Other)?;
                 if self.sqlite() {
-                    escape = sqlite::checked_escape(escape)?;
+                    given = sqlite::checked_escape(given)?;
                 }
+                escape = Some(given);
+            }
+            let plain = matches!(&pattern.kind, ExprKind::Literal(Literal::String(text)) if !text.contains('['));
+            if self.sqlserver() && !plain {
+                let mut arguments = vec![pattern];
+                arguments.extend(escape);
+                let converted = Expr {
+                    kind: ExprKind::Function {
+                        name: "eggdb_tsql_like_regex".to_owned(),
+                        arguments,
+                    },
+                    position,
+                };
+                let operator = if negated {
+                    BinaryOperator::RegexNoMatch
+                } else {
+                    BinaryOperator::RegexMatch
+                };
+                return Ok(Self::binary(expr, operator, converted));
+            }
+            if let Some(escape) = escape {
                 pattern = like_escape(pattern, escape);
             }
             ExprKind::Like {

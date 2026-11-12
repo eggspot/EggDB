@@ -1874,7 +1874,8 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         | "regexp_split_to_array"
         | "like_escape"
         | "similar_to_escape"
-        | "similar_substring_pattern" => &[TEXT, TEXT, TEXT],
+        | "similar_substring_pattern"
+        | "eggdb_tsql_like_regex" => &[TEXT, TEXT, TEXT],
         "regexp_replace" => &[TEXT, TEXT, TEXT],
         "regexp_count" => &[TEXT, TEXT, INTEGER, TEXT],
         "regexp_instr" => &[TEXT, TEXT, INTEGER, INTEGER, INTEGER, TEXT, INTEGER],

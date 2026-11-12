@@ -942,3 +942,4 @@ its full title with its status.
 - [D915](decisions/D915.md) Code-only batch 563 (M18): HTTP foreign sources
 - [D916](decisions/D916.md) Code-only batch 564 (M18): foreign servers and foreign tables with declared columns
 - [D917](decisions/D917.md) Code-only batch 565 (M18): IMPORT FOREIGN SCHEMA
+- [D918](decisions/D918.md) Code-only batch 566 (M5): Transact-SQL character classes in LIKE

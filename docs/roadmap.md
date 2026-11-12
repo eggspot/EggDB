@@ -522,7 +522,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   NULLs (D341 reads the first such column in two ranges only).
 - `DISTINCT ON` an expression outside the select list of a grouped query or beside a window
   function, `NATURAL` joins with a `LATERAL` item, SQLite's error for a wrong `ESCAPE` computed
-  at run time and Oracle's for a wrong `ESCAPE`, and Transact-SQL's `[...]` classes in `LIKE` (D299).
+  at run time and Oracle's for a wrong `ESCAPE`, and Transact-SQL's `[...]` classes in `LIKE` (D299). Transact-SQL's
+  `[...]` classes: **code written, unbuilt** (code-only mode, 2026-11-12, D918).
 - Joined `UPDATE` and `DELETE` with subqueries in `SET` and `RETURNING`, a view, a partitioned
   table or a table with row-level security as the target, `EXPLAIN` of them, SQLite's refusal
   of `FROM` tables in `RETURNING`, and `OUTPUT deleted.` of a joined Transact-SQL `UPDATE`

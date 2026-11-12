@@ -7,7 +7,8 @@ use crate::types::{SqlType, Value};
 
 type Matched = (Vec<char>, Option<Vec<Option<Span>>>);
 
-pub(crate) const FUNCTIONS: [&str; 10] = [
+pub(crate) const FUNCTIONS: [&str; 11] = [
+    "eggdb_tsql_like_regex",
     "like_escape",
     "regexp_like",
     "regexp_match",
@@ -665,6 +666,79 @@ fn similar_to_escape(values: &[Value]) -> Option<SqlResult<Value>> {
     )
 }
 
+fn push_literal(out: &mut String, character: char) {
+    if "\\.^$|?*+()[]{}".contains(character) {
+        out.push('\\');
+    }
+    out.push(character);
+}
+
+/// The regular expression a Transact-SQL `LIKE` pattern means: `%`, `_`, character classes
+/// `[abc]`, ranges `[a-f]` and negated classes `[^abc]`, and `escape` before a character that
+/// stands for itself; a `[` with no `]` after it is itself.
+pub(crate) fn tsql_like_regex_text(pattern: &str, escape: Option<char>) -> SqlResult<String> {
+    let characters: Vec<char> = pattern.chars().collect();
+    let mut out = String::from("^(?:");
+    let mut at = 0;
+    while at < characters.len() {
+        let character = characters[at];
+        at += 1;
+        if Some(character) == escape {
+            let Some(escaped) = characters.get(at) else {
+                return Err(SqlError::new(
+                    SqlState::INVALID_ESCAPE_SEQUENCE,
+                    "LIKE pattern must not end with escape character",
+                ));
+            };
+            push_literal(&mut out, *escaped);
+            at += 1;
+            continue;
+        }
+        match character {
+            '%' => out.push_str(".*"),
+            '_' => out.push('.'),
+            '[' => match characters[at..].iter().skip(1).position(|candidate| *candidate == ']') {
+                Some(offset) => {
+                    let body = &characters[at..at + offset + 1];
+                    at += offset + 2;
+                    out.push('[');
+                    let (negated, body) = match body.split_first() {
+                        Some(('^', rest)) if !rest.is_empty() => (true, rest),
+                        _ => (false, body),
+                    };
+                    if negated {
+                        out.push('^');
+                    }
+                    for member in body {
+                        if matches!(member, '\\' | '[' | ']') {
+                            out.push('\\');
+                        }
+                        out.push(*member);
+                    }
+                    out.push(']');
+                }
+                None => push_literal(&mut out, '['),
+            },
+            other => push_literal(&mut out, other),
+        }
+    }
+    out.push_str(")$");
+    Ok(out)
+}
+
+fn tsql_like_regex(values: &[Value]) -> Option<SqlResult<Value>> {
+    let pattern = values.first()?.character_text()?;
+    let escape = match values.get(1) {
+        None => Ok(None),
+        given => escape_character(given),
+    };
+    Some(
+        escape
+            .and_then(|escape| tsql_like_regex_text(pattern, escape))
+            .map(Value::Text),
+    )
+}
+
 pub(crate) fn like_escape_text(pattern: &str, escape: Option<char>) -> SqlResult<String> {
     if escape == Some('\\') {
         return Ok(pattern.to_owned());
@@ -740,6 +814,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         "like_escape" => like_escape(values),
         "similar_to_escape" => similar_to_escape(values),
         "similar_substring_pattern" => similar_substring_pattern(values),
+        "eggdb_tsql_like_regex" => tsql_like_regex(values),
         _ => None,
     }
 }
@@ -840,6 +915,10 @@ mod tests {
         assert_eq!(call("regexp_like", &["Hello World", "world$", "i"]), "t");
         assert_eq!(call("regexp_like", &["Hello World", "world$"]), "f");
         assert_eq!(call("similar_to_escape", &["abc%"]), "^(?:abc.*)$");
+        assert_eq!(tsql_like_regex_text("[a-c]%_x.", None).unwrap(), "^(?:[a-c].*.x\\.)$");
+        assert_eq!(tsql_like_regex_text("[^0-9]%", None).unwrap(), "^(?:[^0-9].*)$");
+        assert_eq!(tsql_like_regex_text("50!%[", Some('!')).unwrap(), "^(?:50%\\[)$");
+        assert_eq!(tsql_like_regex_text("a\\b", None).unwrap(), "^(?:a\\\\b)$");
     }
 
     #[test]

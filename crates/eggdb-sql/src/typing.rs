@@ -162,6 +162,7 @@ fn added_function_type(
         | "like_escape"
         | "similar_to_escape"
         | "similar_substring_pattern"
+        | "eggdb_tsql_like_regex"
         | "to_char"
         | "jsonb_pretty"
         | "json_extract_path_text"
