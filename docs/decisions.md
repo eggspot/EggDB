@@ -751,3 +751,4 @@ its full title with its status.
 - [D724](decisions/D724.md) Code-only batch 372 (M16): JetStream timers for push redelivery, idle heartbeats and pull timeouts, and pending counts for watches
 - [D725](decisions/D725.md) Code-only batch 373 (M16): JetStream `interest` retention
 - [D726](decisions/D726.md) Code-only batch 374 (M13): GQL path modes `WALK`, `TRAIL`, `ACYCLIC` and `SIMPLE`
+- [D727](decisions/D727.md) Code-only batch 375 (M13): GQL quantified path patterns of one relationship, with group variables

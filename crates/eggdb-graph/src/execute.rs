@@ -1097,6 +1097,11 @@ impl<'g> Executor<'g, '_> {
         for hop in 1..=max {
             let mut next_frontier = Vec::new();
             for (node, path) in &frontier {
+                if let Some(group) = &relationship_pattern.group
+                    && !self.node_matches(&self.existing_node(*node)?, &group.0, &row)?
+                {
+                    continue;
+                }
                 let mut taken = Vec::new();
                 if pattern.mode != crate::cypher::PathMode::Walk {
                     taken.extend_from_slice(&walk.used);
@@ -1105,6 +1110,11 @@ impl<'g> Executor<'g, '_> {
                 for (relationship, next) in
                     self.steps_from(*node, relationship_pattern, &row, &taken)?
                 {
+                    if let Some(group) = &relationship_pattern.group
+                        && !self.node_matches(&self.existing_node(next)?, &group.1, &row)?
+                    {
+                        continue;
+                    }
                     let mut extended = path.clone();
                     extended.push(relationship);
                     if hop >= min {
@@ -1157,6 +1167,23 @@ impl<'g> Executor<'g, '_> {
             let mut next_row = row.clone();
             if let Some(name) = &relationship_pattern.variable {
                 bind(&mut next_row, name, relationship_value);
+            }
+            if let Some(group) = &relationship_pattern.group {
+                let mut starts = Vec::with_capacity(path.len());
+                let mut ends = Vec::with_capacity(path.len());
+                let mut current = at;
+                for relationship in &path {
+                    let next = if relationship.start == current { relationship.end } else { relationship.start };
+                    starts.push(Value::Node(Box::new(self.existing_node(current)?)));
+                    ends.push(Value::Node(Box::new(self.existing_node(next)?)));
+                    current = next;
+                }
+                if let Some(name) = &group.0.variable {
+                    bind(&mut next_row, name, Value::List(starts));
+                }
+                if let Some(name) = &group.1.variable {
+                    bind(&mut next_row, name, Value::List(ends));
+                }
             }
             let node_value = Value::Node(Box::new(node.clone()));
             if let Some(name) = &node_pattern.variable {
@@ -1564,6 +1591,10 @@ impl<'g> Executor<'g, '_> {
             names.extend(pattern.start.variable.clone());
             for (relationship, node) in &pattern.steps {
                 names.extend(relationship.variable.clone());
+                if let Some(group) = &relationship.group {
+                    names.extend(group.0.variable.clone());
+                    names.extend(group.1.variable.clone());
+                }
                 names.extend(node.variable.clone());
             }
         }

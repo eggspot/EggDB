@@ -342,6 +342,14 @@ impl LabelExpression {
 
 const MAX_LABEL_DEPTH: usize = 32;
 
+fn empty_node() -> NodePattern {
+    NodePattern {
+        variable: None,
+        labels: LabelExpression::AllOf(Vec::new()),
+        properties: Vec::new(),
+    }
+}
+
 /// The direction a relationship pattern follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Direction {
@@ -364,6 +372,7 @@ pub(crate) struct RelationshipPattern {
     pub(crate) properties: Vec<(String, Expr)>,
     pub(crate) direction: Direction,
     pub(crate) hops: Option<(u32, u32)>,
+    pub(crate) group: Option<Box<(NodePattern, NodePattern)>>,
 }
 
 /// Which shortest paths a `shortestPath()` or `allShortestPaths()` pattern asks for.
@@ -925,6 +934,7 @@ impl Parser<'_> {
             properties: Vec::new(),
             direction: Direction::Either,
             hops: None,
+            group: None,
         };
         if self.take_symbol("[") {
             if matches!(self.peek(), Some(Token::Word(_) | Token::Quoted(_))) {
@@ -1017,9 +1027,18 @@ impl Parser<'_> {
         if wrapped {
             self.at += 2;
         }
-        let start = self.node_pattern()?;
+        let start = if self.at_quantified_group() { empty_node() } else { self.node_pattern()? };
         let mut steps = Vec::new();
-        while let Some(relationship) = self.relationship_pattern()? {
+        loop {
+            if self.at_quantified_group() {
+                let relationship = self.quantified_group()?;
+                let end = if self.is_symbol("(") && !self.at_quantified_group() { self.node_pattern()? } else { empty_node() };
+                steps.push((relationship, end));
+                continue;
+            }
+            let Some(relationship) = self.relationship_pattern()? else {
+                break;
+            };
             steps.push((relationship, self.node_pattern()?));
         }
         if wrapped {
@@ -1044,6 +1063,38 @@ impl Parser<'_> {
             start,
             steps,
         })
+    }
+
+    fn at_quantified_group(&self) -> bool {
+        self.is_symbol("(") && matches!(self.peek_at(1), Some(Token::Symbol("(")))
+    }
+
+    /// A GQL quantified path pattern of one relationship, `((a)-[r:R]->(b)){m,n}`: the
+    /// relationship repeated `m` to `n` times, with the group's node patterns holding at the
+    /// start and the end of every hop.
+    fn quantified_group(&mut self) -> GraphResult<RelationshipPattern> {
+        self.expect_symbol("(")?;
+        let left = self.node_pattern()?;
+        let Some(mut relationship) = self.relationship_pattern()? else {
+            return Err(self.unexpected());
+        };
+        if relationship.hops.is_some() {
+            return Err(syntax("a relationship inside a quantified path pattern cannot be quantified itself"));
+        }
+        let right = self.node_pattern()?;
+        if !self.is_symbol(")") {
+            return Err(GraphError::new(
+                "Neo.ClientError.Statement.FeatureNotSupported",
+                "quantified path patterns with more than one relationship are not supported yet",
+            ));
+        }
+        self.expect_symbol(")")?;
+        let Some(bounds) = self.gql_quantifier()? else {
+            return Err(syntax("a parenthesized path pattern needs a quantifier such as {1,3} or +"));
+        };
+        relationship.hops = Some(bounds);
+        relationship.group = Some(Box::new((left, right)));
+        Ok(relationship)
     }
 
     /// A GQL path mode before a path pattern: `WALK`, `TRAIL`, `ACYCLIC` or `SIMPLE`, with an
