@@ -620,6 +620,15 @@ fn authenticate_externally<S: KeyValueStore>(
         );
         return AuthenticationOutcome::Refused;
     }
+    if let eggdb_auth::AuthMethod::OAuthBearer {
+        keys,
+        policy,
+        discovery,
+        scope,
+    } = method
+    {
+        return authenticate_oauth(wire, shared, user, keys, policy, discovery, scope, store);
+    }
     wire.outbox.authentication_cleartext_password();
     if wire.flush().is_err() {
         return AuthenticationOutcome::Refused;
@@ -651,9 +660,137 @@ fn authenticate_externally<S: KeyValueStore>(
                 Err(error) => Err(error.to_string()),
             }
         }
-        eggdb_auth::AuthMethod::ScramSha256 | eggdb_auth::AuthMethod::Reject => {
-            Err("no external method".to_owned())
+        eggdb_auth::AuthMethod::ScramSha256
+        | eggdb_auth::AuthMethod::Reject
+        | eggdb_auth::AuthMethod::OAuthBearer { .. } => Err("no external method".to_owned()),
+    };
+    if let Err(why) = checked {
+        return refuse_login(wire, shared, user, &why);
+    }
+    if !may_log_in(store, user) {
+        return refuse_login(
+            wire,
+            shared,
+            user,
+            "no stored role with LOGIN has this name",
+        );
+    }
+    wire.outbox.authentication_ok();
+    AuthenticationOutcome::Authenticated
+}
+
+const OAUTH_MECHANISM: &str = "OAUTHBEARER";
+
+/// The bearer token of an `OAUTHBEARER` client initial response (RFC 7628, section 3.1): the
+/// GS2 header, then `\x01`-separated `key=value` pairs ending in `\x01\x01`; `Ok(None)` when the
+/// client sent no token and asks where to get one.
+fn oauth_token(data: &[u8]) -> Result<Option<String>, &'static str> {
+    let text = std::str::from_utf8(data).map_err(|_| "the OAUTHBEARER message is not UTF-8")?;
+    let (header, rest) = text
+        .split_once('\x01')
+        .ok_or("the OAUTHBEARER message has no key-value pairs")?;
+    if !(header.starts_with("n,") || header.starts_with("y,")) || header.matches(',').count() != 2 {
+        return Err("the OAUTHBEARER message has a malformed GS2 header");
+    }
+    let body = rest
+        .strip_suffix("\x01\x01")
+        .or_else(|| (rest == "\x01").then_some(""))
+        .ok_or("the OAUTHBEARER message does not end with two separators")?;
+    let mut token = None;
+    for pair in body.split('\x01').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or("an OAUTHBEARER pair has no value")?;
+        if key == "auth" {
+            if value.is_empty() {
+                return Ok(None);
+            }
+            let (scheme, credentials) = value
+                .split_once(' ')
+                .ok_or("the OAUTHBEARER auth value is not a bearer token")?;
+            if !scheme.eq_ignore_ascii_case("bearer") || credentials.trim().is_empty() {
+                return Err("the OAUTHBEARER auth value is not a bearer token");
+            }
+            token = Some(credentials.trim().to_owned());
         }
+    }
+    token.map(Some).ok_or("the OAUTHBEARER message has no auth value")
+}
+
+fn json_text(text: &str) -> String {
+    let mut out = String::from("\"");
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authenticate_oauth<S: KeyValueStore>(
+    wire: &mut Wire<'_>,
+    shared: &Shared<'_>,
+    user: &str,
+    keys: &eggdb_auth::JwtKeys,
+    policy: &eggdb_auth::JwtPolicy,
+    discovery: &str,
+    scope: &str,
+    store: &S,
+) -> AuthenticationOutcome {
+    wire.outbox.authentication_sasl(&[OAUTH_MECHANISM]);
+    if wire.flush().is_err() {
+        return AuthenticationOutcome::Refused;
+    }
+    let Some(body) = read_sasl_message(wire) else {
+        return AuthenticationOutcome::Refused;
+    };
+    let initial = match parse_sasl_initial_response(&body) {
+        Ok(initial) if initial.mechanism == OAUTH_MECHANISM => initial,
+        Ok(_) => {
+            fatal(
+                wire,
+                SqlState::PROTOCOL_VIOLATION,
+                "client selected an invalid SASL authentication mechanism",
+            );
+            return AuthenticationOutcome::Refused;
+        }
+        Err(error) => {
+            fatal(wire, SqlState::PROTOCOL_VIOLATION, &error.0);
+            return AuthenticationOutcome::Refused;
+        }
+    };
+    let token = match oauth_token(&initial.data) {
+        Ok(token) => token,
+        Err(why) => {
+            fatal(wire, SqlState::PROTOCOL_VIOLATION, why);
+            return AuthenticationOutcome::Refused;
+        }
+    };
+    let Some(token) = token else {
+        let challenge = format!(
+            "{{\"status\":\"invalid_token\",\"openid-configuration\":{},\"scope\":{}}}",
+            json_text(discovery),
+            json_text(scope)
+        );
+        wire.outbox.authentication_sasl_continue(challenge.as_bytes());
+        if wire.flush().is_err() {
+            return AuthenticationOutcome::Refused;
+        }
+        let _ = read_sasl_message(wire);
+        return refuse_login(wire, shared, user, "the client sent no bearer token");
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+    let checked = match eggdb_auth::jwt::verify(&token, keys, policy, now) {
+        Ok(named) if named == user => Ok(()),
+        Ok(named) => Err(format!("the token names user \"{}\"", printable(&named))),
+        Err(error) => Err(error.to_string()),
     };
     if let Err(why) = checked {
         return refuse_login(wire, shared, user, &why);
@@ -2125,5 +2262,27 @@ mod tests {
             options_parameters("-c application_name=a\\ b"),
             [("application_name".to_owned(), "a b".to_owned())]
         );
+    }
+}
+
+#[cfg(test)]
+mod oauth_tests {
+    use super::oauth_token;
+
+    #[test]
+    fn bearer_tokens_and_discovery_requests_are_read_from_the_initial_response() {
+        assert_eq!(
+            oauth_token(b"n,,\x01auth=Bearer abc.def.ghi\x01\x01"),
+            Ok(Some("abc.def.ghi".to_owned()))
+        );
+        assert_eq!(oauth_token(b"n,,\x01auth=\x01\x01"), Ok(None));
+        assert_eq!(
+            oauth_token(b"y,a=ada,\x01host=db\x01auth=bearer xyz\x01\x01"),
+            Ok(Some("xyz".to_owned()))
+        );
+        assert!(oauth_token(b"n,,\x01auth=Basic abc\x01\x01").is_err());
+        assert!(oauth_token(b"n,,auth=Bearer abc").is_err());
+        assert!(oauth_token(b"p=tls-unique,,\x01auth=Bearer abc\x01\x01").is_err());
+        assert!(oauth_token(b"n,,\x01host=db\x01\x01").is_err());
     }
 }

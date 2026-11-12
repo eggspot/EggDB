@@ -825,3 +825,4 @@ its full title with its status.
 - [D798](decisions/D798.md) Code-only batch 446 (M10): SQL Server's `rowversion` stamped by every write
 - [D799](decisions/D799.md) Code-only batch 447 (M7): Redis Functions kept across restarts, `FUNCTION DUMP` and `RESTORE`
 - [D800](decisions/D800.md) Code-only batch 448 (M8): SQLite FTS5 tables with `MATCH`, `bm25()`, `highlight()` and `snippet()`, searched without an index
+- [D801](decisions/D801.md) Code-only batch 449 (M6b): PostgreSQL 18's `OAUTHBEARER` login through `oauth` rules

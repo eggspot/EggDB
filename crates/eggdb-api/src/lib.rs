@@ -242,7 +242,10 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         for (keys, policy) in rules.bearer_methods() {
             match eggdb_auth::jwt::verify(token.trim(), keys, policy, now) {
                 Ok(role) => {
-                    if !matches!(rules.method_for(&role), AuthMethod::Jwt { .. }) {
+                    if !matches!(
+                        rules.method_for(&role),
+                        AuthMethod::Jwt { .. } | AuthMethod::OAuthBearer { .. }
+                    ) {
                         return Caller::Refused(format!("{role} does not sign in with a token"));
                     }
                     let may_log_in = self

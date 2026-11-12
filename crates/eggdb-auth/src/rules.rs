@@ -8,6 +8,9 @@
 //! - `jwt jwks=keys.json issuer=https://login.example audience=eggdb [user_claim=sub]
 //!   [leeway=60]`: an OpenID Connect token sent as the password, its signature checked with the
 //!   key set file (relative to the rule file).
+//! - `oauth jwks=keys.json issuer=... audience=... discovery=https://login.example/.well-known/openid-configuration
+//!   [scope=openid] [user_claim=sub] [leeway=60]`: the same token sent through SASL's `OAUTHBEARER`, as
+//!   PostgreSQL 18's clients send it; a client without a token is pointed at `discovery` to get one.
 //! - `reject`: the user may not log in.
 
 use crate::jwt::{JwtKeys, JwtPolicy};
@@ -33,6 +36,17 @@ pub enum AuthMethod {
         /// What tokens must say.
         policy: JwtPolicy,
     },
+    /// An OpenID Connect token sent through SASL's `OAUTHBEARER` mechanism (RFC 7628).
+    OAuthBearer {
+        /// The keys tokens may be signed with.
+        keys: JwtKeys,
+        /// What tokens must say.
+        policy: JwtPolicy,
+        /// The issuer's OpenID discovery document, which a client without a token is sent to.
+        discovery: String,
+        /// The scope a client asks the issuer for.
+        scope: String,
+    },
     /// No login.
     Reject,
 }
@@ -41,7 +55,7 @@ impl AuthMethod {
     /// Whether the method has the client send its password or token in clear text, so it is
     /// allowed only over TLS or a local socket.
     pub fn sends_secret_in_clear(&self) -> bool {
-        matches!(self, Self::Ldap(_) | Self::Jwt { .. })
+        matches!(self, Self::Ldap(_) | Self::Jwt { .. } | Self::OAuthBearer { .. })
     }
 }
 
@@ -153,7 +167,7 @@ impl AuthRules {
                     suffix: found.get("suffix").copied().unwrap_or_default().to_owned(),
                     timeout: Duration::from_secs(seconds(&found, "timeout", 5, line)?),
                 }),
-                "jwt" => {
+                "jwt" | "oauth" => {
                     let path = required(&found, "jwks", line)?;
                     let document = read_key_set(Path::new(path)).map_err(|error| RulesError {
                         line,
@@ -163,25 +177,32 @@ impl AuthRules {
                         line,
                         message: error.to_string(),
                     })?;
-                    AuthMethod::Jwt {
-                        keys,
-                        policy: JwtPolicy {
-                            issuer: required(&found, "issuer", line)?.to_owned(),
-                            audience: required(&found, "audience", line)?.to_owned(),
-                            user_claim: found
-                                .get("user_claim")
-                                .copied()
-                                .unwrap_or("sub")
-                                .to_owned(),
-                            leeway_seconds: seconds(&found, "leeway", 60, line)?.min(3600) as i64,
-                        },
+                    let policy = JwtPolicy {
+                        issuer: required(&found, "issuer", line)?.to_owned(),
+                        audience: required(&found, "audience", line)?.to_owned(),
+                        user_claim: found
+                            .get("user_claim")
+                            .copied()
+                            .unwrap_or("sub")
+                            .to_owned(),
+                        leeway_seconds: seconds(&found, "leeway", 60, line)?.min(3600) as i64,
+                    };
+                    if method == "oauth" {
+                        AuthMethod::OAuthBearer {
+                            keys,
+                            policy,
+                            discovery: required(&found, "discovery", line)?.to_owned(),
+                            scope: found.get("scope").copied().unwrap_or("openid").to_owned(),
+                        }
+                    } else {
+                        AuthMethod::Jwt { keys, policy }
                     }
                 }
                 other => {
                     return Err(RulesError {
                         line,
                         message: format!(
-                            "unknown method {other}; use scram-sha-256, ldap, jwt or reject"
+                            "unknown method {other}; use scram-sha-256, ldap, jwt, oauth or reject"
                         ),
                     });
                 }
@@ -210,7 +231,9 @@ impl AuthRules {
     /// token without naming a user first.
     pub fn bearer_methods(&self) -> impl Iterator<Item = (&JwtKeys, &JwtPolicy)> {
         self.rules.iter().filter_map(|rule| match &rule.method {
-            AuthMethod::Jwt { keys, policy } => Some((keys, policy)),
+            AuthMethod::Jwt { keys, policy } | AuthMethod::OAuthBearer { keys, policy, .. } => {
+                Some((keys, policy))
+            }
             _ => None,
         })
     }
