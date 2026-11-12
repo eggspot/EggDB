@@ -789,3 +789,4 @@ its full title with its status.
 - [D762](decisions/D762.md) Code-only batch 410 (M6b): row-level legal holds, records schedules and EDRM eDiscovery export in `eggdb_retention`
 - [D763](decisions/D763.md) Code-only batch 411 (M6b): marketplace listings of shared data, `CREATE EXTENSION eggdb_marketplace`
 - [D764](decisions/D764.md) Code-only batch 412 (M6b): tenants isolated by schema, copied from a template and upgraded with it
+- [D765](decisions/D765.md) Code-only batch 413 (M11): spreadsheet-style tables with formula columns, `spreadsheet_recalculate` and `eggdb_sheets`

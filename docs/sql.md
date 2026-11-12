@@ -3990,6 +3990,28 @@ SELECT eggdb_marketplace.decide(1, true);
 - `eggdb_marketplace.catalog` shows the offered listings with their objects and subscriber counts;
   `eggdb_marketplace.requests` keeps every request and decision.
 
+## Spreadsheet tables (eggdb_sheets)
+
+`spreadsheet_recalculate(cells)` recalculates a sheet given as a JSON object of cells and returns every cell's value
+(D765): `SELECT spreadsheet_recalculate('{"A1": 3, "B1": 4, "C1": "=A1*B1"}')` gives `{"A1": 3, "B1": 4, "C1": 12}`.
+Formulas start with `=` and take `+ - * / ^`, `&` (text), `%`, comparisons, cell references (`A1`, `$A$1`), ranges
+(`A1:B9`) and `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`, `IFERROR`, `AND`, `OR`, `NOT`, `ABS`, `SQRT`,
+`ROUND`, `CONCAT`, `LEN`, `UPPER` and `LOWER`; errors come back as `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!` and
+`#CYCLE!`.
+
+`CREATE EXTENSION eggdb_sheets` stores sheets as tables of cells:
+
+```sql
+CREATE EXTENSION eggdb_sheets;
+SELECT eggdb_sheets.import_table('orders', 'SELECT item, price, qty FROM order_lines');
+INSERT INTO eggdb_sheets.formula_columns (sheet, column_letters, formula) VALUES ('orders', 'D', '=B{row}*C{row}');
+SELECT * FROM eggdb_sheets.grid('orders');
+```
+
+`set_cell(sheet, cell, raw)` enters a value or formula (an empty one clears the cell), a formula column fills its
+formula down every row from `first_row` (2 by default) with `{row}` replaced by the row number, and `cell_values(sheet)`
+and `grid(sheet)` return the recalculated values per cell and per row.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

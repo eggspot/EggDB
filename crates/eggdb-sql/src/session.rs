@@ -2713,6 +2713,7 @@ impl<'s> Session<'s> {
             "eggdb_metering" => ("eggdb_metering", crate::metering::METERING_SCRIPT),
             "eggdb_compliance" => ("eggdb_compliance", crate::compliance::COMPLIANCE_SCRIPT),
             "eggdb_marketplace" => ("eggdb_marketplace", crate::marketplace::MARKETPLACE_SCRIPT),
+            "eggdb_sheets" => ("eggdb_sheets", crate::sheets::SHEETS_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

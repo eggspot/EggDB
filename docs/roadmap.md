@@ -1342,7 +1342,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Reports sent to `https://` targets and by email through the operator's mail server, shared and
   embedded in other applications (D46, D238). `https://` and e-mail delivery: **code written, unbuilt** (code-only
   mode, 2026-11-12, D747). Left: sharing and embedding.
-- Spreadsheet-style tables with formula columns, and a grid view of them in the client (D38).
+- Spreadsheet-style tables with formula columns, and a grid view of them in the client (D38). The tables and formula
+  columns (`eggdb_sheets`): **code written, unbuilt** (code-only mode, 2026-11-12, D765). Left: the client's grid view.
 - Arrays: SQL/MDA, Zarr, HDF5 and NetCDF (D57). NetCDF classic files (`read_netcdf`): **code written, unbuilt**
   (code-only mode, 2026-11-12, D709). Zarr v2 and v3 arrays (`read_zarr`, raw, zlib, gzip and zstd chunks): **code
   written, unbuilt** (code-only mode, 2026-11-12, D715). Left: SQL/MDA, Zarr sharding and Blosc, HDF5 and NetCDF-4.
