@@ -15,6 +15,7 @@ eggdb-content = { path = "../eggdb-content" }
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-ai = { path = "../eggdb-ai" }
 eggdb-geo = { path = "../eggdb-geo" }
+eggdb-arrow = { path = "../eggdb-arrow" }
 eggdb-parquet = { path = "../eggdb-parquet" }
 eggdb-search = { path = "../eggdb-search" }
 eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }

@@ -37,14 +37,17 @@ fn value_of(column: &Column, cell: &Cell) -> Value {
     }
 }
 
-/// The rows of `read_parquet(path) AS t(name type, ...)`: the file read through the session's
-/// file reader, each declared column taken from the file's column of that name (matched
-/// exactly, then without regard to case; `NULL` when the file has none) and cast to its type.
+/// The rows of `read_parquet(path) AS t(name type, ...)` (`arrow` false) or
+/// `read_arrow(path) AS t(...)` (an Arrow IPC file or stream): the file read through the
+/// session's file reader, each declared column taken from the file's column of that name
+/// (matched exactly, then without regard to case; `NULL` when the file has none) and cast to
+/// its type.
 pub(crate) fn rows(
     values: &[Value],
     names: &[String],
     types: &[Option<SqlType>],
     sink: &mut RecordSink<'_>,
+    arrow: bool,
 ) -> SqlResult<()> {
     let Some(path) = values.first() else {
         return Err(crate::json_to_record::definition_list_required());
@@ -53,7 +56,11 @@ pub(crate) fn rows(
         return Ok(());
     };
     let bytes = crate::new_files::read_file(&path, MOST_FILE_BYTES)?;
-    let columns = eggdb_parquet::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {}", error.0)))?;
+    let columns = if arrow {
+        eggdb_arrow::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {error}")))?
+    } else {
+        eggdb_parquet::read(&bytes).map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {}", error.0)))?
+    };
     let chosen: Vec<Option<&Column>> = names
         .iter()
         .map(|name| {

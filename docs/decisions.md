@@ -729,3 +729,4 @@ its full title with its status.
 - [D702](decisions/D702.md) Code-only batch 350 (M16): `icalendar_parse` and `vcard_parse` into jCal and jCard
 - [D703](decisions/D703.md) Code-only batch 351 (M11): SQL reads files only through an embedded session's `FileReader`; `read_parquet` with a column definition list
 - [D704](decisions/D704.md) Code-only batch 352 (M11): `read_csv` with a column definition list
+- [D705](decisions/D705.md) Code-only batch 353 (M11): `read_arrow` for Arrow IPC files and streams
