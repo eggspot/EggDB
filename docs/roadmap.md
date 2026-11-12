@@ -335,7 +335,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - kqueue changes folded into the waiting `kevent` call, so a wait costs no change call (D74).
   Check: system calls per wait, measured on macOS and FreeBSD. **Code written, unbuilt** (code-only mode, 2026-11-10).
 - Acknowledgements that take latency to return, and packet loss, duplication and reordering
-  below the stream level in simulation (D314). Check: simulator tests of each.
+  below the stream level in simulation (D314). Check: simulator tests of each. **Code written, unbuilt** (code-only mode, 2026-11-13, D946).
 - The keep-alive timing set on each accepted socket on macOS and NetBSD: macOS copies only
   `SO_KEEPALIVE`, the interval and the count from the listener, and NetBSD only `SO_KEEPALIVE`,
   none of the timing (D336); with the shared listener crate (D122). **Code written, unbuilt** (code-only mode, 2026-11-10). `eggdb_platform::accept_tcp` copies the

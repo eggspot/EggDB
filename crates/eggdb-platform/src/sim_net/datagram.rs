@@ -81,17 +81,28 @@ impl DatagramSocket for SimDatagramSocket {
         if is_cut(&world.cuts, from.ip(), to.ip()) {
             return Ok(datagram.len());
         }
+        if world.packet_lost(from.ip(), to.ip()) {
+            return Ok(datagram.len());
+        }
+        let copies = if world.packet_duplicated(from.ip(), to.ip()) {
+            2
+        } else {
+            1
+        };
         let now = world.now();
-        let arrival = world.arrival(now, from.ip(), to.ip(), datagram.len());
-        let sequence = world.next_datagram;
-        world.next_datagram = sequence.wrapping_add(1);
-        if let Some(inbox) = world.datagram_sockets.get_mut(&to) {
-            let bytes = inbox.bytes.saturating_add(datagram.len());
-            if bytes <= SimNetwork::DATAGRAM_BUFFER_BYTES {
-                inbox.bytes = bytes;
-                inbox
-                    .datagrams
-                    .insert((arrival, sequence), (from, datagram.to_vec()));
+        for _ in 0..copies {
+            let crossed = world.arrival(now, from.ip(), to.ip(), datagram.len());
+            let arrival = crossed.saturating_add(world.held_back(from.ip(), to.ip()));
+            let sequence = world.next_datagram;
+            world.next_datagram = sequence.wrapping_add(1);
+            if let Some(inbox) = world.datagram_sockets.get_mut(&to) {
+                let bytes = inbox.bytes.saturating_add(datagram.len());
+                if bytes <= SimNetwork::DATAGRAM_BUFFER_BYTES {
+                    inbox.bytes = bytes;
+                    inbox
+                        .datagrams
+                        .insert((arrival, sequence), (from, datagram.to_vec()));
+                }
             }
         }
         Ok(datagram.len())
@@ -163,6 +174,60 @@ mod tests {
         assert_eq!(&buffer[..length], b"<34>1 - - - - - - hi");
         assert_eq!(from, sender.local_address().unwrap());
         assert_eq!(network.clock().monotonic(), Duration::from_millis(5));
+    }
+
+    #[test]
+    fn lost_datagrams_never_arrive_and_duplicated_ones_arrive_twice() {
+        let network = SimNetwork::new();
+        let sender = network.host(A).bind_datagram(any_port(A)).unwrap();
+        let receiver = network.host(B).bind_datagram(any_port(B)).unwrap();
+        let to = receiver.local_address().unwrap();
+        network.packet_loss(1_000_000);
+        sender.send_to(b"gone", to).unwrap();
+        let error = receiver
+            .receive_from(&mut [0; 8], Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        network.packet_loss(0);
+        network.packet_duplication(1_000_000);
+        sender.send_to(b"twice", to).unwrap();
+        for _ in 0..2 {
+            let mut buffer = [0; 8];
+            let (length, _) = receiver
+                .receive_from(&mut buffer, Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(&buffer[..length], b"twice");
+        }
+        let error = receiver
+            .receive_from(&mut [0; 8], Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn a_held_back_datagram_is_overtaken_by_a_later_one() {
+        let network = SimNetwork::new();
+        let sender = network.host(A).bind_datagram(any_port(A)).unwrap();
+        let receiver = network.host(B).bind_datagram(any_port(B)).unwrap();
+        let to = receiver.local_address().unwrap();
+        network.packet_reordering(1_000_000, Duration::from_secs(1));
+        let mut held = false;
+        for _ in 0..16 {
+            sender.send_to(b"first", to).unwrap();
+            network.packet_reordering(0, Duration::ZERO);
+            sender.send_to(b"second", to).unwrap();
+            let mut order = Vec::new();
+            for _ in 0..2 {
+                let mut buffer = [0; 8];
+                let (length, _) = receiver
+                    .receive_from(&mut buffer, Duration::from_secs(2))
+                    .unwrap();
+                order.push(buffer[..length].to_vec());
+            }
+            held |= order[0] == b"second";
+            network.packet_reordering(1_000_000, Duration::from_secs(1));
+        }
+        assert!(held, "no held-back datagram was overtaken in 16 tries");
     }
 
     #[test]

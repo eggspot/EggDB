@@ -102,6 +102,16 @@ struct World {
     links: BTreeMap<IpAddr, HostLink>,
     datagram_sockets: BTreeMap<SocketAddr, datagram::Inbox>,
     next_datagram: u64,
+    packets: PacketFaults,
+    acknowledgement_latency: bool,
+}
+
+#[derive(Debug, Default)]
+struct PacketFaults {
+    loss_per_million: u32,
+    duplication_per_million: u32,
+    reordering_per_million: u32,
+    reordering_most: Duration,
 }
 
 #[derive(Debug)]
@@ -202,6 +212,8 @@ struct Flow {
     end_arrived: bool,
     unacknowledged: bool,
     retransmitting_since: Option<Duration>,
+    acknowledgement_delay: Duration,
+    acknowledged_at: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -242,6 +254,27 @@ impl Flow {
 
     fn everything_arrived(&self) -> bool {
         self.in_transit.is_empty() && (!self.ended || self.end_arrived)
+    }
+
+    fn acknowledge(&mut self, now: Duration) {
+        if !self.unacknowledged {
+            return;
+        }
+        if !self.everything_arrived() {
+            self.acknowledged_at = None;
+            return;
+        }
+        let due = *self
+            .acknowledged_at
+            .get_or_insert(now.saturating_add(self.acknowledgement_delay));
+        if due <= now {
+            self.unacknowledged = false;
+            self.acknowledged_at = None;
+        }
+    }
+
+    fn acknowledgement_due(&self) -> Option<Duration> {
+        self.acknowledged_at.filter(|_| self.unacknowledged)
     }
 
     fn retransmission_deadline(&self) -> Option<Duration> {
@@ -294,6 +327,7 @@ impl Flow {
         self.arrivals.clear();
         self.unacknowledged = false;
         self.retransmitting_since = None;
+        self.acknowledged_at = None;
     }
 
     fn clear(&mut self) {
@@ -332,6 +366,10 @@ impl SimNetwork {
     /// Linux's default of 15 retransmissions (`tcp_retries2`), the timeout doubling from
     /// 200 ms up to 120 s, 924.6 s in all.
     pub const RETRANSMISSION_TIMEOUT: Duration = Duration::from_millis(924_600);
+
+    const FIRST_RETRANSMISSION: Duration = Duration::from_millis(200);
+    const LONGEST_RETRANSMISSION: Duration = Duration::from_secs(120);
+    const MOST_LOSSES_IN_A_ROW: u32 = 15;
 
     /// The most bytes of datagrams one [`SimDatagramSocket`] holds in transit and unreceived,
     /// Linux's default receive buffer; datagrams beyond it are dropped.
@@ -380,6 +418,40 @@ impl SimNetwork {
             .entry(ip)
             .or_default()
             .bytes_per_second = bytes_per_second;
+    }
+
+    /// Makes each packet between two hosts lost with probability `per_million` in a million,
+    /// drawn from the seed. On a connection the sender retransmits it after Linux's
+    /// retransmission timeout, 200 ms doubling up to 120 s for each loss in a row (at most 15),
+    /// so its bytes and every later byte of that direction arrive that much later, still in
+    /// order. A lost datagram never arrives. Zero, the default, loses nothing and draws nothing.
+    pub fn packet_loss(&self, per_million: u32) {
+        lock(&self.shared).packets.loss_per_million = per_million;
+    }
+
+    /// Makes each datagram between two hosts arrive twice with probability `per_million` in a
+    /// million, the copy with a latency of its own. A connection's receiver drops duplicate
+    /// segments, so streams see nothing of it. Zero, the default, draws nothing.
+    pub fn packet_duplication(&self, per_million: u32) {
+        lock(&self.shared).packets.duplication_per_million = per_million;
+    }
+
+    /// Holds back each packet between two hosts with probability `per_million` in a million by
+    /// up to `most` more, drawn from the seed, so later packets may overtake it: datagrams then
+    /// arrive out of order, while a connection waits for the missing bytes and delivers them in
+    /// order. Zero, the default, draws nothing.
+    pub fn packet_reordering(&self, per_million: u32, most: Duration) {
+        let mut world = lock(&self.shared);
+        world.packets.reordering_per_million = per_million;
+        world.packets.reordering_most = most;
+    }
+
+    /// Makes acknowledgements take the latency back from the receiver to the sender, drawn from
+    /// the seed like any packet's, instead of counting the moment the bytes arrive: an end's
+    /// bytes stay unacknowledged that much longer, which the retransmission timeout and
+    /// keep-alives see. Off by default, so the latencies other tests draw stay as they were.
+    pub fn acknowledgement_latency(&self, enabled: bool) {
+        lock(&self.shared).acknowledgement_latency = enabled;
     }
 
     /// Cuts hosts `a` and `b` apart, both ways, until [`SimNetwork::heal`]. Cutting a host from
@@ -899,6 +971,68 @@ impl World {
         least.saturating_add(Duration::from_nanos(extra))
     }
 
+    fn one_in_million(&mut self, per_million: u32) -> bool {
+        per_million > 0 && self.rng.one_in_million(per_million)
+    }
+
+    fn packet_lost(&mut self, from: IpAddr, to: IpAddr) -> bool {
+        from != to && self.one_in_million(self.packets.loss_per_million)
+    }
+
+    fn packet_duplicated(&mut self, from: IpAddr, to: IpAddr) -> bool {
+        from != to && self.one_in_million(self.packets.duplication_per_million)
+    }
+
+    fn held_back(&mut self, from: IpAddr, to: IpAddr) -> Duration {
+        if from == to || !self.one_in_million(self.packets.reordering_per_million) {
+            return Duration::ZERO;
+        }
+        let most = self.packets.reordering_most;
+        self.draw([Duration::ZERO, most])
+    }
+
+    fn retransmissions(&mut self, from: IpAddr, to: IpAddr) -> Duration {
+        let mut delay = Duration::ZERO;
+        let mut timeout = SimNetwork::FIRST_RETRANSMISSION;
+        for _ in 0..SimNetwork::MOST_LOSSES_IN_A_ROW {
+            if !self.packet_lost(from, to) {
+                break;
+            }
+            delay = delay.saturating_add(timeout);
+            timeout = timeout.saturating_mul(2).min(SimNetwork::LONGEST_RETRANSMISSION);
+        }
+        delay
+    }
+
+    fn stream_arrival(
+        &mut self,
+        leaving: Duration,
+        from: IpAddr,
+        to: IpAddr,
+        bytes: usize,
+    ) -> Duration {
+        let crossed = self.arrival(leaving, from, to, bytes);
+        let lost = self.retransmissions(from, to);
+        let held = self.held_back(from, to);
+        crossed.saturating_add(lost).saturating_add(held)
+    }
+
+    fn acknowledgement_delay(&mut self, from: IpAddr, to: IpAddr) -> Duration {
+        if !self.acknowledgement_latency {
+            return Duration::ZERO;
+        }
+        let network_latency = self.latency;
+        let mut latency = self.draw(network_latency);
+        if from != to {
+            for host in [to, from] {
+                if let Some(range) = self.links.get(&host).map(|link| link.latency) {
+                    latency = latency.saturating_add(self.draw(range));
+                }
+            }
+        }
+        latency
+    }
+
     fn arrival(&mut self, leaving: Duration, from: IpAddr, to: IpAddr, bytes: usize) -> Duration {
         let network_latency = self.latency;
         let mut latency = self.draw(network_latency);
@@ -954,9 +1088,12 @@ impl World {
         }
         let [from, to] = connection.hosts(side);
         let now = self.now();
-        let at = self.arrival(now, from, to, 0);
+        let at = self.stream_arrival(now, from, to, 0);
+        let acknowledgement_delay = self.acknowledgement_delay(from, to);
         if let Some(connection) = self.connections.get_mut(&id) {
-            connection.flows[side].end(at);
+            let flow = &mut connection.flows[side];
+            flow.acknowledgement_delay = acknowledgement_delay;
+            flow.end(at);
         }
     }
 
@@ -973,10 +1110,15 @@ impl World {
                 let keep_alive_deadline = connection.keep_alives[side]
                     .gives_up_at
                     .filter(|_| connection.failed[side].is_none());
+                let [from, to] = connection.hosts(side);
+                let acknowledgement = flow
+                    .acknowledgement_due()
+                    .filter(|_| !is_cut(&self.cuts, to, from));
                 let deadlines = arrival
                     .into_iter()
                     .chain(flow.retransmission_deadline())
-                    .chain(keep_alive_deadline);
+                    .chain(keep_alive_deadline)
+                    .chain(acknowledgement);
                 for at in deadlines {
                     next = Some(next.map_or(at, |next| next.min(at)));
                 }
@@ -998,12 +1140,18 @@ impl World {
                 let back_cut = is_cut(cuts, to, from);
                 let peer_gone = connection.failed[1 - side].is_some();
                 let flow = &mut connection.flows[side];
-                if peer_gone && flow.unacknowledged && !out_cut && !back_cut {
+                let acknowledgement_on_its_way = flow.acknowledged_at.is_some();
+                if peer_gone
+                    && flow.unacknowledged
+                    && !acknowledgement_on_its_way
+                    && !out_cut
+                    && !back_cut
+                {
                     connection.reset();
                     break;
                 }
-                if !peer_gone && !back_cut && flow.everything_arrived() {
-                    flow.unacknowledged = false;
+                if !back_cut && (!peer_gone || acknowledgement_on_its_way) {
+                    flow.acknowledge(now);
                 }
                 if !(flow.unacknowledged && (out_cut || back_cut || peer_gone)) {
                     flow.retransmitting_since = None;
@@ -1119,8 +1267,8 @@ impl World {
                     false
                 };
                 let acknowledged = !is_cut(cuts, to, from);
-                if acknowledged && flow.everything_arrived() {
-                    flow.unacknowledged = false;
+                if acknowledged {
+                    flow.acknowledge(now);
                 }
                 if arrived {
                     connection.hear(side, acknowledged, now);
@@ -1151,8 +1299,8 @@ impl World {
                     arrived = true;
                 }
                 let acknowledged = !is_cut(cuts, to, from);
-                if acknowledged && flow.everything_arrived() {
-                    flow.unacknowledged = false;
+                if acknowledged {
+                    flow.acknowledge(now);
                 }
                 if arrived {
                     connection.hear(side, acknowledged, now);
@@ -1365,8 +1513,10 @@ impl World {
         }
         let count = self.transfer_size(room);
         let now = self.now();
-        let at = self.arrival(now, from, to, count);
+        let at = self.stream_arrival(now, from, to, count);
+        let acknowledgement_delay = self.acknowledgement_delay(from, to);
         let flow = &mut self.connections.get_mut(&stream.connection)?.flows[stream.side];
+        flow.acknowledgement_delay = acknowledgement_delay;
         flow.send(&buffer[..count], at);
         Some(Ok(NetOutput::Transferred(count)))
     }
@@ -1693,6 +1843,77 @@ mod tests {
         pair.send(&client, b"more", 3);
         assert!(pair.reap(1).pop().unwrap().result.is_ok());
         assert!(client.peer_address().is_ok());
+    }
+
+    #[test]
+    fn a_lost_packet_arrives_after_its_retransmissions_and_the_bytes_stay_in_order() {
+        let mut pair = Pair::new(23);
+        let (client, server) = pair.connect();
+        let start = pair.now();
+        pair.network.packet_loss(1_000_000);
+        pair.send(&client, b"hello", 0);
+        pair.reap(1);
+        pair.network.packet_loss(0);
+        pair.send(&client, b" world", 1);
+        pair.reap(1);
+        let mut received = Vec::new();
+        while received.len() < 11 {
+            pair.receive(&server, 16, 2);
+            let completion = pair.reap(1).pop().unwrap();
+            let count = completion.result.unwrap().transferred().unwrap();
+            received.extend_from_slice(&completion.op.into_buffer().unwrap()[..count]);
+        }
+        assert_eq!(received, b"hello world");
+        assert_eq!(pair.now() - start, Duration::from_millis(804_600));
+    }
+
+    #[test]
+    fn a_held_back_packet_delays_the_bytes_behind_it_without_reordering_them() {
+        let mut pair = Pair::new(24);
+        let (client, server) = pair.connect();
+        let start = pair.now();
+        pair.network
+            .packet_reordering(1_000_000, Duration::from_millis(50));
+        pair.send(&client, b"first", 0);
+        pair.reap(1);
+        pair.network.packet_reordering(0, Duration::ZERO);
+        pair.send(&client, b"second", 1);
+        pair.reap(1);
+        let mut received = Vec::new();
+        while received.len() < 11 {
+            pair.receive(&server, 16, 2);
+            let completion = pair.reap(1).pop().unwrap();
+            let count = completion.result.unwrap().transferred().unwrap();
+            received.extend_from_slice(&completion.op.into_buffer().unwrap()[..count]);
+        }
+        assert_eq!(received, b"firstsecond");
+        assert!(pair.now() - start <= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn an_acknowledgement_still_on_its_way_when_the_path_back_is_cut_leaves_the_bytes_unacknowledged() {
+        for acknowledgement_latency in [false, true] {
+            let mut pair = Pair::new(25);
+            pair.network
+                .latency(Duration::from_millis(10), Duration::from_millis(10));
+            pair.network.acknowledgement_latency(acknowledgement_latency);
+            let (client, server) = pair.connect();
+            pair.send(&client, b"ping", 0);
+            pair.reap(1);
+            pair.receive(&server, 8, 1);
+            let completion = pair.reap(1).pop().unwrap();
+            assert_eq!(completion.result.unwrap().transferred(), Some(4));
+            pair.network.partition_one_way(SERVER, CLIENT);
+            pair.receive(&client, 8, 2);
+            let waited = pair.reap_for(1, 2 * SimNetwork::RETRANSMISSION_TIMEOUT);
+            if acknowledgement_latency {
+                let completion = waited.into_iter().next().unwrap();
+                assert_eq!(completion.user_data, 2);
+                assert_eq!(completion.result.unwrap_err().kind(), ErrorKind::TimedOut);
+            } else {
+                assert!(waited.is_empty());
+            }
+        }
     }
 
     #[test]
