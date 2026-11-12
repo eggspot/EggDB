@@ -929,3 +929,4 @@ its full title with its status.
 - [D902](decisions/D902.md) Code-only batch 550 (M16): MIME parts and attachments in the email store
 - [D903](decisions/D903.md) Code-only batch 551 (M16): IMAP IDLE
 - [D904](decisions/D904.md) Code-only batch 552 (M16): JMAP uploads and Email/import
+- [D905](decisions/D905.md) Code-only batch 553 (M12): pgRouting spanning trees and maximum flows

@@ -290,6 +290,241 @@ pub(crate) fn connected_components(edges_json: &str) -> SqlResult<String> {
     Ok(format!("[{}]", rows.join(", ")))
 }
 
+fn edge_list(edges_json: &str) -> SqlResult<Vec<Node>> {
+    let document = parse_document(edges_json).map_err(|_| invalid("the edges are not JSON"))?;
+    let Json::Array(edges) = document.value else {
+        return Err(invalid("the edges are a JSON array of objects"));
+    };
+    if edges.len() > MOST_EDGES {
+        return Err(SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "routing reads at most 5,000,000 edges"));
+    }
+    Ok(edges)
+}
+
+struct Disjoint {
+    parent: HashMap<i64, i64>,
+}
+
+impl Disjoint {
+    fn root(&mut self, node: i64) -> i64 {
+        let mut at = node;
+        while let Some(&up) = self.parent.get(&at).filter(|up| **up != at) {
+            at = up;
+        }
+        let root = at;
+        let mut at = node;
+        while let Some(&up) = self.parent.get(&at).filter(|up| **up != at) {
+            self.parent.insert(at, root);
+            at = up;
+        }
+        root
+    }
+
+    fn join(&mut self, left: i64, right: i64) -> bool {
+        let (left, right) = (self.root(left), self.root(right));
+        if left == right {
+            return false;
+        }
+        self.parent.insert(left.max(right), left.min(right));
+        true
+    }
+}
+
+/// A minimum spanning forest of the edges as an undirected graph (an edge weighs the cheaper of
+/// its non-negative `cost` and `reverse_cost`), by Kruskal's algorithm or by Prim's from the
+/// smallest vertex of each component: rows of `edge` and `cost`, in the order they were chosen.
+pub(crate) fn spanning_tree(edges_json: &str, prim: bool) -> SqlResult<String> {
+    let mut weighted: Vec<(f64, i64, i64, i64)> = Vec::new();
+    for edge in edge_list(edges_json)? {
+        let (id, source, target) = (whole(&edge, "id")?, whole(&edge, "source")?, whole(&edge, "target")?);
+        let cost = number(&edge, "cost").ok_or_else(|| invalid("every edge needs a numeric cost"))?;
+        let reverse = number(&edge, "reverse_cost");
+        if !cost.is_finite() || reverse.is_some_and(|reverse| !reverse.is_finite()) {
+            return Err(invalid("costs must be finite"));
+        }
+        let weight = [Some(cost), reverse].into_iter().flatten().filter(|weight| *weight >= 0.0).min_by(f64::total_cmp);
+        if let Some(weight) = weight {
+            weighted.push((weight, id, source, target));
+        }
+    }
+    let chosen = if prim { prim_order(&weighted) } else { kruskal_order(weighted) };
+    let rows: Vec<String> = chosen.iter().map(|(edge, cost)| format!("{{\"edge\": {edge}, \"cost\": {cost}}}")).collect();
+    Ok(format!("[{}]", rows.join(", ")))
+}
+
+fn kruskal_order(mut weighted: Vec<(f64, i64, i64, i64)>) -> Vec<(i64, f64)> {
+    weighted.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+    let mut sets = Disjoint { parent: HashMap::new() };
+    weighted
+        .into_iter()
+        .filter(|(_, _, source, target)| source != target && sets.join(*source, *target))
+        .map(|(weight, id, _, _)| (id, weight))
+        .collect()
+}
+
+fn prim_order(weighted: &[(f64, i64, i64, i64)]) -> Vec<(i64, f64)> {
+    let mut touching: BTreeMap<i64, Vec<(f64, i64, i64)>> = BTreeMap::new();
+    for &(weight, id, source, target) in weighted {
+        if source != target {
+            touching.entry(source).or_default().push((weight, id, target));
+            touching.entry(target).or_default().push((weight, id, source));
+        }
+    }
+    let mut reached: HashSet<i64> = HashSet::new();
+    let mut chosen = Vec::new();
+    let starts: Vec<i64> = touching.keys().copied().collect();
+    for start in starts {
+        if !reached.insert(start) {
+            continue;
+        }
+        let mut heap: BinaryHeap<std::cmp::Reverse<(OrderedCost, i64, i64)>> = BinaryHeap::new();
+        let push_from = |heap: &mut BinaryHeap<std::cmp::Reverse<(OrderedCost, i64, i64)>>, node: i64| {
+            for &(weight, id, to) in touching.get(&node).map(Vec::as_slice).unwrap_or_default() {
+                heap.push(std::cmp::Reverse((OrderedCost(weight), id, to)));
+            }
+        };
+        push_from(&mut heap, start);
+        while let Some(std::cmp::Reverse((OrderedCost(weight), id, to))) = heap.pop() {
+            if !reached.insert(to) {
+                continue;
+            }
+            chosen.push((id, weight));
+            push_from(&mut heap, to);
+        }
+    }
+    chosen
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OrderedCost(f64);
+
+impl Eq for OrderedCost {}
+
+impl Ord for OrderedCost {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+impl PartialOrd for OrderedCost {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct FlowArc {
+    from: usize,
+    to: usize,
+    capacity: i64,
+    flow: i64,
+    paired: usize,
+    edge: i64,
+    original: bool,
+}
+
+fn capacity(edge: &Node, name: &str) -> SqlResult<Option<i64>> {
+    match number(edge, name) {
+        None => Ok(None),
+        Some(value) if value.fract() == 0.0 && value.abs() <= 9.0e15 => Ok(Some(value as i64)),
+        Some(_) => Err(invalid(&format!("{name} must be a whole number"))),
+    }
+}
+
+/// The maximum flow from `source` to `target` (Edmonds-Karp: shortest augmenting paths) over
+/// edges with whole `capacity` and optional `reverse_capacity` (a negative one is no arc):
+/// `{"flow": total, "edges": [...]}`, each edge direction that carries flow with its
+/// `start_vid`, `end_vid`, `flow` and `residual_capacity`.
+pub(crate) fn max_flow(edges_json: &str, source: i64, target: i64) -> SqlResult<String> {
+    let mut index: HashMap<i64, usize> = HashMap::new();
+    let mut vertices: Vec<i64> = Vec::new();
+    let mut place = |vertex: i64, vertices: &mut Vec<i64>| {
+        *index.entry(vertex).or_insert_with(|| {
+            vertices.push(vertex);
+            vertices.len() - 1
+        })
+    };
+    let mut arcs: Vec<FlowArc> = Vec::new();
+    let add = |arcs: &mut Vec<FlowArc>, from: usize, to: usize, capacity: i64, edge: i64| {
+        let forward = arcs.len();
+        arcs.push(FlowArc { from, to, capacity, flow: 0, paired: forward + 1, edge, original: true });
+        arcs.push(FlowArc { from: to, to: from, capacity: 0, flow: 0, paired: forward, edge, original: false });
+    };
+    for edge in edge_list(edges_json)? {
+        let (id, from, to) = (whole(&edge, "id")?, whole(&edge, "source")?, whole(&edge, "target")?);
+        let forward = capacity(&edge, "capacity")?.ok_or_else(|| invalid("every edge needs a whole capacity"))?;
+        let backward = capacity(&edge, "reverse_capacity")?;
+        let (from, to) = (place(from, &mut vertices), place(to, &mut vertices));
+        if forward > 0 && from != to {
+            add(&mut arcs, from, to, forward, id);
+        }
+        if let Some(backward) = backward.filter(|backward| *backward > 0)
+            && from != to
+        {
+            add(&mut arcs, to, from, backward, id);
+        }
+    }
+    let mut leaving: Vec<Vec<usize>> = vec![Vec::new(); vertices.len()];
+    for (at, arc) in arcs.iter().enumerate() {
+        leaving[arc.from].push(at);
+    }
+    let mut total: i64 = 0;
+    if let (Some(&start), Some(&finish)) = (index.get(&source), index.get(&target))
+        && start != finish
+    {
+        loop {
+            let mut came_by: Vec<Option<usize>> = vec![None; vertices.len()];
+            let mut queue = std::collections::VecDeque::from([start]);
+            let mut seen = vec![false; vertices.len()];
+            seen[start] = true;
+            while let Some(node) = queue.pop_front() {
+                if node == finish {
+                    break;
+                }
+                for &at in &leaving[node] {
+                    let arc = &arcs[at];
+                    if !seen[arc.to] && arc.capacity - arc.flow > 0 {
+                        seen[arc.to] = true;
+                        came_by[arc.to] = Some(at);
+                        queue.push_back(arc.to);
+                    }
+                }
+            }
+            if !seen[finish] {
+                break;
+            }
+            let mut bottleneck = i64::MAX;
+            let mut node = finish;
+            while let Some(at) = came_by[node] {
+                bottleneck = bottleneck.min(arcs[at].capacity - arcs[at].flow);
+                node = arcs[at].from;
+            }
+            let mut node = finish;
+            while let Some(at) = came_by[node] {
+                arcs[at].flow += bottleneck;
+                let paired = arcs[at].paired;
+                arcs[paired].flow -= bottleneck;
+                node = arcs[at].from;
+            }
+            total = total.saturating_add(bottleneck);
+        }
+    }
+    let rows: Vec<String> = arcs
+        .iter()
+        .filter(|arc| arc.original && arc.flow > 0)
+        .map(|arc| {
+            format!(
+                "{{\"edge\": {}, \"start_vid\": {}, \"end_vid\": {}, \"flow\": {}, \"residual_capacity\": {}}}",
+                arc.edge,
+                vertices[arc.from],
+                vertices[arc.to],
+                arc.flow,
+                arc.capacity - arc.flow
+            )
+        })
+        .collect();
+    Ok(format!("{{\"flow\": {total}, \"edges\": [{}]}}", rows.join(", ")))
+}
+
 const MOST_TOUR_NODES: usize = 2_000;
 const MOST_IMPROVING_PASSES: usize = 1_000;
 
@@ -535,6 +770,19 @@ mod tests {
             r#"[{"component": 1, "node": 1}, {"component": 1, "node": 2}, {"component": 1, "node": 3}, {"component": 1, "node": 4}, {"component": 7, "node": 7}, {"component": 7, "node": 8}]"#
         );
         assert!(dijkstra("[{\"id\": 1}]", 1, 2, true).is_err());
+    }
+
+    #[test]
+    fn spanning_forests_and_maximum_flows() {
+        let roads = r#"[{"id": 1, "source": 1, "target": 2, "cost": 4}, {"id": 2, "source": 2, "target": 3, "cost": 1}, {"id": 3, "source": 1, "target": 3, "cost": 2}, {"id": 4, "source": 7, "target": 8, "cost": -1, "reverse_cost": 3}]"#;
+        assert_eq!(spanning_tree(roads, false).unwrap(), r#"[{"edge": 2, "cost": 1}, {"edge": 3, "cost": 2}, {"edge": 4, "cost": 3}]"#);
+        assert_eq!(spanning_tree(roads, true).unwrap(), r#"[{"edge": 3, "cost": 2}, {"edge": 2, "cost": 1}, {"edge": 4, "cost": 3}]"#);
+        let pipes = r#"[{"id": 1, "source": 1, "target": 2, "capacity": 3}, {"id": 2, "source": 1, "target": 3, "capacity": 2}, {"id": 3, "source": 2, "target": 4, "capacity": 2}, {"id": 4, "source": 3, "target": 4, "capacity": 3}, {"id": 5, "source": 2, "target": 3, "capacity": 1}]"#;
+        let flow = max_flow(pipes, 1, 4).unwrap();
+        assert!(flow.starts_with(r#"{"flow": 5, "#), "{flow}");
+        assert!(flow.contains(r#""edge": 1, "start_vid": 1, "end_vid": 2, "flow": 3, "residual_capacity": 0"#), "{flow}");
+        assert_eq!(max_flow(pipes, 4, 1).unwrap(), r#"{"flow": 0, "edges": []}"#);
+        assert!(max_flow(r#"[{"id": 1, "source": 1, "target": 2, "capacity": 1.5}]"#, 1, 2).is_err());
     }
 
     #[test]

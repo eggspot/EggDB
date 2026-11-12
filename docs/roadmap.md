@@ -1482,8 +1482,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `pgr_aStar`, `pgr_dijkstraCost` and `pgr_bdDijkstra`: **code written, unbuilt** (code-only mode, 2026-11-12, D832).
   Many-to-many forms and `pgr_dijkstraCostMatrix`: **code written, unbuilt** (code-only mode, 2026-11-12, D865).
   `pgr_TSP`, `pgr_TSPeuclidean` and `pgr_analyzeGraph`: **code written, unbuilt** (code-only mode, 2026-11-12, D882).
-  `pgr_nodeNetwork`: **code written, unbuilt** (code-only mode, 2026-11-12, D883). Left: the rest of pgRouting's
-  functions (flows, spanning trees and others).
+  `pgr_nodeNetwork`: **code written, unbuilt** (code-only mode, 2026-11-12, D883). Spanning trees (`pgr_kruskal`,
+  `pgr_prim`) and maximum flows (`pgr_maxFlow`, `pgr_pushRelabel`, `pgr_edmondsKarp`, `pgr_boykovKolmogorov`): **code
+  written, unbuilt** (code-only mode, 2026-11-12, D905). Left: the rest of pgRouting's functions (the DFS and BFS
+  forms, k shortest paths, turn restrictions, contraction and others).
 - The OGC APIs (D57). OGC API - Features (Core, GeoJSON) on `--rest-listen`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D781). CQL2 filters (text and JSON) and queryables (Part 3): **code written, unbuilt**
   (code-only mode, 2026-11-12, D879); CRS (Part 2): **code written, unbuilt** (code-only mode, 2026-11-12, D880).

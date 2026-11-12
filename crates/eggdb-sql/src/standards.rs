@@ -1,7 +1,7 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 25] = [
+pub(crate) const FUNCTIONS: [&str; 27] = [
     "eggdb_pdf_table",
     "fhir_validate",
     "opcua_decode",
@@ -12,6 +12,8 @@ pub(crate) const FUNCTIONS: [&str; 25] = [
     "eggdb_route_tsp",
     "eggdb_route_tsp_euclidean",
     "eggdb_route_node_network",
+    "eggdb_route_spanning_tree",
+    "eggdb_route_max_flow",
     "modbus_decode",
     "spreadsheet_recalculate",
     "row_pattern_matches",
@@ -459,6 +461,15 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_reach takes edges, a start, a distance and whether the graph is directed")),
             },
             ("eggdb_route_components", Some(edges)) => crate::routing::connected_components(&edges).and_then(jsonb),
+            ("eggdb_route_spanning_tree", Some(edges)) => match values.get(1).and_then(Value::to_text).as_deref() {
+                Some("kruskal") | None => crate::routing::spanning_tree(&edges, false).and_then(jsonb),
+                Some("prim") => crate::routing::spanning_tree(&edges, true).and_then(jsonb),
+                Some(_) => Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "eggdb_route_spanning_tree: the algorithm is 'kruskal' or 'prim'")),
+            },
+            ("eggdb_route_max_flow", Some(edges)) => match (whole(1), whole(2)) {
+                (Some(source), Some(target)) => crate::routing::max_flow(&edges, source, target).and_then(jsonb),
+                _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_max_flow takes edges, a source and a target")),
+            },
             ("eggdb_route_tsp", Some(matrix)) => match (whole(1).or(Some(0)), whole(2).or(Some(0))) {
                 (Some(start), Some(last)) => crate::routing::tsp(&matrix, start, last).and_then(jsonb),
                 _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_tsp takes a cost matrix, a start and an end")),

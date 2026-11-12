@@ -5,7 +5,8 @@
 /// EggDB's own graph code (D57); and `pgr_createTopology` and `pgr_createVerticesTable`, which
 /// number line ends as vertices (D831); `pgr_TSP` and `pgr_TSPeuclidean`, tours by EggDB's own
 /// nearest-neighbour and 2-opt code, and `pgr_analyzeGraph`, which checks a topology (D882);
-/// and `pgr_nodeNetwork`, which cuts edges where they cross (D883).
+/// `pgr_nodeNetwork`, which cuts edges where they cross (D883); and `pgr_kruskal`, `pgr_prim`,
+/// `pgr_maxFlow`, `pgr_pushRelabel`, `pgr_edmondsKarp` and `pgr_boykovKolmogorov` (D905).
 pub(crate) const PGROUTING_SCRIPT: &str = r#"
 CREATE SCHEMA pgrouting;
 CREATE FUNCTION public.pgr_edges_json(edges_sql text) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -138,6 +139,52 @@ CREATE FUNCTION public.pgr_dijkstracost(edges_sql text, start_vids bigint[], end
 $$;
 CREATE FUNCTION public.pgr_dijkstracostmatrix(edges_sql text, vids bigint[], directed boolean DEFAULT true) RETURNS TABLE (start_vid bigint, end_vid bigint, agg_cost double precision) LANGUAGE sql AS $$
     SELECT c.start_vid, c.end_vid, c.agg_cost FROM public.pgr_dijkstracost(edges_sql, vids, vids, directed) c
+$$;
+CREATE FUNCTION public.pgr_spanning_rows(chosen jsonb) RETURNS TABLE (edge bigint, cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    step record;
+BEGIN
+    FOR step IN SELECT s.value AS body FROM jsonb_array_elements(chosen) s LOOP
+        edge := (step.body ->> 'edge')::bigint;
+        cost := (step.body ->> 'cost')::double precision;
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
+CREATE FUNCTION public.pgr_kruskal(edges_sql text) RETURNS TABLE (edge bigint, cost double precision) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_spanning_rows(eggdb_route_spanning_tree(public.pgr_edges_json(edges_sql), 'kruskal'))
+$$;
+CREATE FUNCTION public.pgr_prim(edges_sql text) RETURNS TABLE (edge bigint, cost double precision) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_spanning_rows(eggdb_route_spanning_tree(public.pgr_edges_json(edges_sql), 'prim'))
+$$;
+CREATE FUNCTION public.pgr_flow_rows(computed jsonb) RETURNS TABLE (seq integer, edge bigint, start_vid bigint, end_vid bigint, flow bigint, residual_capacity bigint) LANGUAGE plpgsql AS $$
+DECLARE
+    step record;
+    counted integer := 0;
+BEGIN
+    FOR step IN SELECT s.value AS body FROM jsonb_array_elements(computed -> 'edges') s LOOP
+        counted := counted + 1;
+        seq := counted;
+        edge := (step.body ->> 'edge')::bigint;
+        start_vid := (step.body ->> 'start_vid')::bigint;
+        end_vid := (step.body ->> 'end_vid')::bigint;
+        flow := (step.body ->> 'flow')::bigint;
+        residual_capacity := (step.body ->> 'residual_capacity')::bigint;
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
+CREATE FUNCTION public.pgr_maxflow(edges_sql text, source bigint, target bigint) RETURNS bigint LANGUAGE sql AS $$
+    SELECT (eggdb_route_max_flow(public.pgr_edges_json(edges_sql), source, target) ->> 'flow')::bigint
+$$;
+CREATE FUNCTION public.pgr_pushrelabel(edges_sql text, source bigint, target bigint) RETURNS TABLE (seq integer, edge bigint, start_vid bigint, end_vid bigint, flow bigint, residual_capacity bigint) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_flow_rows(eggdb_route_max_flow(public.pgr_edges_json(edges_sql), source, target))
+$$;
+CREATE FUNCTION public.pgr_edmondskarp(edges_sql text, source bigint, target bigint) RETURNS TABLE (seq integer, edge bigint, start_vid bigint, end_vid bigint, flow bigint, residual_capacity bigint) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_flow_rows(eggdb_route_max_flow(public.pgr_edges_json(edges_sql), source, target))
+$$;
+CREATE FUNCTION public.pgr_boykovkolmogorov(edges_sql text, source bigint, target bigint) RETURNS TABLE (seq integer, edge bigint, start_vid bigint, end_vid bigint, flow bigint, residual_capacity bigint) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_flow_rows(eggdb_route_max_flow(public.pgr_edges_json(edges_sql), source, target))
 $$;
 CREATE FUNCTION public.pgr_vertex_near(vertices text, wanted_x double precision, wanted_y double precision, tolerance double precision) RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE
@@ -401,5 +448,34 @@ mod tests {
             "agg_cost\n2\nSELECT 1"
         );
         assert_eq!(run(&mut session, "SELECT count(*) AS n FROM pgr_bdDijkstra('SELECT id, source, target, cost FROM ways', 1, 3)").unwrap(), "n\n3\nSELECT 1");
+    }
+
+    #[test]
+    fn spanning_trees_and_flows() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION pgrouting",
+            "CREATE TABLE pipes (id bigint, source bigint, target bigint, cost double precision, capacity bigint)",
+            "INSERT INTO pipes VALUES (1, 1, 2, 4, 3), (2, 2, 3, 1, 1), (3, 1, 3, 2, 2), (4, 2, 4, 1, 2), (5, 3, 4, 1, 3)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut session, "SELECT sum(cost) AS total FROM pgr_kruskal('SELECT id, source, target, cost FROM pipes')").unwrap(),
+            "total\n3\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT count(*) AS edges FROM pgr_prim('SELECT id, source, target, cost FROM pipes')").unwrap(),
+            "edges\n3\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT pgr_maxFlow('SELECT id, source, target, capacity FROM pipes', 1, 4) AS flow").unwrap(),
+            "flow\n5\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT sum(flow) AS into_sink FROM pgr_pushRelabel('SELECT id, source, target, capacity FROM pipes', 1, 4) WHERE end_vid = 4").unwrap(),
+            "into_sink\n5\nSELECT 1"
+        );
     }
 }
