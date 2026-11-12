@@ -20,6 +20,8 @@ pub enum Filter {
     JsonSchema(Document),
     /// `$text`: a text search over the fields of the collection's text index.
     Text(crate::text_search::TextSearch),
+    /// `$where`: a JavaScript predicate over the document.
+    Where(Box<crate::where_script::WhereScript>),
     /// The values at a dotted path meet a condition.
     Field {
         /// The dotted path.
@@ -181,11 +183,7 @@ fn parse_at(filter: &Document, depth: usize) -> DocumentResult<Filter> {
             "$text" => {
                 return Err(DocumentError::bad_value("$text can only be at the top level of a filter"));
             }
-            "$where" => {
-                return Err(DocumentError::not_implemented(format!(
-                    "{name} is not supported yet"
-                )));
-            }
+            "$where" => all.push(Filter::Where(Box::new(crate::where_script::WhereScript::parse(value)?))),
             other if other.starts_with('$') => {
                 return Err(DocumentError::bad_value(format!(
                     "unknown top level operator: {other}"
@@ -518,6 +516,7 @@ pub fn matches(filter: &Filter, document: &Document) -> bool {
             crate::json_schema::schema_holds(schema, &Bson::Document(document.clone()), 0)
         }
         Filter::Text(search) => search.matches(document),
+        Filter::Where(script) => script.matches(document),
         Filter::Field { path, condition } => condition_holds(condition, &reached(document, path)),
     }
 }
@@ -534,7 +533,7 @@ pub fn matched_array_index(filter: &Filter, document: &Document) -> Option<usize
             .iter()
             .filter(|inner| matches(inner, document))
             .find_map(|inner| matched_array_index(inner, document)),
-        Filter::Nor(_) | Filter::Expr(_) | Filter::JsonSchema(_) | Filter::Text(_) => None,
+        Filter::Nor(_) | Filter::Expr(_) | Filter::JsonSchema(_) | Filter::Text(_) | Filter::Where(_) => None,
         Filter::Field { path, condition } => {
             if !records_position(condition) {
                 return None;

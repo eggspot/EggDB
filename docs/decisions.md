@@ -743,3 +743,4 @@ its full title with its status.
 - [D716](decisions/D716.md) Code-only batch 364 (M10): MySQL `b'...'`, `0b...` and `0x...` literals
 - [D717](decisions/D717.md) Code-only batch 365 (M16): Kafka transaction timeouts, aborting and fencing expired transactions
 - [D718](decisions/D718.md) Code-only batch 366 (M8): the `romanian` text search configuration with Snowball's Romanian stemmer
+- [D719](decisions/D719.md) Code-only batch 367 (M9): MongoDB's `$where` on a JavaScript expression interpreter of our own
