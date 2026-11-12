@@ -1266,7 +1266,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-12, D716); `SET` values stored in member order, once each, and numeric `SET`
   values: **code written, unbuilt** (code-only mode, 2026-11-13, D970); two-digit years: **code written, unbuilt**
   (code-only mode, 2026-11-13, D971); the spatial types: **code written, unbuilt** (code-only mode, 2026-11-13, D991).
-  Left: `ENUM` ordering, zero dates and the full `TIME` range.
+  Zero dates: **code written, unbuilt** (code-only mode, 2026-11-13, D992); the full `TIME` range was done in D153.
+  Left: `ENUM` ordering.
 - MySQL's semantics: `DECIMAL` division, booleans as integers, implicit string-to-number
   conversion, `sql_mode`, and `1 / 0` as `NULL` with a warning (D10, sql.md). `1 / 0` as `NULL` with
   warning 1365, and numbers as conditions: **code written, unbuilt** (code-only mode, 2026-11-11,

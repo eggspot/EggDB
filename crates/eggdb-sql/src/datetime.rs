@@ -16,6 +16,9 @@ pub(crate) const INFINITE_TIMESTAMP: i64 = i64::MAX;
 pub(crate) const NEGATIVE_INFINITE_TIMESTAMP: i64 = i64::MIN;
 pub(crate) const INFINITE_DATE: i32 = i32::MAX;
 pub(crate) const NEGATIVE_INFINITE_DATE: i32 = i32::MIN;
+pub(crate) const MYSQL_ZERO_DATE: i32 = MIN_DATE as i32 - 1;
+pub(crate) const MYSQL_ZERO_TIMESTAMP: i64 = MIN_TIMESTAMP - 1;
+const MYSQL_ZERO_DATE_TEXT: &str = "0000-00-00";
 
 pub(crate) fn is_infinite_timestamp(micros: i64) -> bool {
     micros == INFINITE_TIMESTAMP || micros == NEGATIVE_INFINITE_TIMESTAMP
@@ -574,11 +577,38 @@ pub(crate) fn valid_date(days: i32) -> bool {
 }
 
 pub(crate) fn valid_stored_timestamp(micros: i64) -> bool {
-    valid_timestamp(micros) || is_infinite_timestamp(micros)
+    valid_timestamp(micros) || is_infinite_timestamp(micros) || micros == MYSQL_ZERO_TIMESTAMP
 }
 
 pub(crate) fn valid_stored_date(days: i32) -> bool {
-    valid_date(days) || is_infinite_date(days)
+    valid_date(days) || is_infinite_date(days) || days == MYSQL_ZERO_DATE
+}
+
+/// A date as MySQL's dialect reads it: `0000-00-00` is MySQL's zero date, below every other.
+pub(crate) fn parse_mysql_date(text: &str) -> SqlResult<i32> {
+    if text.trim() == MYSQL_ZERO_DATE_TEXT {
+        return Ok(MYSQL_ZERO_DATE);
+    }
+    parse_date(text)
+}
+
+fn is_zero_time_of_day(text: &str) -> bool {
+    let text = text.trim();
+    text.is_empty()
+        || text
+            .strip_prefix("00:00:00")
+            .is_some_and(|fraction| fraction.is_empty() || (fraction.starts_with('.') && fraction[1..].bytes().all(|digit| digit == b'0')))
+}
+
+/// A time stamp as MySQL's dialect reads it: `0000-00-00 00:00:00` is MySQL's zero time stamp.
+pub(crate) fn parse_mysql_timestamp(text: &str, with_zone: bool) -> SqlResult<i64> {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix(MYSQL_ZERO_DATE_TEXT)
+        && is_zero_time_of_day(rest.trim_start_matches(['T', ' ']))
+    {
+        return Ok(MYSQL_ZERO_TIMESTAMP);
+    }
+    parse_timestamp(text, with_zone)
 }
 
 pub(crate) fn parse_date(text: &str) -> SqlResult<i32> {
@@ -913,6 +943,9 @@ fn year_text(year: i64) -> (String, bool) {
 }
 
 pub(crate) fn format_date(days: i32) -> String {
+    if days == MYSQL_ZERO_DATE {
+        return MYSQL_ZERO_DATE_TEXT.to_owned();
+    }
     if is_infinite_date(days) {
         return infinity_text(days > 0);
     }
@@ -923,6 +956,9 @@ pub(crate) fn format_date(days: i32) -> String {
 }
 
 fn format_local(micros: i64, zone: Option<i32>) -> String {
+    if micros == MYSQL_ZERO_TIMESTAMP {
+        return format!("{MYSQL_ZERO_DATE_TEXT} 00:00:00");
+    }
     let days = micros.div_euclid(MICROS_PER_DAY);
     let of_day = micros.rem_euclid(MICROS_PER_DAY);
     let (year, month, day) = civil_from_days(days);
@@ -981,6 +1017,9 @@ pub(crate) fn format_timestamptz_in(micros: i64, zone: TimeZone) -> String {
 pub(crate) fn format_timestamptz_at(micros: i64, offset: i32) -> String {
     if is_infinite_timestamp(micros) {
         return infinity_text(micros > 0);
+    }
+    if micros == MYSQL_ZERO_TIMESTAMP {
+        return format_local(micros, None);
     }
     format_local(to_local(micros, offset), Some(offset))
 }

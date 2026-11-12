@@ -789,7 +789,23 @@ pub(crate) fn parse_input(text: &str, sql_type: SqlType) -> SqlResult<Value> {
         SqlType::Bytea => crate::bytea::from_text(text).map(Value::Bytea),
         SqlType::Uuid => crate::bytea::parse_uuid(text).map(Value::Uuid),
         SqlType::Numeric(modifier) => numeric_value(numeric_input(text)?, modifier),
+        SqlType::Date if crate::constraints::current_dialect() == crate::Dialect::MySql => {
+            datetime::parse_mysql_date(text).map(Value::Date)
+        }
         SqlType::Date => datetime::parse_date(text).map(Value::Date),
+        SqlType::Timestamp(precision) | SqlType::TimestampTz(precision)
+            if crate::constraints::current_dialect() == crate::Dialect::MySql =>
+        {
+            let with_zone = matches!(sql_type, SqlType::TimestampTz(_));
+            match datetime::parse_mysql_timestamp(text, with_zone)? {
+                datetime::MYSQL_ZERO_TIMESTAMP => Ok(if with_zone {
+                    Value::TimestampTz(datetime::MYSQL_ZERO_TIMESTAMP)
+                } else {
+                    Value::Timestamp(datetime::MYSQL_ZERO_TIMESTAMP)
+                }),
+                micros => timestamp_value(micros, precision, with_zone),
+            }
+        }
         SqlType::Timestamp(precision) => {
             timestamp_value(datetime::parse_timestamp(text, false)?, precision, false)
         }
