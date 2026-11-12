@@ -165,7 +165,7 @@ pub use sim_fs::{CrashMode, SimFile, SimFileSystem};
 pub use sim_io::SimIoQueue;
 pub use sim_memory::SimMemory;
 pub use sim_net::{SimDatagramSocket, SimHost, SimListener, SimNetQueue, SimNetwork, SimStream};
-pub use threads::{SpawnedThread, ThreadOptions};
+pub use threads::{SpawnedThread, ThreadOptions, prefer_performance_cores_for_current_thread};
 pub use topology::{
     CacheId, CoreId, CoreKind, CpuLocation, CpuTopology, NumaNodeId, PackageId, SiblingNumbering,
 };

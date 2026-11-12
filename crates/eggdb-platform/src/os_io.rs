@@ -282,6 +282,7 @@ impl Pool {
             let worker = ThreadOptions::new()
                 .name(format!("eggdb-io-{number}"))
                 .stack_size(OsIoQueue::WORKER_STACK_SIZE)
+                .hot()
                 .spawn(&cpus, move || work(&queued, &finished, &canceled, &*wake))?;
             pool.workers.push(worker);
         }

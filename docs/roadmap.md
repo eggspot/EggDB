@@ -356,7 +356,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and the shards using it.
 - Performance and efficiency cores on Windows and macOS, and hot work placed on performance cores
   (D65, PR #86). **Code written, unbuilt** (code-only mode, 2026-11-10, D356): Windows' efficiency classes, macOS's `hw.perflevel0` count,
-  `ThreadOptions::hot`. Left: marking the engine's hot threads.
+  `ThreadOptions::hot`. Marking the engine's hot threads (the file I/O workers, and the protocol servers' session
+  threads through `prefer_performance_cores_for_current_thread`, with Windows' high quality of service): **code
+  written, unbuilt** (code-only mode, 2026-11-13, D947).
 - Thread pinning and CPU topology on the BSDs (Where we are). **Code written, unbuilt** (code-only mode, 2026-11-10). FreeBSD, DragonFly and NetBSD; OpenBSD has
   no affinity call.
 - EggDB's own allocator as the default build, once the benchmarks show it (D166).

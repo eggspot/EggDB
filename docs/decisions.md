@@ -971,3 +971,4 @@ its full title with its status.
 - [D944](decisions/D944.md) Code-only batch 592 (M1): completion port tests for a canceled connect and mixed operations
 - [D945](decisions/D945.md) Code-only batch 593 (M1): timed reaps and cancel on the file I/O queue, batched io_uring submission
 - [D946](decisions/D946.md) Code-only batch 594 (M1): packet faults and acknowledgement latency in the simulated network
+- [D947](decisions/D947.md) Code-only batch 595 (M1): the engine's hot threads asked onto performance cores

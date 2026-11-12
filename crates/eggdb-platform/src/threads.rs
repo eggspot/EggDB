@@ -46,10 +46,11 @@ impl ThreadOptions {
 
     /// Marks the thread as latency-critical work, which a hybrid processor should run on its
     /// performance cores: on Apple's systems the thread asks for the user-interactive quality
-    /// of service, which the scheduler keeps on performance cores; elsewhere, when the thread is
-    /// not pinned and the topology names performance cores, it is pinned to those among the
-    /// available CPUs. Either step is best effort: a refusal leaves the thread where the system
-    /// puts it.
+    /// of service, and on Windows it turns off power throttling for itself (the high quality of
+    /// service), both of which the scheduler keeps on performance cores; elsewhere, when the
+    /// thread is not pinned and the topology names performance cores, it is pinned to those
+    /// among the available CPUs. Either step is best effort: a refusal leaves the thread where
+    /// the system puts it.
     pub fn hot(mut self) -> Self {
         self.hot = true;
         self
@@ -106,6 +107,15 @@ impl ThreadOptions {
     }
 }
 
+/// Asks the system to treat the calling thread as latency-critical without pinning it, for
+/// threads that [`ThreadOptions`] did not start, such as a server's session threads: Apple's
+/// user-interactive quality of service, or Windows' high quality of service (power throttling
+/// off). Returns whether the system took the hint; Linux and the BSDs have no such hint for an
+/// unprivileged thread, so there it does nothing and returns `false`.
+pub fn prefer_performance_cores_for_current_thread() -> bool {
+    quality_of_service::ask_for_user_interactive()
+}
+
 fn prefer_performance_cores<C: Cpus>(cpus: &C, pinned_by_caller: bool) {
     if quality_of_service::ask_for_user_interactive() || pinned_by_caller {
         return;
@@ -136,7 +146,56 @@ mod quality_of_service {
     }
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(windows)]
+mod quality_of_service {
+    use std::ffi::c_void;
+
+    const THREAD_POWER_THROTTLING_CLASS: i32 = 3;
+    const THREAD_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
+    const THREAD_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
+
+    #[repr(C)]
+    struct PowerThrottlingState {
+        version: u32,
+        control_mask: u32,
+        state_mask: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThread() -> *mut c_void;
+        fn SetThreadInformation(
+            thread: *mut c_void,
+            class: i32,
+            information: *const c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    pub(super) fn ask_for_user_interactive() -> bool {
+        let state = PowerThrottlingState {
+            version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+            control_mask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            state_mask: 0,
+        };
+        // SAFETY: GetCurrentThread takes nothing and returns a pseudo-handle that needs no
+        // closing.
+        let thread = unsafe { GetCurrentThread() };
+        // SAFETY: `state` is a live THREAD_POWER_THROTTLING_STATE of the size passed, and the
+        // call changes only the calling thread's scheduling hint.
+        let set = unsafe {
+            SetThreadInformation(
+                thread,
+                THREAD_POWER_THROTTLING_CLASS,
+                (&raw const state).cast(),
+                size_of::<PowerThrottlingState>() as u32,
+            )
+        };
+        set != 0
+    }
+}
+
+#[cfg(not(any(target_vendor = "apple", windows)))]
 mod quality_of_service {
     pub(super) fn ask_for_user_interactive() -> bool {
         false

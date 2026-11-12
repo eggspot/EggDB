@@ -267,6 +267,7 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
                         .stack_size(eggdb_sql::SESSION_STACK_BYTES)
                         .spawn_scoped(scope, move || {
                             eggdb_sql::set_thread_stack_size(eggdb_sql::SESSION_STACK_BYTES);
+                            eggdb_platform::prefer_performance_cores_for_current_thread();
                             run_connection(stream, shared, directory, connection_id, login);
                         });
                     if let Err(error) = started {
