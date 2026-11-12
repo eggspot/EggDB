@@ -289,6 +289,7 @@ pub(crate) enum Statement {
     Delete {
         table: TableName,
         columns: Vec<String>,
+        elements: Vec<(String, Term)>,
         relations: Vec<Relation>,
         condition: Option<Condition>,
     },
@@ -842,10 +843,20 @@ impl Parser {
 
     fn delete(&mut self) -> Result<Statement, String> {
         let mut columns = Vec::new();
+        let mut elements = Vec::new();
         if !self.word_is("from") {
-            columns.push(self.identifier()?);
-            while self.eat_symbol(",") {
-                columns.push(self.identifier()?);
+            loop {
+                let column = self.identifier()?;
+                if self.eat_symbol("[") {
+                    let element = self.term()?;
+                    self.expect_symbol("]")?;
+                    elements.push((column, element));
+                } else {
+                    columns.push(column);
+                }
+                if !self.eat_symbol(",") {
+                    break;
+                }
             }
         }
         self.expect_word("from")?;
@@ -857,6 +868,7 @@ impl Parser {
         Ok(Statement::Delete {
             table,
             columns,
+            elements,
             relations,
             condition,
         })

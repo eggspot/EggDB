@@ -1603,7 +1603,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - CQL collections, tuples, user-defined types and counters (D19, D218). Collections and tuples, whole values and list
   appends: **code written, unbuilt** (code-only mode, 2026-11-12, D730). Adding to and removing from lists, sets and
   maps, prepends, `m[k] = v` and `l[i] = v`, counter decrements, `CONTAINS` and `CONTAINS KEY`: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D807). Left: `DELETE m[k]` and `DELETE l[i]`, and user-defined types.
+  unbuilt** (code-only mode, 2026-11-12, D807); `DELETE m[k]` and `DELETE l[i]`: **code written, unbuilt** (code-only
+  mode, 2026-11-12, D808). Left: user-defined types.
 - CQL TTL, `USING TIMESTAMP`, and lightweight transactions beyond `IF NOT EXISTS` (D218). Conditional `UPDATE` and `DELETE`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D587).
 - CQL paging, protocol v5 framing and compression (D218). Paging: **code written, unbuilt** (code-only mode,

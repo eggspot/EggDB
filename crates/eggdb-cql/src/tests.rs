@@ -738,3 +738,13 @@ fn contains_and_contains_key_filter_collections() {
     assert!(collection_sql("SELECT k FROM t WHERE tags CONTAINS KEY 'a' ALLOW FILTERING", &[]).is_err());
     assert!(collection_sql("SELECT k FROM t WHERE k CONTAINS 'a' ALLOW FILTERING", &[]).is_err());
 }
+
+#[test]
+fn single_map_entries_and_list_items_are_deleted() {
+    let entry = collection_sql("DELETE scores['x'], tags FROM t WHERE k = 'a'", &[]).unwrap();
+    assert!(entry.starts_with("UPDATE \"ks\".\"t\" SET \"tags\" = NULL, \"scores\" = (SELECT"), "{entry}");
+    assert!(entry.contains("item.value -> 0 <> to_jsonb('x'::text)"), "{entry}");
+    let item = collection_sql("DELETE items[?] FROM t WHERE k = 'a'", &[Some("2")]).unwrap();
+    assert!(item.contains("\"items\" = (COALESCE(\"items\", '[]')::jsonb #- ARRAY[('2'::integer)::text])::text"), "{item}");
+    assert!(collection_sql("DELETE tags['a'] FROM t WHERE k = 'a'", &[]).is_err());
+}

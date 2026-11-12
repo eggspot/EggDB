@@ -280,6 +280,29 @@ fn relations_after(
     Ok(())
 }
 
+fn deleted_element(builder: &mut Builder, name: &str, cql: CqlType, element: &Term) -> Result<(), String> {
+    let column = identifier(name);
+    let current = format!("COALESCE({column}, '[]')::jsonb");
+    match cql {
+        CqlType::Map(key, _) => {
+            builder.sql(&format!(
+                "{column} = (SELECT COALESCE(jsonb_agg(item.value), '[]'::jsonb) FROM jsonb_array_elements({current}) AS item WHERE item.value -> 0 <> to_jsonb("
+            ));
+            builder.term(element, name, *key)?;
+            builder.sql("))::text");
+        }
+        CqlType::List(_) => {
+            builder.sql(&format!("{column} = ({current} #- ARRAY[("));
+            builder.term(element, name, CqlType::Int)?;
+            builder.sql(")::text])::text");
+        }
+        other => {
+            return Err(format!("Invalid element deletion from the non-list, non-map {} column {name}", other.name()));
+        }
+    }
+    Ok(())
+}
+
 fn contains(builder: &mut Builder, relation: &Relation, cql: CqlType) -> Result<(), String> {
     let term = relation.terms.first().ok_or("a relation has no value")?;
     let column = identifier(&relation.column);
@@ -996,26 +1019,41 @@ fn statement(
         Statement::Delete {
             table,
             columns,
+            elements,
             relations: conditions,
             condition,
         } => {
             let keyspace = keyspace_of(table, current)?;
             let info = catalog.table(&keyspace, &table.table)?;
             let target = qualified(&keyspace, &table.table);
-            if columns.is_empty() {
+            if columns.is_empty() && elements.is_empty() {
                 builder.sql(&format!("DELETE FROM {target}"));
             } else {
-                let mut cleared = Vec::new();
-                for name in columns {
+                builder.sql(&format!("UPDATE {target} SET "));
+                let names = columns.iter().chain(elements.iter().map(|(name, _)| name));
+                for name in names {
                     column(&info, name)?;
                     if info.primary_key().any(|key| key == name) {
                         return Err(format!(
                             "Invalid identifier {name} for deletion (should not be a PRIMARY KEY part)"
                         ));
                     }
-                    cleared.push(format!("{} = NULL", identifier(name)));
                 }
-                builder.sql(&format!("UPDATE {target} SET {}", cleared.join(", ")));
+                let mut first = true;
+                for name in columns {
+                    if !first {
+                        builder.sql(", ");
+                    }
+                    first = false;
+                    builder.sql(&format!("{} = NULL", identifier(name)));
+                }
+                for (name, element) in elements {
+                    if !first {
+                        builder.sql(", ");
+                    }
+                    first = false;
+                    deleted_element(builder, name, column(&info, name)?, element)?;
+                }
             }
             relations(builder, &info, conditions)?;
             match condition {
