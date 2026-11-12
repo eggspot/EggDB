@@ -125,6 +125,7 @@ mod shredding;
 mod iot;
 mod modbus;
 mod remote_models;
+mod advisor;
 mod report_pdf;
 mod zarr;
 mod new_files;

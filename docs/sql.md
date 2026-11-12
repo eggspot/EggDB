@@ -4157,6 +4157,24 @@ SELECT eggdb_iot.latest('urn:dev:lamp-1');
   array `items`, object `required` and `properties`) with SQLSTATE 22023, and keep it in `eggdb_iot.readings` or
   `eggdb_iot.events`. `latest(thing)` returns each property's newest reading.
 
+## Index advisor (eggdb_advisor)
+
+`CREATE EXTENSION eggdb_advisor` proposes indexes from the statement statistics (D780):
+
+```sql
+CREATE EXTENSION eggdb_advisor;
+SELECT eggdb_advisor.find_indexes(1000);
+SELECT table_name, column_name, calls, total_ms, ddl FROM eggdb_advisor.recommendations ORDER BY total_ms DESC;
+SELECT eggdb_advisor.apply(1);
+```
+
+`find_indexes([least_total_ms, schema])` reads the 500 costliest `SELECT`, `UPDATE` and `DELETE` shapes in
+`pg_stat_statements` that took at least that many milliseconds in all, takes the columns their `WHERE` compares with
+a parameter (`=`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `IN`), and keeps each column of the schema's tables that the
+planner reads with a sequential scan (`scans_sequentially(schema, table, column)` asks `EXPLAIN`), with how many
+statements, calls and milliseconds it would serve and the `CREATE INDEX` to make. `apply(id)` runs one and
+`apply_all(least_total_ms)` every one above a cost; nothing is created on its own.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,
