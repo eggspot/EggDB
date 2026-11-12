@@ -354,8 +354,10 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         if parts == ["tileMatrixSets"] {
             return json(200, crate::ogc_tiles::matrix_sets_json());
         }
-        if parts == ["tileMatrixSets", crate::ogc_tiles::MATRIX_SET] {
-            return json(200, crate::ogc_tiles::matrix_set_json());
+        if let ["tileMatrixSets", id] = parts.as_slice()
+            && let Some(set) = crate::ogc_tiles::MatrixSet::named(id)
+        {
+            return json(200, crate::ogc_tiles::matrix_set_json(set));
         }
         let collections = match self.collections() {
             Ok(collections) => collections,
@@ -375,8 +377,14 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                     ["items"] => self.items(collection, request, None),
                     ["queryables"] => self.queryables(collection),
                     ["tiles"] => self.tilesets(collection),
-                    ["tiles", crate::ogc_tiles::MATRIX_SET] => self.tileset(collection),
-                    ["tiles", crate::ogc_tiles::MATRIX_SET, zoom, row, column] => self.tile(collection, zoom, row, column),
+                    ["tiles", id] => match crate::ogc_tiles::MatrixSet::named(id) {
+                        Some(set) => self.tileset(collection, set),
+                        None => failure(404, "OGC404", "no such tile matrix set"),
+                    },
+                    ["tiles", id, zoom, row, column] => match crate::ogc_tiles::MatrixSet::named(id) {
+                        Some(set) => self.tile(collection, set, zoom, row, column),
+                        None => failure(404, "OGC404", "no such tile matrix set"),
+                    },
                     ["items", id] => self.items(collection, request, Some(id)),
                     _ => failure(404, "OGC404", "no such resource"),
                 }

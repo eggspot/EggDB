@@ -1489,8 +1489,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The OGC APIs (D57). OGC API - Features (Core, GeoJSON) on `--rest-listen`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D781). CQL2 filters (text and JSON) and queryables (Part 3): **code written, unbuilt**
   (code-only mode, 2026-11-12, D879); CRS (Part 2): **code written, unbuilt** (code-only mode, 2026-11-12, D880).
-  Tiles with vector tiles on `WebMercatorQuad`: **code written, unbuilt** (code-only mode, 2026-11-12, D881).
-  Left: Maps, and other tile matrix sets.
+  Tiles with vector tiles on `WebMercatorQuad`: **code written, unbuilt** (code-only mode, 2026-11-12, D881);
+  `WorldCRS84Quad`: **code written, unbuilt** (code-only mode, 2026-11-12, D906). Left: Maps, and the other tile matrix
+  sets of OGC 17-083r4 (the UTM and polar ones, `EuropeanETRS89_LAEAQuad`, `CanadianNAD83_LCC`).
 - An ONNX runtime with `embed(model, text)` on local models (D31, D205).
 - Opt-in remote embedding and language-model providers, with keys from the secrets store (D31,
   D205). **Code written, unbuilt** (code-only mode, 2026-11-12, D777).
