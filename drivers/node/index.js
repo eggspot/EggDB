@@ -176,4 +176,132 @@ class Database {
   }
 }
 
-module.exports = { Database, EggDbError };
+const SCAN_REVERSE = 1;
+const SCAN_END_INCLUSIVE = 2;
+const SCAN_PREFIX = 4;
+
+function native(call) {
+  try {
+    return call();
+  } catch (error) {
+    throw error && error.status !== undefined ? new EggDbError(error) : error;
+  }
+}
+
+function bytesOf(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    return Buffer.from(value, 'utf8');
+  }
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  throw new TypeError('keys and values are strings, Buffers or Uint8Arrays');
+}
+
+class Transaction {
+  constructor(handle, writing) {
+    this.handle = handle;
+    this.writing = writing;
+  }
+
+  get(key, collection = null) {
+    return native(() => addon.kvGet(this.handle, collection, bytesOf(key)));
+  }
+
+  put(key, value, collection = null, ttlMs = null) {
+    native(() => addon.kvPut(this.handle, collection, bytesOf(key), bytesOf(value), ttlMs));
+  }
+
+  delete(key, collection = null) {
+    return native(() => addon.kvDelete(this.handle, collection, bytesOf(key)));
+  }
+
+  scan(options = {}) {
+    const { start = null, end = null, prefix = null, reverse = false, endInclusive = false, collection = null } = options;
+    let flags = (reverse ? SCAN_REVERSE : 0) | (endInclusive ? SCAN_END_INCLUSIVE : 0);
+    let from = start;
+    let to = end;
+    if (prefix !== null && prefix !== undefined) {
+      flags |= SCAN_PREFIX;
+      from = prefix;
+      to = null;
+    }
+    return native(() => addon.kvScan(this.handle, collection, bytesOf(from), bytesOf(to), flags));
+  }
+
+  createCollection(name) {
+    return native(() => addon.kvCollection(this.handle, 'create', name));
+  }
+
+  dropCollection(name) {
+    return native(() => addon.kvCollection(this.handle, 'drop', name));
+  }
+
+  renameCollection(name, newName) {
+    native(() => addon.kvCollection(this.handle, 'rename', name, newName));
+  }
+
+  collectionStats(name) {
+    return native(() => addon.kvCollection(this.handle, 'stats', name));
+  }
+
+  collections() {
+    return native(() => addon.kvCollections(this.handle));
+  }
+
+  commit() {
+    return native(() => addon.kvEnd(this.handle, true));
+  }
+
+  rollback() {
+    native(() => addon.kvEnd(this.handle, false));
+  }
+}
+
+class KeyValue {
+  constructor(file, options = {}) {
+    this.readOnly = Boolean(options.readOnly);
+    this.handle = native(() => addon.kvOpen(String(file), this.readOnly));
+  }
+
+  begin(writing) {
+    if (!this.handle) {
+      throw new EggDbError({ message: 'the store is closed', code: null, status: 100 });
+    }
+    return new Transaction(native(() => addon.kvBegin(this.handle, writing)), writing);
+  }
+
+  read(body) {
+    const transaction = this.begin(false);
+    try {
+      return body(transaction);
+    } finally {
+      transaction.rollback();
+    }
+  }
+
+  write(body) {
+    const transaction = this.begin(true);
+    let value;
+    try {
+      value = body(transaction);
+    } catch (error) {
+      transaction.rollback();
+      throw error;
+    }
+    transaction.commit();
+    return value;
+  }
+
+  close() {
+    if (this.handle) {
+      addon.kvClose(this.handle);
+      this.handle = null;
+    }
+  }
+}
+
+module.exports = { Database, EggDbError, KeyValue, Transaction };

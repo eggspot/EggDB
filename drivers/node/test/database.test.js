@@ -60,3 +60,22 @@ test('question marks are numbered for the PostgreSQL dialect', () => {
   assert.deepEqual(db.query("SELECT CAST(? AS integer) + CAST(? AS integer) AS sum, '?' AS mark", [2, 3]), [{ sum: 5, mark: '?' }]);
   db.close();
 });
+
+test('collections hold keys apart, rename and count', () => {
+  const { KeyValue } = require('..');
+  const store = new KeyValue(temporaryDatabase());
+  store.write((txn) => {
+    assert.equal(txn.createCollection('sessions'), true);
+    txn.put('s:1', 'ada', 'sessions');
+    txn.put('plain', Buffer.from('default'));
+  });
+  store.read((txn) => {
+    assert.equal(txn.get('s:1', 'sessions').toString(), 'ada');
+    assert.equal(txn.get('s:1'), null);
+    assert.deepEqual(txn.scan({ prefix: 's:', collection: 'sessions' }).map(([key]) => key.toString()), ['s:1']);
+    assert.equal(txn.collectionStats('sessions').entries, 1n);
+  });
+  store.write((txn) => txn.renameCollection('sessions', 'logins'));
+  store.read((txn) => assert.deepEqual(txn.collections(), ['logins']));
+  store.close();
+});
