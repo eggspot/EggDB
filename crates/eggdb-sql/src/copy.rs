@@ -759,7 +759,13 @@ pub(crate) fn copy_from_client(
             }
         }
     };
-    let count = loaded?;
+    let count = match loaded {
+        Ok(count) => count,
+        Err(error) => {
+            crate::plpgsql::push_statement_notices(std::mem::take(&mut loader.notices));
+            return Err(error);
+        }
+    };
     let mut result = QueryResult::command(format!("COPY {count}"));
     result.notices = std::mem::take(&mut loader.notices);
     if loader.skipped > 0 && loader.log_verbosity != CopyLogVerbosity::Silent {

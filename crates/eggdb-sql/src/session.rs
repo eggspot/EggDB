@@ -4570,11 +4570,34 @@ fn with_raised_notices(result: SqlResult<QueryResult>) -> SqlResult<QueryResult>
     if raised.is_empty() {
         return result;
     }
-    result.map(|mut result| {
-        let own = std::mem::replace(&mut result.notices, raised);
-        result.notices.extend(own);
-        result
-    })
+    match result {
+        Ok(mut result) => {
+            let own = std::mem::replace(&mut result.notices, raised);
+            result.notices.extend(own);
+            Ok(result)
+        }
+        Err(error) => {
+            NOTICES_BEFORE_ERROR.with(|kept| {
+                let mut kept = kept.borrow_mut();
+                let room = MOST_NOTICES_BEFORE_ERROR.saturating_sub(kept.len());
+                kept.extend(raised.into_iter().take(room));
+            });
+            Err(error)
+        }
+    }
+}
+
+const MOST_NOTICES_BEFORE_ERROR: usize = 10_000;
+
+thread_local! {
+    static NOTICES_BEFORE_ERROR: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The notices a statement raised before it failed (PL/pgSQL `RAISE NOTICE`, `COPY`'s
+/// `LOG_VERBOSITY verbose` lines before a `REJECT_LIMIT` error), each once: a server sends
+/// them before the error, as PostgreSQL does.
+pub fn take_notices_before_error() -> Vec<String> {
+    NOTICES_BEFORE_ERROR.with(|kept| std::mem::take(&mut *kept.borrow_mut()))
 }
 
 fn with_refused_routine_setting(

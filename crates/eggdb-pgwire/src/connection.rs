@@ -1758,7 +1758,12 @@ impl<'a, 's> Connection<'a, 's> {
             Ok(()) if results == 0 => self.wire.outbox.empty_query_response(),
             Ok(()) => {}
             Err(_) if self.lost.is_some() => return true,
-            Err(error) => report_error(&mut self.wire, Severity::Error, &error, Some(text)),
+            Err(error) => {
+                for notice in eggdb_sql::take_notices_before_error() {
+                    send_notice(&mut self.wire, &notice);
+                }
+                report_error(&mut self.wire, Severity::Error, &error, Some(text))
+            }
         }
         if discarded_all {
             self.discard_all();

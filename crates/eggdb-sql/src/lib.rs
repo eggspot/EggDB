@@ -445,6 +445,7 @@ pub use session::{
     BatchStep, InfoMessage, NamedParameter, OneStatementError, OneStatementRefusal, OutputColumn,
     Parameter, ParameterDeclaration, PlsqlParameter, PlsqlProcedure, PreparedStatement,
     QueryResult, Session, StatementDescription, StoredProcedure, TransactionStatus,
+    take_notices_before_error,
 };
 pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;
