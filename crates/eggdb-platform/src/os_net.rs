@@ -801,6 +801,91 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn a_canceled_connect_on_a_completion_port_comes_back_once_and_the_port_keeps_working() {
+        let network = OsNetwork::new();
+        let listener = Arc::new(network.listen(any_port()).unwrap());
+        let mut queue = network.net_queue(options(NetBackend::Iocp)).unwrap();
+        let unanswered = Address::Tcp(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 9)));
+        queue.submit(NetOp::Connect { address: unanswered }, 7).unwrap();
+        queue.cancel(7).unwrap();
+        queue.cancel(7).unwrap();
+        let mut completions = Vec::new();
+        queue
+            .reap_timeout(&mut completions, 1, Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(completions.len(), 1);
+        let canceled = completions.pop().unwrap();
+        assert_eq!(canceled.user_data, 7);
+        assert!(matches!(canceled.op, NetOp::Connect { .. }));
+        assert!(canceled.result.is_err(), "a connect to TEST-NET-1 succeeded");
+        assert_eq!(queue.in_flight(), 0);
+        assert_eq!(queue.cancel(7).unwrap_err().kind(), ErrorKind::NotFound);
+        let (server, client) = connected_pair(&mut queue, &listener);
+        let (server, client) = (Arc::new(server), Arc::new(client));
+        assert_eq!(receive_one_byte(&mut queue, &client, &server), Some(9));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn operations_through_the_port_and_answered_at_once_finish_in_one_reap() {
+        let network = OsNetwork::new();
+        let listener = Arc::new(network.listen(any_port()).unwrap());
+        let mut queue = network.net_queue(options(NetBackend::Iocp)).unwrap();
+        let (server, client) = connected_pair(&mut queue, &listener);
+        let (server, client) = (Arc::new(server), Arc::new(client));
+        let receive = NetOp::Receive {
+            stream: Arc::clone(&server),
+            buffer: vec![0; 4].into(),
+        };
+        queue.submit(receive, 1).unwrap();
+        let empty_send = NetOp::Send {
+            stream: Arc::clone(&client),
+            buffer: Vec::new().into(),
+        };
+        queue.submit(empty_send, 2).unwrap();
+        let empty_receive = NetOp::Receive {
+            stream: Arc::clone(&server),
+            buffer: Vec::new().into(),
+        };
+        queue.submit(empty_receive, 3).unwrap();
+        let send = NetOp::Send {
+            stream: Arc::clone(&client),
+            buffer: b"ping".to_vec().into(),
+        };
+        queue.submit(send, 4).unwrap();
+        let blocked = NetOp::Receive {
+            stream: Arc::clone(&client),
+            buffer: vec![0; 4].into(),
+        };
+        queue.submit(blocked, 5).unwrap();
+        queue.cancel(5).unwrap();
+        let mut completions = Vec::new();
+        while completions.len() < 5 {
+            let before = completions.len();
+            queue
+                .reap_timeout(&mut completions, 1, Duration::from_secs(5))
+                .unwrap();
+            assert!(completions.len() > before, "a reap timed out");
+        }
+        completions.sort_by_key(|completion| completion.user_data);
+        let user_data: Vec<u64> = completions.iter().map(|done| done.user_data).collect();
+        assert_eq!(user_data, [1, 2, 3, 4, 5]);
+        let mut completions = completions.into_iter();
+        let received = completions.next().unwrap();
+        let count = received.result.unwrap().transferred().unwrap();
+        assert_eq!(&received.op.into_buffer().unwrap()[..count], &b"ping"[..count]);
+        assert_eq!(completions.next().unwrap().result.unwrap().transferred(), Some(0));
+        assert_eq!(completions.next().unwrap().result.unwrap().transferred(), Some(0));
+        assert_eq!(completions.next().unwrap().result.unwrap().transferred(), Some(4));
+        assert_eq!(
+            completions.next().unwrap().result.unwrap_err().kind(),
+            ErrorKind::Canceled
+        );
+        assert_eq!(queue.in_flight(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn a_connection_bound_to_one_completion_port_is_refused_by_another() {
         let network = OsNetwork::new();
         let listener = Arc::new(network.listen(any_port()).unwrap());
