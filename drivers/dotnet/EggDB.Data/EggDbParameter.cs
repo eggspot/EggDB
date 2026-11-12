@@ -5,7 +5,10 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace EggDB.Data;
 
-/// <summary>A value for one <c>?</c> placeholder, in order.</summary>
+/// <summary>
+/// A value for one <c>?</c> placeholder, in order, or, when it has a name, for each <c>@name</c>,
+/// <c>:name</c> or <c>$name</c> placeholder with that name.
+/// </summary>
 public sealed class EggDbParameter : DbParameter
 {
     private string _name = string.Empty;
@@ -54,7 +57,8 @@ public sealed class EggDbParameterCollection : DbParameterCollection
 {
     private readonly List<EggDbParameter> _parameters = new();
 
-    internal IReadOnlyList<object?> Values() => _parameters.Select(parameter => parameter.Value).ToList();
+    internal IReadOnlyList<(string Name, object? Value)> NamedValues() =>
+        _parameters.Select(parameter => (parameter.ParameterName, parameter.Value)).ToList();
 
     /// <inheritdoc />
     public override int Count => _parameters.Count;

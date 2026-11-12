@@ -81,6 +81,22 @@ using (var store = new EggDbKeyValue(keyValuePath))
     }
 }
 File.Delete(keyValuePath);
+using (var named = new EggDbConnection("Data Source=:memory:;Dialect=sqlite"))
+{
+    named.Open();
+    using var create = named.CreateCommand();
+    create.CommandText = "CREATE TABLE eggs (id INTEGER PRIMARY KEY, colour TEXT, weight INTEGER)";
+    create.ExecuteNonQuery();
+    using var insert = named.CreateCommand();
+    insert.CommandText = "INSERT INTO eggs (weight, colour) VALUES (@weight, @colour)";
+    insert.Parameters.Add(new EggDbParameter { ParameterName = "@colour", Value = "brown" });
+    insert.Parameters.Add(new EggDbParameter { ParameterName = "weight", Value = 61 });
+    Check(insert.ExecuteNonQuery() == 1, "a named insert changes one row");
+    using var select = named.CreateCommand();
+    select.CommandText = "SELECT colour FROM eggs WHERE weight = :weight AND colour <> '@colour'";
+    select.Parameters.Add(new EggDbParameter { ParameterName = "weight", Value = 61 });
+    Check((string?)select.ExecuteScalar() == "brown", "named parameters bind by name, not inside quotes");
+}
 Console.WriteLine("dotnet driver check: passed");
 
 static void Check(bool condition, string what)

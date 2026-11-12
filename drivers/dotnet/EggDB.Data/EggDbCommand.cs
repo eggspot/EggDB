@@ -43,8 +43,9 @@ public sealed class EggDbCommand : DbCommand
 
     private List<StatementResult> Run()
     {
-        var values = ((EggDbParameterCollection)DbParameterCollection).Values();
-        return OpenConnection().Run(_commandText, values);
+        var named = ((EggDbParameterCollection)DbParameterCollection).NamedValues();
+        var (text, values) = NamedParameters.Positional(_commandText, named);
+        return OpenConnection().Run(text, values);
     }
 
     /// <inheritdoc />

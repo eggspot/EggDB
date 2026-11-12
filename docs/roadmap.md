@@ -1044,7 +1044,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Every model and dialect and the MCP tools in the drivers, first the dialect per connection and
   an ordered key-value API in FoundationDB's style (D16, D48). Check: driver tests, both modes.
 - The EF Core provider, with Dapper and NHibernate checked (D16, D182). Check: EF Core's
-  provider specification tests.
+  provider specification tests. Named parameters for
+  Dapper and NHibernate's driver and dialect (`EggDB.NHibernate`): **code written, unbuilt** (code-only mode,
+  2026-11-13, D965). Left: the EF Core provider.
 - The Hibernate dialect, R2DBC, and jOOQ, Spring Data and Exposed checked (D16, D182). The Hibernate dialect
   (`EggDbDialect` with its resolver) and Exposed's registration (`EggDbExposed`): **code written, unbuilt** (code-only
   mode, 2026-11-13, D964). Left: R2DBC, and the jOOQ and Spring Data checks.
