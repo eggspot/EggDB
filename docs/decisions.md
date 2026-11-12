@@ -981,3 +981,4 @@ its full title with its status.
 - [D954](decisions/D954.md) Code-only batch 602 (M4): YCSB workloads against SQLite and Redis
 - [D955](decisions/D955.md) Code-only batch 603 (M5): Oracle's AFTER STARTUP and BEFORE SHUTDOWN triggers
 - [D956](decisions/D956.md) Code-only batch 604 (M5): SQL Server's server-level DDL events and security events
+- [D957](decisions/D957.md) Code-only batch 605 (M6f): a SQLAlchemy dialect and asyncio support for the Python driver

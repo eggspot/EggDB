@@ -1046,7 +1046,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The EF Core provider, with Dapper and NHibernate checked (D16, D182). Check: EF Core's
   provider specification tests.
 - The Hibernate dialect, R2DBC, and jOOQ, Spring Data and Exposed checked (D16, D182).
-- The SQLAlchemy dialect, the Django backend and asyncio support for Python (D16, D182).
+- The SQLAlchemy dialect, the Django backend and asyncio support for Python (D16, D182). The SQLAlchemy dialect
+  (`eggdb.sqlalchemy`) and asyncio support (`eggdb.aio`): **code written, unbuilt** (code-only mode, 2026-11-13,
+  D957). Left: the Django backend, which needs Django's SQLite user functions in EggDB.
 - Prisma, TypeORM, Drizzle, Sequelize and Knex adapters for Node.js (D16, D182).
 - The GORM dialect, with sqlc checked (D16, D182).
 - A PDO driver with Laravel/Eloquent and Doctrine (D16, D182).
