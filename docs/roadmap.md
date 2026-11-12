@@ -732,7 +732,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   audit log, with anchored digests and retention (D26, D231).
 - Crypto-shredding: per-subject keys whose deletion makes data unreadable in the file, history
   and every backup, with holds that override it (D26, D53, D231, D246).
-- Classification and tagging of personal data (D26).
+- Classification and tagging of personal data (D26). **Code written, unbuilt** (code-only mode, 2026-11-12, D748).
 - Evidence reports for SOC 2, HIPAA and PCI DSS audits (D26).
 - Ledger tables: `TRUNCATE` and `DROP` refused (**code written, unbuilt**, code-only mode,
   2026-11-10, D392), digests published outside the database and checked
@@ -748,9 +748,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   account (D52).
 - Clean rooms: query-output policies and private set intersection (D52, D245).
 - Differential privacy: privacy budgets, DP aggregates, the snapping mechanism and l-diversity
-  (D52, D245).
+  (D52, D245). Budgets and DP count, sum and average: **code written, unbuilt** (code-only mode, 2026-11-12, D748).
+  Left: the snapping mechanism and l-diversity.
 - Blind-index search on encrypted columns (D52).
-- Synthetic data, and masked copies for non-production use (D52).
+- Synthetic data, and masked copies for non-production use (D52). Masked copies (`eggdb_privacy.masked_copy`): **code
+  written, unbuilt** (code-only mode, 2026-11-12, D748). Left: synthetic data.
 - A secrets store with dynamic, short-lived credentials in Vault's style (D54).
 - An LDAP v3 server, SCIM, and the published Active Directory protocols (MS-ADTS) after D58's
   legal check (D54).

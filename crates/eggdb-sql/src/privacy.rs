@@ -25,6 +25,198 @@ BEGIN
     RETURN coalesce(smallest, 0);
 END
 $$;
+CREATE TABLE eggdb_privacy.classifications (schema_name text NOT NULL, table_name text NOT NULL, column_name text NOT NULL, category text NOT NULL, share double precision, sampled_rows bigint NOT NULL, classified_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (schema_name, table_name, column_name, category));
+CREATE FUNCTION eggdb_privacy.luhn(digits text) RETURNS boolean LANGUAGE plpgsql AS $$
+DECLARE
+    clean text := regexp_replace(digits, '[^0-9]', '', 'g');
+    total integer := 0;
+    digit integer;
+BEGIN
+    IF length(clean) < 12 OR length(clean) > 19 THEN
+        RETURN false;
+    END IF;
+    FOR position_from_right IN 1..length(clean) LOOP
+        digit := substr(clean, length(clean) - position_from_right + 1, 1)::integer;
+        IF position_from_right % 2 = 0 THEN
+            digit := digit * 2;
+            IF digit > 9 THEN
+                digit := digit - 9;
+            END IF;
+        END IF;
+        total := total + digit;
+    END LOOP;
+    RETURN total % 10 = 0;
+END
+$$;
+CREATE FUNCTION eggdb_privacy.value_category(value text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+    IF value ~ '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' THEN
+        RETURN 'email';
+    ELSIF value ~ '^[0-9][0-9 -]{11,22}[0-9]$' AND eggdb_privacy.luhn(value) THEN
+        RETURN 'payment_card';
+    ELSIF upper(replace(value, ' ', '')) ~ '^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$' THEN
+        RETURN 'iban';
+    ELSIF value ~ '^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$' THEN
+        RETURN 'ip_address';
+    ELSIF value ~ '^\+?[0-9][0-9 ().-]{6,18}[0-9]$' THEN
+        RETURN 'phone';
+    END IF;
+    RETURN NULL;
+END
+$$;
+CREATE FUNCTION eggdb_privacy.name_category(column_name text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    lowered text := lower(column_name);
+BEGIN
+    IF lowered ~ '(^|_)(ssn|social_security|national_id|passport|tax_id|cccd|cmnd)($|_)' THEN
+        RETURN 'national_id';
+    ELSIF lowered ~ '(^|_)(birth|dob|birthday|date_of_birth)($|_)' THEN
+        RETURN 'date_of_birth';
+    ELSIF lowered ~ '(^|_)((first|last|full|given|family|middle)_?)?name($|_)' AND lowered !~ '(user|file|table|host|domain|product|company)_?name' THEN
+        RETURN 'person_name';
+    ELSIF lowered ~ '(^|_)(address|street|postcode|zip|zipcode)($|_)' THEN
+        RETURN 'address';
+    ELSIF lowered ~ '(^|_)(gender|sex|religion|ethnicity|race|health|diagnosis)($|_)' THEN
+        RETURN 'sensitive';
+    END IF;
+    RETURN NULL;
+END
+$$;
+CREATE FUNCTION eggdb_privacy.classify(schema_name text, table_name text, sample_size integer DEFAULT 1000, threshold double precision DEFAULT 0.8) RETURNS TABLE (column_name text, category text, share double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    found_column record;
+    value text;
+    sampled bigint;
+    by_name text;
+    counts jsonb;
+    kind text;
+    best text;
+    best_count bigint;
+BEGIN
+    DELETE FROM eggdb_privacy.classifications c WHERE c.schema_name = classify.schema_name AND c.table_name = classify.table_name;
+    FOR found_column IN SELECT c.column_name AS name, c.data_type FROM information_schema.columns c WHERE c.table_schema = classify.schema_name AND c.table_name = classify.table_name ORDER BY c.ordinal_position LOOP
+        by_name := eggdb_privacy.name_category(found_column.name);
+        sampled := 0;
+        counts := '{}'::jsonb;
+        IF found_column.data_type IN ('text', 'character varying', 'character', 'inet') THEN
+            FOR value IN EXECUTE format('SELECT %I::text FROM %I.%I WHERE %I IS NOT NULL LIMIT %s', found_column.name, classify.schema_name, classify.table_name, found_column.name, greatest(sample_size, 1)) LOOP
+                sampled := sampled + 1;
+                kind := eggdb_privacy.value_category(trim(value));
+                IF kind IS NOT NULL THEN
+                    counts := jsonb_set(counts, ARRAY[kind], to_jsonb(coalesce((counts ->> kind)::bigint, 0) + 1));
+                END IF;
+            END LOOP;
+        END IF;
+        best := NULL;
+        best_count := 0;
+        FOR kind IN SELECT jsonb_object_keys(counts) LOOP
+            IF (counts ->> kind)::bigint > best_count THEN
+                best := kind;
+                best_count := (counts ->> kind)::bigint;
+            END IF;
+        END LOOP;
+        IF best IS NOT NULL AND sampled > 0 AND best_count::double precision / sampled >= threshold THEN
+            INSERT INTO eggdb_privacy.classifications (schema_name, table_name, column_name, category, share, sampled_rows)
+                VALUES (classify.schema_name, classify.table_name, found_column.name, best, best_count::double precision / sampled, sampled);
+            column_name := found_column.name;
+            category := best;
+            share := best_count::double precision / sampled;
+            RETURN NEXT;
+        ELSIF by_name IS NOT NULL THEN
+            INSERT INTO eggdb_privacy.classifications (schema_name, table_name, column_name, category, share, sampled_rows)
+                VALUES (classify.schema_name, classify.table_name, found_column.name, by_name, NULL, sampled);
+            column_name := found_column.name;
+            category := by_name;
+            share := NULL;
+            RETURN NEXT;
+        END IF;
+    END LOOP;
+END
+$$;
+CREATE TABLE eggdb_privacy.budgets (dataset text PRIMARY KEY, epsilon_total double precision NOT NULL CHECK (epsilon_total > 0), epsilon_spent double precision NOT NULL DEFAULT 0);
+CREATE TABLE eggdb_privacy.budget_spending (id bigserial PRIMARY KEY, dataset text NOT NULL, epsilon double precision NOT NULL, purpose text NOT NULL, spent_at timestamptz NOT NULL DEFAULT now(), spent_by text NOT NULL DEFAULT current_user);
+CREATE FUNCTION eggdb_privacy.spend(dataset text, epsilon double precision, purpose text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    remaining double precision;
+BEGIN
+    IF epsilon IS NULL OR epsilon <= 0 THEN
+        RAISE EXCEPTION 'epsilon must be positive' USING ERRCODE = '22023';
+    END IF;
+    SELECT b.epsilon_total - b.epsilon_spent INTO remaining FROM eggdb_privacy.budgets b WHERE b.dataset = spend.dataset FOR UPDATE;
+    IF remaining IS NULL THEN
+        RAISE EXCEPTION 'dataset % has no privacy budget', dataset USING ERRCODE = '42704';
+    END IF;
+    IF epsilon > remaining THEN
+        RAISE EXCEPTION 'the privacy budget of % has % left, less than the % asked', dataset, remaining, epsilon USING ERRCODE = '53400';
+    END IF;
+    UPDATE eggdb_privacy.budgets SET epsilon_spent = epsilon_spent + epsilon WHERE budgets.dataset = spend.dataset;
+    INSERT INTO eggdb_privacy.budget_spending (dataset, epsilon, purpose) VALUES (spend.dataset, epsilon, purpose);
+END
+$$;
+CREATE FUNCTION eggdb_privacy.dp_count(dataset text, query text, epsilon double precision) RETURNS double precision LANGUAGE plpgsql AS $$
+DECLARE
+    exact bigint;
+BEGIN
+    PERFORM eggdb_privacy.spend(dataset, epsilon, 'count');
+    EXECUTE format('SELECT count(*) FROM (%s) q', query) INTO exact;
+    RETURN greatest(exact + laplace_noise(1, epsilon), 0);
+END
+$$;
+CREATE FUNCTION eggdb_privacy.dp_sum(dataset text, query text, column_name text, lower_bound double precision, upper_bound double precision, epsilon double precision) RETURNS double precision LANGUAGE plpgsql AS $$
+DECLARE
+    exact double precision;
+BEGIN
+    IF lower_bound > upper_bound THEN
+        RAISE EXCEPTION 'the lower bound is above the upper bound' USING ERRCODE = '22023';
+    END IF;
+    PERFORM eggdb_privacy.spend(dataset, epsilon, 'sum');
+    EXECUTE format('SELECT coalesce(sum(least(greatest(%I::double precision, %s), %s)), 0) FROM (%s) q', column_name, lower_bound, upper_bound, query) INTO exact;
+    RETURN exact + laplace_noise(greatest(abs(lower_bound), abs(upper_bound)), epsilon);
+END
+$$;
+CREATE FUNCTION eggdb_privacy.dp_avg(dataset text, query text, column_name text, lower_bound double precision, upper_bound double precision, epsilon double precision) RETURNS double precision LANGUAGE plpgsql AS $$
+DECLARE
+    total double precision;
+    counted double precision;
+BEGIN
+    total := eggdb_privacy.dp_sum(dataset, query, column_name, lower_bound, upper_bound, epsilon / 2);
+    counted := eggdb_privacy.dp_count(dataset, query, epsilon / 2);
+    IF counted < 1 THEN
+        RETURN NULL;
+    END IF;
+    RETURN least(greatest(total / counted, lower_bound), upper_bound);
+END
+$$;
+CREATE FUNCTION eggdb_privacy.masked_copy(schema_name text, table_name text, target_table text, masks jsonb) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    found_column record;
+    chosen text[] := '{}';
+    rule text;
+    copied bigint;
+BEGIN
+    FOR found_column IN SELECT c.column_name AS name, c.data_type FROM information_schema.columns c WHERE c.table_schema = masked_copy.schema_name AND c.table_name = masked_copy.table_name ORDER BY c.ordinal_position LOOP
+        rule := masks ->> found_column.name;
+        chosen := chosen || CASE
+            WHEN rule IS NULL OR rule = 'keep' THEN format('%I', found_column.name)
+            WHEN rule = 'null' THEN format('NULL::%s AS %I', found_column.data_type, found_column.name)
+            WHEN rule = 'redact' THEN format('CASE WHEN %I IS NULL THEN NULL ELSE repeat(''x'', length(%I::text)) END AS %I', found_column.name, found_column.name, found_column.name)
+            WHEN rule = 'hash' THEN format('md5(%I::text) AS %I', found_column.name, found_column.name)
+            WHEN rule = 'email' THEN format('CASE WHEN %I IS NULL THEN NULL ELSE ''user'' || substr(md5(%I::text), 1, 8) || ''@example.com'' END AS %I', found_column.name, found_column.name, found_column.name)
+            WHEN rule ~ '^keep_last:[0-9]+$' THEN format('CASE WHEN %I IS NULL THEN NULL ELSE repeat(''*'', greatest(length(%I::text) - %s, 0)) || right(%I::text, %s) END AS %I', found_column.name, found_column.name, split_part(rule, ':', 2), found_column.name, split_part(rule, ':', 2), found_column.name)
+            ELSE NULL
+        END;
+        IF chosen[array_length(chosen, 1)] IS NULL THEN
+            RAISE EXCEPTION 'unknown mask % for column %', rule, found_column.name USING ERRCODE = '22023';
+        END IF;
+    END LOOP;
+    IF coalesce(array_length(chosen, 1), 0) = 0 THEN
+        RAISE EXCEPTION 'table %.% does not exist', schema_name, table_name USING ERRCODE = '42P01';
+    END IF;
+    EXECUTE format('CREATE TABLE %s AS SELECT %s FROM %I.%I', target_table, array_to_string(chosen, ', '), schema_name, table_name);
+    GET DIAGNOSTICS copied = ROW_COUNT;
+    RETURN copied;
+END
+$$;
 "#;
 
 fn invalid(message: impl Into<String>) -> SqlError {

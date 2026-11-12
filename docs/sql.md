@@ -3627,6 +3627,16 @@ SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY['zip', 'age_band'])
 - `eggdb_privacy.k_anonymity(schema, table, columns)` returns the size of the smallest group of
   rows sharing the same values of the quasi-identifier columns: the table is k-anonymous for
   that k.
+- `eggdb_privacy.classify(schema, table [, sample_size, threshold])` tags personal data (D748): it samples each text
+  column and names it `email`, `payment_card` (Luhn-checked), `iban`, `ip_address` or `phone` when at least the
+  threshold share (0.8) of values look like one, else by its name (`national_id`, `date_of_birth`, `person_name`,
+  `address`, `sensitive`), and keeps the result in `eggdb_privacy.classifications`.
+- Differential privacy with budgets: a row in `eggdb_privacy.budgets` gives a dataset its total epsilon;
+  `dp_count(dataset, query, epsilon)`, `dp_sum(dataset, query, column, lower, upper, epsilon)` and `dp_avg(...)`
+  spend from it (logged in `budget_spending`) and answer with Laplace noise, values clamped to the bounds; once the
+  budget is spent they refuse with `53400`.
+- `eggdb_privacy.masked_copy(schema, table, target, masks)` copies a table for non-production use with each column
+  kept or masked as `masks` says: `null`, `redact`, `hash`, `email` (a fake address) or `keep_last:N`.
 
 ## Retention, legal hold and erasure (eggdb_retention)
 
