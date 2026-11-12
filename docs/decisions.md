@@ -988,3 +988,4 @@ its full title with its status.
 - [D961](decisions/D961.md) Code-only batch 609 (M6f): a Prisma driver adapter for the Node.js driver
 - [D962](decisions/D962.md) Code-only batch 610 (M6f): GORM on EggDB through GORM's SQLite dialector
 - [D963](decisions/D963.md) Code-only batch 611 (M6f): a Doctrine DBAL driver for the PHP driver
+- [D964](decisions/D964.md) Code-only batch 612 (M6f): Hibernate's dialect and Exposed's registration for the JDBC driver
