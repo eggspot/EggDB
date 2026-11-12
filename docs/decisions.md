@@ -868,3 +868,4 @@ its full title with its status.
 - [D841](decisions/D841.md) Code-only batch 489 (M6c): OAuth access tokens for MCP over HTTP
 - [D842](decisions/D842.md) Code-only batch 490 (M14): roles, grants, routines and triggers in the SQL dump
 - [D843](decisions/D843.md) Code-only batch 491 (M16): CQL ALTER TYPE
+- [D844](decisions/D844.md) Code-only batch 492 (M16): CQL system_schema.types

@@ -957,6 +957,42 @@ impl<'s> Connection<'_, 's> {
                     rows,
                 )
             }
+            ("system_schema", "types") => {
+                let keyspaces = self.user_keyspaces()?;
+                let stored = text_rows(
+                    &mut self.session,
+                    "SELECT keyspace_name, type_name, definition FROM eggdb_cql.types ORDER BY keyspace_name, type_name",
+                )
+                .unwrap_or_default();
+                let mut rows = Vec::new();
+                for row in stored {
+                    let [keyspace, name, definition] = row.as_slice() else {
+                        continue;
+                    };
+                    if !keyspaces.contains(keyspace) {
+                        continue;
+                    }
+                    let Some(CqlType::Udt(user_type)) = CqlType::parse(definition) else {
+                        continue;
+                    };
+                    let names: Vec<&[u8]> = user_type.fields.iter().map(|(field, _)| field.as_bytes()).collect();
+                    let types: Vec<String> = user_type.fields.iter().map(|(_, cql)| cql.name()).collect();
+                    let type_bytes: Vec<&[u8]> = types.iter().map(String::as_bytes).collect();
+                    rows.push(vec![text(keyspace), text(name), collection(&names), collection(&type_bytes)]);
+                }
+                let text_list = crate::types::interned(CqlType::Varchar)
+                    .map(CqlType::List)
+                    .map_err(invalid)?;
+                (
+                    vec![
+                        simple("keyspace_name", CqlType::Varchar),
+                        simple("type_name", CqlType::Varchar),
+                        simple("field_names", text_list),
+                        simple("field_types", text_list),
+                    ],
+                    rows,
+                )
+            }
             ("system_schema", "columns") => {
                 let mut rows = Vec::new();
                 for (keyspace, name) in self.user_tables()? {
@@ -1011,8 +1047,7 @@ impl<'s> Connection<'_, 's> {
             }
             (
                 "system_schema",
-                "types" | "functions" | "aggregates" | "triggers" | "indexes" | "views"
-                | "dropped_columns",
+                "functions" | "aggregates" | "triggers" | "indexes" | "views" | "dropped_columns",
             ) => (vec![simple("keyspace_name", CqlType::Varchar)], Vec::new()),
             _ => return Err(invalid(format!("unconfigured table {table}"))),
         })
