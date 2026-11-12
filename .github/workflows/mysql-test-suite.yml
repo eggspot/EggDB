@@ -1,0 +1,71 @@
+name: MySQL test suite
+
+on:
+  schedule:
+    - cron: "13 5 * * 6"
+  workflow_dispatch:
+    inputs:
+      minimum:
+        description: "The pass rate below which the run fails, in percent"
+        required: false
+        default: "0"
+
+concurrency:
+  group: mysql-test-suite
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  MYSQL_TEST_MINIMUM: ${{ inputs.minimum || vars.MYSQL_TEST_MINIMUM || '0' }}
+
+jobs:
+  mysql-test-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-mysql-test-suite-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-mysql-test-suite-${{ runner.os }}-
+      - name: Install MySQL's test suite (a test tool run from outside the repo, never shipped or read, D1)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-testsuite-8.0
+      - name: Run the main suite against eggdb serve and publish the pass rate (D10, D45)
+        env:
+          EGGDB_PASSWORD: mysql-test-suite
+        run: |
+          cargo build --release -p eggdb
+          suite="$(dirname "$(find /usr/lib/mysql-test -maxdepth 2 -type d -name t | head -n 1)")"
+          scripts/mysql-test-suite.sh target/release/eggdb "$suite" "$RUNNER_TEMP" "$RUNNER_TEMP/mysql-test-rates.txt"
+      - name: Summarise the rate
+        if: always()
+        run: |
+          {
+            echo "## MySQL test suite"
+            echo
+            echo "Minimum: ${MYSQL_TEST_MINIMUM}%"
+            echo
+            echo '```'
+            tail -n 1 "$RUNNER_TEMP/mysql-test-rates.txt" 2>/dev/null || echo "no results"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the per-test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mysql-test-rates-${{ github.run_number }}
+          path: ${{ runner.temp }}/mysql-test-rates.txt
+          retention-days: 90

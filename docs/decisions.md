@@ -1018,3 +1018,4 @@ its full title with its status.
 - [D991](decisions/D991.md) Code-only batch 639 (M10): MySQL's spatial types
 - [D992](decisions/D992.md) Code-only batch 640 (M10): MySQL's zero dates
 - [D993](decisions/D993.md) Code-only batch 641 (M10): eggdb follow for MySQL through its binary log
+- [D994](decisions/D994.md) Code-only batch 642 (M10): MySQL's test suite run weekly with its pass rate published
