@@ -346,8 +346,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78). File locks: **Code written, unbuilt** (code-only mode, 2026-11-10). `SIGPIPE`: left.
 - Datagrams in the network completion queue (`NetOp`) and batched receives, for QUIC (D315).
 - Windows named pipes, for the mysql client and SQL Server clients on Windows (D267, Where we are). The pipes in the
-  platform layer and `eggdb serve --mysql-pipe`: **code written, unbuilt** (code-only mode, 2026-11-13, D941). Left:
-  SQL Server clients' pipe, once the TDS server takes a connection other than a `TcpStream`.
+  platform layer and `eggdb serve --mysql-pipe`: **code written, unbuilt** (code-only mode, 2026-11-13, D941); the
+  TDS server on a local connection and `eggdb serve --tds-pipe`: **code written, unbuilt** (code-only mode,
+  2026-11-13, D942). Left: attention (cancel) on a pipe, which the TDS server watches only on TCP.
 - Per-device alignment for direct I/O (Where we are). **Code written, unbuilt** (code-only mode, 2026-11-10). Uncached opens are refused when the device's
   alignment does not divide 4096 (`statx` on Linux, the logical sector size on Windows).
 - NUMA memory placement and work placed by NUMA node, so one machine is used fully (D18, D65,

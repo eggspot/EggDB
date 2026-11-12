@@ -341,7 +341,7 @@ fn read_strict_prelogin(
 }
 
 fn read_prelogin(shared: &Shared<'_>, wire: &mut Wire<'_>) -> Option<Encryption> {
-    let tls_config = shared.config.tls.as_deref();
+    let tls_config = shared.config.tls.as_deref().filter(|_| !wire.is_local());
     let message = match (wire.read_message(MAX_LOGIN_BYTES), tls_config) {
         (Ok(message), _) => message,
         (Err(WireError::Tls), Some(config)) => return read_strict_prelogin(shared, wire, config),

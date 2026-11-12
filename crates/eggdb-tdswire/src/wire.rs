@@ -1,5 +1,6 @@
 use crate::tls_transport::TdsTransport;
 use eggdb_platform::connection_limits::{LoginTicket, MemoryBudget, Reservation};
+use eggdb_platform::local_socket::LocalStream;
 use eggdb_tls::{SessionInfo, TlsStream};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -22,6 +23,7 @@ const UNBUDGETED_MESSAGE_BYTES: usize = READ_CHUNK_BYTES;
 pub(crate) enum TdsStream {
     Plain(TcpStream),
     Tls(Box<TlsStream<TdsTransport>>),
+    Local(LocalStream),
     Broken,
 }
 
@@ -30,7 +32,17 @@ impl TdsStream {
         match self {
             Self::Plain(stream) => Some(stream),
             Self::Tls(stream) => Some(&stream.get_ref().tcp),
-            Self::Broken => None,
+            Self::Local(_) | Self::Broken => None,
+        }
+    }
+
+    fn set_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+        match self {
+            Self::Local(stream) => stream.set_read_timeout(Some(timeout)),
+            _ => self
+                .tcp()
+                .ok_or_else(broken)?
+                .set_read_timeout(Some(timeout)),
         }
     }
 }
@@ -44,6 +56,7 @@ impl Read for TdsStream {
         match self {
             Self::Plain(stream) => stream.read(buffer),
             Self::Tls(stream) => stream.read(buffer),
+            Self::Local(stream) => stream.read(buffer),
             Self::Broken => Err(broken()),
         }
     }
@@ -54,6 +67,7 @@ impl Write for TdsStream {
         match self {
             Self::Plain(stream) => stream.write(buffer),
             Self::Tls(stream) => stream.write(buffer),
+            Self::Local(stream) => stream.write(buffer),
             Self::Broken => Err(broken()),
         }
     }
@@ -62,6 +76,7 @@ impl Write for TdsStream {
         match self {
             Self::Plain(stream) => stream.flush(),
             Self::Tls(stream) => stream.flush(),
+            Self::Local(stream) => stream.flush(),
             Self::Broken => Err(broken()),
         }
     }
@@ -118,8 +133,27 @@ impl<'a> Wire<'a> {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(POLL_INTERVAL))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-        Ok(Self {
-            stream: TdsStream::Plain(stream),
+        Ok(Self::over(TdsStream::Plain(stream), stop, deadline))
+    }
+
+    pub(crate) fn new_local(
+        stream: LocalStream,
+        stop: &'a (dyn Fn() -> bool + Sync),
+        deadline: Option<Instant>,
+    ) -> io::Result<Self> {
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(POLL_INTERVAL))?;
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        Ok(Self::over(TdsStream::Local(stream), stop, deadline))
+    }
+
+    fn over(
+        stream: TdsStream,
+        stop: &'a (dyn Fn() -> bool + Sync),
+        deadline: Option<Instant>,
+    ) -> Self {
+        Self {
+            stream,
             stop,
             deadline,
             login: None,
@@ -132,7 +166,11 @@ impl<'a> Wire<'a> {
             read_timeout: POLL_INTERVAL,
             packet_size: DEFAULT_PACKET_SIZE,
             spid: 0,
-        })
+        }
+    }
+
+    pub(crate) fn is_local(&self) -> bool {
+        matches!(self.stream, TdsStream::Local(_))
     }
 
     fn next_wait(&self) -> Result<Duration, WireError> {
@@ -160,9 +198,7 @@ impl<'a> Wire<'a> {
             let wait = self.next_wait()?;
             if wait != self.read_timeout {
                 self.stream
-                    .tcp()
-                    .ok_or(WireError::Io)?
-                    .set_read_timeout(Some(wait))
+                    .set_read_timeout(wait)
                     .map_err(|_| WireError::Io)?;
                 self.read_timeout = wait;
             }
@@ -337,6 +373,10 @@ impl<'a> Wire<'a> {
         if let TdsStream::Tls(stream) = &mut self.stream {
             let _ = stream.close();
         }
+        if let TdsStream::Local(stream) = &self.stream {
+            let _ = stream.shutdown(Shutdown::Write);
+            return;
+        }
         let Some(mut stream) = self.stream.tcp() else {
             return;
         };
@@ -365,6 +405,9 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn peer(&self) -> String {
+        if self.is_local() {
+            return "a local pipe".to_owned();
+        }
         self.stream
             .tcp()
             .and_then(|stream| stream.peer_addr().ok())
@@ -409,10 +452,12 @@ impl<'a> Wire<'a> {
     }
 
     pub(crate) fn peer_is_loopback(&self) -> bool {
-        self.stream
-            .tcp()
-            .and_then(|stream| stream.peer_addr().ok())
-            .is_some_and(|peer| peer.ip().is_loopback())
+        self.is_local()
+            || self
+                .stream
+                .tcp()
+                .and_then(|stream| stream.peer_addr().ok())
+                .is_some_and(|peer| peer.ip().is_loopback())
     }
 
     pub(crate) fn tls(&self) -> Option<&SessionInfo> {
@@ -429,9 +474,13 @@ impl<'a> Wire<'a> {
         config: &eggdb_tls::ServerConfig,
         framed: bool,
     ) -> Result<(), String> {
-        let TdsStream::Plain(stream) = std::mem::replace(&mut self.stream, TdsStream::Broken)
-        else {
-            return Err("TLS was requested twice".to_owned());
+        let stream = match std::mem::replace(&mut self.stream, TdsStream::Broken) {
+            TdsStream::Plain(stream) => stream,
+            TdsStream::Local(stream) => {
+                self.stream = TdsStream::Local(stream);
+                return Err("TLS is not offered on a local pipe".to_owned());
+            }
+            _ => return Err("TLS was requested twice".to_owned()),
         };
         let timeout = self
             .deadline
@@ -467,5 +516,38 @@ impl<'a> Wire<'a> {
         if let TdsStream::Tls(stream) = std::mem::replace(&mut self.stream, TdsStream::Broken) {
             self.stream = TdsStream::Plain(stream.into_inner().tcp);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::Wire;
+    use std::io::{Read, Write};
+
+    fn never_stop() -> bool {
+        false
+    }
+
+    #[test]
+    fn a_local_connection_counts_as_this_machine_and_carries_messages() {
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut wire = Wire::new_local(server, &never_stop, None).unwrap();
+        assert!(wire.is_local());
+        assert!(wire.peer_is_loopback());
+        assert_eq!(wire.peer(), "a local pipe");
+        assert!(wire.socket().is_none());
+        assert!(wire.peer_ip().is_none());
+        wire.send_message(0x04, b"hello").unwrap();
+        wire.flush().unwrap();
+        let mut packet = [0u8; 13];
+        client.read_exact(&mut packet).unwrap();
+        assert_eq!(packet[0], 0x04);
+        assert_eq!(&packet[8..], b"hello");
+        client
+            .write_all(&[0x12, 0x01, 0x00, 0x0B, 0x00, 0x00, 0x01, 0x00, b'a', b'b', b'c'])
+            .unwrap();
+        let message = wire.read_message(1024).unwrap();
+        assert_eq!(message.kind, 0x12);
+        assert_eq!(message.body, b"abc");
     }
 }

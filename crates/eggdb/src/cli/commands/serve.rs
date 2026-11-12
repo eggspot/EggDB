@@ -689,6 +689,12 @@ impl Session<'_> {
                     .to_owned(),
             ));
         }
+        if options.tds_pipe.is_some() && options.tds_listen.is_none() {
+            return Err(usage(
+                "--tds-pipe needs --tds-listen: the pipe serves the same SQL Server server"
+                    .to_owned(),
+            ));
+        }
         if options.mysql_pipe.is_some() && options.mysql_socket.is_some() {
             return Err(usage(
                 "--mysql-pipe and --mysql-socket cannot be used together; pick one".to_owned(),
@@ -703,8 +709,12 @@ impl Session<'_> {
         };
         let mysql_local_listener = match (&options.mysql_socket, &options.mysql_pipe) {
             (Some(path), _) => Some(self.local_listener(path, "--mysql-socket")?),
-            (None, Some(name)) => Some(self.named_pipe_listener(name)?),
+            (None, Some(name)) => Some(self.named_pipe_listener(name, "--mysql-pipe", "MySQL")?),
             (None, None) => None,
+        };
+        let tds_local_listener = match &options.tds_pipe {
+            Some(name) => Some(self.named_pipe_listener(name, "--tds-pipe", "SQL Server")?),
+            None => None,
         };
         let mysql_bound = match &mysql_listener {
             Some(listener) => Some(listener.local_addr().map_err(|error| {
@@ -813,6 +823,7 @@ impl Session<'_> {
             postgresql: socket_path.clone(),
             mysql: options.mysql_socket.clone(),
             mysql_pipe: options.mysql_pipe.clone(),
+            tds_pipe: options.tds_pipe.clone(),
         };
         let bound = Bound {
             postgresql: bound,
@@ -1441,9 +1452,10 @@ impl Session<'_> {
                     let log = move |line: &str| {
                         let _ = tds_events.send(stamped(&format!("tds {line}")));
                     };
-                    eggdb_tdswire::serve_directory(
+                    eggdb_tdswire::serve_directory_with_local(
                         &served_databases,
                         listener,
+                        tds_local_listener.as_ref(),
                         config,
                         &stop_signals::requested,
                         &log,
@@ -1773,6 +1785,7 @@ impl Session<'_> {
                             .as_deref(),
                     )
                     .string_if_any("mysql_pipe", sockets.mysql_pipe.as_deref())
+                    .string_if_any("tds_pipe", sockets.tds_pipe.as_deref())
                     .boolean("loopback_only", tls.is_none());
                 if let Some(setup) = tls {
                     let certificate = match &setup.source {
@@ -1870,6 +1883,11 @@ impl Session<'_> {
                 if let Some(name) = &sockets.mysql_pipe {
                     socket_lines.push_str(&format!(
                         "  mysql pipe   \\\\.\\pipe\\{name} (owner only, this machine only)\n"
+                    ));
+                }
+                if let Some(name) = &sockets.tds_pipe {
+                    socket_lines.push_str(&format!(
+                        "  tds pipe     \\\\.\\pipe\\{name} (owner only, this machine only)\n"
                     ));
                 }
                 self.out.text(&format!(
@@ -2031,23 +2049,26 @@ pub(super) struct Sockets {
     postgresql: Option<std::path::PathBuf>,
     mysql: Option<std::path::PathBuf>,
     mysql_pipe: Option<String>,
+    tds_pipe: Option<String>,
 }
 
 impl Session<'_> {
     fn named_pipe_listener(
         &self,
         name: &str,
+        option: &str,
+        product: &str,
     ) -> Result<eggdb_platform::local_socket::LocalListener, Failure> {
         use eggdb_platform::local_socket::{LocalBindError, bind_named_pipe};
         bind_named_pipe(name).map_err(|error| match error {
             LocalBindError::InUse => Failure::database(
                 format!(
-                    "cannot listen on pipe {name}: another server already has it (often MySQL itself). Stop it, or pick another --mysql-pipe name"
+                    "cannot listen on pipe {name}: another server already has it (often {product} itself). Stop it, or pick another {option} name"
                 ),
                 Exit::DatabaseError,
             ),
             LocalBindError::Unsupported => Failure::usage(
-                "--mysql-pipe is only available on Windows; use --mysql-socket here".to_owned(),
+                format!("{option} is only available on Windows"),
                 Some(CommandName::Serve),
             ),
             LocalBindError::MissingDirectory(_) | LocalBindError::NotASocket => Failure::database(

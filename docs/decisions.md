@@ -966,3 +966,4 @@ its full title with its status.
 - [D939](decisions/D939.md) Code-only batch 587 (M4): key-value transactions and collections in the Swift package
 - [D940](decisions/D940.md) Code-only batch 588 (M4): key-value transactions and collections in the Dart package
 - [D941](decisions/D941.md) Code-only batch 589 (M1): Windows named pipes in the platform layer and eggdb serve --mysql-pipe
+- [D942](decisions/D942.md) Code-only batch 590 (M1): the TDS server on local connections and eggdb serve --tds-pipe

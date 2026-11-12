@@ -4,6 +4,7 @@ use crate::wire::Wire;
 use eggdb_platform::connection_limits::{
     LoginSlots, LoginTicket, MAX_LOGINS_IN_PROGRESS, MemoryBudget,
 };
+use eggdb_platform::local_socket::{LocalListener, LocalStream};
 use eggdb_sql::{CancelSignal, DatabaseDirectory, FixedDatabases, KeyValueStore};
 use std::collections::VecDeque;
 use std::fmt;
@@ -12,6 +13,9 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+/// The pipe SQL Server's clients open for a local default instance (`np:\\.\pipe\sql\query`).
+pub const SQL_SERVER_DEFAULT_PIPE: &str = r"sql\query";
 
 /// The connections a server serves at once unless told otherwise.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
@@ -227,6 +231,21 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    serve_directory_with_local(directory, listener, None, config, stop, log)
+}
+
+/// [`serve_directory`], also accepting connections on `local`, such as the Windows named pipe
+/// `sql\query` that SQL Server's clients open for a local server (D942). A local connection is
+/// treated as coming from this machine: it is never offered TLS, and it may log in without it
+/// even when TLS is set up.
+pub fn serve_directory_with_local<D: DatabaseDirectory + Sync>(
+    directory: &D,
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
     if config.credentials.is_for_empty_password() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -234,6 +253,9 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
         ));
     }
     listener.set_nonblocking(true)?;
+    if let Some(local) = local {
+        local.set_nonblocking(true)?;
+    }
     let mut secret = [0u8; 32];
     eggdb_platform::secure_random::fill(&mut secret)?;
     let shared = Shared {
@@ -251,28 +273,18 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
     let next_connection_id = AtomicU32::new(51);
     std::thread::scope(|scope| {
         while !stop() {
-            let (stream, peer) = match eggdb_platform::accept_tcp(listener) {
-                Ok(accepted) => accepted,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
-                    continue;
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => {
-                    log(&format!("accepting a connection failed: {error}"));
-                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
-                    continue;
-                }
+            let Some(stream) = accept_next(listener, local, log) else {
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                continue;
             };
+            let peer = stream.peer_text();
             let connection_id = next_connection_id.fetch_add(1, Ordering::Relaxed);
             let shared = &shared;
             let full = shared.connections.load(Ordering::Acquire) >= config.max_connections;
             let login = if full {
                 None
             } else {
-                shared
-                    .logins
-                    .admit(stream.peer_addr().ok().map(|address| address.ip()))
+                shared.logins.admit(stream.peer_ip())
             };
             match login {
                 Some(login) => {
@@ -318,23 +330,81 @@ pub fn serve_directory<D: DatabaseDirectory + Sync>(
     Ok(shared.ended_by_stop.load(Ordering::Acquire))
 }
 
+enum Accepted {
+    Tcp(TcpStream, SocketAddr),
+    Local(LocalStream),
+}
+
+impl Accepted {
+    fn peer_text(&self) -> String {
+        match self {
+            Self::Tcp(_, peer) => peer.to_string(),
+            Self::Local(_) => "a local pipe".to_owned(),
+        }
+    }
+
+    fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        match self {
+            Self::Tcp(_, peer) => Some(peer.ip()),
+            Self::Local(_) => None,
+        }
+    }
+
+    fn into_wire<'a>(
+        self,
+        stop: &'a (dyn Fn() -> bool + Sync),
+        deadline: Instant,
+    ) -> io::Result<Wire<'a>> {
+        match self {
+            Self::Tcp(stream, _) => Wire::new(stream, stop, Some(deadline)),
+            Self::Local(stream) => Wire::new_local(stream, stop, Some(deadline)),
+        }
+    }
+}
+
+fn accept_next(
+    listener: &TcpListener,
+    local: Option<&LocalListener>,
+    log: &(dyn Fn(&str) + Sync),
+) -> Option<Accepted> {
+    let report = |error: io::Error| {
+        if !matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ) {
+            log(&format!("accepting a connection failed: {error}"));
+        }
+    };
+    match eggdb_platform::accept_tcp(listener) {
+        Ok((stream, peer)) => return Some(Accepted::Tcp(stream, peer)),
+        Err(error) => report(error),
+    }
+    match local?.accept() {
+        Ok((stream, _)) => Some(Accepted::Local(stream)),
+        Err(error) => {
+            report(error);
+            None
+        }
+    }
+}
+
 fn run_connection<'a, D: DatabaseDirectory>(
-    stream: TcpStream,
+    stream: Accepted,
     shared: &'a Shared<'a>,
     directory: &D,
     connection_id: u32,
     login: LoginTicket<'a>,
 ) {
     let deadline = Instant::now() + shared.config.authentication_timeout;
-    let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
+    let Ok(wire) = stream.into_wire(shared.stop, deadline) else {
         return;
     };
     serve_connection(wire, shared, directory, connection_id, login);
 }
 
-fn refuse_connection(stream: TcpStream, shared: &Shared<'_>) {
+fn refuse_connection(stream: Accepted, shared: &Shared<'_>) {
     let deadline = Instant::now() + REFUSAL_TIMEOUT;
-    if let Ok(mut wire) = Wire::new(stream, shared.stop, Some(deadline)) {
+    if let Ok(mut wire) = stream.into_wire(shared.stop, deadline) {
         refuse_too_many(shared, &mut wire);
     }
 }

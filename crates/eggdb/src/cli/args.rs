@@ -290,6 +290,7 @@ impl CommandName {
             | OptionName::SocketDir
             | OptionName::MysqlSocket
             | OptionName::MysqlPipe
+            | OptionName::TdsPipe
             | OptionName::TlsCertificate
             | OptionName::AuthRules
             | OptionName::TlsKey
@@ -504,6 +505,7 @@ enum OptionName {
     SocketDir,
     MysqlSocket,
     MysqlPipe,
+    TdsPipe,
     TlsCertificate,
     AuthRules,
     TlsKey,
@@ -644,6 +646,7 @@ impl OptionName {
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
             b"mysql-pipe" => Self::MysqlPipe,
+            b"tds-pipe" => Self::TdsPipe,
             b"tls-certificate" => Self::TlsCertificate,
             b"auth-rules" => Self::AuthRules,
             b"tls-key" => Self::TlsKey,
@@ -986,6 +989,7 @@ pub(crate) struct ServeOptions {
     pub(crate) socket_dir: Option<PathBuf>,
     pub(crate) mysql_socket: Option<PathBuf>,
     pub(crate) mysql_pipe: Option<String>,
+    pub(crate) tds_pipe: Option<String>,
     pub(crate) tls_certificate: Option<PathBuf>,
     pub(crate) auth_rules: Option<PathBuf>,
     pub(crate) tls_key: Option<PathBuf>,
@@ -1685,6 +1689,15 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 } else {
                     request.serve.mysql_socket = Some(PathBuf::from(value));
                 }
+            }
+            OptionName::TdsPipe => {
+                if !eggdb_platform::local_socket::NAMED_PIPES_SUPPORTED {
+                    return Err(usage(format!(
+                        "{} is only available on Windows; connect over --tds-listen here",
+                        option.spelled
+                    )));
+                }
+                request.serve.tds_pipe = Some(parse_name(&option.spelled, value).map_err(usage)?);
             }
             OptionName::MysqlPipe => {
                 if !eggdb_platform::local_socket::NAMED_PIPES_SUPPORTED {
