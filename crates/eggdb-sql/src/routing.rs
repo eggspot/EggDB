@@ -290,6 +290,167 @@ pub(crate) fn connected_components(edges_json: &str) -> SqlResult<String> {
     Ok(format!("[{}]", rows.join(", ")))
 }
 
+const MOST_TOUR_NODES: usize = 2_000;
+const MOST_IMPROVING_PASSES: usize = 1_000;
+
+fn tour_rows(nodes: &[i64], tour: &[usize], cost: &dyn Fn(usize, usize) -> f64) -> String {
+    let mut rows = Vec::with_capacity(tour.len() + 1);
+    let mut total = 0.0;
+    let mut previous: Option<usize> = None;
+    for (seq, &at) in tour.iter().chain(tour.first()).enumerate() {
+        let step = previous.map_or(0.0, |from| cost(from, at));
+        total += step;
+        rows.push(format!(
+            "{{\"seq\": {}, \"node\": {}, \"cost\": {step}, \"agg_cost\": {total}}}",
+            seq + 1,
+            nodes[at]
+        ));
+        previous = Some(at);
+    }
+    format!("[{}]", rows.join(", "))
+}
+
+/// A short closed tour over `count` places with the costs `cost`, starting at place `start`
+/// and visiting `last` just before it returns, when given: the nearest-neighbour tour, then
+/// improved by 2-opt moves until none shortens it. Like pgRouting's own, it is a heuristic, not
+/// always the shortest tour.
+fn short_tour(count: usize, start: usize, last: Option<usize>, cost: &dyn Fn(usize, usize) -> f64) -> Vec<usize> {
+    let mut tour = vec![start];
+    let mut left: Vec<usize> = (0..count).filter(|place| *place != start && Some(*place) != last).collect();
+    while !left.is_empty() {
+        let from = tour.last().copied().unwrap_or(start);
+        let nearest = left
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| cost(from, **a).total_cmp(&cost(from, **b)).then(a.cmp(b)))
+            .map_or(0, |(at, _)| at);
+        tour.push(left.swap_remove(nearest));
+    }
+    if let Some(last) = last.filter(|last| *last != start) {
+        tour.push(last);
+    }
+    let movable_end = if last.is_some() { tour.len().saturating_sub(1) } else { tour.len() };
+    for _ in 0..MOST_IMPROVING_PASSES {
+        let mut improved = false;
+        for i in 1..movable_end.saturating_sub(1) {
+            for j in (i + 1)..movable_end {
+                let before = tour[i - 1];
+                let after = tour.get(j + 1).copied().unwrap_or(tour[0]);
+                let current = cost(before, tour[i]) + cost(tour[j], after);
+                let swapped = cost(before, tour[j]) + cost(tour[i], after);
+                let asymmetric_change: f64 = tour[i..=j].windows(2).map(|pair| cost(pair[1], pair[0]) - cost(pair[0], pair[1])).sum();
+                if swapped + asymmetric_change + 1e-9 < current {
+                    tour[i..=j].reverse();
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    tour
+}
+
+fn place_of(nodes: &[i64], vid: i64, what: &str) -> SqlResult<Option<usize>> {
+    if vid == 0 {
+        return Ok(None);
+    }
+    nodes
+        .iter()
+        .position(|node| *node == vid)
+        .map(Some)
+        .ok_or_else(|| invalid(&format!("the {what} vertex {vid} is not in the matrix")))
+}
+
+/// A travelling salesperson tour over a cost matrix (pgRouting's `pgr_TSP`): `matrix` is a
+/// JSON array of `{start_vid, end_vid, agg_cost}`; a missing cost is taken from the opposite
+/// direction, as pgRouting does. `start` 0 means the smallest vertex; `last`, when not 0, is
+/// visited just before returning. Rows are `{seq, node, cost, agg_cost}`, ending back at the
+/// start.
+pub(crate) fn tsp(matrix_json: &str, start: i64, last: i64) -> SqlResult<String> {
+    let document = parse_document(matrix_json).map_err(|_| invalid("the matrix is not JSON"))?;
+    let Json::Array(cells) = &document.value else {
+        return Err(invalid("the matrix is a JSON array of objects"));
+    };
+    let mut costs: HashMap<(i64, i64), f64> = HashMap::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    for cell in cells {
+        let (from, to) = (whole(cell, "start_vid")?, whole(cell, "end_vid")?);
+        let cost = number(cell, "agg_cost").ok_or_else(|| invalid("every cell needs a numeric agg_cost"))?;
+        if !cost.is_finite() || cost < 0.0 {
+            return Err(invalid("costs must be finite and not negative"));
+        }
+        seen.insert(from);
+        seen.insert(to);
+        if from != to {
+            costs.insert((from, to), cost);
+        }
+        if seen.len() > MOST_TOUR_NODES {
+            return Err(SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "pgr_TSP visits at most 2,000 vertices"));
+        }
+    }
+    let mut nodes: Vec<i64> = seen.into_iter().collect();
+    nodes.sort_unstable();
+    if nodes.is_empty() {
+        return Ok("[]".to_owned());
+    }
+    for (a, &from) in nodes.iter().enumerate() {
+        for &to in nodes.iter().skip(a + 1) {
+            if !costs.contains_key(&(from, to)) && !costs.contains_key(&(to, from)) {
+                return Err(invalid(&format!("the matrix has no cost between {from} and {to}")));
+            }
+        }
+    }
+    let cost = |from: usize, to: usize| -> f64 {
+        if from == to {
+            return 0.0;
+        }
+        let (a, b) = (nodes[from], nodes[to]);
+        costs.get(&(a, b)).or_else(|| costs.get(&(b, a))).copied().unwrap_or(f64::INFINITY)
+    };
+    let start = place_of(&nodes, start, "start")?.unwrap_or(0);
+    let last = place_of(&nodes, last, "end")?;
+    let tour = short_tour(nodes.len(), start, last, &cost);
+    Ok(tour_rows(&nodes, &tour, &cost))
+}
+
+/// A tour over points by their Euclidean distances (pgRouting's `pgr_TSPeuclidean`): `points`
+/// is a JSON array of `{id, x, y}`.
+pub(crate) fn tsp_euclidean(points_json: &str, start: i64, last: i64) -> SqlResult<String> {
+    let document = parse_document(points_json).map_err(|_| invalid("the points are not JSON"))?;
+    let Json::Array(items) = &document.value else {
+        return Err(invalid("the points are a JSON array of objects"));
+    };
+    if items.len() > MOST_TOUR_NODES {
+        return Err(SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "pgr_TSPeuclidean visits at most 2,000 points"));
+    }
+    let mut points: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+    for item in items {
+        let id = whole(item, "id")?;
+        let (Some(x), Some(y)) = (number(item, "x"), number(item, "y")) else {
+            return Err(invalid("every point needs numeric x and y"));
+        };
+        if !x.is_finite() || !y.is_finite() {
+            return Err(invalid("coordinates must be finite"));
+        }
+        points.insert(id, (x, y));
+    }
+    let nodes: Vec<i64> = points.keys().copied().collect();
+    let places: Vec<(f64, f64)> = points.values().copied().collect();
+    if nodes.is_empty() {
+        return Ok("[]".to_owned());
+    }
+    let cost = |from: usize, to: usize| -> f64 {
+        let ((x1, y1), (x2, y2)) = (places[from], places[to]);
+        (x1 - x2).hypot(y1 - y2)
+    };
+    let start = place_of(&nodes, start, "start")?.unwrap_or(0);
+    let last = place_of(&nodes, last, "end")?;
+    let tour = short_tour(nodes.len(), start, last, &cost);
+    Ok(tour_rows(&nodes, &tour, &cost))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +470,21 @@ mod tests {
             r#"[{"component": 1, "node": 1}, {"component": 1, "node": 2}, {"component": 1, "node": 3}, {"component": 1, "node": 4}, {"component": 7, "node": 7}, {"component": 7, "node": 8}]"#
         );
         assert!(dijkstra("[{\"id\": 1}]", 1, 2, true).is_err());
+    }
+
+    #[test]
+    fn tours_visit_every_vertex_once_and_return() {
+        let square = r#"[{"id": 1, "x": 0, "y": 0}, {"id": 2, "x": 1, "y": 1}, {"id": 3, "x": 1, "y": 0}, {"id": 4, "x": 0, "y": 1}]"#;
+        let tour = tsp_euclidean(square, 1, 0).unwrap();
+        assert!(tour.contains("\"seq\": 5, \"node\": 1, \"cost\": 1, \"agg_cost\": 4}"), "{tour}");
+        let ended = tsp_euclidean(square, 1, 3).unwrap();
+        assert!(ended.contains("\"seq\": 4, \"node\": 3"), "{ended}");
+        let matrix = r#"[{"start_vid": 1, "end_vid": 2, "agg_cost": 1}, {"start_vid": 2, "end_vid": 3, "agg_cost": 1}, {"start_vid": 1, "end_vid": 3, "agg_cost": 5}]"#;
+        let tour = tsp(matrix, 0, 0).unwrap();
+        assert!(tour.starts_with("[{\"seq\": 1, \"node\": 1, \"cost\": 0, \"agg_cost\": 0}"), "{tour}");
+        assert!(tour.contains("\"agg_cost\": 7}"), "{tour}");
+        assert!(tsp(r#"[{"start_vid": 1, "end_vid": 2, "agg_cost": 1}, {"start_vid": 3, "end_vid": 4, "agg_cost": 1}]"#, 0, 0).is_err());
+        assert!(tsp(matrix, 9, 0).is_err());
     }
 
     #[test]

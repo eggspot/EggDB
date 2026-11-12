@@ -906,3 +906,4 @@ its full title with its status.
 - [D879](decisions/D879.md) Code-only batch 527 (M12): CQL2 filters and queryables in OGC API - Features
 - [D880](decisions/D880.md) Code-only batch 528 (M12): coordinate reference systems in OGC API - Features
 - [D881](decisions/D881.md) Code-only batch 529 (M12): OGC API - Tiles with vector tiles
+- [D882](decisions/D882.md) Code-only batch 530 (M12): pgRouting TSP and graph analysis

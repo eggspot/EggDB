@@ -3,7 +3,8 @@
 /// `pgr_drivingDistance` and `pgr_connectedComponents`, written from its documentation, over an
 /// edges query with `id`, `source`, `target`, `cost` and optionally `reverse_cost`, computed by
 /// EggDB's own graph code (D57); and `pgr_createTopology` and `pgr_createVerticesTable`, which
-/// number line ends as vertices (D831).
+/// number line ends as vertices (D831); `pgr_TSP` and `pgr_TSPeuclidean`, tours by EggDB's own
+/// nearest-neighbour and 2-opt code, and `pgr_analyzeGraph`, which checks a topology (D882).
 pub(crate) const PGROUTING_SCRIPT: &str = r#"
 CREATE SCHEMA pgrouting;
 CREATE FUNCTION public.pgr_edges_json(edges_sql text) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -188,6 +189,67 @@ BEGIN
     RETURN 'OK';
 END
 $$;
+CREATE FUNCTION public.pgr_tsp_rows(tour jsonb) RETURNS TABLE (seq integer, node bigint, cost double precision, agg_cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    step record;
+BEGIN
+    FOR step IN SELECT s.value AS body FROM jsonb_array_elements(tour) s LOOP
+        seq := (step.body ->> 'seq')::integer;
+        node := (step.body ->> 'node')::bigint;
+        cost := (step.body ->> 'cost')::double precision;
+        agg_cost := (step.body ->> 'agg_cost')::double precision;
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
+CREATE FUNCTION public.pgr_tsp(matrix_cell_sql text, start_id bigint DEFAULT 0, end_id bigint DEFAULT 0) RETURNS TABLE (seq integer, node bigint, cost double precision, agg_cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    cells jsonb;
+BEGIN
+    EXECUTE format('SELECT coalesce(jsonb_agg(jsonb_build_object(''start_vid'', m.start_vid, ''end_vid'', m.end_vid, ''agg_cost'', m.agg_cost)), ''[]''::jsonb) FROM (%s) m', matrix_cell_sql) INTO cells;
+    RETURN QUERY SELECT * FROM public.pgr_tsp_rows(eggdb_route_tsp(cells, start_id, end_id));
+END
+$$;
+CREATE FUNCTION public.pgr_tspeuclidean(coordinates_sql text, start_id bigint DEFAULT 0, end_id bigint DEFAULT 0) RETURNS TABLE (seq integer, node bigint, cost double precision, agg_cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    points jsonb;
+BEGIN
+    EXECUTE format('SELECT coalesce(jsonb_agg(jsonb_build_object(''id'', p.id, ''x'', p.x, ''y'', p.y)), ''[]''::jsonb) FROM (%s) p', coordinates_sql) INTO points;
+    RETURN QUERY SELECT * FROM public.pgr_tsp_rows(eggdb_route_tsp_euclidean(points, start_id, end_id));
+END
+$$;
+CREATE FUNCTION public.pgr_analyzegraph(edge_table text, tolerance double precision, the_geom text DEFAULT 'the_geom', id text DEFAULT 'id', source text DEFAULT 'source', target text DEFAULT 'target', rows_where text DEFAULT 'true') RETURNS varchar LANGUAGE plpgsql AS $$
+DECLARE
+    vertices text := edge_table || '_vertices_pgr';
+    isolated bigint;
+    dead_ends bigint;
+    gaps bigint;
+    crossings bigint;
+    rings bigint;
+BEGIN
+    IF tolerance IS NULL OR tolerance < 0 THEN
+        RAISE EXCEPTION 'the tolerance must be zero or more' USING ERRCODE = '22023';
+    END IF;
+    IF to_regclass(vertices) IS NULL THEN
+        RAISE NOTICE 'run pgr_createTopology first: % does not exist', vertices;
+        RETURN 'FAIL';
+    END IF;
+    EXECUTE format('UPDATE %s v SET cnt = (SELECT count(*) FROM %s e WHERE (e.%I = v.id OR e.%I = v.id) AND %s), ein = (SELECT count(*) FROM %s e WHERE e.%I = v.id AND %s), eout = (SELECT count(*) FROM %s e WHERE e.%I = v.id AND %s), chk = 0', vertices, edge_table, source, target, rows_where, edge_table, target, rows_where, edge_table, source, rows_where);
+    EXECUTE format('UPDATE %s v SET chk = 1 WHERE v.cnt = 1 AND EXISTS (SELECT 1 FROM %s e WHERE e.%I <> v.id AND e.%I <> v.id AND %s AND ST_DWithin(e.%I, ST_MakePoint(v.x, v.y), $1))', vertices, edge_table, source, target, rows_where, the_geom) USING tolerance;
+    EXECUTE format('SELECT count(*) FROM %s v WHERE v.cnt = 1', vertices) INTO dead_ends;
+    EXECUTE format('SELECT count(*) FROM %s v WHERE v.chk = 1', vertices) INTO gaps;
+    EXECUTE format('SELECT count(*) FROM %s e JOIN %s a ON a.id = e.%I JOIN %s b ON b.id = e.%I WHERE a.cnt = 1 AND b.cnt = 1 AND %s', edge_table, vertices, source, vertices, target, rows_where) INTO isolated;
+    EXECUTE format('SELECT count(*) FROM %s e WHERE e.%I = e.%I AND %s', edge_table, source, target, rows_where) INTO rings;
+    EXECUTE format('SELECT count(*) FROM %s a JOIN %s b ON a.%I < b.%I WHERE ST_Intersects(a.%I, b.%I) AND a.%I <> b.%I AND a.%I <> b.%I AND a.%I <> b.%I AND a.%I <> b.%I', edge_table, edge_table, id, id, the_geom, the_geom, source, source, source, target, target, source, target, target) INTO crossings;
+    RAISE NOTICE 'ANALYSIS RESULTS FOR SELECTED EDGES:';
+    RAISE NOTICE '                  Isolated segments: %', isolated;
+    RAISE NOTICE '                          Dead ends: %', dead_ends;
+    RAISE NOTICE 'Potential gaps found near dead ends: %', gaps;
+    RAISE NOTICE '             Intersections detected: %', crossings;
+    RAISE NOTICE '                    Ring geometries: %', rings;
+    RETURN 'OK';
+END
+$$;
 "#;
 
 #[cfg(test)]
@@ -265,6 +327,32 @@ mod tests {
         assert_eq!(run(&mut session, "SELECT pgr_createVerticesTable('roads') AS done").unwrap(), "done\nOK\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT count(*) AS n FROM roads_vertices_pgr").unwrap(), "n\n4\nSELECT 1");
         assert!(run(&mut session, "SELECT pgr_createTopology('roads', -1)").is_err());
+    }
+
+    #[test]
+    fn tours_and_graph_analysis() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION pgrouting",
+            "CREATE TABLE stops (id bigint PRIMARY KEY, x double precision, y double precision)",
+            "INSERT INTO stops VALUES (1, 0, 0), (2, 1, 1), (3, 1, 0), (4, 0, 1)",
+            "CREATE TABLE roads (id bigint PRIMARY KEY, source bigint, target bigint, the_geom text)",
+            "INSERT INTO roads VALUES (1, NULL, NULL, 'LINESTRING(0 0, 1 0)'), (2, NULL, NULL, 'LINESTRING(1 0, 2 0)'), (3, NULL, NULL, 'LINESTRING(5 5, 6 6)')",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut session, "SELECT node, agg_cost FROM pgr_TSPeuclidean('SELECT id, x, y FROM stops', 1) ORDER BY seq").unwrap(),
+            "node|agg_cost\n1|0\n3|1\n2|2\n4|3\n1|4\nSELECT 5"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT node FROM pgr_TSP($$SELECT * FROM (VALUES (1, 2, 1.0), (2, 3, 1.0), (1, 3, 5.0)) AS m (start_vid, end_vid, agg_cost)$$) ORDER BY seq").unwrap(),
+            "node\n1\n2\n3\n1\nSELECT 4"
+        );
+        run(&mut session, "SELECT pgr_createTopology('roads', 0.001)").unwrap();
+        assert_eq!(run(&mut session, "SELECT pgr_analyzeGraph('roads', 0.001) AS done").unwrap(), "done\nOK\nSELECT 1");
+        assert_eq!(run(&mut session, "SELECT count(*) AS n FROM roads_vertices_pgr WHERE cnt = 1").unwrap(), "n\n4\nSELECT 1");
     }
 
     #[test]
