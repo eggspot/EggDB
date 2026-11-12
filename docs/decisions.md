@@ -937,3 +937,4 @@ its full title with its status.
 - [D910](decisions/D910.md) Code-only batch 558 (M6a): OData navigation properties and $expand
 - [D911](decisions/D911.md) Code-only batch 559 (M9): MongoDB user-defined roles
 - [D912](decisions/D912.md) Code-only batch 560 (M16): Flux variables, several results and join
+- [D913](decisions/D913.md) Code-only batch 561 (M16): foreign sources and copies from object storage

@@ -1767,7 +1767,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - ETL connectors, first scheduled copies from PostgreSQL, MySQL and SQL Server and from CSV and
   Parquet in object storage (D46, D229). Check: a CI copy from PostgreSQL 17, compared by row. Scheduled copies
   (`eggdb_etl`) from PostgreSQL, SQL Server and local CSV and Parquet files: **code written, unbuilt** (code-only
-  mode, 2026-11-12, D769). Left: MySQL and object storage.
+  mode, 2026-11-12, D769); CSV and Parquet objects in S3-compatible storage: **code written, unbuilt** (code-only
+  mode, 2026-11-12, D913). Left: MySQL.
 - Transformations in SQL and WebAssembly, first SQL models with `ref()` dependencies, tests and
   lineage in `eggdb_catalog` (D46, D244). Check: a model graph run in dependency order. SQL models (`eggdb_pipelines`): **code written, unbuilt** (code-only mode, 2026-11-12, D750).
 - Pipeline orchestration on the job scheduler, first dependencies, retries with backoff and

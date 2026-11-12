@@ -212,7 +212,11 @@ fn read_parquet(
     }
     let bytes =
         std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let columns: Vec<Column> = eggdb_parquet::read(&bytes).map_err(|error| error.to_string())?;
+    parquet_rows(&bytes, row)
+}
+
+fn parquet_rows(bytes: &[u8], row: &mut dyn FnMut(String) -> Result<(), String>) -> Result<(), String> {
+    let columns: Vec<Column> = eggdb_parquet::read(bytes).map_err(|error| error.to_string())?;
     let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
     let count = columns.first().map_or(0, |column| column.cells.len());
     for index in 0..count {
@@ -326,18 +330,26 @@ fn read_csv(
     query: &str,
     row: &mut dyn FnMut(String) -> Result<(), String>,
 ) -> Result<(), String> {
-    use std::io::{BufRead, Read};
+    use std::io::Read;
     if !query.trim().is_empty() && query.trim() != "*" {
         return Err("a CSV source reads every column: give '*' as the query".to_owned());
     }
     let file = std::fs::File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let reader = std::io::BufReader::new(file.take(MOST_CSV_BYTES));
+    csv_rows(reader, &path.display().to_string(), row)
+}
+
+fn csv_rows(
+    reader: impl std::io::BufRead,
+    shown: &str,
+    row: &mut dyn FnMut(String) -> Result<(), String>,
+) -> Result<(), String> {
     let mut names: Option<Vec<String>> = None;
     let mut fields = Vec::new();
     let mut field = String::new();
     let mut quoted = false;
     for line in reader.lines() {
-        let line = line.map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        let line = line.map_err(|error| format!("cannot read {shown}: {error}"))?;
         let line = line.strip_suffix('\r').unwrap_or(&line);
         if !csv_fields(line, &mut fields, &mut field, &mut quoted) {
             continue;
@@ -362,6 +374,38 @@ fn is_sql_server(source: &str) -> bool {
     source.starts_with("sqlserver://")
 }
 
+fn is_object(source: &str) -> bool {
+    source.starts_with(super::archive::BUCKET_SCHEME)
+}
+
+fn object_allowed(allowed: &str, source: &str) -> bool {
+    let (Some(entry), Some(wanted)) = (
+        allowed.strip_prefix(super::archive::BUCKET_SCHEME),
+        source.strip_prefix(super::archive::BUCKET_SCHEME),
+    ) else {
+        return false;
+    };
+    let entry = entry.trim_end_matches('/');
+    let climbs = wanted.split('/').any(|segment| segment == ".." || segment == ".");
+    !entry.is_empty() && !climbs && wanted.strip_prefix(entry).is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
+}
+
+fn read_object(source: &str, query: &str, row: &mut dyn FnMut(String) -> Result<(), String>) -> Result<(), String> {
+    if !query.trim().is_empty() && query.trim() != "*" {
+        return Err("an object storage source reads every column: give '*' as the query".to_owned());
+    }
+    let largest = usize::try_from(MOST_CSV_BYTES).unwrap_or(usize::MAX);
+    let location = eggdb_s3::client::Location::parse(source, &|name| std::env::var(name).ok(), largest)?;
+    let bytes = location
+        .bucket
+        .get(&location.prefix)?
+        .ok_or_else(|| format!("{source} does not exist"))?;
+    if source.ends_with(".csv") {
+        return csv_rows(std::io::Cursor::new(bytes), source, row);
+    }
+    parquet_rows(&bytes, row)
+}
+
 fn read(
     prefixes: &[String],
     source: &str,
@@ -379,6 +423,9 @@ fn read(
     }
     if is_sql_server(source) {
         return read_sql_server(source, query, row);
+    }
+    if is_object(source) && (source.ends_with(".csv") || source.ends_with(".parquet")) {
+        return read_object(source, query, row);
     }
     if let Some(path) = file_path(source)
         && path.ends_with(".csv")
@@ -406,7 +453,7 @@ fn read(
         return read_parquet(&checked, query, row);
     }
     Err(format!(
-        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// URL, or a file:...parquet or file:...csv path",
+        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// URL, a file:...parquet or file:...csv path, or an s3://bucket/...parquet or ...csv object",
         shown_source(source)
     ))
 }
@@ -466,6 +513,9 @@ fn allows(allowed: &str, source: &str) -> bool {
             && (!names_database(allowed) || entry.database == wanted.database)
             && wanted.ssl_mode >= entry.ssl_mode
             && (wanted.ssl_root_cert.is_none() || wanted.ssl_root_cert == entry.ssl_root_cert);
+    }
+    if is_object(allowed) || is_object(source) {
+        return object_allowed(allowed, source);
     }
     allowed_file(allowed, source).is_some()
 }
@@ -559,6 +609,23 @@ mod tests {
         assert_eq!(decimal_text(12_345, 2), "123.45");
         assert_eq!(decimal_text(-5, 3), "-0.005");
         assert_eq!(decimal_text(7, 0), "7");
+    }
+
+    #[test]
+    fn object_entries_allow_only_the_objects_under_them() {
+        assert!(allows("s3://lake/sales/", "s3://lake/sales/2026/orders.parquet"));
+        assert!(allows("s3://lake/sales", "s3://lake/sales/orders.csv"));
+        assert!(!allows("s3://lake/sales/", "s3://lake/salesman/orders.csv"));
+        assert!(!allows("s3://lake/sales/", "s3://lake/sales/../hr/pay.csv"));
+        assert!(!allows("s3://lake/sales/", "s3://other/sales/orders.csv"));
+        assert!(!allows("file:/data/", "s3://lake/sales/orders.csv"));
+        let mut rows = Vec::new();
+        csv_rows(std::io::Cursor::new(b"id,name\n1,\"a, b\"\n".to_vec()), "test", &mut |row| {
+            rows.push(row);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rows, vec!["{\"id\":\"1\",\"name\":\"a, b\"}".to_owned()]);
     }
 
     #[test]
