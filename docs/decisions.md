@@ -881,3 +881,4 @@ its full title with its status.
 - [D854](decisions/D854.md) Code-only batch 502 (M16): CQL updates of one user-type field
 - [D855](decisions/D855.md) Code-only batch 503 (M6b): FIPS mode for MySQL logins and serve --fips
 - [D856](decisions/D856.md) Code-only batch 504 (M6a): composites and user-defined ranges read in PostgreSQL's binary format
+- [D857](decisions/D857.md) Code-only batch 505 (M10): Oracle DBMS_APPLICATION_INFO, DBMS_SESSION, DBMS_LOCK.SLEEP and DBMS_STATS

@@ -3,6 +3,7 @@ mod dbms_lob;
 mod dbms_output;
 mod dbms_rls;
 mod dbms_scheduler;
+mod dbms_session;
 mod plsql;
 mod plsql_triggers;
 
@@ -1225,6 +1226,11 @@ impl<'r> Run<'r> {
         }
         if self.oracle
             && let Some(flow) = self.dbms_rls_call(text)?
+        {
+            return Ok(flow);
+        }
+        if self.oracle
+            && let Some(flow) = self.dbms_session_call(text)?
         {
             return Ok(flow);
         }

@@ -433,14 +433,19 @@ impl<'t> Parser<'t> {
         }
         let user = self.oracle_user();
         let current_schema = self.oracle_current_schema();
-        let (database, session_id) = self.oracle_settings(|settings| {
-            (settings.database.clone(), settings.sqlserver.connection_id)
+        let (database, session_id, application) = self.oracle_settings(|settings| {
+            (
+                settings.database.clone(),
+                settings.sqlserver.connection_id,
+                crate::oracle_dictionary::ApplicationInfo::of(settings),
+            )
         });
         let facts = crate::oracle_dictionary::SessionFacts {
             user: &user,
             current_schema: &current_schema,
             database: &database,
             session_id,
+            application: &application,
         };
         let value = crate::oracle_dictionary::userenv(&parameter, &facts)
             .map_err(|error| error.at(position))?;

@@ -1766,6 +1766,37 @@ pub(crate) struct SessionFacts<'a> {
     pub(crate) current_schema: &'a str,
     pub(crate) database: &'a str,
     pub(crate) session_id: u32,
+    pub(crate) application: &'a ApplicationInfo,
+}
+
+/// The setting `DBMS_APPLICATION_INFO.SET_MODULE` keeps the module name in.
+pub(crate) const MODULE_SETTING: &str = "eggdb.oracle_module";
+/// The setting `DBMS_APPLICATION_INFO.SET_MODULE` and `SET_ACTION` keep the action in.
+pub(crate) const ACTION_SETTING: &str = "eggdb.oracle_action";
+/// The setting `DBMS_APPLICATION_INFO.SET_CLIENT_INFO` keeps the client information in.
+pub(crate) const CLIENT_INFO_SETTING: &str = "eggdb.oracle_client_info";
+/// The setting `DBMS_SESSION.SET_IDENTIFIER` keeps the client identifier in.
+pub(crate) const CLIENT_IDENTIFIER_SETTING: &str = "eggdb.oracle_client_identifier";
+
+/// What a session told about itself through `DBMS_APPLICATION_INFO` and `DBMS_SESSION`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ApplicationInfo {
+    pub(crate) module: Option<String>,
+    pub(crate) action: Option<String>,
+    pub(crate) client_info: Option<String>,
+    pub(crate) client_identifier: Option<String>,
+}
+
+impl ApplicationInfo {
+    pub(crate) fn of(settings: &crate::settings::Settings) -> Self {
+        let read = |name: &str| settings.get(name).ok().filter(|value| !value.is_empty());
+        Self {
+            module: read(MODULE_SETTING),
+            action: read(ACTION_SETTING),
+            client_info: read(CLIENT_INFO_SETTING),
+            client_identifier: read(CLIENT_IDENTIFIER_SETTING),
+        }
+    }
 }
 
 fn invalid_userenv_parameter() -> SqlError {
@@ -1801,15 +1832,15 @@ pub(crate) fn userenv(parameter: &str, facts: &SessionFacts<'_>) -> SqlResult<Op
         "NLS_SORT" => Some("BINARY".to_owned()),
         "NLS_DATE_LANGUAGE" => Some("AMERICAN".to_owned()),
         "NLS_DATE_FORMAT" => nls_session_parameter("NLS_DATE_FORMAT"),
+        "MODULE" => facts.application.module.clone(),
+        "ACTION" => facts.application.action.clone(),
+        "CLIENT_INFO" => facts.application.client_info.clone(),
+        "CLIENT_IDENTIFIER" => facts.application.client_identifier.clone(),
         "DB_DOMAIN"
         | "HOST"
         | "OS_USER"
         | "TERMINAL"
         | "IP_ADDRESS"
-        | "MODULE"
-        | "ACTION"
-        | "CLIENT_INFO"
-        | "CLIENT_IDENTIFIER"
         | "CLIENT_PROGRAM_NAME"
         | "SERVER_HOST"
         | "GLOBAL_CONTEXT_MEMORY"

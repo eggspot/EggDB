@@ -1011,3 +1011,38 @@ fn static_vpd_policies_filter_and_check_rows_for_every_user() {
     let mut ada = as_user("ada");
     assert_eq!(values(&mut ada, "SELECT count(*) FROM notes"), vec![vec![number(4)]]);
 }
+
+#[test]
+fn application_info_and_the_client_identifier_show_in_sys_context() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut session,
+        "BEGIN DBMS_APPLICATION_INFO.SET_MODULE('billing', 'close month'); DBMS_SESSION.SET_IDENTIFIER('ada@web'); END;",
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT SYS_CONTEXT('USERENV', 'MODULE'), SYS_CONTEXT('USERENV', 'ACTION'), SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') FROM dual"
+        ),
+        vec![vec![text("billing"), text("close month"), text("ada@web")]]
+    );
+    values(
+        &mut session,
+        "BEGIN DBMS_APPLICATION_INFO.SET_ACTION(NULL); DBMS_SESSION.CLEAR_IDENTIFIER; DBMS_LOCK.SLEEP(0); END;",
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT SYS_CONTEXT('USERENV', 'ACTION'), SYS_CONTEXT('USERENV', 'CLIENT_IDENTIFIER') FROM dual"
+        ),
+        vec![vec![Value::Null, Value::Null]]
+    );
+    failure(&mut session, "BEGIN DBMS_LOCK.SLEEP(-1); END;");
+    values(&mut session, "CREATE TABLE stats_target (id NUMBER)");
+    values(
+        &mut session,
+        "BEGIN DBMS_STATS.GATHER_TABLE_STATS(ownname => NULL, tabname => 'STATS_TARGET'); DBMS_STATS.GATHER_SCHEMA_STATS(USER); END;",
+    );
+    failure(&mut session, "BEGIN DBMS_SESSION.NO_SUCH_MEMBER; END;");
+}
