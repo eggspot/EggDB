@@ -215,6 +215,22 @@ impl Session<'_> {
             }
             None => None,
         };
+        let zookeeper_listener = match options.zookeeper_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--zookeeper-listen {address}: EggDB does not enforce ZooKeeper's ACLs yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for ZooKeeper on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let es_listener = match options.es_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -697,6 +713,7 @@ impl Session<'_> {
                 mcp_listener.as_ref().map(|(listener, _)| listener),
                 resp_listener.as_ref(),
                 memcached_listener.as_ref(),
+                zookeeper_listener.as_ref(),
                 es_listener.as_ref(),
                 mongo_listener.as_ref(),
                 bolt_listener.as_ref(),
@@ -848,6 +865,10 @@ impl Session<'_> {
         let mqtt_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::MQTT_COLLECTIONS,
+        };
+        let zookeeper_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::ZOOKEEPER_COLLECTIONS,
         };
         let nats_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
@@ -1048,6 +1069,18 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
+            let zookeeper_server = scope.spawn(|| match &zookeeper_listener {
+                Some(listener) => eggdb_zookeeper::serve(
+                    &zookeeper_database,
+                    listener,
+                    &eggdb_zookeeper::ServerConfig {
+                        max_connections: config.max_connections,
+                        ..eggdb_zookeeper::ServerConfig::default()
+                    },
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
             let es_server = scope.spawn(|| match &es_listener {
                 Some(listener) => eggdb_http::serve_replies_with_limits(
                     listener,
@@ -1235,6 +1268,7 @@ impl Session<'_> {
             let _ = mcp_server.join();
             let _ = resp_server.join();
             let _ = memcached_server.join();
+            let _ = zookeeper_server.join();
             let _ = es_server.join();
             let _ = mongo_server.join();
             let _ = bolt_server.join();

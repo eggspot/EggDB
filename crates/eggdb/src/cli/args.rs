@@ -239,6 +239,7 @@ impl CommandName {
             | OptionName::McpListen
             | OptionName::RespListen
             | OptionName::MemcachedListen
+            | OptionName::ZookeeperListen
             | OptionName::EsListen
             | OptionName::MongoListen
             | OptionName::MongoReplicaSet
@@ -441,6 +442,7 @@ enum OptionName {
     McpListen,
     RespListen,
     MemcachedListen,
+    ZookeeperListen,
     EsListen,
     MongoListen,
     MongoReplicaSet,
@@ -568,6 +570,7 @@ impl OptionName {
             b"mcp-listen" => Self::McpListen,
             b"resp-listen" => Self::RespListen,
             b"memcached-listen" => Self::MemcachedListen,
+            b"zookeeper-listen" => Self::ZookeeperListen,
             b"es-listen" => Self::EsListen,
             b"mongo-listen" => Self::MongoListen,
             b"mongo-replica-set" => Self::MongoReplicaSet,
@@ -895,6 +898,7 @@ pub(crate) struct ServeOptions {
     pub(crate) mcp_tables: Vec<String>,
     pub(crate) resp_listen: Option<SocketAddr>,
     pub(crate) memcached_listen: Option<SocketAddr>,
+    pub(crate) zookeeper_listen: Option<SocketAddr>,
     pub(crate) es_listen: Option<SocketAddr>,
     pub(crate) mongo_listen: Option<SocketAddr>,
     pub(crate) mongo_replica_set: Option<String>,
@@ -1415,6 +1419,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::MemcachedListen => {
                 request.serve.memcached_listen =
                     Some(parse_listen(&option.spelled, value, 11211).map_err(usage)?);
+            }
+            OptionName::ZookeeperListen => {
+                request.serve.zookeeper_listen =
+                    Some(parse_listen(&option.spelled, value, 2181).map_err(usage)?);
             }
             OptionName::MqttListen => {
                 request.serve.mqtt_listen =
