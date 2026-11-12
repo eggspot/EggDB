@@ -94,6 +94,7 @@ mod mysql_date_functions;
 mod mysql_date_parts;
 mod mysql_errors;
 mod mysql_named_locks;
+mod mysql_set;
 mod mysql_variables;
 mod name_resolution;
 mod new_files;

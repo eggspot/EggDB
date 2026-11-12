@@ -724,3 +724,4 @@ its full title with its status.
 - [D697](decisions/D697.md) Code-only batch 345 (M6a): PostgreSQL's `xml` type accepted and read as `text`
 - [D698](decisions/D698.md) Code-only batch 346 (M16): `dicom_parse`, DICOM Part 10 files as DICOM's JSON model
 - [D699](decisions/D699.md) Code-only batch 347 (M16): `iso20022_parse`, ISO 20022 XML messages as JSON
+- [D700](decisions/D700.md) Code-only batch 348 (M10): MySQL `SET` member checks

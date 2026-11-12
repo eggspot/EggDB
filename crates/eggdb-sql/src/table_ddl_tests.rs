@@ -198,15 +198,17 @@ fn mysql_enum_members_unsigned_ranges_and_year_are_checked() {
     let mut session = Session::with_dialect(&store, Dialect::MySql);
     last(
         &mut session,
-        "CREATE TABLE t (role ENUM('admin', 'member'), small TINYINT UNSIGNED, price DECIMAL(5, 2) UNSIGNED, born YEAR)",
+        "CREATE TABLE t (role ENUM('admin', 'member'), small TINYINT UNSIGNED, price DECIMAL(5, 2) UNSIGNED, born YEAR, \
+         tags SET('a', 'bb'))",
     );
-    last(&mut session, "INSERT INTO t VALUES ('admin', 255, 1.5, 2024), (NULL, 0, 0, 0)");
+    last(&mut session, "INSERT INTO t VALUES ('admin', 255, 1.5, 2024, 'a,bb'), (NULL, 0, 0, 0, '')");
     for bad in [
         "INSERT INTO t (role) VALUES ('guest')",
         "INSERT INTO t (small) VALUES (256)",
         "INSERT INTO t (small) VALUES (-1)",
         "INSERT INTO t (price) VALUES (-0.5)",
         "INSERT INTO t (born) VALUES (1800)",
+        "INSERT INTO t (tags) VALUES ('a,zz')",
     ] {
         fails(&mut session, bad);
     }

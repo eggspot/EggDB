@@ -1095,7 +1095,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   types, zero dates and the full `TIME` range (D19, sql.md). Columns of `BIGINT UNSIGNED`, `YEAR`, `BIT`,
   `ENUM` and `SET` accepted on the nearest stored type: **code written, unbuilt** (code-only mode, 2026-11-12,
   D646); `ENUM` members, unsigned ranges and `YEAR`'s range checked: **code written, unbuilt** (code-only mode,
-  2026-11-12, D684). Left: `ENUM` ordering, `SET` member checks and order, two-digit years, bit literals, the
+  2026-11-12, D684); `SET` member checks: **code written, unbuilt** (code-only mode, 2026-11-12, D700). Left: `ENUM`
+  ordering, `SET` member order, two-digit years, bit literals, the
   spatial types, zero dates and the full `TIME` range.
 - MySQL's semantics: `DECIMAL` division, booleans as integers, implicit string-to-number
   conversion, `sql_mode`, and `1 / 0` as `NULL` with a warning (D10, sql.md). `1 / 0` as `NULL` with

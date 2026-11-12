@@ -567,9 +567,11 @@ impl<'t> Parser<'t> {
         }
         if word == "enum" || word == "set" {
             let members = self.mysql_type_members()?;
-            if word == "enum" {
-                self.mysql_column_check = Some(MysqlColumnCheck::Members(members.clone()));
-            }
+            self.mysql_column_check = Some(if word == "enum" {
+                MysqlColumnCheck::Members(members.clone())
+            } else {
+                MysqlColumnCheck::SetMembers(members.clone())
+            });
             let lengths = members.iter().map(|member| member.chars().count());
             let longest = if word == "enum" {
                 lengths.max().unwrap_or(1)
@@ -1423,6 +1425,7 @@ pub(super) fn postgresql_source(expr: &Expr) -> Option<String> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MysqlColumnCheck {
     Members(Vec<String>),
+    SetMembers(Vec<String>),
     Range(i64, Option<i64>),
     Year,
 }
@@ -1454,6 +1457,20 @@ impl MysqlColumnCheck {
                         .map(|member| format!("'{}'", member.replace('\'', "''")))
                         .collect::<Vec<_>>()
                         .join(",")
+                ),
+            ),
+            Self::SetMembers(members) => (
+                at(ExprKind::Function {
+                    name: crate::mysql_set::SET_MEMBERS_FUNCTION.to_owned(),
+                    arguments: vec![
+                        *column_expr(),
+                        at(ExprKind::Literal(Literal::String(members.join(",")))),
+                    ],
+                }),
+                format!(
+                    "{}({quoted}, '{}')",
+                    crate::mysql_set::SET_MEMBERS_FUNCTION,
+                    members.join(",").replace('\'', "''")
                 ),
             ),
             Self::Range(low, Some(high)) => (
