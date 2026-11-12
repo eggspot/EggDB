@@ -3665,6 +3665,23 @@ SELECT eggdb_coordination.evaluate_flag('new-checkout', '{"country": "VN"}'::jso
   time ran out. Each instance that registers, deregisters or expires is announced on the `eggdb_services` channel
   (`LISTEN eggdb_services`) as `{"service", "instance", "event"}`.
 
+## Feature store (eggdb_features)
+
+`CREATE EXTENSION eggdb_features` keeps machine-learning features for online serving (D744):
+
+```sql
+CREATE EXTENSION eggdb_features;
+SELECT eggdb_features.define_view('user_stats',
+  'SELECT user_id, updated_at, orders_30d, avg_basket FROM user_stats_source', 'user_id', 'updated_at', interval '2 days');
+SELECT eggdb_features.materialize('user_stats');            -- latest row per user into the online table
+SELECT eggdb_features.online_features('user_stats', '42');  -- {"orders_30d": ..., "avg_basket": ..., "event_time": ...}
+SELECT eggdb_features.features_at('user_stats', '42', '2026-10-01');  -- as they were then, for training
+```
+
+A view is a query with an entity column and an event-time column; `materialize` keeps each entity's newest row in
+`eggdb_features.online` (one primary-key read to serve), `online_features` returns it unless it is older than the
+view's time to live, and `features_at` reads the source as of a past time, so training data has no leakage.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

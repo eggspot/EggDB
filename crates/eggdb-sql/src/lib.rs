@@ -104,6 +104,7 @@ mod netcdf;
 mod orc;
 mod timescale;
 mod ai_memory;
+mod features;
 mod zarr;
 mod new_files;
 mod file_readers;

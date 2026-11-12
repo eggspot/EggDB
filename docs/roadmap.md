@@ -1372,7 +1372,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - In-database training, first linear and logistic regression over a query's rows with predictions
   in SQL (D31). Check: fits compared with a reference on a public dataset. **Code written,
   unbuilt** (code-only mode, 2026-11-11, D439).
-- A feature store with low-latency online feature serving (D31, D55).
+- A feature store with low-latency online feature serving (D31, D55). **Code written, unbuilt** (code-only mode,
+  2026-11-12, D744): feature views, an online table and point-in-time reads in `eggdb_features`.
 - An end-to-end retrieval benchmark (D205).
 
 ### M13 Graphs
