@@ -1856,7 +1856,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Foreign sources: MySQL, SQL Server, HTTP, S3 and Parquet over object storage (D29, D229). SQL Server: **code
   written, unbuilt** (code-only mode, 2026-11-12, D769); CSV and Parquet objects in S3-compatible storage: **code
   written, unbuilt** (code-only mode, 2026-11-12, D913); MySQL: **code written, unbuilt** (code-only mode, 2026-11-12,
-  D914). Left: HTTP.
+  D914); `http://` CSV, Parquet and JSON: **code written, unbuilt** (code-only mode, 2026-11-12, D915).
 - Credentials per source, permission per role, and a timeout and row limit per call (D229). **Code written, unbuilt**
   (code-only mode, 2026-11-12, D770).
 - Joins across servers planned as one distributed query, and federated SQL across EggDB clusters

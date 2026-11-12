@@ -4,7 +4,7 @@ use eggdb_parquet::{Cell, Column, ColumnType};
 const VARIABLE: &str = "EGGDB_FOREIGN_SOURCES";
 const SQL_SERVER_PASSWORD: &str = "SQLCMDPASSWORD";
 const MYSQL_PASSWORD: &str = "MYSQL_PWD";
-const MYSQL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const REMOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PASSWORD_FILE: &str = "EGGDB_FOREIGN_PASSFILE";
 const ROW_LIMIT: &str = "EGGDB_FOREIGN_ROW_LIMIT";
 const TIMEOUT_SECONDS: &str = "EGGDB_FOREIGN_TIMEOUT_SECONDS";
@@ -315,7 +315,7 @@ fn read_mysql(
         options.password = password_from_file(&options.host, options.port, &options.database, &options.user)
             .or_else(|| std::env::var(MYSQL_PASSWORD).ok());
     }
-    let mut client = eggdb_mysqlwire::client::MySqlClient::connect(&options, MYSQL_TIMEOUT).map_err(|error| error.to_string())?;
+    let mut client = eggdb_mysqlwire::client::MySqlClient::connect(&options, REMOTE_TIMEOUT).map_err(|error| error.to_string())?;
     let results = client.query(query).map_err(|error| error.to_string())?;
     let Some(answer) = results.into_iter().rev().find(|result| !result.columns.is_empty()) else {
         return Ok(());
@@ -400,6 +400,56 @@ fn is_sql_server(source: &str) -> bool {
     source.starts_with("sqlserver://")
 }
 
+fn is_web(source: &str) -> bool {
+    source.starts_with("http://")
+}
+
+fn web_allowed(allowed: &str, source: &str) -> bool {
+    let (Ok(entry), Ok(wanted)) = (eggdb_http::parse_http_url(allowed), eggdb_http::parse_http_url(source)) else {
+        return false;
+    };
+    let path = wanted.path.split('?').next().unwrap_or_default();
+    let climbs = path.split('/').any(|segment| segment == ".." || segment == ".");
+    let prefix = if entry.path.ends_with('/') { entry.path.clone() } else { format!("{}/", entry.path) };
+    entry.host.eq_ignore_ascii_case(&wanted.host) && entry.port == wanted.port && !climbs && (path.starts_with(&prefix) || path == entry.path)
+}
+
+fn json_rows(bytes: &[u8], shown: &str, row: &mut dyn FnMut(String) -> Result<(), String>) -> Result<(), String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("{shown} is not UTF-8"))?;
+    let document = eggdb_sql::json::parse_document(text).map_err(|error| format!("{shown}: {}", error.message))?;
+    let eggdb_sql::json::Json::Array(items) = document.value else {
+        return Err(format!("{shown} is not a JSON array of objects"));
+    };
+    for item in items {
+        if !matches!(item.value, eggdb_sql::json::Json::Object(_)) {
+            return Err(format!("{shown} holds a value that is not an object"));
+        }
+        row(text.get(item.start..item.end).ok_or_else(|| format!("{shown} is cut"))?.to_owned())?;
+    }
+    Ok(())
+}
+
+fn read_web(source: &str, query: &str, row: &mut dyn FnMut(String) -> Result<(), String>) -> Result<(), String> {
+    if !query.trim().is_empty() && query.trim() != "*" {
+        return Err("an HTTP source reads every column: give '*' as the query".to_owned());
+    }
+    let target = eggdb_http::parse_http_url(source)?;
+    let largest = usize::try_from(MOST_CSV_BYTES).unwrap_or(usize::MAX);
+    let response = eggdb_http::request(&target, "GET", &target.path, &[], &[], REMOTE_TIMEOUT, largest)
+        .map_err(|error| format!("cannot read {source}: {error}"))?;
+    if response.status != 200 {
+        return Err(format!("{source} answered HTTP {}", response.status));
+    }
+    let path = target.path.split('?').next().unwrap_or_default();
+    if path.ends_with(".csv") {
+        return csv_rows(std::io::Cursor::new(response.body), source, row);
+    }
+    if path.ends_with(".parquet") {
+        return parquet_rows(&response.body, row);
+    }
+    json_rows(&response.body, source, row)
+}
+
 fn is_mysql(source: &str) -> bool {
     source.starts_with("mysql://")
 }
@@ -457,6 +507,9 @@ fn read(
     if is_mysql(source) {
         return read_mysql(source, query, row);
     }
+    if is_web(source) {
+        return read_web(source, query, row);
+    }
     if is_object(source) && (source.ends_with(".csv") || source.ends_with(".parquet")) {
         return read_object(source, query, row);
     }
@@ -486,7 +539,7 @@ fn read(
         return read_parquet(&checked, query, row);
     }
     Err(format!(
-        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// or mysql:// URL, a file:...parquet or file:...csv path, or an s3://bucket/...parquet or ...csv object",
+        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// or mysql:// URL, a file:...parquet or file:...csv path, an s3://bucket/...parquet or ...csv object, or an http:// URL of CSV, Parquet or a JSON array",
         shown_source(source)
     ))
 }
@@ -561,6 +614,9 @@ fn allows(allowed: &str, source: &str) -> bool {
     }
     if is_object(allowed) || is_object(source) {
         return object_allowed(allowed, source);
+    }
+    if is_web(allowed) || is_web(source) {
+        return web_allowed(allowed, source);
     }
     allowed_file(allowed, source).is_some()
 }
@@ -663,6 +719,23 @@ mod tests {
         assert!(!allows("mysql://reader@db.internal:3306/shop", "mysql://root@db.internal:3306/shop"));
         assert!(allows("mysql://reader@db.internal", "mysql://reader@db.internal:3306/any"));
         assert!(!allows("mysql://reader@db.internal", "postgresql://reader@db.internal/any"));
+    }
+
+    #[test]
+    fn web_entries_allow_only_the_paths_under_them() {
+        assert!(allows("http://data.internal/exports/", "http://data.internal/exports/2026/orders.csv"));
+        assert!(!allows("http://data.internal/exports/", "http://data.internal/exportsx/orders.csv"));
+        assert!(!allows("http://data.internal/exports/", "http://data.internal/exports/../admin.json"));
+        assert!(!allows("http://data.internal/exports/", "http://data.internal:8080/exports/orders.csv"));
+        assert!(!allows("http://data.internal/exports/", "http://evil.example/exports/orders.csv"));
+        let mut rows = Vec::new();
+        json_rows(br#"[{"id": 1}, {"id": 2}]"#, "test", &mut |row| {
+            rows.push(row);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rows, vec!["{\"id\": 1}".to_owned(), "{\"id\": 2}".to_owned()]);
+        assert!(json_rows(b"[1]", "test", &mut |_| Ok(())).is_err());
     }
 
     #[test]
