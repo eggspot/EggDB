@@ -776,3 +776,4 @@ its full title with its status.
 - [D749](decisions/D749.md) Code-only batch 397 (M6c): data profiling, entity resolution and golden records in `eggdb_catalog`
 - [D750](decisions/D750.md) Code-only batch 398 (M16): `CREATE EXTENSION eggdb_pipelines`, SQL models with `ref()`, tests and lineage, and task pipelines with retries and backfills
 - [D751](decisions/D751.md) Code-only batch 399 (M6b): `CREATE EXTENSION eggdb_secrets`, AES-GCM sealed secrets and dynamic credentials, with `eggdb_seal` and `gen_random_bytes`
+- [D752](decisions/D752.md) Code-only batch 400 (M6b): `eggdb_blind_index`, HMAC blind indexes for searching sealed columns

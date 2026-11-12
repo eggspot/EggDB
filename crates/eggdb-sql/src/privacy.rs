@@ -1,7 +1,8 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 6] = ["ff1_encrypt", "ff1_decrypt", "laplace_noise", "gen_random_bytes", "eggdb_seal", "eggdb_unseal"];
+pub(crate) const FUNCTIONS: [&str; 7] = ["ff1_encrypt", "ff1_decrypt", "laplace_noise", "gen_random_bytes", "eggdb_seal", "eggdb_unseal", "eggdb_blind_index"];
+const DEFAULT_BLIND_INDEX_BITS: i64 = 64;
 const MOST_RANDOM_BYTES: i64 = 1024;
 const SEAL_VERSION: u8 = 1;
 
@@ -332,6 +333,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         "laplace_noise" => laplace_noise(values),
         "gen_random_bytes" => random_bytes(values),
         "eggdb_seal" | "eggdb_unseal" => sealed(name, values),
+        "eggdb_blind_index" => blind_index(values),
         _ => ff1(name, values),
     })
 }
@@ -343,6 +345,25 @@ fn random_bytes(values: &[Value]) -> SqlResult<Value> {
     let mut bytes = vec![0u8; count as usize];
     crate::random::fill(&mut bytes)?;
     Ok(Value::Bytea(bytes))
+}
+
+fn blind_index(values: &[Value]) -> SqlResult<Value> {
+    let (value, key) = match values {
+        [value, key] | [value, key, _] => (value, key),
+        _ => return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_blind_index takes a value, a key and optionally a bit count")),
+    };
+    let bits = match values.get(2) {
+        Some(bits) => bits.as_integer().filter(|bits| (8..=256).contains(bits) && bits % 8 == 0).ok_or_else(|| {
+            SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "eggdb_blind_index keeps 8 to 256 bits, a multiple of 8")
+        })?,
+        None => DEFAULT_BLIND_INDEX_BITS,
+    };
+    let key = bytes_of(key);
+    if key.len() < 16 {
+        return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "eggdb_blind_index needs a key of at least 16 bytes"));
+    }
+    let digest = eggdb_crypto::hmac_sha256(&key, &bytes_of(value));
+    Ok(Value::Text(digest[..(bits / 8) as usize].iter().map(|byte| format!("{byte:02x}")).collect()))
 }
 
 fn bytes_of(value: &Value) -> Vec<u8> {

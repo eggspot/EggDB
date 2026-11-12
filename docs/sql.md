@@ -3772,6 +3772,12 @@ random password, a member of the given role and valid until the lease ends; `ren
 `revoke_credentials` and `expire_credentials` (for a pg_cron job) manage the leases. `gen_random_bytes(n)` gives
 random bytes from the secure source.
 
+To search a sealed column, store beside it `eggdb_blind_index(value, index_key [, bits])` (D752): HMAC-SHA-256 of the
+value under a second key, cut to `bits` (64 by default, 8 to 256) and written in hex. Equal values give equal
+indexes, so `WHERE email_index = eggdb_blind_index($1, :'index_key')` finds a row with an ordinary index, while the
+column reveals neither the value nor, with few bits, whether two rare values are the same. Normalize values (case,
+spaces) before indexing them.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,
