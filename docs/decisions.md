@@ -846,3 +846,4 @@ its full title with its status.
 - [D819](decisions/D819.md) Code-only batch 467 (M6b): audit file rotation and retention
 - [D820](decisions/D820.md) Code-only batch 468 (M6b): API keys for roles
 - [D821](decisions/D821.md) Code-only batch 469 (M6b): authentication rules by database and address
+- [D822](decisions/D822.md) Code-only batch 470 (M6b): SQL Server security policies with filter predicates

@@ -109,7 +109,9 @@ pub fn record_login(user: &str, database: &str, protocol: &str, client: &str, me
 pub(crate) fn statement_kind(statement: &crate::ast::Statement) -> Option<AuditKind> {
     use crate::ast::Statement;
     match statement {
-        Statement::Role(_) | Statement::RowSecurity(_) => Some(AuditKind::PrivilegeChange),
+        Statement::Role(_)
+        | Statement::RowSecurity(_)
+        | Statement::SqlServer(crate::ast::SqlServerStatement::SecurityPolicy(_)) => Some(AuditKind::PrivilegeChange),
         Statement::CreateTable(_)
         | Statement::DropTable { .. }
         | Statement::Truncate(_)

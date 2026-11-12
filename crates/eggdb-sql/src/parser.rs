@@ -1,4 +1,5 @@
 mod asof;
+mod sqlserver_security;
 mod constraints;
 mod copy;
 mod create_table_as;

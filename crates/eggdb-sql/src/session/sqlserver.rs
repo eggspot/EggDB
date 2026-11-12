@@ -552,6 +552,7 @@ impl<'s> Session<'s> {
                 Arc::make_mut(&mut self.settings).sqlserver.xact_abort = *on;
                 Ok(QueryResult::command("SET"))
             }
+            SqlServerStatement::SecurityPolicy(command) => self.run_security_policy(command),
             SqlServerStatement::InsertBulk(_) => Err(SqlError::new(
                 SqlState::INTERNAL_ERROR,
                 "an INSERT BULK statement reached the statement runner",

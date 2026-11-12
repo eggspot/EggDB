@@ -808,6 +808,9 @@ impl<'t> Parser<'t> {
             "create" | "alter" | "drop" if self.at_sqlserver_routine() => {
                 self.sqlserver_routine()?
             }
+            "create" | "alter" | "drop" if self.at_security_policy() => {
+                self.sqlserver_security_policy()?
+            }
             "create" if self.is_word_at(1, "sequence") => {
                 self.at += 1;
                 self.sqlserver_create_sequence()?

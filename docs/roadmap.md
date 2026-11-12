@@ -742,7 +742,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-12, D621).
 - Column grants that follow a column renamed by MySQL's `CHANGE COLUMN` (D285). **Code written,
   unbuilt** (code-only mode, 2026-11-11, D484).
-- Oracle VPD and SQL Server's security predicates (D186).
+- Oracle VPD and SQL Server's security predicates (D186). SQL Server's security policies with filter predicates: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D822). Left: block predicates and Oracle VPD.
 - Dynamic data masking: SQL Server's `MASKED WITH` and Oracle's redaction, after its decision
   (D22, D285).
 - Redis ACLs, MongoDB roles, Elasticsearch roles and Cassandra roles mapped onto the one role

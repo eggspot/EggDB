@@ -18,6 +18,7 @@ mod sqlite;
 mod sqlite_copy;
 pub(crate) mod sqlserver;
 pub(crate) mod sqlserver_agent;
+mod sqlserver_security;
 mod transaction_settings;
 mod triggers;
 mod tsql;

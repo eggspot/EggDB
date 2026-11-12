@@ -460,6 +460,7 @@ fn sqlserver(
         SqlServerStatement::TopRows(top) => classify(&top.statement, keys),
         SqlServerStatement::InsertBulk(bulk) => insert_runs_code(&bulk.table, keys),
         SqlServerStatement::Use(_)
+        | SqlServerStatement::SecurityPolicy(_)
         | SqlServerStatement::NoCount(_)
         | SqlServerStatement::ImplicitTransactions(_)
         | SqlServerStatement::IdentityInsert { .. }

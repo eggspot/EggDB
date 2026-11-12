@@ -654,6 +654,7 @@ pub(crate) enum SqlServerStatement {
     },
     XactAbort(bool),
     InsertBulk(crate::bulk_load::InsertBulk),
+    SecurityPolicy(Box<crate::sqlserver_security::SecurityPolicyCommand>),
     Declare(Vec<VariableDeclaration>),
     SetVariable {
         variable: Name,
