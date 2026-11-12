@@ -37,6 +37,7 @@ fn source_select(computed: Vec<Expr>, query: Query, position: usize) -> Select {
                 })),
                 generated: None,
                 partition_selection: None,
+                system_time: None,
             },
             joins: Vec::new(),
         }),

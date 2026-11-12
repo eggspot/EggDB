@@ -818,3 +818,4 @@ its full title with its status.
 - [D791](decisions/D791.md) Code-only batch 439 (M5): JDBC `DatabaseMetaData` in the embedded Java driver
 - [D792](decisions/D792.md) Code-only batch 440 (M5): floating point, tables, `call_indirect` and start functions in the WebAssembly interpreter
 - [D793](decisions/D793.md) Code-only batch 441 (M5): `CREATE FUNCTION ... LANGUAGE wasm` on EggDB's interpreter
+- [D794](decisions/D794.md) Code-only batch 442 (M14): `FOR SYSTEM_TIME` queries over the history `eggdb_temporal` keeps

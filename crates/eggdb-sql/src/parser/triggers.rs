@@ -1178,6 +1178,7 @@ impl<'t> Parser<'t> {
             name,
             derived: None,
             partition_selection: None,
+            system_time: None,
         }))
     }
 }

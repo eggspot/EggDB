@@ -1501,6 +1501,16 @@ pub(crate) struct TableReference {
     pub(crate) derived: Option<Box<DerivedTable>>,
     pub(crate) generated: Option<Box<GeneratedTable>>,
     pub(crate) partition_selection: Option<Box<PartitionSelection>>,
+    pub(crate) system_time: Option<Box<SystemTime>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SystemTime {
+    AsOf(Expr),
+    FromTo(Expr, Expr),
+    Between(Expr, Expr),
+    ContainedIn(Expr, Expr),
+    All,
 }
 
 impl TableReference {
@@ -1511,6 +1521,7 @@ impl TableReference {
             derived: None,
             generated: None,
             partition_selection: None,
+            system_time: None,
         }
     }
 }

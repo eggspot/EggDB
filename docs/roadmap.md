@@ -1489,7 +1489,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D610). Left: transaction metadata (needs a transaction id per transaction).
 - Change capture without triggers (D210).
 - System-versioned temporal tables (SQL:2011) with `AS OF` over kept history, and SQL Server's
-  temporal tables (D28).
+  temporal tables (D28). `FOR SYSTEM_TIME AS OF | FROM ... TO | BETWEEN ... AND | CONTAINED IN | ALL` over the tables
+  `eggdb_temporal` keeps (D755): **code written, unbuilt** (code-only mode, 2026-11-12, D794). Left: SQL Server's and
+  MariaDB's `CREATE`/`ALTER` syntax for system versioning onto the same history.
 - Materialized views kept up to date incrementally at commit, and continuous queries (D28,
   PR #86).
 - `eggdb follow` of `pgoutput`'s parallel streaming and two-phase messages, binary arrays,

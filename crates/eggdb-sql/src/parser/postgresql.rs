@@ -393,6 +393,7 @@ impl Parser<'_> {
                 position,
             }))),
             partition_selection: None,
+            system_time: None,
         })
     }
 
@@ -484,6 +485,7 @@ impl Parser<'_> {
                         position,
                     }))),
                     partition_selection: None,
+                    system_time: None,
                 },
                 joins: Vec::new(),
             }),

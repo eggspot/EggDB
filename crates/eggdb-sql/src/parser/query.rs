@@ -792,6 +792,7 @@ impl Parser<'_> {
                 derived: None,
                 generated: Some(Box::new(GeneratedTable::Values(list))),
                 partition_selection: None,
+                system_time: None,
             });
         }
         Ok(TableReference {
@@ -806,6 +807,7 @@ impl Parser<'_> {
             })),
             generated: None,
             partition_selection: None,
+            system_time: None,
         })
     }
 

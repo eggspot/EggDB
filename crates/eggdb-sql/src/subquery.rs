@@ -2437,6 +2437,7 @@ fn lateral_source(reference: &TableReference) -> Option<LateralSource> {
                 derived: None,
                 generated: Some(Box::new(generated.clone())),
                 partition_selection: None,
+                system_time: None,
             },
             joins: Vec::new(),
         }),

@@ -1,3 +1,8 @@
+pub(crate) const REGISTRY_SCHEMA: &str = "eggdb_temporal";
+pub(crate) const REGISTRY_TABLE: &str = "tables";
+pub(crate) const SYSTEM_START: &str = "recorded_from";
+pub(crate) const SYSTEM_END: &str = "recorded_to";
+
 /// The statements `CREATE EXTENSION eggdb_temporal` runs: bitemporal tables, with a valid period
 /// the application states and a recorded period the database keeps, so a row can be read as it
 /// was true at any time and as it was known at any time (D50).
@@ -187,5 +192,42 @@ mod tests {
             "removed\n1\nSELECT 1"
         );
         assert_eq!(run(&mut session, "SELECT count(*) AS left_rows FROM prices").unwrap(), "left_rows\n4\nSELECT 1");
+    }
+
+    #[test]
+    fn for_system_time_reads_the_rows_known_at_a_time() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_temporal",
+            "CREATE TABLE stock (sku text NOT NULL, amount integer NOT NULL)",
+            "SELECT eggdb_temporal.enable('public', 'stock', ARRAY['sku'])",
+            "INSERT INTO stock (sku, amount) VALUES ('egg', 5)",
+            "UPDATE stock SET recorded_from = '2026-01-01' WHERE sku = 'egg'",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        run(&mut session, "UPDATE stock SET amount = 7 WHERE sku = 'egg'").unwrap();
+        assert_eq!(
+            run(&mut session, "SELECT count(*) AS versions FROM stock FOR SYSTEM_TIME ALL").unwrap(),
+            "versions\n3\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT amount FROM stock FOR SYSTEM_TIME AS OF now() + interval '1 day' AS s").unwrap(),
+            "amount\n7\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT amount FROM stock FOR SYSTEM_TIME AS OF '1999-01-01'").unwrap(),
+            "amount\nSELECT 0"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT * FROM prices_missing FOR SYSTEM_TIME ALL").unwrap_err().state().code(),
+            "42P01"
+        );
+        run(&mut session, "CREATE TABLE plain (a integer)").unwrap();
+        assert_eq!(
+            run(&mut session, "SELECT * FROM plain FOR SYSTEM_TIME ALL").unwrap_err().state().code(),
+            "42809"
+        );
     }
 }

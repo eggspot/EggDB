@@ -677,6 +677,7 @@ impl Parser<'_> {
             derived: None,
             generated: Some(Box::new(GeneratedTable::Function(function))),
             partition_selection: None,
+            system_time: None,
         })
     }
 

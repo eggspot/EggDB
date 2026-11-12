@@ -4,6 +4,7 @@ mod copy;
 mod create_table_as;
 mod cursors;
 mod event_triggers;
+mod system_time;
 mod databases;
 mod generated;
 mod group_concat;
@@ -3031,6 +3032,7 @@ impl<'t> Parser<'t> {
         let name = self.table_name()?;
         let name_text = self.slice(name_start, self.previous_end());
         let partition_selection = self.partition_selection()?;
+        let system_time = self.system_time_clause()?;
         let alias = if !self.is_word("tablesample") && (self.take_word("as") || self.at_bare_alias()) {
             Some(self.name()?.text)
         } else {
@@ -3045,6 +3047,7 @@ impl<'t> Parser<'t> {
         }
         let mut reference = TableReference::named(name, alias);
         reference.partition_selection = partition_selection;
+        reference.system_time = system_time;
         Ok(reference)
     }
 

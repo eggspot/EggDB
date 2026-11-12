@@ -454,6 +454,7 @@ pub(super) fn connect_by(mut select: Select, clause: HierarchicalClause) -> SqlR
             })),
             generated: None,
             partition_selection: None,
+            system_time: None,
         },
         joins: Vec::new(),
     });

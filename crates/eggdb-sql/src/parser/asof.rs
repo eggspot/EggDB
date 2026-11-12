@@ -198,6 +198,7 @@ impl Parser<'_> {
             })),
             generated: None,
             partition_selection: None,
+            system_time: None,
         };
         Ok(if keep_unmatched {
             Join {

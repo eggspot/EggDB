@@ -568,6 +568,7 @@ impl Parser<'_> {
                 position,
             }))),
             partition_selection: None,
+            system_time: None,
         })
     }
 

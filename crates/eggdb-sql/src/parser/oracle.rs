@@ -2072,6 +2072,7 @@ impl Parser<'_> {
                     position,
                 }))),
                 partition_selection: None,
+                system_time: None,
             }
         };
         self.expect(&TokenKind::RightParen)?;
@@ -2112,6 +2113,7 @@ impl Parser<'_> {
                 position,
             }))),
             partition_selection: None,
+            system_time: None,
         })
     }
 }

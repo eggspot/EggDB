@@ -79,6 +79,7 @@ fn replace_reference(
         derived: None,
         generated: Some(Box::new(GeneratedTable::Variable(variable.clone()))),
         partition_selection: None,
+        system_time: None,
     };
     Ok(())
 }

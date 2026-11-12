@@ -1487,6 +1487,7 @@ fn values_table(
             position,
         }))),
         partition_selection: None,
+        system_time: None,
     }
 }
 

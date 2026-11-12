@@ -818,6 +818,12 @@ impl<'a> Resolver<'a> {
             }
             return Ok(self.opaque_item(reference));
         }
+        if reference.system_time.is_some()
+            && (ctes.contains(&reference.name.text)
+                || crate::pg_catalog::catalog_reference(self.reader, &reference.name.text)?.is_some())
+        {
+            return Err(not_system_versioned(&reference.name));
+        }
         if ctes.contains(&reference.name.text) {
             refuse_partition_selection(reference)?;
             return Ok(self.opaque_item(reference));
@@ -867,6 +873,15 @@ impl<'a> Resolver<'a> {
             let name = reference.name.text.clone();
             self.record(&name);
         }
+        if relation.is_some()
+            && let Some(clause) = reference.system_time.take()
+        {
+            let Some(Relation::Table(table)) = &relation else {
+                return Err(not_system_versioned(&reference.name));
+            };
+            self.expand_system_time(reference, table, *clause)?;
+            return Ok(item);
+        }
         match relation {
             Some(Relation::View(view)) => {
                 if reference.partition_selection.is_some() {
@@ -879,6 +894,141 @@ impl<'a> Resolver<'a> {
             None => self.sequence_reference(reference)?,
         }
         Ok(item)
+    }
+
+    fn versions_view_of(&mut self, table: &str) -> SqlResult<Option<String>> {
+        let registry_name = schemas::qualified(
+            crate::temporal_tables::REGISTRY_SCHEMA,
+            crate::temporal_tables::REGISTRY_TABLE,
+        );
+        let Some(registry) = self.tables.table(self.reader, &registry_name)? else {
+            return Ok(None);
+        };
+        let schema = schemas::schema_of(table);
+        let schema = if schema.is_empty() { DEFAULT_SCHEMA } else { schema };
+        let name = base_name(table);
+        for (_, row) in crate::execute::every_row(self.reader, &registry)? {
+            let text = |at: usize| row.get(at).and_then(crate::types::Value::character_text);
+            if text(0) == Some(schema) && text(1) == Some(name) {
+                return Ok(text(4).map(|view| schemas::qualified(schema, view)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn expand_system_time(
+        &mut self,
+        reference: &mut TableReference,
+        table: &crate::encoding::TableDefinition,
+        clause: crate::ast::SystemTime,
+    ) -> SqlResult<()> {
+        use crate::ast::{BinaryOperator, SystemTime};
+        let position = reference.name.position;
+        let Some(view) = self.versions_view_of(&table.name)? else {
+            return Err(not_system_versioned(&reference.name));
+        };
+        let column = |name: &str| Expr {
+            kind: ExprKind::Column {
+                qualifier: None,
+                name: name.to_owned(),
+            },
+            position,
+        };
+        let compare = |left: Expr, operator: BinaryOperator, right: Expr| Expr {
+            kind: ExprKind::Binary(operator, Box::new(left), Box::new(right)),
+            position,
+        };
+        let start = || column(crate::temporal_tables::SYSTEM_START);
+        let end = || column(crate::temporal_tables::SYSTEM_END);
+        let conditions = match clause {
+            SystemTime::All => Vec::new(),
+            SystemTime::AsOf(at) => vec![
+                compare(start(), BinaryOperator::LessOrEqual, at.clone()),
+                compare(end(), BinaryOperator::Greater, at),
+            ],
+            SystemTime::FromTo(from, to) => vec![
+                compare(start(), BinaryOperator::Less, to),
+                compare(end(), BinaryOperator::Greater, from),
+            ],
+            SystemTime::Between(from, to) => vec![
+                compare(start(), BinaryOperator::LessOrEqual, to),
+                compare(end(), BinaryOperator::Greater, from),
+            ],
+            SystemTime::ContainedIn(from, to) => vec![
+                compare(start(), BinaryOperator::GreaterOrEqual, from),
+                compare(end(), BinaryOperator::LessOrEqual, to),
+            ],
+        };
+        let filter = match conditions.len() {
+            0 => None,
+            _ => Some(Expr {
+                kind: ExprKind::And(conditions),
+                position,
+            }),
+        };
+        let label = reference
+            .alias
+            .clone()
+            .unwrap_or_else(|| base_name(&reference.name.text).to_owned());
+        let items: Vec<SelectItem> = table
+            .columns
+            .iter()
+            .map(|found| SelectItem::Expr {
+                expr: column(&found.name),
+                alias: None,
+            })
+            .collect();
+        let mut query = Query {
+            with: Vec::new(),
+            recursive: false,
+            body: crate::ast::SetExpr::Select(Box::new(Select {
+                distinct: false,
+                items,
+                from: Some(FromClause {
+                    first: TableReference::named(
+                        Name {
+                            text: view,
+                            position,
+                        },
+                        None,
+                    ),
+                    joins: Vec::new(),
+                }),
+                filter,
+                group_by: Vec::new(),
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                source_row_limit: None,
+                grouping_sets: None,
+                distinct_on: Vec::new(),
+            })),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            position,
+        };
+        let walk_expressions = std::mem::replace(&mut self.walk_expressions, true);
+        let walked = self.walk_query(&mut query, &mut Vec::new());
+        self.walk_expressions = walk_expressions;
+        walked?;
+        reference.alias = Some(label);
+        reference.derived = Some(Box::new(DerivedTable {
+            query,
+            column_names: table
+                .columns
+                .iter()
+                .map(|found| Name {
+                    text: found.name.clone(),
+                    position,
+                })
+                .collect(),
+            dialect: crate::constraints::current_dialect(),
+            lateral: false,
+            hierarchy: None,
+        }));
+        Ok(())
     }
 
     fn populate_row_type(&mut self, generated: &mut GeneratedTable) -> SqlResult<()> {
@@ -1347,6 +1497,18 @@ fn by_source_position(
     select_from(items, query, renamed, label, view.dialect, position)
 }
 
+fn not_system_versioned(name: &Name) -> SqlError {
+    SqlError::new(
+        SqlState::WRONG_OBJECT_TYPE,
+        format!(
+            "table \"{}\" is not system-versioned",
+            display(&name.text)
+        ),
+    )
+    .with_hint("Make it system-versioned with eggdb_temporal.enable(schema, table, key_columns).")
+    .at(name.position)
+}
+
 fn refuse_partition_selection(reference: &TableReference) -> SqlResult<()> {
     match reference.partition_selection {
         Some(_) => Err(
@@ -1399,6 +1561,7 @@ fn select_from(
                 })),
                 generated: None,
                 partition_selection: None,
+                system_time: None,
             },
             joins: Vec::new(),
         }),

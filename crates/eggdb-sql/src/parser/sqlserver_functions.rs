@@ -1052,6 +1052,7 @@ impl Parser<'_> {
                 position,
             }))),
             partition_selection: None,
+            system_time: None,
         };
         Ok(derived_rows(
             rows,
@@ -1119,6 +1120,7 @@ impl Parser<'_> {
                 position,
             }))),
             partition_selection: None,
+            system_time: None,
         })
     }
 
@@ -1214,6 +1216,7 @@ impl Parser<'_> {
                 position,
             }))),
             partition_selection: None,
+            system_time: None,
         };
         Ok(derived_rows(
             rows,
@@ -1266,6 +1269,7 @@ fn derived_rows(
         })),
         generated: None,
         partition_selection: None,
+        system_time: None,
     }
 }
 

@@ -1297,6 +1297,7 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
                 },
             )))),
             partition_selection: None,
+            system_time: None,
         },
         joins: Vec::new(),
     });
