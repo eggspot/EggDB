@@ -1577,7 +1577,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - OPC UA, Modbus and Sparkplug ingest (D57). Sparkplug B payloads decoded in SQL (`sparkplug_decode`): **code written,
   unbuilt** (code-only mode, 2026-11-12, D701). Left: ingest as messages arrive, OPC UA and Modbus.
 - Email stores with IMAP, JMAP and SMTP (D56).
-- CalDAV, CardDAV and WebDAV (D56).
+- CalDAV, CardDAV and WebDAV (D56). iCalendar and vCard read as jCal and jCard (`icalendar_parse`,
+  `vcard_parse`): **code written, unbuilt** (code-only mode, 2026-11-12, D702). Left: the servers.
 - Digital asset management: EXIF and XMP metadata, and renditions with our own royalty-free
   codecs (D56).
 
