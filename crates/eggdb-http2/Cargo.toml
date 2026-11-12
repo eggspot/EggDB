@@ -1,0 +1,13 @@
+[package]
+name = "eggdb-http2"
+autotests = false
+description = "EggDB's own HTTP/2 (RFC 9113) with HPACK (RFC 7541) and gRPC message framing, for gRPC APIs and Arrow Flight SQL."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

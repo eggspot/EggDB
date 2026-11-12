@@ -1491,7 +1491,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   JSON text: **code written, unbuilt** (code-only mode, 2026-11-12, D835); maps, fixed-size lists and unions: **code
   written, unbuilt** (code-only mode, 2026-11-12, D860); dictionary-encoded values inside nested columns:
   **code written, unbuilt** (code-only mode, 2026-11-12, D897).
-- Arrow Flight SQL and ADBC (D29).
+- Arrow Flight SQL and ADBC (D29). HTTP/2, HPACK and gRPC framing (`eggdb-http2`): **code written, unbuilt** (code-only
+  mode, 2026-11-13, D999). Left: Flight SQL itself and ADBC.
 - NDJSON, ORC and Avro (D29). NDJSON: **code written, unbuilt** (code-only mode, 2026-11-11, D505).
   Avro: **code written, unbuilt** (code-only mode, 2026-11-11, D509). ORC (`read_orc`, flat columns): **code
   written, unbuilt** (code-only mode, 2026-11-12, D735); ORC list, map and struct columns as JSON text: **code written,
