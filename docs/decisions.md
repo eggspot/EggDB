@@ -952,3 +952,4 @@ its full title with its status.
 - [D925](decisions/D925.md) Code-only batch 573 (M16): CalDAV expand in calendar-data
 - [D926](decisions/D926.md) Code-only batch 574 (M16): CalDAV times in the object's own time zones
 - [D927](decisions/D927.md) Code-only batch 575 (M6c): column-level lineage captured from statements
+- [D928](decisions/D928.md) Code-only batch 576 (M6c): byte quotas per tenant

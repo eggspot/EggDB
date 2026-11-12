@@ -3,7 +3,8 @@ CREATE SCHEMA eggdb_tenancy;
 CREATE TABLE eggdb_tenancy.tenants (
     tenant text PRIMARY KEY,
     max_rows bigint,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    max_bytes bigint
 );
 CREATE TABLE eggdb_tenancy.isolated (
     table_schema text NOT NULL,
@@ -17,12 +18,28 @@ DECLARE
     tenant_value text;
     allowed bigint;
     used bigint;
+    allowed_bytes bigint;
+    used_bytes bigint;
+    added_bytes bigint;
 BEGIN
     SELECT i.tenant_column INTO column_name FROM eggdb_tenancy.isolated i WHERE i.table_schema = TG_TABLE_SCHEMA AND i.table_name = TG_TABLE_NAME;
     tenant_value := to_jsonb(NEW) ->> column_name;
     IF NOT coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false)
         AND tenant_value IS DISTINCT FROM current_setting('eggdb.tenant', true) THEN
         RAISE EXCEPTION 'new row violates row-level security policy for table %', TG_TABLE_NAME USING ERRCODE = '42501';
+    END IF;
+    SELECT t.max_bytes INTO allowed_bytes FROM eggdb_tenancy.tenants t WHERE t.tenant = tenant_value;
+    IF allowed_bytes IS NOT NULL THEN
+        added_bytes := octet_length(to_jsonb(NEW)::text);
+        IF TG_OP = 'UPDATE' AND tenant_value IS NOT DISTINCT FROM to_jsonb(OLD) ->> column_name THEN
+            added_bytes := added_bytes - octet_length(to_jsonb(OLD)::text);
+        END IF;
+        IF added_bytes > 0 THEN
+            EXECUTE format('SELECT coalesce(sum(octet_length(to_jsonb(r)::text)), 0) FROM %I.%I r WHERE %I = $1', TG_TABLE_SCHEMA, TG_TABLE_NAME, column_name) INTO used_bytes USING tenant_value;
+            IF used_bytes + added_bytes > allowed_bytes THEN
+                RAISE EXCEPTION 'tenant % has reached its quota of % bytes in %', tenant_value, allowed_bytes, TG_TABLE_NAME USING ERRCODE = '53400';
+            END IF;
+        END IF;
     END IF;
     SELECT t.max_rows INTO allowed FROM eggdb_tenancy.tenants t WHERE t.tenant = tenant_value;
     IF allowed IS NOT NULL AND (TG_OP = 'INSERT' OR tenant_value IS DISTINCT FROM to_jsonb(OLD) ->> column_name) THEN
@@ -271,6 +288,25 @@ mod tests {
             run(&mut session, "SELECT id, project_id FROM tasks").unwrap(),
             "id|project_id\n20|3\nSELECT 1"
         );
+    }
+
+    #[test]
+    fn a_tenant_s_bytes_stay_within_its_byte_quota() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_tenancy",
+            "CREATE TABLE notes (id integer PRIMARY KEY, tenant text NOT NULL, body text)",
+            "SELECT eggdb_tenancy.isolate('public', 'notes', 'tenant')",
+            "INSERT INTO eggdb_tenancy.tenants (tenant, max_bytes) VALUES ('acme', 120)",
+            "SET eggdb.tenant = 'acme'",
+            "INSERT INTO notes VALUES (1, 'acme', 'short')",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        let refused = run(&mut session, "INSERT INTO notes VALUES (2, 'acme', 'a body long enough to pass the quota of bytes')").unwrap_err();
+        assert_eq!(refused.state().code(), "53400");
+        run(&mut session, "UPDATE notes SET body = 'tiny' WHERE id = 1").unwrap();
     }
 
     #[test]
