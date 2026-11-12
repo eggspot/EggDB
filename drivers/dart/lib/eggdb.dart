@@ -40,6 +40,11 @@ final class _Result extends Struct {
   external Pointer<_Value> values;
 }
 
+const processLibrary = ':process:';
+
+DynamicLibrary _openLibrary(String name) =>
+    name == processLibrary ? DynamicLibrary.process() : DynamicLibrary.open(name);
+
 class EggDbException implements Exception {
   EggDbException(this.message, this.sqlState, this.status);
   final String message;
@@ -119,7 +124,7 @@ class Database {
     final name = library ??
         Platform.environment['EGGDB_LIBRARY'] ??
         (Platform.isMacOS ? 'libeggdb_capi.dylib' : Platform.isWindows ? 'eggdb_capi.dll' : 'libeggdb_capi.so');
-    final api = _Api(DynamicLibrary.open(name));
+    final api = _Api(_openLibrary(name));
     final out = api.malloc(sizeOf<Pointer<Void>>()).cast<Pointer<Void>>();
     final path = api.text(pathOrUrl);
     try {
@@ -356,7 +361,7 @@ class KeyValue {
     final name = library ??
         Platform.environment['EGGDB_LIBRARY'] ??
         (Platform.isMacOS ? 'libeggdb_capi.dylib' : Platform.isWindows ? 'eggdb_capi.dll' : 'libeggdb_capi.so');
-    final kv = _KeyValueApi(DynamicLibrary.open(name));
+    final kv = _KeyValueApi(_openLibrary(name));
     final api = kv.api;
     final out = api.malloc(sizeOf<Pointer<Void>>()).cast<Pointer<Void>>();
     final options = api.malloc(sizeOf<_Options>()).cast<_Options>();

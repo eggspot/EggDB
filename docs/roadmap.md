@@ -1063,7 +1063,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-13, D963). Left: the PDO driver, which Laravel needs.
 - ActiveRecord and Sequel for Ruby (D16, D182). The Sequel adapter (`adapter: :eggdb`): **code written, unbuilt** (code-only
   mode, 2026-11-13, D958). Left: ActiveRecord.
-- The Swift and Dart/Flutter drivers with their mobile frameworks (D16).
+- The Swift and Dart/Flutter drivers with their mobile frameworks (D16). The Flutter plugin (`eggdb_flutter`, Android
+  `jniLibs` and iOS and macOS XCFrameworks) and the Swift package on an XCFramework: **code written, unbuilt**
+  (code-only mode, 2026-11-13, D966).
 - An ODBC driver (D12, D46).
 - The `compatibility` job with DataGrip, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana,
   Grafana, Metabase, Superset, Power BI, Airbyte, Liquibase and Alembic (D12, D239).
