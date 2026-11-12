@@ -5,6 +5,7 @@ mod event_triggers;
 mod system_versioning;
 mod foreign_tables;
 mod rowversion;
+pub(crate) use rowversion::{FIRST_ROWVERSION, ROWVERSION_SEQUENCE};
 mod mysql_set_order;
 mod mysql;
 pub(crate) mod mysql_events;
@@ -172,9 +173,14 @@ fn only_separators_after(tokens: &[Token<'_>], at: usize) -> bool {
 
 fn mentions_sequence_functions(tokens: &[Token<'_>]) -> bool {
     tokens.iter().enumerate().any(|(at, token)| {
-        let TokenKind::Word(word) = &token.kind else {
-            return false;
+        let word = match &token.kind {
+            TokenKind::Word(word) => word,
+            TokenKind::Variable(name) => return name.eq_ignore_ascii_case("@@dbts"),
+            _ => return false,
         };
+        if word.eq_ignore_ascii_case("min_active_rowversion") {
+            return true;
+        }
         ["nextval", "setval", "currval", "lastval"]
             .iter()
             .any(|name| word.eq_ignore_ascii_case(name))

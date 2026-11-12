@@ -1019,3 +1019,4 @@ its full title with its status.
 - [D992](decisions/D992.md) Code-only batch 640 (M10): MySQL's zero dates
 - [D993](decisions/D993.md) Code-only batch 641 (M10): eggdb follow for MySQL through its binary log
 - [D994](decisions/D994.md) Code-only batch 642 (M10): MySQL's test suite run weekly with its pass rate published
+- [D995](decisions/D995.md) Code-only batch 643 (M10): SQL Server's @@DBTS and MIN_ACTIVE_ROWVERSION()

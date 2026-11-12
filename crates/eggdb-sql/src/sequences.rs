@@ -1471,8 +1471,32 @@ fn setval(name: &str, value: &Value, is_called: &Value) -> SqlResult<Value> {
     })
 }
 
+/// The internal function `@@DBTS` and `MIN_ACTIVE_ROWVERSION()` read: a sequence's last
+/// value drawn, or the given value before its first (or when it does not exist yet).
+pub(crate) const LAST_USED_FUNCTION: &str = "eggdb_sequence_last_used";
+
+fn last_used(name: &str, before_first: i64) -> SqlResult<Value> {
+    with_state(|state| {
+        let known_missing = state
+            .loaded
+            .get(name)
+            .map_or(state.all_loaded, Option::is_none);
+        if known_missing {
+            return Ok(Value::BigInt(before_first));
+        }
+        let sequence = loaded(state, name)?;
+        Ok(Value::BigInt(if sequence.is_called {
+            sequence.last_value
+        } else {
+            sequence.last_value.saturating_sub(sequence.increment)
+        }))
+    })
+}
+
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     Some(match (name, values) {
+        (LAST_USED_FUNCTION, [sequence, before_first]) => argument_name(sequence)
+            .and_then(|name| last_used(&name, before_first.as_integer().unwrap_or(0))),
         ("nextval" | "currval" | "setval", [Value::Null, ..]) => Ok(Value::Null),
         ("nextval", [argument]) => argument_name(argument).and_then(|name| nextval(&name)),
         ("currval", [argument]) => argument_name(argument).and_then(|name| currval(&name)),
@@ -1494,7 +1518,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     match name {
-        "nextval" | "currval" | "lastval" | "setval" | "oracle_nextval" | "oracle_currval" => {
+        "nextval" | "currval" | "lastval" | "setval" | "oracle_nextval" | "oracle_currval" | LAST_USED_FUNCTION => {
             Some(SqlType::BigInt)
         }
         "regclass_cast" => Some(SqlType::Catalog(crate::pg_catalog::CatalogType::Reg(

@@ -4,7 +4,7 @@ use crate::error::SqlResult;
 use crate::schemas::{DEFAULT_SCHEMA, base_name, schema_of};
 
 pub(crate) const ROWVERSION_SEQUENCE: &str = "eggdb_internal.sqlserver_rowversion";
-const FIRST_ROWVERSION: i64 = 2001;
+pub(crate) const FIRST_ROWVERSION: i64 = 2001;
 
 fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))

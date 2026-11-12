@@ -540,6 +540,38 @@ fn session_text(value: String, position: usize) -> Expr {
     }
 }
 
+fn call(name: &str, arguments: Vec<Expr>, position: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Function {
+            name: name.to_owned(),
+            arguments,
+        },
+        position,
+    }
+}
+
+fn rowversion_counter(after_last: i64, position: usize) -> Expr {
+    let last = call(
+        crate::sequences::LAST_USED_FUNCTION,
+        vec![
+            session_text(crate::session::ROWVERSION_SEQUENCE.to_owned(), position),
+            integer(crate::session::FIRST_ROWVERSION - 1, position),
+        ],
+        position,
+    );
+    let counter = Expr {
+        kind: ExprKind::Binary(
+            crate::ast::BinaryOperator::Add,
+            Box::new(last),
+            Box::new(integer(after_last, position)),
+        ),
+        position,
+    };
+    let hex = call("to_hex", vec![counter], position);
+    let padded = call("lpad", vec![hex, integer(16, position), session_text("0".to_owned(), position)], position);
+    call("decode", vec![padded, session_text("hex".to_owned(), position)], position)
+}
+
 fn integer(value: i64, position: usize) -> Expr {
     Expr {
         kind: ExprKind::Literal(Literal::Integer(value)),
@@ -2001,6 +2033,7 @@ impl<'t> Parser<'t> {
             "@@lock_timeout" => integer(-1, position),
             "@@textsize" => integer(i64::from(i32::MAX), position),
             "@@max_connections" => integer(32_767, position),
+            "@@dbts" => rowversion_counter(0, position),
             "@@rowcount" => Expr {
                 kind: ExprKind::SqlServerFunction {
                     function: crate::sqlserver_functions::Function::RowCount,
@@ -2029,6 +2062,11 @@ impl<'t> Parser<'t> {
             self.expect(&TokenKind::LeftParen)?;
             self.expect(&TokenKind::RightParen)?;
             return Ok(Some(clock(precision, name.position)));
+        }
+        if name.text == "min_active_rowversion" {
+            self.expect(&TokenKind::LeftParen)?;
+            self.expect(&TokenKind::RightParen)?;
+            return Ok(Some(rowversion_counter(1, name.position)));
         }
         if let Some(expr) = self.sqlserver_call(name)? {
             return Ok(Some(expr));
