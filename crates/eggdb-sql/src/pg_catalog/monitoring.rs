@@ -1130,7 +1130,8 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "pg_is_wal_replay_paused"
         | "pg_cancel_backend"
         | "pg_terminate_backend" => SqlType::Boolean,
-        "pg_backend_pid" => SqlType::Integer,
+        "pg_backend_pid" | crate::event_triggers::TABLE_REWRITE_REASON => SqlType::Integer,
+        crate::event_triggers::TABLE_REWRITE_OID => SqlType::Catalog(super::CatalogType::Oid),
         "pg_stat_statements_reset" => SqlType::VOID,
         "pg_postmaster_start_time" | "pg_conf_load_time" => STAMP,
         "pg_size_pretty" | "pg_tablespace_location" | "pg_current_wal_lsn" => SqlType::Text,
@@ -1194,6 +1195,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             .map(Value::Boolean)
         }
         "pg_is_in_recovery" | "pg_is_wal_replay_paused" => Ok(Value::Boolean(false)),
+        crate::event_triggers::TABLE_REWRITE_OID | crate::event_triggers::TABLE_REWRITE_REASON => {
+            crate::event_triggers::table_rewrite_value(name)
+        }
         "pg_backend_pid" => Ok(Value::Integer(
             i32::try_from(std::process::id()).unwrap_or(i32::MAX),
         )),

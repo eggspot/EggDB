@@ -576,7 +576,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Event triggers: PostgreSQL's event triggers, SQL Server's DDL triggers and Oracle's DDL and
   database event triggers (D27). PostgreSQL's (`ddl_command_start`, `ddl_command_end`, `sql_drop`): **code written,
   unbuilt** (code-only mode, 2026-11-12, D787); `login`: **code written, unbuilt** (code-only mode, 2026-11-12, D863).
-  Left: `table_rewrite` firing, SQL Server's DDL triggers and Oracle's DDL and database event triggers.
+  `table_rewrite` firing: **code written, unbuilt** (code-only mode, 2026-11-12, D864). Left: SQL Server's DDL
+  triggers and Oracle's DDL and database event triggers.
 - Users can write SQLite files: the B-tree writer, the rollback journal and the WAL (D180).
   Check: files EggDB writes pass `PRAGMA integrity_check`. The b-tree writer for whole new files
   and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631). Left: editing a

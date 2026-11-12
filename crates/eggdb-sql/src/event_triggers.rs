@@ -268,6 +268,41 @@ struct Firing {
     object_identity: String,
     schema: Option<String>,
     dropped: Vec<DroppedObject>,
+    rewrite: Option<(u32, i32)>,
+}
+
+/// PostgreSQL's `AT_REWRITE_COLUMN_REWRITE`: a column's type changes, so every row is
+/// rewritten.
+pub(crate) const REWRITE_COLUMN_TYPE: i32 = 4;
+pub(crate) const TABLE_REWRITE_OID: &str = "pg_event_trigger_table_rewrite_oid";
+pub(crate) const TABLE_REWRITE_REASON: &str = "pg_event_trigger_table_rewrite_reason";
+
+/// The table an `ALTER TABLE` rewrites and PostgreSQL's reason code, when it rewrites one:
+/// a column whose type changes.
+pub(crate) fn rewritten_table(statement: &Statement) -> Option<(String, i32)> {
+    let Statement::AlterTable(alter) = statement else {
+        return None;
+    };
+    alter
+        .actions
+        .iter()
+        .any(|action| matches!(action, crate::ast::AlterAction::SetType { .. }))
+        .then(|| (alter.name.text.clone(), REWRITE_COLUMN_TYPE))
+}
+
+/// The rewritten table's OID or the reason, inside a `table_rewrite` trigger function.
+pub(crate) fn table_rewrite_value(function: &str) -> SqlResult<Value> {
+    FIRING.with(|firing| match firing.borrow().as_ref() {
+        Some(Firing {
+            rewrite: Some((oid, reason)),
+            ..
+        }) => Ok(if function == TABLE_REWRITE_OID {
+            Value::Oid(*oid)
+        } else {
+            Value::Integer(*reason)
+        }),
+        _ => Err(outside_event(function, TABLE_REWRITE)),
+    })
 }
 
 thread_local! {
@@ -321,6 +356,7 @@ pub(crate) struct FiredStatement<'s> {
     pub(crate) tag: &'static str,
     pub(crate) object: Option<(&'static str, String, Option<String>)>,
     pub(crate) dropped: &'s [DroppedObject],
+    pub(crate) rewrite: Option<(u32, i32)>,
 }
 
 pub(crate) fn object_of(statement: &Statement) -> Option<(&'static str, String, Option<String>)> {
@@ -401,6 +437,7 @@ pub(crate) fn fire(
                 object_identity,
                 schema,
                 dropped: fired.dropped.to_vec(),
+                rewrite: fired.rewrite,
             });
         });
         let _guard = FiringGuard;

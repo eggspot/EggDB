@@ -177,3 +177,30 @@ fn login_triggers_fire_once_per_login_and_can_refuse_it() {
         answer(&mut session, "SELECT 1 AS count")
     );
 }
+
+#[test]
+fn table_rewrite_fires_when_a_column_changes_type() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(&mut session, LOG);
+    answer(
+        &mut session,
+        "CREATE FUNCTION log_rewrite() RETURNS event_trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO ddl_log (event, tag) VALUES (TG_EVENT, (pg_event_trigger_table_rewrite_oid() <> 0)::text || ':' || pg_event_trigger_table_rewrite_reason());
+END
+$$",
+    );
+    answer(&mut session, "CREATE EVENT TRIGGER on_rewrite ON table_rewrite EXECUTE FUNCTION log_rewrite()");
+    answer(&mut session, "CREATE TABLE rewritten (a integer, b text)");
+    answer(&mut session, "ALTER TABLE rewritten ADD COLUMN c integer");
+    answer(&mut session, "ALTER TABLE rewritten ALTER COLUMN a TYPE bigint");
+    assert_eq!(
+        answer(&mut session, "SELECT event, tag FROM ddl_log ORDER BY seq"),
+        answer(&mut session, "VALUES ('table_rewrite', 'true:4')")
+            .replace("column1", "event")
+            .replace("column2", "tag")
+    );
+    let outside = refusal(&mut session, "SELECT pg_event_trigger_table_rewrite_reason()");
+    assert_eq!(outside.state().code(), "39P03");
+}

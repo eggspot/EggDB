@@ -888,3 +888,4 @@ its full title with its status.
 - [D861](decisions/D861.md) Code-only batch 509 (M5): WebAssembly multi-value results and typed blocks
 - [D862](decisions/D862.md) Code-only batch 510 (M5): text and bytea through a WebAssembly module's memory
 - [D863](decisions/D863.md) Code-only batch 511 (M5): PostgreSQL login event triggers
+- [D864](decisions/D864.md) Code-only batch 512 (M5): PostgreSQL table_rewrite event triggers fire

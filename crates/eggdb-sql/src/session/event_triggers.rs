@@ -249,6 +249,7 @@ impl Session<'_> {
             tag: event_triggers::LOGIN,
             object: None,
             dropped: &[],
+            rewrite: None,
         };
         self.atomically(|session| session.fire_event_triggers(&triggers, event_triggers::LOGIN, &fired))
     }
@@ -281,14 +282,38 @@ impl Session<'_> {
         }
         let dropped = event_triggers::dropped_objects(statement);
         let object = event_triggers::object_of(statement);
+        let rewritten = event_triggers::rewritten_table(statement).filter(|_| {
+            triggers
+                .iter()
+                .any(|trigger| trigger.fires_on(event_triggers::TABLE_REWRITE, tag))
+        });
         let fired = FiredStatement {
             tag,
             object,
             dropped: &dropped,
+            rewrite: None,
         };
         let mut outcome = None;
         self.atomically(|session| {
             session.fire_event_triggers(&triggers, event_triggers::DDL_COMMAND_START, &fired)?;
+            if let Some((table, reason)) = &rewritten {
+                let oid = session.read(|reader, _| {
+                    let snapshot = crate::pg_catalog::snapshot_for(reader)?;
+                    let at = if table.contains('.') {
+                        snapshot.find_internal(table)
+                    } else {
+                        snapshot.find_relation(None, table)
+                    };
+                    Ok(at.and_then(|at| snapshot.relations.get(at)).map_or(0, |entry| entry.oid))
+                })?;
+                let rewriting = FiredStatement {
+                    tag,
+                    object: fired.object.clone(),
+                    dropped: fired.dropped,
+                    rewrite: Some((oid, *reason)),
+                };
+                session.fire_event_triggers(&triggers, event_triggers::TABLE_REWRITE, &rewriting)?;
+            }
             let result = session.run_statement(statement, io)?;
             if !dropped.is_empty() {
                 session.fire_event_triggers(&triggers, event_triggers::SQL_DROP, &fired)?;
