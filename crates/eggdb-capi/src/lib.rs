@@ -72,10 +72,10 @@ pub use status::{
     eggdb_last_error, eggdb_last_sqlstate, eggdb_status_name,
 };
 pub use transaction::{
-    EggdbTxn, eggdb_begin_read, eggdb_begin_write, eggdb_clear_expiry, eggdb_collection_names,
-    eggdb_commit, eggdb_compare_and_set, eggdb_create_collection, eggdb_delete,
+    EggdbCollectionStats, EggdbTxn, eggdb_begin_read, eggdb_begin_write, eggdb_clear_expiry,
+    eggdb_collection_names, eggdb_collection_stats, eggdb_commit, eggdb_compare_and_set, eggdb_create_collection, eggdb_delete,
     eggdb_drop_collection, eggdb_get, eggdb_increment, eggdb_put, eggdb_put_with_expiry,
-    eggdb_rollback, eggdb_set_expiry, eggdb_time_to_live,
+    eggdb_rename_collection, eggdb_rollback, eggdb_set_expiry, eggdb_time_to_live,
 };
 
 use std::ffi::{CStr, c_char};

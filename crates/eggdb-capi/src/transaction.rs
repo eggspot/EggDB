@@ -568,6 +568,89 @@ pub unsafe extern "C" fn eggdb_drop_collection(
     })
 }
 
+/// Renames the collection `name` to `new_name` in one commit of two keys, whatever its size:
+/// its keys, their times to live and every snapshot stay as they are. A missing collection
+/// fails with `EGGDB_ERR_COLLECTION_NOT_FOUND` and a name already taken with
+/// `EGGDB_ERR_ALREADY_EXISTS`.
+///
+/// # Safety
+/// `txn` is a live write transaction handle, and `name` and `new_name` NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_rename_collection(
+    txn: *mut EggdbTxn,
+    name: *const c_char,
+    new_name: *const c_char,
+) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for a live transaction handle used by this call alone.
+        let txn = unsafe { args::handle_mut(txn, "txn") }?;
+        // SAFETY: eggdb.h asks for a NUL-terminated collection name.
+        let name = unsafe { args::text(name, "name") }?;
+        // SAFETY: eggdb.h asks for a NUL-terminated collection name.
+        let new_name = unsafe { args::text(new_name, "new_name") }?;
+        txn.writer()?.rename_collection(name, new_name)?;
+        Ok(())
+    })
+}
+
+/// What `eggdb_collection_stats` counts in one collection.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EggdbCollectionStats {
+    /// How many keys it holds.
+    pub entries: u64,
+    /// The bytes of its keys together.
+    pub key_bytes: u64,
+    /// The bytes of its values together.
+    pub value_bytes: u64,
+}
+
+/// Counts the collection `name` as a read transaction sees it: its entries and their key and
+/// value bytes, from the count the collection keeps, into `*stats`. A missing collection fails
+/// with `EGGDB_ERR_COLLECTION_NOT_FOUND`; a write transaction is refused with
+/// `EGGDB_ERR_INVALID_ARGUMENT`, as its counts move with its own writes.
+///
+/// # Safety
+/// `txn` is a live transaction handle, `name` a NUL-terminated string, and `stats` writable
+/// memory for one `eggdb_collection_stats`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_collection_stats(
+    txn: *mut EggdbTxn,
+    name: *const c_char,
+    stats: *mut EggdbCollectionStats,
+) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for writable memory for one eggdb_collection_stats.
+        unsafe { args::write(stats, EggdbCollectionStats::default(), "stats") }?;
+        // SAFETY: eggdb.h asks for a live transaction handle used by this call alone.
+        let txn = unsafe { args::handle_mut(txn, "txn") }?;
+        // SAFETY: eggdb.h asks for a NUL-terminated collection name.
+        let name = unsafe { args::text(name, "name") }?;
+        let Transaction::Read(transaction) = &txn.transaction else {
+            return Err(crate::status::Failure::invalid_argument(
+                "eggdb_collection_stats counts in a read transaction; begin one with eggdb_begin_read",
+            ));
+        };
+        let counted = transaction
+            .collection_stats()?
+            .into_iter()
+            .find(|found| found.name == name)
+            .ok_or_else(|| {
+                crate::status::Failure::new(
+                    crate::status::EGGDB_ERR_COLLECTION_NOT_FOUND,
+                    format!("there is no collection named {name}"),
+                )
+            })?;
+        let counts = EggdbCollectionStats {
+            entries: counted.entries,
+            key_bytes: counted.key_bytes,
+            value_bytes: counted.value_bytes,
+        };
+        // SAFETY: as for the first write to `stats`.
+        unsafe { args::write(stats, counts, "stats") }
+    })
+}
+
 /// Lists the collections in name order: `*names` gets a buffer holding each name followed by a
 /// NUL byte, the caller's to free with `eggdb_free` and `*names_len`, and `*count` the number of
 /// names.

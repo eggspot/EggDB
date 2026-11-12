@@ -163,6 +163,15 @@ int eggdb_compare_and_set(eggdb_txn *txn, const char *collection, const uint8_t 
 int eggdb_create_collection(eggdb_txn *txn, const char *name, int *created);
 int eggdb_drop_collection(eggdb_txn *txn, const char *name, int *dropped);
 int eggdb_collection_names(eggdb_txn *txn, uint8_t **names, size_t *names_len, size_t *count);
+int eggdb_rename_collection(eggdb_txn *txn, const char *name, const char *new_name);
+
+typedef struct eggdb_collection_stats {
+    uint64_t entries;
+    uint64_t key_bytes;
+    uint64_t value_bytes;
+} eggdb_collection_stats;
+
+int eggdb_collection_stats(eggdb_txn *txn, const char *name, eggdb_collection_stats *stats);
 
 int eggdb_scan_open(eggdb_txn *txn, const char *collection, const uint8_t *start,
                     size_t start_len, const uint8_t *end, size_t end_len, uint32_t flags,

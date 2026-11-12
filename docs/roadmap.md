@@ -463,7 +463,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A benchmark against SQLite's `:memory:` in the compare job (D175).
 - `ATTACH` of in-memory, EggDB and SQLite files, in every dialect that has it (D175, sql.md).
 - SQL tables kept in their own collection, named `sql` (D139: "SQL in collections is later work").
-- Collections in the C API and the language drivers beyond D139 (D292).
+- Collections in the C API and the language drivers beyond D139 (D292). Renaming and counting collections in the C API
+  (`eggdb_rename_collection`, `eggdb_collection_stats`): **code written, unbuilt** (code-only mode, 2026-11-13, D929).
+  Left: the language drivers.
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
   Check: the compare job, gated.
 - On-disk overhead per row and per index entry, measured with a target beside the others (D6,
