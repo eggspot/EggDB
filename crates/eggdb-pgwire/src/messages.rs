@@ -95,6 +95,24 @@ impl<'b> Fields<'b> {
         Ok(text)
     }
 
+    /// A NUL-terminated string in the client's encoding: UTF-8, or the single-byte
+    /// `client_encoding` it chose, decoded to UTF-8.
+    pub fn text(&mut self, encoding: Option<eggdb_sql::ClientEncoding>) -> Result<String, MalformedMessage> {
+        let Some(encoding) = encoding else {
+            return self.string().map(str::to_owned);
+        };
+        let rest = &self.body[self.at..];
+        let end = rest
+            .iter()
+            .position(|&byte| byte == 0)
+            .ok_or_else(|| malformed("invalid string in message"))?;
+        let text = encoding
+            .decode(&rest[..end])
+            .map_err(|error| malformed(error.message()))?;
+        self.at += end + 1;
+        Ok(text)
+    }
+
     /// Fails unless every byte was read.
     pub fn finish(&self) -> Result<(), MalformedMessage> {
         if self.at == self.body.len() {
@@ -394,14 +412,24 @@ fn target(code: u8) -> Result<Target, MalformedMessage> {
     }
 }
 
-/// Parses a message from its type byte and its body.
+/// Parses a message from its type byte and its body, its strings in UTF-8.
 pub fn parse_message(tag: u8, body: &[u8]) -> Result<FrontendMessage, MalformedMessage> {
+    parse_message_in(tag, body, None)
+}
+
+/// Parses a message from its type byte and its body, its strings in the client's encoding
+/// (`None` for UTF-8).
+pub fn parse_message_in(
+    tag: u8,
+    body: &[u8],
+    encoding: Option<eggdb_sql::ClientEncoding>,
+) -> Result<FrontendMessage, MalformedMessage> {
     let mut fields = Fields::new(body);
     let message = match tag {
-        b'Q' => FrontendMessage::Query(fields.string()?.to_owned()),
+        b'Q' => FrontendMessage::Query(fields.text(encoding)?),
         b'P' => {
-            let name = fields.string()?.to_owned();
-            let query = fields.string()?.to_owned();
+            let name = fields.text(encoding)?;
+            let query = fields.text(encoding)?;
             let count = fields.count()?;
             let parameter_types = (0..count)
                 .map(|_| fields.i32().map(|oid| oid as u32))
@@ -413,8 +441,8 @@ pub fn parse_message(tag: u8, body: &[u8]) -> Result<FrontendMessage, MalformedM
             }
         }
         b'B' => {
-            let portal = fields.string()?.to_owned();
-            let statement = fields.string()?.to_owned();
+            let portal = fields.text(encoding)?;
+            let statement = fields.text(encoding)?;
             let parameter_formats = formats(&mut fields)?;
             let count = fields.count()?;
             let mut parameters = Vec::with_capacity(count.min(body.len() / 4));
@@ -439,15 +467,15 @@ pub fn parse_message(tag: u8, body: &[u8]) -> Result<FrontendMessage, MalformedM
         }
         b'D' => {
             let target = target(fields.u8()?)?;
-            FrontendMessage::Describe(target, fields.string()?.to_owned())
+            FrontendMessage::Describe(target, fields.text(encoding)?)
         }
         b'E' => FrontendMessage::Execute {
-            portal: fields.string()?.to_owned(),
+            portal: fields.text(encoding)?,
             max_rows: fields.i32()?,
         },
         b'C' => {
             let target = target(fields.u8()?)?;
-            FrontendMessage::Close(target, fields.string()?.to_owned())
+            FrontendMessage::Close(target, fields.text(encoding)?)
         }
         b'F' => {
             let function = fields.i32()? as u32;
@@ -553,6 +581,7 @@ fn count_field(count: usize, too_large: fn(usize) -> TooLarge) -> Result<[u8; 2]
 #[derive(Debug, Default)]
 pub struct Outbox {
     bytes: Vec<u8>,
+    encoding: Option<eggdb_sql::ClientEncoding>,
 }
 
 /// A field of an `ErrorResponse` or a `NoticeResponse`.
@@ -627,6 +656,19 @@ impl Outbox {
         self.bytes.clear();
     }
 
+    /// Writes the names, tags and messages that follow in the client's encoding (`None` for
+    /// UTF-8), with `?` for a character it cannot hold.
+    pub fn set_client_encoding(&mut self, encoding: Option<eggdb_sql::ClientEncoding>) {
+        self.encoding = encoding;
+    }
+
+    fn wire_text(&self, text: &str) -> Vec<u8> {
+        match self.encoding {
+            Some(encoding) => encoding.encode_lossy(text),
+            None => text.as_bytes().to_vec(),
+        }
+    }
+
     fn message(&mut self, tag: u8, body: impl FnOnce(&mut Vec<u8>)) {
         self.bytes.push(tag);
         let length_at = self.bytes.len();
@@ -699,10 +741,11 @@ impl Outbox {
 
     /// `ParameterStatus`.
     pub fn parameter_status(&mut self, name: &str, value: &str) {
+        let (name, value) = (self.wire_text(name), self.wire_text(value));
         self.message(b'S', |body| {
-            body.extend_from_slice(name.as_bytes());
+            body.extend_from_slice(&name);
             body.push(0);
-            body.extend_from_slice(value.as_bytes());
+            body.extend_from_slice(&value);
             body.push(0);
         });
     }
@@ -718,11 +761,12 @@ impl Outbox {
     /// `ReadyForQuery` with the transaction status byte, `I`, `T` or `E`.
     /// `NotificationResponse`: a notification from the backend `sender` on `channel`.
     pub fn notification_response(&mut self, sender: i32, channel: &str, payload: &str) {
+        let (channel, payload) = (self.wire_text(channel), self.wire_text(payload));
         self.message(b'A', |body| {
             body.extend_from_slice(&sender.to_be_bytes());
-            body.extend_from_slice(channel.as_bytes());
+            body.extend_from_slice(&channel);
             body.push(0);
-            body.extend_from_slice(payload.as_bytes());
+            body.extend_from_slice(&payload);
             body.push(0);
         });
     }
@@ -735,10 +779,11 @@ impl Outbox {
     /// `RowDescription`; refused for more than 32,767 columns.
     pub fn row_description(&mut self, columns: &[ColumnDescription]) -> Result<(), TooLarge> {
         let count = count_field(columns.len(), TooLarge::Columns)?;
+        let names: Vec<Vec<u8>> = columns.iter().map(|column| self.wire_text(&column.name)).collect();
         self.message(b'T', |body| {
             body.extend_from_slice(&count);
-            for column in columns {
-                body.extend_from_slice(column.name.as_bytes());
+            for (column, name) in columns.iter().zip(&names) {
+                body.extend_from_slice(name);
                 body.push(0);
                 body.extend_from_slice(&0i32.to_be_bytes());
                 body.extend_from_slice(&0i16.to_be_bytes());
@@ -835,8 +880,9 @@ impl Outbox {
 
     /// `CommandComplete` with its tag, such as `INSERT 0 1`.
     pub fn command_complete(&mut self, tag: &str) {
+        let tag = self.wire_text(tag);
         self.message(b'C', |body| {
-            body.extend_from_slice(tag.as_bytes());
+            body.extend_from_slice(&tag);
             body.push(0);
         });
     }
@@ -885,10 +931,11 @@ impl Outbox {
 
     /// `ErrorResponse` (`notice` false) or `NoticeResponse` (`notice` true) with its fields.
     pub fn report(&mut self, notice: bool, fields: &[(ReportField, &str)]) {
+        let values: Vec<Vec<u8>> = fields.iter().map(|(_, value)| self.wire_text(value)).collect();
         self.message(if notice { b'N' } else { b'E' }, |body| {
-            for (field, value) in fields {
+            for ((field, _), value) in fields.iter().zip(&values) {
                 body.push(field.code());
-                body.extend(value.bytes().filter(|&byte| byte != 0));
+                body.extend(value.iter().copied().filter(|&byte| byte != 0));
                 body.push(0);
             }
             body.push(0);
@@ -1154,5 +1201,19 @@ mod tests {
         assert!(!shown.contains("201"), "{shown}");
         assert!(shown.contains("process_id: 7"), "{shown}");
         assert!(shown.contains("***"), "{shown}");
+    }
+
+    #[test]
+    fn strings_and_replies_follow_the_client_encoding() {
+        let latin1 = eggdb_sql::ClientEncoding::named("LATIN1");
+        assert_eq!(
+            parse_message_in(b'Q', b"SELECT 'caf\xe9'\0", latin1),
+            Ok(FrontendMessage::Query("SELECT 'café'".to_owned()))
+        );
+        assert!(parse_message(b'Q', b"SELECT 'caf\xe9'\0").is_err());
+        let mut outbox = Outbox::new();
+        outbox.set_client_encoding(latin1);
+        outbox.command_complete("SELECT café €");
+        assert_eq!(&outbox.bytes()[5..], b"SELECT caf\xe9 ?\0");
     }
 }

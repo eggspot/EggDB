@@ -1145,6 +1145,15 @@ impl<'s> Session<'s> {
         Arc::make_mut(&mut self.settings).set(name, Some(value))
     }
 
+    /// The session's `client_encoding` when it is not UTF-8: the single-byte encoding a
+    /// PostgreSQL client speaks, which the listener decodes and encodes text with.
+    pub fn client_encoding(&self) -> Option<crate::ClientEncoding> {
+        self.settings
+            .get("client_encoding")
+            .ok()
+            .and_then(|name| crate::ClientEncoding::named(&name))
+    }
+
     /// The session's `TimeZone`: what a `timestamp with time zone` is shown in, a fixed
     /// offset or a region of the time zone database.
     pub fn time_zone(&self) -> crate::time_zones::TimeZone {

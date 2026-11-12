@@ -1,12 +1,12 @@
 use crate::backend_keys::SECRET_KEY_BYTES;
 use crate::messages::{
     ColumnDescription, Format, FrontendMessage, ReportField, StartupRequest, Target, TooLarge,
-    parse_message, parse_sasl_initial_response, parse_startup,
+    parse_message, parse_message_in, parse_sasl_initial_response, parse_startup,
 };
 use crate::server::{Shared, take_slot};
 use crate::types::{
-    TEXT_OID, UNKNOWN_OID, decode_parameter, describe_columns, encode_value, format_at, oid_of,
-    sql_type_of,
+    TEXT_OID, UNKNOWN_OID, decode_parameter_in, describe_columns, encode_value_in, format_at,
+    oid_of, sql_type_of,
 };
 use crate::wire::{POLL_INTERVAL, Wire, WireError};
 use eggdb_auth::scram::{ScramExchange, ScramFailure, ScramVerifier};
@@ -1332,7 +1332,9 @@ impl<'a, 's> Connection<'a, 's> {
                 Err(WireError::Closed | WireError::Io) => return,
             };
             self.wire.deadline = None;
-            let message = match parse_message(tag, &body) {
+            let encoding = self.session.client_encoding();
+            self.wire.outbox.set_client_encoding(encoding);
+            let message = match parse_message_in(tag, &body, encoding) {
                 Ok(message) => message,
                 Err(error) => {
                     fatal(&mut self.wire, SqlState::PROTOCOL_VIOLATION, &error.0);
@@ -1660,8 +1662,13 @@ impl<'a, 's> Connection<'a, 's> {
             rendered.push(match argument {
                 None => "NULL".to_owned(),
                 Some(bytes) => {
-                    let value =
-                        decode_parameter(bytes, *oid, format_at(argument_formats, index), index + 1)?;
+                    let value = decode_parameter_in(
+                        bytes,
+                        *oid,
+                        format_at(argument_formats, index),
+                        index + 1,
+                        self.session.client_encoding(),
+                    )?;
                     format!("'{}'", value.replace('\'', "''"))
                 }
             });
@@ -1681,7 +1688,13 @@ impl<'a, 's> Connection<'a, 's> {
         let zone = self.session.time_zone();
         match value {
             None | Some(Value::Null) => Ok(None),
-            Some(value) => encode_value(&value, result_type, result_format, zone),
+            Some(value) => encode_value_in(
+                &value,
+                result_type,
+                result_format,
+                zone,
+                self.session.client_encoding(),
+            ),
         }
     }
 
@@ -1708,6 +1721,7 @@ impl<'a, 's> Connection<'a, 's> {
         let mut sent = true;
         let mut unsendable = None;
         let mut discarded_all = false;
+        let encoding = self.session.client_encoding();
         let wire = RefCell::new(&mut self.wire);
         let mut copy = WireCopy {
             wire: &wire,
@@ -1729,10 +1743,20 @@ impl<'a, 's> Connection<'a, 's> {
                         return false;
                     }
                     for row in &result.rows {
-                        let values: Vec<Option<Vec<u8>>> = row
+                        let values: Result<Vec<Option<Vec<u8>>>, SqlError> = row
                             .iter()
-                            .map(|value| value.to_text().map(String::into_bytes))
+                            .map(|value| match (value.to_text(), encoding) {
+                                (Some(text), Some(encoding)) => encoding.encode(&text).map(Some),
+                                (text, _) => Ok(text.map(String::into_bytes)),
+                            })
                             .collect();
+                        let values = match values {
+                            Ok(values) => values,
+                            Err(error) => {
+                                unsendable = Some(error);
+                                return false;
+                            }
+                        };
                         if let Err(error) = wire.outbox.data_row(&values) {
                             unsendable = Some(too_large(error));
                             return false;
@@ -1895,9 +1919,16 @@ impl<'a, 's> Connection<'a, 's> {
         let mut parameters = Vec::with_capacity(values.len());
         for (index, value) in values.into_iter().enumerate() {
             let oid = statement.declared_oids.get(index).copied().unwrap_or(0);
+            let encoding = self.session.client_encoding();
             let value = value
                 .map(|bytes| {
-                    decode_parameter(&bytes, oid, format_at(parameter_formats, index), index + 1)
+                    decode_parameter_in(
+                        &bytes,
+                        oid,
+                        format_at(parameter_formats, index),
+                        index + 1,
+                        encoding,
+                    )
                 })
                 .transpose()
                 .map_err(|error| (error, None))?;
@@ -2210,6 +2241,7 @@ impl<'a, 's> Connection<'a, 's> {
         released: &mut usize,
     ) -> Result<bool, (SqlError, Option<String>)> {
         let zone = self.session.time_zone();
+        let encoding = self.session.client_encoding();
         let counting = pending.held_bytes > 0;
         while *sent < limit {
             let Some(row) = pending.rows.next() else {
@@ -2221,7 +2253,7 @@ impl<'a, 's> Connection<'a, 's> {
             let mut values = Vec::with_capacity(row.len());
             for (value, column) in row.iter().zip(&pending.columns) {
                 values.push(
-                    encode_value(value, column.type_oid, column.format, zone)
+                    encode_value_in(value, column.type_oid, column.format, zone, encoding)
                         .map_err(|error| (error, None))?,
                 );
             }

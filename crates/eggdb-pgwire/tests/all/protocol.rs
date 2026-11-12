@@ -428,8 +428,19 @@ fn set_and_show_report_parameter_changes() {
             .any(|message| message.tag == b'S' && message.text() == "application_name\0reports")
     );
     assert_eq!(rows(&answer), [vec![Some("reports".into())]]);
-    let refused = client.query("SET client_encoding = 'LATIN1'");
+    let refused = client.query("SET client_encoding = 'SJIS'");
     assert_eq!(refused[0].code(), "0A000");
+    let switched = client.query("SET client_encoding = 'LATIN1'");
+    assert!(
+        switched
+            .iter()
+            .any(|message| message.tag == b'S' && message.text() == "client_encoding\0LATIN1")
+    );
+    client.send(b'Q', b"SELECT 'caf\xe9' AS word\0");
+    let answer = client.read_until_ready();
+    let row = answer.iter().find(|message| message.tag == b'D').expect("a row");
+    assert!(row.body.ends_with(b"caf\xe9"), "{:?}", row.body);
+    client.query("SET client_encoding = 'UTF8'");
     let answer = client.query("SET extra_float_digits = 3");
     assert_eq!(tags(&answer), "CZ");
 }
@@ -824,7 +835,7 @@ fn unsupported_startup_settings_and_function_calls_are_answered_without_hanging(
     assert!(
         greeting
             .iter()
-            .any(|message| message.text() == "client_encoding\0UTF8")
+            .any(|message| message.text() == "client_encoding\0LATIN1")
     );
     client.send(b'F', &[0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
     let answer = client.read_until_ready();

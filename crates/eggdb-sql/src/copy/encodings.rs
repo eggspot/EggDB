@@ -196,6 +196,73 @@ fn no_equivalent(bytes: &[u8], from: &str, to: &str) -> SqlError {
     )
 }
 
+/// A `client_encoding` of PostgreSQL's protocol other than UTF-8: one of the single-byte
+/// encodings `COPY ... ENCODING` reads and writes. Text the client sends is decoded to UTF-8 and
+/// text sent to it is encoded back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientEncoding(CopyEncoding);
+
+impl ClientEncoding {
+    /// The single-byte encoding PostgreSQL names `name` (any case or spelling of its aliases);
+    /// `None` for UTF-8, `SQL_ASCII` and every encoding EggDB does not speak on the wire.
+    pub fn named(name: &str) -> Option<Self> {
+        match CopyEncoding::named(name) {
+            EncodingName::Supported(encoding) if encoding != CopyEncoding::Utf8 && !encoding.is_utf16() => {
+                Some(Self(encoding))
+            }
+            _ => None,
+        }
+    }
+
+    /// PostgreSQL's name of the encoding, such as `LATIN1` or `WIN1251`.
+    pub fn name(self) -> &'static str {
+        self.0.name()
+    }
+
+    pub(crate) fn copy_encoding(self) -> CopyEncoding {
+        self.0
+    }
+
+    /// `bytes` the client sent, as UTF-8 text; a NUL or a byte the encoding leaves undefined is
+    /// an error.
+    pub fn decode(self, bytes: &[u8]) -> SqlResult<String> {
+        let mut text = String::with_capacity(bytes.len());
+        for &byte in bytes {
+            if byte == 0 {
+                return Err(invalid_sequence(self.0, &[byte]));
+            }
+            let character = self
+                .0
+                .decoded_byte(byte)
+                .ok_or_else(|| no_equivalent(&[byte], self.0.name(), "UTF8"))?;
+            text.push(character);
+        }
+        Ok(text)
+    }
+
+    /// `text` in the encoding; a character it has no byte for is `22P05`, as PostgreSQL
+    /// reports it.
+    pub fn encode(self, text: &str) -> SqlResult<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(text.len());
+        let mut buffer = [0u8; 4];
+        for character in text.chars() {
+            let byte = self.0.encoded_char(character).ok_or_else(|| {
+                no_equivalent(character.encode_utf8(&mut buffer).as_bytes(), "UTF8", self.0.name())
+            })?;
+            bytes.push(byte);
+        }
+        Ok(bytes)
+    }
+
+    /// `text` in the encoding with `?` for a character it has no byte for, for messages,
+    /// names and tags, which must reach the client whatever they hold.
+    pub fn encode_lossy(self, text: &str) -> Vec<u8> {
+        text.chars()
+            .map(|character| self.0.encoded_char(character).unwrap_or(b'?'))
+            .collect()
+    }
+}
+
 pub(crate) struct Transcoded<'c> {
     inner: &'c mut dyn CopyChannel,
     encoding: CopyEncoding,
@@ -583,5 +650,23 @@ mod tests {
             CopyEncoding::named("klingon"),
             EncodingName::Unknown
         ));
+    }
+
+    #[test]
+    fn client_encodings_decode_and_encode_wire_text() {
+        let latin1 = ClientEncoding::named("latin1").expect("LATIN1 is a client encoding");
+        assert_eq!(latin1.name(), "LATIN1");
+        assert!(ClientEncoding::named("UTF8").is_none());
+        assert!(ClientEncoding::named("SQL_ASCII").is_none());
+        assert!(ClientEncoding::named("utf16").is_none());
+        assert!(ClientEncoding::named("sjis").is_none());
+        assert_eq!(latin1.decode(b"caf\xe9").unwrap(), "café");
+        assert_eq!(latin1.encode("café").unwrap(), b"caf\xe9");
+        assert_eq!(latin1.encode("€").unwrap_err().state().code(), "22P05");
+        assert_eq!(latin1.encode_lossy("a€b"), b"a?b");
+        assert!(latin1.decode(b"a\0b").is_err());
+        let win1251 = ClientEncoding::named("cp1251").expect("WIN1251 is a client encoding");
+        assert_eq!(win1251.decode(b"\xcf\xf0\xe8").unwrap(), "При");
+        assert!(win1251.decode(b"\x98").is_err());
     }
 }

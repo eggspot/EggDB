@@ -244,9 +244,24 @@ pub fn encode_value(
     format: Format,
     zone: TimeZone,
 ) -> Result<Option<Vec<u8>>, SqlError> {
+    encode_value_in(value, oid, format, zone, None)
+}
+
+/// [`encode_value`] with text in the client's `client_encoding` (`None` for UTF-8); a
+/// character the encoding cannot hold is `22P05`.
+pub fn encode_value_in(
+    value: &Value,
+    oid: u32,
+    format: Format,
+    zone: TimeZone,
+    encoding: Option<eggdb_sql::ClientEncoding>,
+) -> Result<Option<Vec<u8>>, SqlError> {
     match format {
         Format::Binary => eggdb_sql::encode_pg_binary(value, oid, zone),
-        Format::Text => Ok(value.to_text_in(zone).map(String::into_bytes)),
+        Format::Text => match (value.to_text_in(zone), encoding) {
+            (Some(text), Some(encoding)) => encoding.encode(&text).map(Some),
+            (text, _) => Ok(text.map(String::into_bytes)),
+        },
     }
 }
 
@@ -272,11 +287,28 @@ pub fn decode_parameter(
     format: Format,
     number: usize,
 ) -> Result<String, SqlError> {
+    decode_parameter_in(bytes, oid, format, number, None)
+}
+
+/// [`decode_parameter`] with a text-format value in the client's `client_encoding` (`None`
+/// for UTF-8).
+pub fn decode_parameter_in(
+    bytes: &[u8],
+    oid: u32,
+    format: Format,
+    number: usize,
+    encoding: Option<eggdb_sql::ClientEncoding>,
+) -> Result<String, SqlError> {
     if ARRAY_OIDS.contains(&oid) && ArrayElement::of_array_oid(oid).is_none() {
         return Err(SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,
             format!("array parameters (type OID {oid}, parameter ${number}) are not supported yet"),
         ));
+    }
+    if format == Format::Text
+        && let Some(encoding) = encoding
+    {
+        return encoding.decode(bytes);
     }
     if format == Format::Text {
         return std::str::from_utf8(bytes)

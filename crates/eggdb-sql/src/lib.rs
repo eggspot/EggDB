@@ -421,6 +421,7 @@ pub use numeric::Numeric;
 pub use parser::{
     ORACLE_COMPATIBLE_VERSION, SQLITE_COMPATIBLE_VERSION, SQLSERVER_COMPATIBLE_VERSION,
 };
+pub use copy::ClientEncoding;
 pub use pg_binary::{decode_pg_binary_text, encode_pg_binary};
 pub use pg_catalog::{CatalogType, RegKind, RegValue, type_oid};
 pub use plsql::ServerOutputReader;

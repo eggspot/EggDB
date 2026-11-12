@@ -592,9 +592,11 @@ impl Settings {
                         .any(|spelling| value.eq_ignore_ascii_case(spelling))
                     {
                         "UTF8".to_owned()
+                    } else if let Some(encoding) = crate::copy::ClientEncoding::named(value) {
+                        encoding.name().to_owned()
                     } else {
                         return Err(SqlError::not_supported(format!(
-                            "client_encoding {value} is not supported; EggDB speaks UTF8 only"
+                            "client_encoding {value} is not supported; EggDB speaks UTF8 and PostgreSQL's single-byte encodings"
                         )));
                     }
                 }

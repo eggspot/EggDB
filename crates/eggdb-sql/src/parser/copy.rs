@@ -426,7 +426,17 @@ impl Parser<'_> {
         } else {
             None
         };
-        let options = builder.finish(direction)?;
+        let encoding_named = builder.seen.contains(&"encoding");
+        let mut options = builder.finish(direction)?;
+        if !encoding_named
+            && let Some(settings) = self.settings
+            && let Some(client) = settings
+                .get("client_encoding")
+                .ok()
+                .and_then(|name| crate::copy::ClientEncoding::named(&name))
+        {
+            options.encoding = client.copy_encoding();
+        }
         Ok(Statement::Copy(Box::new(CopyStatement {
             source,
             direction,

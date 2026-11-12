@@ -3,6 +3,7 @@ mod encodings;
 mod single_byte;
 mod format;
 
+pub use encodings::ClientEncoding;
 pub(crate) use encodings::{CopyEncoding, EncodingName};
 #[cfg(test)]
 pub(crate) use format::FieldKind;
