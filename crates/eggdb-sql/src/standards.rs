@@ -1,8 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 20] = [
+pub(crate) const FUNCTIONS: [&str; 21] = [
     "eggdb_pdf_table",
+    "opcua_decode",
     "eggdb_route_dijkstra",
     "eggdb_route_astar",
     "eggdb_route_reach",
@@ -417,6 +418,23 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             [Value::Bytea(file)] if name == "geotiff_info" => crate::geotiff::info(file).and_then(jsonb),
             [Value::Bytea(payload)] => crate::sparkplug::decode(payload).and_then(jsonb),
             _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes bytea"))),
+        });
+    }
+    if name == "opcua_decode" {
+        let encoded = match values.get(1).and_then(Value::to_text).as_deref().map(str::to_ascii_lowercase).as_deref() {
+            None | Some("datavalue") => crate::opcua::Encoded::DataValue,
+            Some("variant") => crate::opcua::Encoded::Variant,
+            _ => {
+                return Some(Err(SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    "opcua_decode: the second argument is 'datavalue' or 'variant'",
+                )));
+            }
+        };
+        return Some(match values.first() {
+            Some(Value::Null) => Ok(Value::Null),
+            Some(Value::Bytea(bytes)) => crate::opcua::decode(bytes, encoded).and_then(jsonb),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "opcua_decode takes bytea and optionally 'datavalue' or 'variant'")),
         });
     }
     if name.starts_with("eggdb_route_") {

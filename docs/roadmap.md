@@ -1712,7 +1712,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D774). Left: DTDL.
 - OPC UA, Modbus and Sparkplug ingest (D57). Sparkplug B payloads decoded in SQL (`sparkplug_decode`): **code written,
   unbuilt** (code-only mode, 2026-11-12, D701). Modbus frames decoded in SQL (`modbus_decode`): **code written,
-  unbuilt** (code-only mode, 2026-11-12, D775). Left: ingest as messages arrive, and OPC UA.
+  unbuilt** (code-only mode, 2026-11-12, D775). OPC UA binary Variants and DataValues decoded in SQL (`opcua_decode`):
+  **code written, unbuilt** (code-only mode, 2026-11-12, D833). Left: ingest as messages arrive, and an OPC UA client
+  (secure channel, sessions, subscriptions).
 - Email stores with IMAP, JMAP and SMTP (D56).
 - CalDAV, CardDAV and WebDAV (D56). iCalendar and vCard read as jCal and jCard (`icalendar_parse`,
   `vcard_parse`): **code written, unbuilt** (code-only mode, 2026-11-12, D702). Left: the servers.
