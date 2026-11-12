@@ -4,7 +4,7 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::sqlserver_ddl_triggers::{
     CREATE_TRIGGERS_TABLE, DdlTriggerCommand, DdlTriggerScope, EventData, LOGON_EVENT, TRIGGERS_TABLE,
-    event_matches, event_type, is_known_event, object_type,
+    event_matches, event_type, is_known_event, is_server_only_event, needs_server_scope, object_type,
 };
 use crate::sqlserver_security::literal;
 use crate::types::Value;
@@ -14,6 +14,7 @@ struct StoredDdlTrigger {
     events: Vec<String>,
     body: String,
     enabled: bool,
+    server: bool,
 }
 
 fn missing_trigger(name: &str) -> SqlError {
@@ -54,17 +55,18 @@ impl Session<'_> {
             return Ok(Vec::new());
         }
         let results = self.ddl_trigger_sql(&format!(
-            "SELECT name, events, body, enabled FROM {TRIGGERS_TABLE} ORDER BY created, name"
+            "SELECT name, events, body, enabled, scope FROM {TRIGGERS_TABLE} ORDER BY created, name"
         ))?;
         Ok(results
             .into_iter()
             .flat_map(|result| result.rows)
-            .filter(|row| row.len() == 4)
+            .filter(|row| row.len() == 5)
             .map(|row| StoredDdlTrigger {
                 name: text_of(&row[0]),
                 events: text_of(&row[1]).split(',').filter(|event| !event.is_empty()).map(str::to_owned).collect(),
                 body: text_of(&row[2]),
                 enabled: row[3] == Value::Boolean(true),
+                server: text_of(&row[4]) == DdlTriggerScope::Server.code(),
             })
             .collect())
     }
@@ -100,7 +102,10 @@ impl Session<'_> {
                     .at(unknown.position));
                 }
                 let logon = events.iter().any(|event| event.text.eq_ignore_ascii_case(LOGON_EVENT));
-                if logon && (*scope != DdlTriggerScope::Server || events.len() > 1) {
+                let server_only = events.iter().any(|event| needs_server_scope(&event.text));
+                if (logon && (*scope != DdlTriggerScope::Server || events.len() > 1))
+                    || (server_only && *scope != DdlTriggerScope::Server)
+                {
                     return Err(SqlError::new(
                         SqlState::FEATURE_NOT_SUPPORTED,
                         "The specified event type(s) is/are not valid on the specified target object.",
@@ -284,7 +289,11 @@ impl Session<'_> {
         let triggers: Vec<StoredDdlTrigger> = self
             .stored_ddl_triggers()?
             .into_iter()
-            .filter(|trigger| trigger.enabled && trigger.events.iter().any(|wanted| event_matches(wanted, event)))
+            .filter(|trigger| {
+                trigger.enabled
+                    && (trigger.server || !is_server_only_event(event))
+                    && trigger.events.iter().any(|wanted| event_matches(wanted, event))
+            })
             .collect();
         if triggers.is_empty() {
             return self.run_statement(statement, io);

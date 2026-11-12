@@ -273,7 +273,12 @@ impl Session<'_> {
         let (_depth, outermost) = event_triggers::enter_statement();
         if outermost
             && self.dialect == Dialect::SqlServer
-            && let Some(tag) = event_triggers::ddl_tag(statement)
+            && let Some(tag) = event_triggers::ddl_tag(statement).or_else(|| {
+                crate::sqlserver_ddl_triggers::security_tag(
+                    statement,
+                    self.ddl_command_text.as_deref().unwrap_or_default(),
+                )
+            })
         {
             return self.run_with_ddl_triggers(statement, io, tag);
         }

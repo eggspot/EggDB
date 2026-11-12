@@ -2,7 +2,9 @@
 //! <batch>`, fired after the DDL statements they name, with `EVENTDATA()` describing the
 //! statement; and logon triggers, `ON ALL SERVER FOR LOGON`, fired when a connection signs in.
 
-use crate::ast::Name;
+use crate::ast::{Name, Statement};
+use crate::roles::RoleStatement;
+use crate::served_databases::DatabaseStatement;
 use crate::types::Value;
 use std::cell::RefCell;
 
@@ -62,7 +64,19 @@ pub(crate) const TRIGGERS_TABLE: &str = "eggdb_internal.sqlserver_ddl_triggers";
 pub(crate) const CREATE_TRIGGERS_TABLE: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_ddl_triggers (name text PRIMARY KEY, scope text NOT NULL, events text NOT NULL, body text NOT NULL, enabled boolean NOT NULL, created timestamp NOT NULL)";
 
 /// The event types EggDB fires, each with the groups that contain it.
-const EVENT_GROUPS: [(&str, &[&str]); 30] = [
+const EVENT_GROUPS: [(&str, &[&str]); 42] = [
+    ("CREATE_LOGIN", &["DDL_LOGIN_EVENTS", "DDL_SERVER_SECURITY_EVENTS"]),
+    ("ALTER_LOGIN", &["DDL_LOGIN_EVENTS", "DDL_SERVER_SECURITY_EVENTS"]),
+    ("DROP_LOGIN", &["DDL_LOGIN_EVENTS", "DDL_SERVER_SECURITY_EVENTS"]),
+    ("CREATE_DATABASE", &["DDL_DATABASE_EVENTS"]),
+    ("ALTER_DATABASE", &["DDL_DATABASE_EVENTS"]),
+    ("DROP_DATABASE", &["DDL_DATABASE_EVENTS"]),
+    ("CREATE_USER", &["DDL_USER_EVENTS", "DDL_DATABASE_SECURITY_EVENTS"]),
+    ("ALTER_USER", &["DDL_USER_EVENTS", "DDL_DATABASE_SECURITY_EVENTS"]),
+    ("DROP_USER", &["DDL_USER_EVENTS", "DDL_DATABASE_SECURITY_EVENTS"]),
+    ("CREATE_ROLE", &["DDL_ROLE_EVENTS", "DDL_DATABASE_SECURITY_EVENTS"]),
+    ("ALTER_ROLE", &["DDL_ROLE_EVENTS", "DDL_DATABASE_SECURITY_EVENTS"]),
+    ("DROP_ROLE", &["DDL_ROLE_EVENTS", "DDL_DATABASE_SECURITY_EVENTS"]),
     ("CREATE_TABLE", &["DDL_TABLE_EVENTS", "DDL_TABLE_VIEW_EVENTS"]),
     ("ALTER_TABLE", &["DDL_TABLE_EVENTS", "DDL_TABLE_VIEW_EVENTS"]),
     ("DROP_TABLE", &["DDL_TABLE_EVENTS", "DDL_TABLE_VIEW_EVENTS"]),
@@ -95,7 +109,50 @@ const EVENT_GROUPS: [(&str, &[&str]); 30] = [
     ("GRANT_DATABASE", &["DDL_GDR_DATABASE_EVENTS"]),
 ];
 
-const LEVEL_GROUPS: [&str; 2] = ["DDL_DATABASE_LEVEL_EVENTS", "DDL_EVENTS"];
+const LEVEL_GROUPS: [&str; 3] = ["DDL_DATABASE_LEVEL_EVENTS", "DDL_SERVER_LEVEL_EVENTS", "DDL_EVENTS"];
+
+/// The events only a server-scoped trigger (`ON ALL SERVER`) sees, and the groups made only of
+/// them; `ALTER_DATABASE` fires at both levels, as in SQL Server.
+const SERVER_ONLY_EVENTS: [&str; 5] = ["CREATE_LOGIN", "ALTER_LOGIN", "DROP_LOGIN", "CREATE_DATABASE", "DROP_DATABASE"];
+const SERVER_ONLY_GROUPS: [&str; 3] = ["DDL_SERVER_LEVEL_EVENTS", "DDL_LOGIN_EVENTS", "DDL_SERVER_SECURITY_EVENTS"];
+
+/// Whether a trigger on a database may not name `name`: a server-only event or group.
+pub(crate) fn needs_server_scope(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    SERVER_ONLY_EVENTS.contains(&name.as_str())
+        || SERVER_ONLY_GROUPS.contains(&name.as_str())
+        || name == "DDL_DATABASE_EVENTS"
+}
+
+/// Whether only server-scoped triggers fire on `event`.
+pub(crate) fn is_server_only_event(event: &str) -> bool {
+    SERVER_ONLY_EVENTS.contains(&event)
+}
+
+/// The command tag of a login, user, role or database statement, which the PostgreSQL event
+/// tags leave out: SQL Server's `CREATE LOGIN`, `CREATE USER` and `CREATE ROLE` all parse to a
+/// role statement, so the statement's own text tells them apart.
+pub(crate) fn security_tag(statement: &Statement, command_text: &str) -> Option<&'static str> {
+    let verb = match statement {
+        Statement::Database(DatabaseStatement::Create { .. }) => return Some("CREATE DATABASE"),
+        Statement::Database(DatabaseStatement::Drop { .. }) => return Some("DROP DATABASE"),
+        Statement::Role(RoleStatement::Create { .. }) => 0,
+        Statement::Role(RoleStatement::Alter { .. }) => 1,
+        Statement::Role(RoleStatement::Drop { .. }) => 2,
+        _ => return None,
+    };
+    let kind = command_text
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let tags = match kind.as_str() {
+        "LOGIN" => ["CREATE LOGIN", "ALTER LOGIN", "DROP LOGIN"],
+        "USER" => ["CREATE USER", "ALTER USER", "DROP USER"],
+        _ => ["CREATE ROLE", "ALTER ROLE", "DROP ROLE"],
+    };
+    Some(tags[verb])
+}
 
 /// The event of a logon trigger, which only a server-scoped trigger may name, alone.
 pub(crate) const LOGON_EVENT: &str = "LOGON";
@@ -120,6 +177,9 @@ pub(crate) fn event_matches(wanted: &str, event: &str) -> bool {
     }
     if wanted == LOGON_EVENT || event == LOGON_EVENT {
         return false;
+    }
+    if wanted == "DDL_DATABASE_LEVEL_EVENTS" {
+        return !is_server_only_event(event);
     }
     if LEVEL_GROUPS.contains(&wanted.as_str()) {
         return true;
@@ -339,6 +399,32 @@ mod tests {
         rows(&mut session, "DROP TABLE orders");
         let unknown = session.execute("CREATE TRIGGER bad ON DATABASE FOR CREATE_UNICORN AS PRINT 'x'", &mut |_| {});
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn server_triggers_see_logins_and_database_triggers_do_not() {
+        let store = crate::memory_store::MemoryStore::default();
+        let mut session = crate::Session::with_dialect(&store, crate::Dialect::SqlServer);
+        rows(&mut session, "CREATE TABLE security_log (event_type nvarchar(100), scope nvarchar(10))");
+        let misplaced = session.execute("CREATE TRIGGER wrong ON DATABASE FOR CREATE_LOGIN AS PRINT 'x'", &mut |_| {});
+        assert_eq!(misplaced.unwrap_err().vendor_code(), Some(1098));
+        rows(
+            &mut session,
+            "CREATE TRIGGER log_logins ON ALL SERVER FOR DDL_LOGIN_EVENTS AS \
+             INSERT INTO security_log VALUES (EVENTDATA().value('(/EVENT_INSTANCE/EventType)[1]', 'nvarchar(100)'), 'server')",
+        );
+        rows(
+            &mut session,
+            "CREATE TRIGGER log_database ON DATABASE FOR DDL_DATABASE_LEVEL_EVENTS AS \
+             INSERT INTO security_log VALUES (EVENTDATA().value('(/EVENT_INSTANCE/EventType)[1]', 'nvarchar(100)'), 'database')",
+        );
+        rows(&mut session, "CREATE LOGIN auditor WITH PASSWORD = 'Str0ng!pass'");
+        rows(&mut session, "CREATE ROLE reporting");
+        let logged = rows(&mut session, "SELECT event_type, scope FROM security_log ORDER BY event_type");
+        assert!(logged.contains("CREATE_LOGIN\tserver") || logged.contains("CREATE_LOGIN"), "{logged}");
+        assert!(logged.contains("CREATE_ROLE"), "{logged}");
+        assert!(!logged.contains("CREATE_LOGIN\tdatabase"), "{logged}");
+        assert_eq!(logged.matches("CREATE_LOGIN").count(), 1, "{logged}");
     }
 
     #[test]

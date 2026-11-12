@@ -2295,7 +2295,8 @@ impl<'s> Session<'s> {
                     .map(|shown| shown.trim().trim_end_matches(';').trim_end().to_owned());
             }
             self.ddl_command_text = (self.sqlserver()
-                && crate::event_triggers::ddl_tag(&statement).is_some())
+                && (crate::event_triggers::ddl_tag(&statement).is_some()
+                    || crate::sqlserver_ddl_triggers::security_tag(&statement, "").is_some()))
             .then(|| {
                 let end = tokens.get(resume.0).map_or(text.len(), |token| token.start);
                 text.get(self.statement_start..end)

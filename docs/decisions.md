@@ -980,3 +980,4 @@ its full title with its status.
 - [D953](decisions/D953.md) Code-only batch 601 (M4): a speedtest1-style workload in the compare job
 - [D954](decisions/D954.md) Code-only batch 602 (M4): YCSB workloads against SQLite and Redis
 - [D955](decisions/D955.md) Code-only batch 603 (M5): Oracle's AFTER STARTUP and BEFORE SHUTDOWN triggers
+- [D956](decisions/D956.md) Code-only batch 604 (M5): SQL Server's server-level DDL events and security events
