@@ -1005,3 +1005,4 @@ its full title with its status.
 - [D978](decisions/D978.md) Code-only batch 626 (M6b): eggdb serve --tls-client-ca
 - [D979](decisions/D979.md) Code-only batch 627 (M6b): roles with BYPASSRLS
 - [D980](decisions/D980.md) Code-only batch 628 (M6c): a Kubernetes operator in Rust
+- [D981](decisions/D981.md) Code-only batch 629 (M8): the turkish text search configuration with Snowball's Turkish stemmer
