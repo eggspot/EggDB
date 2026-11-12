@@ -1463,7 +1463,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `pgr_connectedComponents`): **code written, unbuilt** (code-only mode, 2026-11-12, D782); topology
   (`pgr_createTopology`, `pgr_createVerticesTable`): **code written, unbuilt** (code-only mode, 2026-11-12, D831).
   `pgr_aStar`, `pgr_dijkstraCost` and `pgr_bdDijkstra`: **code written, unbuilt** (code-only mode, 2026-11-12, D832).
-  Left: the rest of pgRouting's functions (`pgr_analyzeGraph`, `pgr_nodeNetwork`, many-to-many forms, TSP and others).
+  Many-to-many forms and `pgr_dijkstraCostMatrix`: **code written, unbuilt** (code-only mode, 2026-11-12, D865).
+  Left: the rest of pgRouting's functions (`pgr_analyzeGraph`, `pgr_nodeNetwork`, TSP and others).
 - The OGC APIs (D57). OGC API - Features (Core, GeoJSON) on `--rest-listen`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D781). Left: CRS (Part 2), CQL2 filters, Tiles and Maps.
 - An ONNX runtime with `embed(model, text)` on local models (D31, D205).
