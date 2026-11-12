@@ -3464,6 +3464,12 @@ own tables only. `upgrade_tenant_schemas(template)` brings every tenant schema m
 it, adding new tables and new columns, and returns the changes made. `drop_tenant_schema(tenant)` drops the
 tenant's schema and everything in it; the role stays.
 
+`eggdb_tenancy.backup_tenant(tenant)` returns one tenant's data as JSON: its rows of every isolated table and every
+table of its schema (D784). `restore_tenant(tenant, backup)` puts them back in one transaction, replacing that
+tenant's current rows and nothing of the other tenants', and refuses a backup taken of another tenant or holding
+another tenant's rows. Keep the JSON in a table, a file (`COPY ... TO`) or object storage to restore one customer
+without restoring the whole database.
+
 ## Ledger tables (eggdb_ledger)
 
 `CREATE EXTENSION eggdb_ledger` makes tables append-only and tamper-evident (D236):

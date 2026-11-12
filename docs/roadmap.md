@@ -1447,7 +1447,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   reports (D141).
 - Compaction's lock window closed: the platform layer tells whether a file it locked is still
   linked at its path (D141).
-- Tenant-aware backup and restore (D234).
+- Tenant-aware backup and restore (D234). Logical, per tenant (`eggdb_tenancy.backup_tenant`, `restore_tenant`):
+  **code written, unbuilt** (code-only mode, 2026-11-12, D784).
 - Replication wired into the engine: the commit hook and its change log, a transport with TLS and
   authentication, and `eggdb serve --replica-of` (D209).
 - Initial copy of a replica from a snapshot archive (D208, D209).

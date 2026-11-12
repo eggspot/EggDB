@@ -152,6 +152,65 @@ BEGIN
     RETURN changes;
 END
 $$;
+CREATE FUNCTION eggdb_tenancy.backup_tenant(tenant text) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE
+    found_table record;
+    rows jsonb;
+    tables jsonb := '{}'::jsonb;
+    own_schema text;
+BEGIN
+    FOR found_table IN SELECT i.table_schema AS schema_name, i.table_name, i.tenant_column FROM eggdb_tenancy.isolated i ORDER BY i.table_schema, i.table_name LOOP
+        EXECUTE format('SELECT coalesce(jsonb_agg(to_jsonb(t)), %L::jsonb) FROM %I.%I t WHERE t.%I = %L', '[]', found_table.schema_name, found_table.table_name, found_table.tenant_column, tenant) INTO rows;
+        tables := tables || jsonb_build_object(found_table.schema_name || '.' || found_table.table_name, rows);
+    END LOOP;
+    SELECT s.schema_name INTO own_schema FROM eggdb_tenancy.tenant_schemas s WHERE s.tenant = backup_tenant.tenant;
+    IF own_schema IS NOT NULL THEN
+        FOR found_table IN SELECT t.table_name FROM information_schema.tables t WHERE t.table_schema = own_schema AND t.table_type = 'BASE TABLE' ORDER BY t.table_name LOOP
+            EXECUTE format('SELECT coalesce(jsonb_agg(to_jsonb(t)), %L::jsonb) FROM %I.%I t', '[]', own_schema, found_table.table_name) INTO rows;
+            tables := tables || jsonb_build_object(own_schema || '.' || found_table.table_name, rows);
+        END LOOP;
+    END IF;
+    RETURN jsonb_build_object('format', 'eggdb-tenant-backup-1', 'tenant', tenant, 'taken_at', now(), 'schema', own_schema, 'tables', tables);
+END
+$$;
+CREATE FUNCTION eggdb_tenancy.restore_tenant(tenant text, backup jsonb) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    entry record;
+    found_schema text;
+    found_table text;
+    tenant_column text;
+    own_schema text;
+    restored bigint := 0;
+    added bigint;
+BEGIN
+    IF backup ->> 'format' IS DISTINCT FROM 'eggdb-tenant-backup-1' THEN
+        RAISE EXCEPTION 'this is not an EggDB tenant backup' USING ERRCODE = '22023';
+    END IF;
+    IF backup ->> 'tenant' IS DISTINCT FROM tenant THEN
+        RAISE EXCEPTION 'the backup is of tenant %, not %', backup ->> 'tenant', tenant USING ERRCODE = '22023';
+    END IF;
+    SELECT s.schema_name INTO own_schema FROM eggdb_tenancy.tenant_schemas s WHERE s.tenant = restore_tenant.tenant;
+    FOR entry IN SELECT b.key AS qualified, b.value AS rows FROM jsonb_each(backup -> 'tables') b ORDER BY b.key LOOP
+        found_schema := split_part(entry.qualified, '.', 1);
+        found_table := substr(entry.qualified, length(found_schema) + 2);
+        SELECT i.tenant_column INTO tenant_column FROM eggdb_tenancy.isolated i WHERE i.table_schema = found_schema AND i.table_name = found_table;
+        IF tenant_column IS NOT NULL THEN
+            IF EXISTS (SELECT 1 FROM jsonb_array_elements(entry.rows) r WHERE r.value ->> tenant_column IS DISTINCT FROM tenant) THEN
+                RAISE EXCEPTION 'the backup of %.% holds rows of another tenant', found_schema, found_table USING ERRCODE = '22023';
+            END IF;
+            EXECUTE format('DELETE FROM %I.%I WHERE %I = %L', found_schema, found_table, tenant_column, tenant);
+        ELSIF found_schema = own_schema THEN
+            EXECUTE format('DELETE FROM %I.%I', found_schema, found_table);
+        ELSE
+            RAISE EXCEPTION 'table %.% belongs neither to an isolated table nor to the tenant''s schema', found_schema, found_table USING ERRCODE = '42501';
+        END IF;
+        EXECUTE format('INSERT INTO %I.%I SELECT * FROM jsonb_populate_recordset(NULL::%I.%I, %L::jsonb)', found_schema, found_table, found_schema, found_table, entry.rows::text);
+        GET DIAGNOSTICS added = ROW_COUNT;
+        restored := restored + added;
+    END LOOP;
+    RETURN restored;
+END
+$$;
 CREATE FUNCTION eggdb_tenancy.drop_tenant_schema(tenant text) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
     found_schema text;
@@ -338,5 +397,26 @@ mod tests {
         assert_eq!(run(&mut session, "SELECT count(*) AS roles FROM pg_catalog.pg_roles WHERE rolname = 'acme'").unwrap(), "roles\n1\nSELECT 1");
         run(&mut session, "SELECT eggdb_tenancy.drop_tenant_schema('acme')").unwrap();
         assert!(run(&mut session, "SELECT * FROM acme.notes").is_err());
+    }
+
+    #[test]
+    fn a_tenant_is_backed_up_and_restored_alone() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_tenancy",
+            "CREATE TABLE notes (id integer PRIMARY KEY, tenant text NOT NULL, body text)",
+            "SELECT eggdb_tenancy.isolate('public', 'notes', 'tenant')",
+            "INSERT INTO notes VALUES (1, 'acme', 'one'), (2, 'acme', 'two'), (3, 'globex', 'theirs')",
+            "CREATE TABLE saved (backup jsonb)",
+            "INSERT INTO saved SELECT eggdb_tenancy.backup_tenant('acme')",
+            "DELETE FROM notes WHERE id = 2",
+            "UPDATE notes SET body = 'changed' WHERE id = 1",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(run(&mut session, "SELECT eggdb_tenancy.restore_tenant('acme', backup) AS restored FROM saved").unwrap(), "restored\n2\nSELECT 1");
+        assert_eq!(run(&mut session, "SELECT id, body FROM notes ORDER BY id").unwrap(), "id|body\n1|one\n2|two\n3|theirs\nSELECT 3");
+        assert_eq!(run(&mut session, "SELECT eggdb_tenancy.restore_tenant('globex', backup) FROM saved").unwrap_err().state().code(), "22023");
     }
 }
