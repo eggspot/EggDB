@@ -859,3 +859,4 @@ its full title with its status.
 - [D832](decisions/D832.md) Code-only batch 480 (D57): pgRouting A*, dijkstraCost and bdDijkstra
 - [D833](decisions/D833.md) Code-only batch 481 (D57): OPC UA binary values in SQL (`opcua_decode`)
 - [D834](decisions/D834.md) Code-only batch 482 (D50): FHIR structural validation (`fhir_validate`)
+- [D835](decisions/D835.md) Code-only batch 483 (M11): nested Arrow columns as JSON

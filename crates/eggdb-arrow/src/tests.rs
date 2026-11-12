@@ -339,3 +339,64 @@ fn compressed_batches_read_through_their_codec() {
     let broken = read(&compressed_stream(1, |data: &[u8]| data.to_vec()));
     assert!(broken.is_err());
 }
+
+fn list_stream() -> Vec<u8> {
+    use crate::flatbuffer::{Builder, Field};
+    let mut builder = Builder::new();
+    let item_name = builder.string("item");
+    let int_type = builder.table(&[Some(Field::I32(32)), Some(Field::Bool(true))]);
+    let no_children = builder.offsets(&[]);
+    let item = builder.table(&[
+        Some(Field::Offset(item_name)),
+        Some(Field::Bool(true)),
+        Some(Field::U8(2)),
+        Some(Field::Offset(int_type)),
+        None,
+        Some(Field::Offset(no_children)),
+    ]);
+    let name = builder.string("scores");
+    let list_type = builder.table(&[]);
+    let children = builder.offsets(&[item]);
+    let field = builder.table(&[
+        Some(Field::Offset(name)),
+        Some(Field::Bool(true)),
+        Some(Field::U8(12)),
+        Some(Field::Offset(list_type)),
+        None,
+        Some(Field::Offset(children)),
+    ]);
+    let fields = builder.offsets(&[field]);
+    let schema = builder.table(&[Some(Field::I16(0)), Some(Field::Offset(fields))]);
+    let mut out = Vec::new();
+    crate::frame(&crate::message(builder, crate::HEADER_SCHEMA, schema, 0), &[], &mut out);
+    let mut body = crate::Body {
+        bytes: Vec::new(),
+        buffers: Vec::new(),
+    };
+    body.push(&[]);
+    body.push(&[0, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]);
+    body.push(&[]);
+    body.push(&[10, 0, 0, 0, 20, 0, 0, 0, 30, 0, 0, 0]);
+    let mut builder = Builder::new();
+    let batch = batch_table(&mut builder, 2, &[[2, 0], [3, 0]], &body);
+    let metadata = crate::message(builder, crate::HEADER_RECORD_BATCH, batch, body.bytes.len() as i64);
+    crate::frame(&metadata, &body.bytes, &mut out);
+    out.extend_from_slice(&crate::CONTINUATION);
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out
+}
+
+#[test]
+fn list_columns_read_as_json_arrays() {
+    let columns = read(&list_stream()).expect("the stream reads");
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].column_type, ColumnType::Text);
+    assert_eq!(
+        columns[0].cells,
+        vec![Cell::Bytes(b"[10,20]".to_vec()), Cell::Bytes(b"[30]".to_vec())]
+    );
+    let mut damaged = list_stream();
+    let length = damaged.len();
+    damaged.truncate(length - 20);
+    assert!(read(&damaged).is_err());
+}

@@ -18,6 +18,11 @@ const TYPE_DATE: u8 = 8;
 const TYPE_TIMESTAMP: u8 = 10;
 const TYPE_LARGE_BINARY: u8 = 19;
 const TYPE_LARGE_UTF8: u8 = 20;
+const TYPE_LIST: u8 = 12;
+const TYPE_STRUCT: u8 = 13;
+const TYPE_LARGE_LIST: u8 = 21;
+const MOST_NESTING: usize = 32;
+const DAYS_FROM_0000_TO_1970: i64 = 719_468;
 const MILLIS_PER_DAY: i64 = 86_400_000;
 const CODEC_LZ4_FRAME: u8 = 0;
 const CODEC_ZSTD: u8 = 1;
@@ -234,6 +239,187 @@ fn kind_of(field: &Table<'_>) -> Result<Kind, String> {
         }
         other => return Err(format!("Arrow type {other} is not supported yet")),
     })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Shape {
+    Leaf(Kind),
+    List { large: bool, item: Box<Shape> },
+    Struct(Vec<(String, Shape)>),
+}
+
+impl Shape {
+    fn column_type(&self) -> ColumnType {
+        match self {
+            Self::Leaf(kind) => kind.column_type(),
+            _ => ColumnType::Text,
+        }
+    }
+}
+
+fn shape_of(field: &Table<'_>, depth: usize) -> Result<Shape, String> {
+    if depth > MOST_NESTING {
+        return Err(damaged("types are nested too deeply"));
+    }
+    let children = field.tables(5).unwrap_or_default();
+    match field.u8(2, 0) {
+        TYPE_LIST | TYPE_LARGE_LIST => {
+            let [item] = children.as_slice() else {
+                return Err(damaged("a list type has other than one child"));
+            };
+            if item.table(4).is_some() {
+                return Err("dictionary-encoded values inside lists are not supported yet".to_owned());
+            }
+            Ok(Shape::List {
+                large: field.u8(2, 0) == TYPE_LARGE_LIST,
+                item: Box::new(shape_of(item, depth + 1)?),
+            })
+        }
+        TYPE_STRUCT => {
+            if children.is_empty() {
+                return Err(damaged("a struct type has no fields"));
+            }
+            let mut fields = Vec::with_capacity(children.len());
+            for child in &children {
+                if child.table(4).is_some() {
+                    return Err("dictionary-encoded values inside structs are not supported yet".to_owned());
+                }
+                fields.push((child.string(0).unwrap_or_default().to_owned(), shape_of(child, depth + 1)?));
+            }
+            Ok(Shape::Struct(fields))
+        }
+        _ if !children.is_empty() => Err("this nested Arrow type is not supported yet (lists and structs are)".to_owned()),
+        _ => kind_of(field).map(Shape::Leaf),
+    }
+}
+
+fn json_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn civil_date(days: i64) -> String {
+    let shifted = days + DAYS_FROM_0000_TO_1970;
+    let era = shifted.div_euclid(146_097);
+    let of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let day_of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn cell_json(kind: Kind, cell: &Cell) -> String {
+    match (kind, cell) {
+        (_, Cell::Null) => "null".to_owned(),
+        (_, Cell::Boolean(flag)) => flag.to_string(),
+        (Kind::DateDays | Kind::DateMillis, Cell::Int(days)) => json_text(&civil_date(*days)),
+        (Kind::Timestamp { .. }, Cell::Int(micros)) => {
+            let days = micros.div_euclid(86_400_000_000);
+            let within = micros.rem_euclid(86_400_000_000);
+            json_text(&format!(
+                "{}T{:02}:{:02}:{:02}.{:06}",
+                civil_date(days),
+                within / 3_600_000_000,
+                within / 60_000_000 % 60,
+                within / 1_000_000 % 60,
+                within % 1_000_000
+            ))
+        }
+        (_, Cell::Int(number)) => number.to_string(),
+        (_, Cell::Float(number)) if number.is_finite() => number.to_string(),
+        (_, Cell::Float(number)) => json_text(&number.to_string()),
+        (Kind::Text { .. }, Cell::Bytes(bytes)) => json_text(&String::from_utf8_lossy(bytes)),
+        (_, Cell::Bytes(bytes)) => json_text(&bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+        (Kind::Decimal { scale, .. }, Cell::Decimal(unscaled)) => {
+            let digits = unscaled.unsigned_abs().to_string();
+            let scale = scale as usize;
+            let padded = if digits.len() <= scale { format!("{}{digits}", "0".repeat(scale + 1 - digits.len())) } else { digits };
+            let (whole, fraction) = padded.split_at(padded.len() - scale);
+            let sign = if *unscaled < 0 { "-" } else { "" };
+            if scale == 0 { format!("{sign}{whole}") } else { format!("{sign}{whole}.{fraction}") }
+        }
+        (_, Cell::Decimal(unscaled)) => unscaled.to_string(),
+    }
+}
+
+fn decode_json(shape: &Shape, batch: &mut Batch<'_>, rows: usize) -> Result<Vec<String>, String> {
+    let kind = match shape {
+        Shape::Leaf(kind) => {
+            let mut cells = Vec::with_capacity(rows);
+            decode(*kind, batch, rows, &mut cells)?;
+            return Ok(cells.iter().map(|cell| cell_json(*kind, cell)).collect());
+        }
+        other => other,
+    };
+    let (length, nulls) = *batch
+        .nodes
+        .get(batch.next_node)
+        .ok_or_else(|| damaged("a batch has too few field nodes"))?;
+    batch.next_node += 1;
+    if usize::try_from(length).ok() != Some(rows) {
+        return Err(damaged("a nested column's length differs from its parent's"));
+    }
+    let validity_buffer = batch.buffer()?;
+    let validity: &[u8] = &validity_buffer;
+    let present = |index: usize| nulls == 0 || validity.is_empty() || bit(validity, index).unwrap_or(false);
+    match kind {
+        Shape::List { large, item } => {
+            let offsets_buffer = batch.buffer()?;
+            let offsets: &[u8] = &offsets_buffer;
+            let first = if rows == 0 { 0 } else { offset_at(offsets, 0, *large)? };
+            let last = if rows == 0 { 0 } else { offset_at(offsets, rows, *large)? };
+            if first > last || u64::try_from(last).unwrap_or(u64::MAX) > MAX_ROWS {
+                return Err(damaged("a list's offsets run backwards or too far"));
+            }
+            let items = decode_json(item, batch, last)?;
+            let mut out = Vec::with_capacity(rows);
+            for index in 0..rows {
+                if !present(index) {
+                    out.push("null".to_owned());
+                    continue;
+                }
+                let start = offset_at(offsets, index, *large)?;
+                let end = offset_at(offsets, index + 1, *large)?;
+                let slice = items.get(start..end).ok_or_else(|| damaged("a list's offsets lie outside its values"))?;
+                out.push(format!("[{}]", slice.join(",")));
+            }
+            Ok(out)
+        }
+        Shape::Struct(fields) => {
+            let mut columns = Vec::with_capacity(fields.len());
+            for (_, field) in fields {
+                columns.push(decode_json(field, batch, rows)?);
+            }
+            let mut out = Vec::with_capacity(rows);
+            for index in 0..rows {
+                if !present(index) {
+                    out.push("null".to_owned());
+                    continue;
+                }
+                let members: Vec<String> = fields
+                    .iter()
+                    .zip(&columns)
+                    .map(|((name, _), values)| format!("{}:{}", json_text(name), values[index]))
+                    .collect();
+                out.push(format!("{{{}}}", members.join(",")));
+            }
+            Ok(out)
+        }
+        Shape::Leaf(_) => Err(damaged("a leaf reached the nested decoder")),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -472,15 +658,16 @@ fn decode(kind: Kind, batch: &mut Batch<'_>, rows: usize, cells: &mut Vec<Cell>)
 /// Reads an Arrow IPC stream, or an Arrow IPC file (`.arrow`, Feather 2), into columns: its
 /// schema's flat fields and every record batch's rows in order, dictionary-encoded columns read
 /// through their dictionary batches (deltas appended), and batches whose buffers are compressed
-/// with `LZ4_FRAME` or `ZSTD` decompressed. Damaged or hostile input is an error, never a panic;
-/// nested types are refused by name.
+/// with `LZ4_FRAME` or `ZSTD` decompressed. List, large list and struct columns are read as JSON
+/// text (lists as arrays, structs as objects, dates and timestamps as ISO text, bytes as hex).
+/// Damaged or hostile input is an error, never a panic; other nested types are refused by name.
 pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
     let mut at = if bytes.starts_with(FILE_MAGIC) {
         FILE_MAGIC_PADDED
     } else {
         0
     };
-    let mut columns: Vec<(Kind, Option<Dictionary>, Column)> = Vec::new();
+    let mut columns: Vec<(Shape, Option<Dictionary>, Column)> = Vec::new();
     let mut dictionaries: std::collections::HashMap<i64, Vec<Cell>> = std::collections::HashMap::new();
     let mut dictionary_cells: u64 = 0;
     let mut have_schema = false;
@@ -489,16 +676,18 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
         match message.header_type {
             HEADER_SCHEMA if !have_schema => {
                 for field in message.header.tables(1).ok_or_else(|| damaged("the schema's fields cannot be read"))? {
-                    if field.tables(5).is_some_and(|children| !children.is_empty()) {
-                        return Err("nested Arrow types are not supported yet".to_owned());
+                    let shape = shape_of(&field, 0)?;
+                    let dictionary = dictionary_of(&field)?;
+                    if dictionary.is_some() && !matches!(shape, Shape::Leaf(_)) {
+                        return Err("dictionary-encoded nested columns are not supported yet".to_owned());
                     }
-                    let kind = kind_of(&field)?;
+                    let column_type = shape.column_type();
                     columns.push((
-                        kind,
-                        dictionary_of(&field)?,
+                        shape,
+                        dictionary,
                         Column {
                             name: field.string(0).unwrap_or_default().to_owned(),
-                            column_type: kind.column_type(),
+                            column_type,
                             nullable: field.u8(1, 0) != 0,
                             cells: Vec::new(),
                         },
@@ -522,10 +711,15 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                     codec,
                 };
                 let rows = usize::try_from(rows).map_err(|_| damaged("a batch is too long"))?;
-                for (kind, dictionary, column) in &mut columns {
-                    match dictionary {
-                        None => decode(*kind, &mut batch, rows, &mut column.cells)?,
-                        Some(dictionary) => {
+                for (shape, dictionary, column) in &mut columns {
+                    match (dictionary, &*shape) {
+                        (None, Shape::Leaf(kind)) => decode(*kind, &mut batch, rows, &mut column.cells)?,
+                        (None, nested) => {
+                            for value in decode_json(nested, &mut batch, rows)? {
+                                column.cells.push(if value == "null" { Cell::Null } else { Cell::Bytes(value.into_bytes()) });
+                            }
+                        }
+                        (Some(dictionary), _) => {
                             let mut indices = Vec::with_capacity(rows);
                             decode(dictionary.index, &mut batch, rows, &mut indices)?;
                             let values = dictionaries
@@ -546,8 +740,11 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                 let kind = columns
                     .iter()
                     .find(|(_, dictionary, _)| dictionary.is_some_and(|dictionary| dictionary.id == id))
-                    .map(|(kind, _, _)| *kind)
-                    .ok_or_else(|| damaged("a dictionary batch belongs to no column"))?;
+                    .and_then(|(shape, _, _)| match shape {
+                        Shape::Leaf(kind) => Some(*kind),
+                        _ => None,
+                    })
+                    .ok_or_else(|| damaged("a dictionary batch belongs to no flat column"))?;
                 let rows = u64::try_from(data.i64(0, 0)).map_err(|_| damaged("a dictionary's length is negative"))?;
                 dictionary_cells = dictionary_cells.saturating_add(rows);
                 if dictionary_cells > MAX_ROWS {
