@@ -17,7 +17,22 @@ pub const WGS_84: i32 = 4326;
 pub const WGS_84_3D: i32 = 4979;
 
 /// The Cypher functions that build temporal and spatial values.
-pub(crate) const FUNCTIONS: [&str; 7] = ["date", "localtime", "time", "localdatetime", "datetime", "duration", "point"];
+pub(crate) const FUNCTIONS: [&str; 13] = [
+    "date",
+    "localtime",
+    "time",
+    "localdatetime",
+    "datetime",
+    "duration",
+    "point",
+    "duration.between",
+    "duration.inmonths",
+    "duration.indays",
+    "duration.inseconds",
+    "point.distance",
+    "distance",
+];
+const EARTH_RADIUS_METERS: f64 = 6_378_140.0;
 
 /// A Cypher temporal value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,9 +445,166 @@ pub(crate) fn call(name: &str, arguments: &[Value]) -> Option<Value> {
         }
         ("duration", [Value::String(text)]) => parse_duration(text.trim())?,
         ("duration", [Value::Map(entries)]) => map_duration(entries)?,
+        ("duration.between", [Value::Temporal(from), Value::Temporal(to)]) => between(from, to)?,
+        ("duration.inmonths", [Value::Temporal(from), Value::Temporal(to)]) => match between(from, to)? {
+            Temporal::Duration { months, .. } => Temporal::Duration { months, days: 0, seconds: 0, nanos: 0 },
+            _ => return None,
+        },
+        ("duration.indays", [Value::Temporal(from), Value::Temporal(to)]) => {
+            let nanos = elapsed_nanos(from, to)?;
+            Temporal::Duration { months: 0, days: i64::try_from(nanos / i128::from(NANOS_PER_DAY)).ok()?, seconds: 0, nanos: 0 }
+        }
+        ("duration.inseconds", [Value::Temporal(from), Value::Temporal(to)]) => {
+            duration_of_nanos(0, 0, elapsed_nanos(from, to)?)?
+        }
+        ("point.distance" | "distance", [Value::Point(from), Value::Point(to)]) => {
+            return Some(distance(from, to).map_or(Value::Null, Value::Float));
+        }
         _ => return None,
     };
     Some(Value::Temporal(temporal))
+}
+
+fn duration_of_nanos(months: i64, days: i64, nanos: i128) -> Option<Temporal> {
+    Some(Temporal::Duration {
+        months,
+        days,
+        seconds: i64::try_from(nanos.div_euclid(i128::from(NANOS_PER_SECOND))).ok()?,
+        nanos: nanos.rem_euclid(i128::from(NANOS_PER_SECOND)) as i32,
+    })
+}
+
+fn add_months(days: i64, months: i64) -> Option<i64> {
+    let (year, month, day) = civil_from_days(days);
+    let total = year.checked_mul(12)?.checked_add(month - 1)?.checked_add(months)?;
+    let (year, month) = (total.div_euclid(12), total.rem_euclid(12) + 1);
+    checked_date(year, month, day.min(days_in_month(year, month)))
+}
+
+fn shifted_nanos(seconds: i64, nanos: i32, months: i64, days: i64, extra: i128) -> Option<(i64, i32)> {
+    let day = add_months(seconds.div_euclid(SECONDS_PER_DAY), months)?.checked_add(days)?;
+    let total = i128::from(day) * i128::from(NANOS_PER_DAY)
+        + i128::from(seconds.rem_euclid(SECONDS_PER_DAY)) * i128::from(NANOS_PER_SECOND)
+        + i128::from(nanos)
+        + extra;
+    Some((
+        i64::try_from(total.div_euclid(i128::from(NANOS_PER_SECOND))).ok()?,
+        total.rem_euclid(i128::from(NANOS_PER_SECOND)) as i32,
+    ))
+}
+
+/// `temporal + duration` (or `- duration` when `sign` is -1): months first, keeping the day
+/// within the new month, then days, then the time; a date takes only the duration's whole days.
+pub(crate) fn plus(temporal: &Temporal, duration: &Temporal, sign: i64) -> Option<Temporal> {
+    let Temporal::Duration { months, days, seconds, nanos } = *duration else {
+        return None;
+    };
+    let (months, days) = (months.checked_mul(sign)?, days.checked_mul(sign)?);
+    let extra = (i128::from(seconds) * i128::from(NANOS_PER_SECOND) + i128::from(nanos)) * i128::from(sign);
+    let wrapped = |nanos_of_day: i64| (i128::from(nanos_of_day) + extra).rem_euclid(i128::from(NANOS_PER_DAY)) as i64;
+    Some(match *temporal {
+        Temporal::Date { days: day } => Temporal::Date {
+            days: add_months(day, months)?.checked_add(days)?.checked_add(i64::try_from(extra / i128::from(NANOS_PER_DAY)).ok()?)?,
+        },
+        Temporal::LocalTime { nanos } => Temporal::LocalTime { nanos: wrapped(nanos) },
+        Temporal::Time { nanos, offset } => Temporal::Time { nanos: wrapped(nanos), offset },
+        Temporal::LocalDateTime { seconds, nanos } => {
+            let (seconds, nanos) = shifted_nanos(seconds, nanos, months, days, extra)?;
+            Temporal::LocalDateTime { seconds, nanos }
+        }
+        Temporal::DateTime { seconds, nanos, offset } => {
+            let (local, nanos) = shifted_nanos(seconds + i64::from(offset), nanos, months, days, extra)?;
+            Temporal::DateTime { seconds: local - i64::from(offset), nanos, offset }
+        }
+        Temporal::Duration { months: left_months, days: left_days, seconds: left_seconds, nanos: left_nanos } => {
+            let total = i128::from(left_seconds) * i128::from(NANOS_PER_SECOND) + i128::from(left_nanos) + extra;
+            duration_of_nanos(left_months.checked_add(months)?, left_days.checked_add(days)?, total)?
+        }
+    })
+}
+
+/// A duration times a whole number, component by component.
+pub(crate) fn times(duration: &Temporal, factor: i64) -> Option<Temporal> {
+    let Temporal::Duration { months, days, seconds, nanos } = *duration else {
+        return None;
+    };
+    let total = (i128::from(seconds) * i128::from(NANOS_PER_SECOND) + i128::from(nanos)).checked_mul(i128::from(factor))?;
+    duration_of_nanos(months.checked_mul(factor)?, days.checked_mul(factor)?, total)
+}
+
+fn instant_nanos(temporal: &Temporal) -> Option<(Option<i64>, i128)> {
+    Some(match *temporal {
+        Temporal::Date { days } => (Some(days), 0),
+        Temporal::LocalTime { nanos } => (None, i128::from(nanos)),
+        Temporal::Time { nanos, offset } => (None, i128::from(nanos) - i128::from(offset) * i128::from(NANOS_PER_SECOND)),
+        Temporal::LocalDateTime { seconds, nanos } => (
+            Some(seconds.div_euclid(SECONDS_PER_DAY)),
+            i128::from(seconds.rem_euclid(SECONDS_PER_DAY)) * i128::from(NANOS_PER_SECOND) + i128::from(nanos),
+        ),
+        Temporal::DateTime { seconds, nanos, .. } => (
+            Some(seconds.div_euclid(SECONDS_PER_DAY)),
+            i128::from(seconds.rem_euclid(SECONDS_PER_DAY)) * i128::from(NANOS_PER_SECOND) + i128::from(nanos),
+        ),
+        Temporal::Duration { .. } => return None,
+    })
+}
+
+fn elapsed_nanos(from: &Temporal, to: &Temporal) -> Option<i128> {
+    let (from_day, from_nanos) = instant_nanos(from)?;
+    let (to_day, to_nanos) = instant_nanos(to)?;
+    let days = match (from_day, to_day) {
+        (Some(from_day), Some(to_day)) => i128::from(to_day - from_day),
+        _ => 0,
+    };
+    Some(days * i128::from(NANOS_PER_DAY) + to_nanos - from_nanos)
+}
+
+/// `duration.between(from, to)`: whole months, then whole days, then the rest of the time, each
+/// with the sign of the whole difference; only the time when either value has no date.
+pub(crate) fn between(from: &Temporal, to: &Temporal) -> Option<Temporal> {
+    let (from_day, from_nanos) = instant_nanos(from)?;
+    let (to_day, to_nanos) = instant_nanos(to)?;
+    let (Some(from_day), Some(to_day)) = (from_day, to_day) else {
+        return duration_of_nanos(0, 0, to_nanos - from_nanos);
+    };
+    let total = i128::from(to_day - from_day) * i128::from(NANOS_PER_DAY) + to_nanos - from_nanos;
+    let forward = total >= 0;
+    let (from_year, from_month, _) = civil_from_days(from_day);
+    let (to_year, to_month, _) = civil_from_days(to_day);
+    let mut months = (to_year - from_year) * 12 + (to_month - from_month);
+    let passed = |months: i64| -> Option<bool> {
+        let shifted = i128::from(add_months(from_day, months)?) * i128::from(NANOS_PER_DAY) + from_nanos;
+        let target = i128::from(to_day) * i128::from(NANOS_PER_DAY) + to_nanos;
+        Some(if forward { shifted > target } else { shifted < target })
+    };
+    while months != 0 && passed(months)? {
+        months -= months.signum();
+    }
+    let shifted_day = add_months(from_day, months)?;
+    let rest = i128::from(to_day - shifted_day) * i128::from(NANOS_PER_DAY) + to_nanos - from_nanos;
+    let days = rest / i128::from(NANOS_PER_DAY);
+    duration_of_nanos(months, i64::try_from(days).ok()?, rest - days * i128::from(NANOS_PER_DAY))
+}
+
+fn distance(from: &Point, to: &Point) -> Option<f64> {
+    if from.srid != to.srid {
+        return None;
+    }
+    match from.srid {
+        WGS_84 | WGS_84_3D => {
+            let (from_latitude, to_latitude) = (from.y.to_radians(), to.y.to_radians());
+            let half_latitude = (to_latitude - from_latitude) / 2.0;
+            let half_longitude = (to.x - from.x).to_radians() / 2.0;
+            let chord = half_latitude.sin().powi(2) + from_latitude.cos() * to_latitude.cos() * half_longitude.sin().powi(2);
+            let surface = 2.0 * EARTH_RADIUS_METERS * chord.sqrt().min(1.0).asin();
+            let height = to.z.unwrap_or(0.0) - from.z.unwrap_or(0.0);
+            Some(surface.hypot(height))
+        }
+        _ => {
+            let depth = to.z.unwrap_or(0.0) - from.z.unwrap_or(0.0);
+            Some(((to.x - from.x).powi(2) + (to.y - from.y).powi(2) + depth.powi(2)).sqrt())
+        }
+    }
 }
 
 fn fraction(nanos: i64) -> String {
@@ -709,5 +881,23 @@ mod tests {
         };
         assert_eq!(duration.text(), "P1Y2M3DT4H5M6S");
         assert!(call("date", &[Value::String("2023-02-29".to_owned())]).is_none());
+    }
+
+    #[test]
+    fn arithmetic_keeps_month_ends_and_between_splits_months_days_and_time() {
+        let date = |text: &str| match call("date", &[Value::String(text.to_owned())]) {
+            Some(Value::Temporal(date)) => date,
+            _ => Temporal::Date { days: 0 },
+        };
+        let one_month = Temporal::Duration { months: 1, days: 0, seconds: 0, nanos: 0 };
+        assert_eq!(plus(&date("2024-01-31"), &one_month, 1), Some(date("2024-02-29")));
+        assert_eq!(plus(&date("2024-03-31"), &one_month, -1), Some(date("2024-02-29")));
+        assert_eq!(
+            between(&date("2024-01-15"), &date("2024-03-20")),
+            Some(Temporal::Duration { months: 2, days: 5, seconds: 0, nanos: 0 })
+        );
+        let origin = Point { srid: CARTESIAN, x: 0.0, y: 0.0, z: None };
+        let corner = Point { srid: CARTESIAN, x: 3.0, y: 4.0, z: None };
+        assert_eq!(distance(&origin, &corner), Some(5.0));
     }
 }

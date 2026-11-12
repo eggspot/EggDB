@@ -745,3 +745,4 @@ its full title with its status.
 - [D718](decisions/D718.md) Code-only batch 366 (M8): the `romanian` text search configuration with Snowball's Romanian stemmer
 - [D719](decisions/D719.md) Code-only batch 367 (M9): MongoDB's `$where` on a JavaScript expression interpreter of our own
 - [D720](decisions/D720.md) Code-only batch 368 (M13): Cypher temporal and spatial values, and Bolt's structures for them
+- [D721](decisions/D721.md) Code-only batch 369 (M13): Cypher temporal arithmetic, `duration.between` and `point.distance`

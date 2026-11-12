@@ -731,10 +731,28 @@ impl<'g> Executor<'g, '_> {
                 (x, Value::String(y)) => Value::String(format!("{}{y}", display(x))),
                 (Value::List(x), Value::List(y)) => Value::List([x.clone(), y.clone()].concat()),
                 (Value::List(x), y) => Value::List([x.clone(), vec![y.clone()]].concat()),
+                (Value::Temporal(x), Value::Temporal(y @ crate::temporal::Temporal::Duration { .. })) => {
+                    Value::Temporal(crate::temporal::plus(x, y, 1).ok_or_else(|| arithmetic_error("temporal overflow"))?)
+                }
+                (Value::Temporal(x @ crate::temporal::Temporal::Duration { .. }), Value::Temporal(y)) => {
+                    Value::Temporal(crate::temporal::plus(y, x, 1).ok_or_else(|| arithmetic_error("temporal overflow"))?)
+                }
                 _ => number_result(&a, &b, i64::checked_add, |x, y| x + y)?,
             },
-            Operator::Subtract => number_result(&a, &b, i64::checked_sub, |x, y| x - y)?,
-            Operator::Multiply => number_result(&a, &b, i64::checked_mul, |x, y| x * y)?,
+            Operator::Subtract => match (&a, &b) {
+                (Value::Temporal(x), Value::Temporal(y @ crate::temporal::Temporal::Duration { .. })) => {
+                    Value::Temporal(crate::temporal::plus(x, y, -1).ok_or_else(|| arithmetic_error("temporal overflow"))?)
+                }
+                _ => number_result(&a, &b, i64::checked_sub, |x, y| x - y)?,
+            },
+            Operator::Multiply => match (&a, &b) {
+                (Value::Temporal(duration), Value::Integer(factor)) | (Value::Integer(factor), Value::Temporal(duration)) => {
+                    Value::Temporal(
+                        crate::temporal::times(duration, *factor).ok_or_else(|| type_error("only durations multiply by numbers"))?,
+                    )
+                }
+                _ => number_result(&a, &b, i64::checked_mul, |x, y| x * y)?,
+            },
             Operator::Divide => {
                 if matches!(b, Value::Integer(0)) {
                     return Err(arithmetic_error("/ by zero"));

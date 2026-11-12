@@ -1401,6 +1401,19 @@ impl Parser<'_> {
                         Ok(Expr::ShortestPath(Box::new(self.pattern()?)))
                     }
                     _ if matches!(self.peek_at(1), Some(Token::Symbol("("))) => self.call(lower),
+                    _ if matches!(self.peek_at(1), Some(Token::Symbol(".")))
+                        && matches!(self.peek_at(2), Some(Token::Word(_)))
+                        && matches!(self.peek_at(3), Some(Token::Symbol("(")))
+                        && crate::temporal::FUNCTIONS.iter().any(|known| {
+                            known.split_once('.').is_some_and(|(namespace, _)| namespace == lower)
+                        }) =>
+                    {
+                        let Some(Token::Word(member)) = self.peek_at(2).cloned() else {
+                            return Err(self.unexpected());
+                        };
+                        self.at += 2;
+                        self.call(format!("{lower}.{member}"))
+                    }
                     _ => {
                         self.at += 1;
                         Ok(Expr::Variable(word))
