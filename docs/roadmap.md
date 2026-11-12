@@ -352,8 +352,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Per-device alignment for direct I/O (Where we are). **Code written, unbuilt** (code-only mode, 2026-11-10). Uncached opens are refused when the device's
   alignment does not divide 4096 (`statx` on Linux, the logical sector size on Windows).
 - NUMA memory placement and work placed by NUMA node, so one machine is used fully (D18, D65,
-  PR #86). Placement: **Code written, unbuilt** (code-only mode, 2026-11-10, D356): `MemoryRegion::place_on_numa_node` on Linux. Left: the page cache
-  and the shards using it.
+  PR #86). Placement: **Code written, unbuilt** (code-only mode, 2026-11-10, D356): `MemoryRegion::place_on_numa_node` on Linux. The page cache:
+  **code written, unbuilt** (code-only mode, 2026-11-13, D948), `Options::cache_numa_node`. Left: the shards using
+  it, which come with sharding (D18).
 - Performance and efficiency cores on Windows and macOS, and hot work placed on performance cores
   (D65, PR #86). **Code written, unbuilt** (code-only mode, 2026-11-10, D356): Windows' efficiency classes, macOS's `hw.perflevel0` count,
   `ThreadOptions::hot`. Marking the engine's hot threads (the file I/O workers, and the protocol servers' session

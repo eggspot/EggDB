@@ -22,6 +22,13 @@ impl Frames {
         self.region.lock()
     }
 
+    pub(crate) fn place_on_numa_node(
+        &mut self,
+        node: eggdb_platform::NumaNodeId,
+    ) -> eggdb_platform::Result<()> {
+        self.region.place_on_numa_node(node)
+    }
+
     pub(crate) fn new(
         memory: &impl Memory,
         count: usize,

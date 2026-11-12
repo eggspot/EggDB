@@ -74,6 +74,7 @@ pub struct Options {
     pub(crate) busy_timeout: Duration,
     pub(crate) clock: ClockChoice,
     pub(crate) lock_cache: bool,
+    pub(crate) cache_numa_node: Option<u32>,
     pub(crate) value_compression: eggdb_storage::ValueCompression,
     pub(crate) encryption_key: Option<EncryptionKey>,
 }
@@ -136,6 +137,7 @@ impl Options {
             busy_timeout: Duration::ZERO,
             clock: ClockChoice::default(),
             lock_cache: false,
+            cache_numa_node: None,
             value_compression: eggdb_storage::ValueCompression::Off,
             encryption_key: None,
         }
@@ -183,6 +185,17 @@ impl Options {
     /// working-set size, or lower [`Options::cache_bytes`].
     pub fn lock_cache(mut self, lock: bool) -> Self {
         self.lock_cache = lock;
+        self
+    }
+
+    /// Places the page cache's memory on NUMA node `node` (the operating system's number, as
+    /// in `/sys/devices/system/node/node<n>`), so a process whose threads run on that node's
+    /// CPUs reads its hot pages from local memory; `None`, the default, leaves placement to the
+    /// system. Opening fails with [`ErrorKind::Io`](crate::ErrorKind::Io), carrying the
+    /// system's reason, for a node the machine does not have and where memory cannot be placed
+    /// (everywhere but Linux and Android).
+    pub fn cache_numa_node(mut self, node: Option<u32>) -> Self {
+        self.cache_numa_node = node;
         self
     }
 

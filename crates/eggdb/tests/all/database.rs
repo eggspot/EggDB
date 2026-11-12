@@ -380,6 +380,38 @@ fn a_database_can_keep_its_page_cache_locked_in_memory() {
 }
 
 #[test]
+fn a_page_cache_placed_on_a_numa_node_works_or_the_open_says_why() {
+    let file = common::TempPath::new("numa-cache");
+    let missing_node = eggdb::Database::open_with(
+        file.path(),
+        Options::new()
+            .create_if_missing(true)
+            .cache_numa_node(Some(u32::MAX)),
+    );
+    assert!(missing_node.is_err());
+    let opened = eggdb::Database::open_with(
+        file.path(),
+        Options::new()
+            .create_if_missing(true)
+            .cache_bytes(256 * 1024)
+            .cache_numa_node(Some(0)),
+    );
+    match opened {
+        Ok(db) => {
+            db.put(b"placed", b"on node 0").unwrap();
+            assert_eq!(db.get(b"placed").unwrap().as_deref(), Some(&b"on node 0"[..]));
+        }
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                ErrorKind::Io | ErrorKind::PermissionDenied
+            ),
+            "{error}"
+        ),
+    }
+}
+
+#[test]
 fn a_database_in_memory_works_and_leaves_no_file() {
     let db = eggdb::Database::in_memory().unwrap();
     assert!(db.is_in_memory());

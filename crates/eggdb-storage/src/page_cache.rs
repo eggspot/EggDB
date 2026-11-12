@@ -179,6 +179,19 @@ impl<F: File> PageCache<F> {
         self.frames.lock_in_memory().map_err(StorageError::from)
     }
 
+    /// Moves the cache's frames to NUMA node `node` and keeps them there, so a reader pinned to
+    /// that node's CPUs reads local memory. Fails with the platform's error for a node the
+    /// machine does not have, or where memory cannot be placed (everywhere but Linux and
+    /// Android).
+    pub fn place_on_numa_node(
+        &mut self,
+        node: eggdb_platform::NumaNodeId,
+    ) -> Result<(), StorageError> {
+        self.frames
+            .place_on_numa_node(node)
+            .map_err(StorageError::from)
+    }
+
     /// Puts `file` behind a cache of `size`, taking its memory from `memory` now and never
     /// again. A size of no pages, or of more pages than [`u32::MAX`], is refused with
     /// [`StorageError::InvalidCacheSize`], and memory that can't be had fails with the

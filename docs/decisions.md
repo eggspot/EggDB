@@ -972,3 +972,4 @@ its full title with its status.
 - [D945](decisions/D945.md) Code-only batch 593 (M1): timed reaps and cancel on the file I/O queue, batched io_uring submission
 - [D946](decisions/D946.md) Code-only batch 594 (M1): packet faults and acknowledgement latency in the simulated network
 - [D947](decisions/D947.md) Code-only batch 595 (M1): the engine's hot threads asked onto performance cores
+- [D948](decisions/D948.md) Code-only batch 596 (M1): the page cache placed on a NUMA node

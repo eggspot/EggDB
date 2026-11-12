@@ -312,6 +312,11 @@ impl Database {
             CacheSize::Bytes(options.cache_bytes),
         )
         .map_err(Error::storage)?;
+        if let Some(node) = options.cache_numa_node {
+            cache
+                .place_on_numa_node(eggdb_platform::NumaNodeId::new(node))
+                .map_err(Error::storage)?;
+        }
         if options.lock_cache {
             cache.lock_in_memory().map_err(Error::storage)?;
         }
