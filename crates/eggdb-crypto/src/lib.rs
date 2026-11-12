@@ -46,6 +46,7 @@ mod md5;
 mod p256;
 mod pbkdf2;
 mod poly1305;
+mod psi;
 mod rsa;
 mod sha1;
 mod sha256;
@@ -71,6 +72,7 @@ pub use p256::{
 };
 pub use pbkdf2::pbkdf2_hmac_sha256;
 pub use poly1305::{POLY1305_KEY_BYTES, POLY1305_TAG_BYTES, Poly1305, poly1305};
+pub use psi::{PSI_ELEMENT_BYTES, PSI_MAX_KEY_BYTES, PSI_MIN_KEY_BYTES, PsiError, psi_blind, psi_reblind};
 pub use rsa::{
     RSA_MAX_MODULUS_BITS, RSA_MAX_PUBLIC_EXPONENT_BITS, RSA_MIN_PRIVATE_MODULUS_BITS,
     RSA_MIN_PUBLIC_MODULUS_BITS, RsaError, RsaPkcs1Hash, RsaPrivateKey, RsaPublicKey,

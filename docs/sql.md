@@ -3860,6 +3860,29 @@ SELECT * FROM eggdb_finance.book('EGG');
   or `fok` (all or nothing). `cancel_order(order)` takes an order off the book and `book(instrument [, depth])` shows
   each side's price levels.
 
+## Clean rooms (eggdb_cleanroom)
+
+`CREATE EXTENSION eggdb_cleanroom` lets several parties analyse data together without seeing each other's rows (D759):
+
+```sql
+CREATE EXTENSION eggdb_cleanroom;
+INSERT INTO eggdb_cleanroom.rooms (room, minimum_group) VALUES ('retail', 10);
+INSERT INTO eggdb_cleanroom.members VALUES ('retail', 'shop'), ('retail', 'bank');
+SELECT eggdb_cleanroom.propose('retail', 'spend by country',
+    'SELECT country, count(*) AS n, sum(spend) AS spend FROM visits GROUP BY country');
+SELECT eggdb_cleanroom.approve('retail', 'spend by country');
+SELECT * FROM eggdb_cleanroom.run('retail', 'spend by country');
+```
+
+- An analysis runs only after every member approved it, and returns, as `jsonb`, only the rows whose `n` column (the
+  group size) is at least the room's `minimum_group`; each run is logged in `eggdb_cleanroom.runs`.
+- Private set intersection: `psi_blind(value, key)` and `psi_reblind(blinded, key)` blind values in a 2048-bit group
+  so that blinding by one key and then the other gives the same result in either order. In a room, each member calls
+  `publish_set(room, 'SELECT id, email FROM customers', key)` with its own 32- to 64-byte key, then
+  `double_set(room, other_member, key)` on the other's set; `intersection(room, other_member)` returns the caller's
+  tags (the first column) whose values both hold, if there are at least `minimum_group` of them. Keys are never
+  stored.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

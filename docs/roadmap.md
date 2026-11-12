@@ -746,7 +746,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   organizations on branches with entitlements (D52, D245).
 - Marketplace listings of shared data inside EggDB, with no payments and no external marketplace
   account (D52).
-- Clean rooms: query-output policies and private set intersection (D52, D245).
+- Clean rooms: query-output policies and private set intersection (D52, D245). **Code written, unbuilt** (code-only
+  mode, 2026-11-12, D759).
 - Differential privacy: privacy budgets, DP aggregates, the snapping mechanism and l-diversity
   (D52, D245). Budgets and DP count, sum and average: **code written, unbuilt** (code-only mode, 2026-11-12, D748).
   The snapping mechanism and l-diversity: **code written, unbuilt** (code-only mode, 2026-11-12, D758).

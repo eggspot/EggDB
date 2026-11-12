@@ -1,7 +1,7 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 8] = ["ff1_encrypt", "ff1_decrypt", "laplace_noise", "gen_random_bytes", "eggdb_seal", "eggdb_unseal", "eggdb_blind_index", "snapping_mechanism"];
+pub(crate) const FUNCTIONS: [&str; 10] = ["ff1_encrypt", "ff1_decrypt", "laplace_noise", "gen_random_bytes", "eggdb_seal", "eggdb_unseal", "eggdb_blind_index", "snapping_mechanism", "psi_blind", "psi_reblind"];
 const LOWEST_EXPONENT: i32 = -1022;
 const DEFAULT_BLIND_INDEX_BITS: i64 = 64;
 const MOST_RANDOM_BYTES: i64 = 1024;
@@ -502,6 +502,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     Some(match name {
         "laplace_noise" => laplace_noise(values),
         "snapping_mechanism" => snapping_mechanism(values),
+        "psi_blind" | "psi_reblind" => intersection_blinding(name, values),
         "gen_random_bytes" => random_bytes(values),
         "eggdb_seal" | "eggdb_unseal" => sealed(name, values),
         "eggdb_blind_index" => blind_index(values),
@@ -544,6 +545,27 @@ fn bytes_of(value: &Value) -> Vec<u8> {
     }
 }
 
+fn intersection_blinding(name: &str, values: &[Value]) -> SqlResult<Value> {
+    let [element, key] = values else {
+        return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes a value and a key")));
+    };
+    let key = bytes_of(key);
+    let blinded = if name == "psi_blind" {
+        eggdb_crypto::psi_blind(&bytes_of(element), &key)
+    } else {
+        eggdb_crypto::psi_reblind(&bytes_of(element), &key)
+    };
+    match blinded {
+        Ok(blinded) => Ok(Value::Bytea(blinded.to_vec())),
+        Err(eggdb_crypto::PsiError::WeakKey) => Err(invalid(format!(
+            "{name}: the key must be {} to {} bytes, not all zero",
+            eggdb_crypto::PSI_MIN_KEY_BYTES,
+            eggdb_crypto::PSI_MAX_KEY_BYTES
+        ))),
+        Err(eggdb_crypto::PsiError::NotAnElement) => Err(invalid(format!("{name}: the value is not a blinded element"))),
+    }
+}
+
 fn sealed(name: &str, values: &[Value]) -> SqlResult<Value> {
     let [data, key] = values else {
         return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes data and a key")));
@@ -580,7 +602,7 @@ fn sealed(name: &str, values: &[Value]) -> SqlResult<Value> {
 pub(crate) fn result_type(name: &str) -> crate::types::SqlType {
     if matches!(name, "laplace_noise" | "snapping_mechanism") {
         crate::types::SqlType::Double
-    } else if matches!(name, "gen_random_bytes" | "eggdb_seal" | "eggdb_unseal") {
+    } else if matches!(name, "gen_random_bytes" | "eggdb_seal" | "eggdb_unseal" | "psi_blind" | "psi_reblind") {
         crate::types::SqlType::Bytea
     } else {
         crate::types::SqlType::Text
