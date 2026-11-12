@@ -92,6 +92,8 @@ pub(crate) struct Session {
     pub(crate) transaction: Option<crate::transactions::Transaction>,
     pub(crate) committed_transaction: Option<i64>,
     pub(crate) authenticated_user: Option<String>,
+    pub(crate) authentication_database: String,
+    pub(crate) roles: Option<Vec<(String, String)>>,
     pub(crate) conversation: Option<Conversation>,
     pub(crate) failed_logins: u32,
 }
@@ -322,6 +324,8 @@ pub fn serve(
                             transaction: None,
                             committed_transaction: None,
                             authenticated_user: None,
+                            authentication_database: "admin".to_owned(),
+                            roles: None,
                             conversation: None,
                             failed_logins: 0,
                         };

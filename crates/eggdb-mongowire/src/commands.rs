@@ -280,10 +280,10 @@ fn payload_reply(done: bool, payload: Vec<u8>) -> Document {
     ]))
 }
 
-fn sasl_start(shared: &Shared<'_>, session: &mut Session, body: &Document) -> Document {
+fn sasl_start(shared: &Shared<'_>, session: &mut Session, body: &Document, database: &str) -> Document {
     let mechanism = body.get_str("mechanism").unwrap_or_default();
-    let sha1 = mechanism == SCRAM_SHA_1 && shared.config.sha1_verifier.is_some();
-    if mechanism != eggdb_auth::scram::SCRAM_SHA_256 && !sha1 {
+    let wants_sha1 = mechanism == SCRAM_SHA_1;
+    if mechanism != eggdb_auth::scram::SCRAM_SHA_256 && !wants_sha1 {
         return command_failure(
             334,
             "MechanismUnavailable",
@@ -299,32 +299,40 @@ fn sasl_start(shared: &Shared<'_>, session: &mut Session, body: &Document) -> Do
         return command_failure(1, "InternalError", "could not generate a random nonce");
     }
     let known = user == shared.config.user;
-    let mut exchange = match &shared.config.sha1_verifier {
-        Some(sha1_verifier) if sha1 => {
-            let verifier = if known {
-                sha1_verifier.clone()
-            } else {
-                ScramSha1Verifier::for_unknown_user(
-                    &shared.config.unknown_user_secret,
-                    &user,
-                    sha1_verifier.iterations(),
-                )
-            };
-            crate::server::Exchange::Sha1(ScramSha1Exchange::new(verifier, &nonce))
-        }
-        _ => {
-            let verifier = if known {
-                shared.config.verifier.clone()
-            } else {
-                ScramVerifier::for_unknown_user(
-                    &shared.config.unknown_user_secret,
-                    &user,
-                    shared.config.verifier.iterations(),
-                )
-            };
-            crate::server::Exchange::Sha256(ScramExchange::new(verifier, &nonce))
-        }
+    let stored = if known { None } else { crate::users::stored_user(shared, database, &user) };
+    let sha1_offered = match &stored {
+        Some(stored) => stored.sha1.is_some(),
+        None => shared.config.sha1_verifier.is_some(),
     };
+    if wants_sha1 && !sha1_offered {
+        return command_failure(
+            334,
+            "MechanismUnavailable",
+            format!("Received authentication for mechanism {mechanism} which is not enabled"),
+        );
+    }
+    let iterations_sha1 = shared.config.sha1_verifier.as_ref().map_or(10_000, ScramSha1Verifier::iterations);
+    let mut exchange = if wants_sha1 {
+        let verifier = match (&stored, &shared.config.sha1_verifier) {
+            (Some(stored), _) => stored.sha1.clone(),
+            (None, Some(configured)) if known => Some(configured.clone()),
+            _ => None,
+        }
+        .unwrap_or_else(|| ScramSha1Verifier::for_unknown_user(&shared.config.unknown_user_secret, &user, iterations_sha1));
+        crate::server::Exchange::Sha1(ScramSha1Exchange::new(verifier, &nonce))
+    } else {
+        let verifier = match &stored {
+            Some(stored) => stored.sha256.clone(),
+            None if known => Some(shared.config.verifier.clone()),
+            None => None,
+        }
+        .unwrap_or_else(|| {
+            ScramVerifier::for_unknown_user(&shared.config.unknown_user_secret, &user, shared.config.verifier.iterations())
+        });
+        crate::server::Exchange::Sha256(ScramExchange::new(verifier, &nonce))
+    };
+    session.authentication_database = database.to_owned();
+    session.roles = None;
     match exchange.client_first(&payload) {
         Ok(server_first) => {
             let skip_empty = body
@@ -417,6 +425,16 @@ pub(crate) fn run(
     if let Err(error) = eggdb_documents::check_database_name(database) {
         return failure(&error);
     }
+    if !crate::users::allowed(shared, session, &command, database, body) {
+        return command_failure(
+            13,
+            "Unauthorized",
+            format!("not authorized on {database} to execute command {command}"),
+        );
+    }
+    if let Some(reply) = crate::users::run(shared, &command, database, body) {
+        return reply;
+    }
     let outcome = match command.as_str() {
         "hello" => Ok(hello(shared, session, body, false)),
         "isMaster" | "ismaster" => Ok(hello(shared, session, body, true)),
@@ -440,10 +458,11 @@ pub(crate) fn run(
             ),
             ("storageEngines", Bson::Array(vec![text("eggdb")])),
         ]))),
-        "saslStart" => Ok(sasl_start(shared, session, body)),
+        "saslStart" => Ok(sasl_start(shared, session, body, database)),
         "saslContinue" => Ok(sasl_continue(session, body)),
         "logout" => {
             session.authenticated_user = None;
+            session.roles = None;
             Ok(ok(Document::new()))
         }
         "connectionStatus" => {
@@ -454,14 +473,10 @@ pub(crate) fn run(
                     Bson::Document(document(vec![("user", text(user)), ("db", text("admin"))]))
                 })
                 .collect();
-            let roles: Vec<Bson> = if users.is_empty() {
-                Vec::new()
-            } else {
-                vec![Bson::Document(document(vec![
-                    ("role", text("root")),
-                    ("db", text("admin")),
-                ]))]
-            };
+            let roles: Vec<Bson> = crate::users::session_roles(shared, session)
+                .into_iter()
+                .map(|(role, db)| Bson::Document(document(vec![("role", text(&role)), ("db", text(&db))])))
+                .collect();
             Ok(ok(document(vec![(
                 "authInfo",
                 Bson::Document(document(vec![

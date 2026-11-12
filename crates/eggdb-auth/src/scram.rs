@@ -80,6 +80,18 @@ impl ScramVerifier {
         })
     }
 
+    /// The verifier in the form [`ScramVerifier::from_stored`] reads:
+    /// `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`, base64 parts.
+    pub fn to_stored(&self) -> String {
+        format!(
+            "SCRAM-SHA-256${}:{}${}:{}",
+            self.iterations,
+            base64_encode(&self.salt),
+            base64_encode(&self.stored_key),
+            base64_encode(&self.server_key)
+        )
+    }
+
     /// A verifier no password matches, for a user that does not exist, so the exchange looks
     /// the same as for a real user (a salt derived from `secret` and the name) and fails at
     /// its end.

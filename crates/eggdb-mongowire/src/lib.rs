@@ -15,6 +15,7 @@ mod message;
 mod server;
 mod tailable;
 mod transactions;
+mod users;
 
 pub use message::MAX_MESSAGE_BYTES;
 pub use server::{ServerConfig, serve};

@@ -761,3 +761,4 @@ its full title with its status.
 - [D734](decisions/D734.md) Code-only batch 382 (M11): GZIP and ZSTD Parquet pages, read and written, and `--parquet-compression`
 - [D735](decisions/D735.md) Code-only batch 383 (M11): `read_orc`, flat ORC files in SQL with RLE v1 and v2, ZLIB, Snappy and ZSTD
 - [D736](decisions/D736.md) Code-only batch 384 (M11): `CREATE EXTENSION timescaledb` with hypertables, `drop_chunks`, retention and continuous-aggregate policies
+- [D737](decisions/D737.md) Code-only batch 385 (M9): MongoDB users in `admin.system.users`, user commands, SCRAM sign-in and built-in roles

@@ -48,6 +48,8 @@ fn session(authenticated: bool) -> Session {
         transaction: None,
         committed_transaction: None,
         authenticated_user: authenticated.then(|| "eggdb".to_owned()),
+        authentication_database: "admin".to_owned(),
+        roles: None,
         conversation: None,
         failed_logins: 0,
     }

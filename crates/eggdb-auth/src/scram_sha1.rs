@@ -87,6 +87,32 @@ impl ScramSha1Verifier {
     pub fn iterations(&self) -> u32 {
         self.iterations
     }
+
+    /// The verifier as text: `SCRAM-SHA-1$<iterations>:<salt>$<StoredKey>:<ServerKey>`, base64
+    /// parts, as [`ScramSha1Verifier::from_stored`] reads it.
+    pub fn to_stored(&self) -> String {
+        format!(
+            "SCRAM-SHA-1${}:{}${}:{}",
+            self.iterations,
+            base64_encode(&self.salt),
+            base64_encode(&self.stored_key),
+            base64_encode(&self.server_key)
+        )
+    }
+
+    /// The verifier [`ScramSha1Verifier::to_stored`] wrote, or `None` when the text is not one
+    /// or asks for fewer than the least iterations.
+    pub fn from_stored(text: &str) -> Option<Self> {
+        let rest = text.strip_prefix("SCRAM-SHA-1$")?;
+        let (head, keys) = rest.split_once('$')?;
+        let (iterations, salt) = head.split_once(':')?;
+        let (stored, server) = keys.split_once(':')?;
+        let iterations: u32 = iterations.parse().ok().filter(|count| *count >= MIN_SCRAM_ITERATIONS)?;
+        let salt = base64_decode(salt.as_bytes()).ok().filter(|salt| !salt.is_empty())?;
+        let stored_key = base64_decode(stored.as_bytes()).ok()?.try_into().ok()?;
+        let server_key = base64_decode(server.as_bytes()).ok()?.try_into().ok()?;
+        Some(Self { salt, iterations, stored_key, server_key })
+    }
 }
 
 #[derive(Debug)]
