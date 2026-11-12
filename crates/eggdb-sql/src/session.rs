@@ -728,6 +728,38 @@ impl<'s> Session<'s> {
         self.explain_plan_displays = displays;
     }
 
+    fn set_role(&mut self, wanted: Option<&str>) -> SqlResult<()> {
+        let (login, login_superuser) = match &self.settings.role_before_set_role {
+            Some((_, superuser)) => (
+                self.settings.login_role.clone().unwrap_or_else(|| self.settings.get("session_authorization").unwrap_or_default()),
+                *superuser,
+            ),
+            None => (
+                self.settings.login_role.clone().unwrap_or_else(|| self.settings.get("session_authorization").unwrap_or_default()),
+                self.settings.checked_role.is_none() && self.settings.is_superuser(),
+            ),
+        };
+        let wanted = wanted.filter(|wanted| *wanted != login);
+        let Some(wanted) = wanted else {
+            let settings = Arc::make_mut(&mut self.settings);
+            if let Some((checked_role, superuser)) = settings.role_before_set_role.take() {
+                settings.checked_role = checked_role;
+                settings.set_superuser(superuser);
+            }
+            settings.choose_role(None);
+            return Ok(());
+        };
+        let chosen = self.read(|reader, _| crate::roles::choose_role(reader, &login, login_superuser, wanted))?;
+        let settings = Arc::make_mut(&mut self.settings);
+        if settings.role_before_set_role.is_none() {
+            settings.role_before_set_role = Some((settings.checked_role.clone(), login_superuser));
+        }
+        settings.checked_role = chosen.checked_role;
+        settings.set_superuser(chosen.superuser);
+        settings.choose_role(Some(wanted));
+        Ok(())
+    }
+
     /// SQLite's `.scanstats on`: in the SQLite dialect, each `SELECT` is followed by a second
     /// result, its `QUERY PLAN` with `(loops=1 rows=n)` on each scan the executor measured.
     /// `false` is the default.
@@ -3310,6 +3342,11 @@ impl<'s> Session<'s> {
             }
             Statement::Database(command) => {
                 Err(SqlError::not_supported(format!("{} here", command.tag())))
+            }
+            Statement::Role(crate::roles::RoleStatement::SetRole { role, reset }) => {
+                let role = role.clone();
+                let tag = if *reset { "RESET" } else { "SET" };
+                self.set_role(role.as_deref()).map(|()| QueryResult::command(tag))
             }
             Statement::Role(role) => {
                 let mut role = role.clone();

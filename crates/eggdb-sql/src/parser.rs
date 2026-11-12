@@ -1281,7 +1281,6 @@ impl<'t> Parser<'t> {
 
     fn set_role(&mut self) -> SqlResult<Statement> {
         self.at += 1;
-        let position = self.position();
         let role = match self.peek_kind() {
             TokenKind::String(text) => {
                 let text = text.as_ref().to_owned();
@@ -1290,14 +1289,17 @@ impl<'t> Parser<'t> {
             }
             TokenKind::Word(word) if word == "none" => {
                 self.at += 1;
-                return Ok(Statement::Ignored {
-                    tag: "SET",
-                    notice: None,
-                });
+                return Ok(Statement::Role(crate::roles::RoleStatement::SetRole {
+                    role: None,
+                    reset: false,
+                }));
             }
             _ => self.name()?.text,
         };
-        self.set_to_the_session_user("SET ROLE", &role, position)
+        Ok(Statement::Role(crate::roles::RoleStatement::SetRole {
+            role: Some(role),
+            reset: false,
+        }))
     }
 
     fn set_session_authorization(&mut self) -> SqlResult<Statement> {
@@ -1558,11 +1560,17 @@ impl<'t> Parser<'t> {
         if session_authorization {
             self.at += 2;
         }
-        if session_authorization || self.take_word("role") {
+        if session_authorization {
             return Ok(Statement::Ignored {
                 tag: "RESET",
                 notice: None,
             });
+        }
+        if self.take_word("role") {
+            return Ok(Statement::Role(crate::roles::RoleStatement::SetRole {
+                role: None,
+                reset: true,
+            }));
         }
         let name = if self.is_word("time") && self.is_word_at(1, "zone") {
             self.at += 2;
@@ -1636,6 +1644,10 @@ impl<'t> Parser<'t> {
             ),
             "current_database" | "current_catalog" => settings.database.clone(),
             "current_schema" => "public".to_owned(),
+            "current_user" => match settings.set_role() {
+                Some(role) => role.to_owned(),
+                None => settings.get("session_authorization")?,
+            },
             _ => settings.get("session_authorization")?,
         };
         Ok(Expr {

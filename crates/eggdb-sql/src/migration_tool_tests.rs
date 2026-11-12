@@ -164,11 +164,38 @@ fn set_role_to_the_sessions_own_user_changes_nothing() {
     last(&mut session, "BEGIN");
     assert_eq!(last(&mut session, "SET ROLE 'eggdb'"), "SET");
     last(&mut session, "COMMIT");
-    assert_eq!(state(&mut session, "SET ROLE 'someone_else'"), "0A000");
+    assert_eq!(state(&mut session, "SET ROLE 'someone_else'"), "22023");
     assert_eq!(
         last(&mut session, "SELECT current_user"),
         "current_user\neggdb\nSELECT 1"
     );
+}
+
+#[test]
+fn set_role_switches_to_a_role_the_login_may_use_and_reset_returns() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE ROLE reader",
+        "CREATE ROLE ada LOGIN",
+        "GRANT reader TO ada",
+        "CREATE ROLE stranger",
+        "CREATE TABLE notes (id int PRIMARY KEY)",
+    ] {
+        last(&mut session, sql);
+    }
+    assert_eq!(last(&mut session, "SET ROLE reader"), "SET");
+    assert_eq!(last(&mut session, "SELECT current_user"), "current_user\nreader\nSELECT 1");
+    assert_eq!(state(&mut session, "SELECT * FROM notes"), "42501");
+    assert_eq!(last(&mut session, "RESET ROLE"), "RESET");
+    assert_eq!(last(&mut session, "SELECT count(*) AS n FROM notes"), "n\n0\nSELECT 1");
+
+    let mut ada = Session::new(&store);
+    ada.identify_role("ada", "eggdb").unwrap();
+    assert_eq!(last(&mut ada, "SET ROLE reader"), "SET");
+    assert_eq!(state(&mut ada, "SET ROLE stranger"), "42501");
+    assert_eq!(last(&mut ada, "SET ROLE NONE"), "SET");
+    assert_eq!(last(&mut ada, "SELECT current_user"), "current_user\nada\nSELECT 1");
 }
 
 #[test]

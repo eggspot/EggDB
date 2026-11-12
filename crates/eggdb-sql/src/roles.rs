@@ -123,6 +123,10 @@ pub(crate) enum RoleStatement {
         roles: Vec<String>,
         members: Vec<String>,
     },
+    SetRole {
+        role: Option<String>,
+        reset: bool,
+    },
 }
 
 impl RoleStatement {
@@ -136,6 +140,8 @@ impl RoleStatement {
             }
             Self::Privileges { .. } | Self::Membership { .. } => "REVOKE",
             Self::Deny { .. } => "DENY",
+            Self::SetRole { reset: true, .. } => "RESET",
+            Self::SetRole { .. } => "SET",
         }
     }
 
@@ -535,8 +541,44 @@ pub(crate) fn run(
             roles,
             members,
         } => change_membership(writer, *granting, roles, members)?,
+        RoleStatement::SetRole { .. } => {
+            return Err(SqlError::new(SqlState::INTERNAL_ERROR, "SET ROLE reached the catalog writer"));
+        }
     }
     Ok(QueryResult::command(tag))
+}
+
+/// What `SET ROLE` changes: the role checked from now on, and whether it is a superuser.
+pub(crate) struct ChosenRole {
+    pub(crate) checked_role: Option<String>,
+    pub(crate) superuser: bool,
+}
+
+/// Checks `SET ROLE wanted` for a session whose login is `login` (a superuser when
+/// `login_superuser`): the role must exist, and the login must be a superuser or a member of
+/// it, directly or through other roles.
+pub(crate) fn choose_role(
+    reader: &dyn KeyValueRead,
+    login: &str,
+    login_superuser: bool,
+    wanted: &str,
+) -> SqlResult<ChosenRole> {
+    let Some(role) = stored_role(reader, wanted)? else {
+        return Err(SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!("role \"{wanted}\" does not exist"),
+        ));
+    };
+    if !login_superuser && !role_closure(reader, login)?.contains(wanted) {
+        return Err(SqlError::new(
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            format!("permission denied to set role \"{wanted}\""),
+        ));
+    }
+    Ok(ChosenRole {
+        checked_role: (!role.superuser).then(|| role.name.clone()),
+        superuser: role.superuser,
+    })
 }
 
 fn drop_roles(writer: &mut dyn KeyValueWrite, names: &[Name], if_exists: bool) -> SqlResult<()> {

@@ -733,7 +733,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL and TDS logins for stored roles (D183). MySQL: **code written, unbuilt** (code-only mode, 2026-11-12, D823);
   TDS: **code written, unbuilt** (code-only mode, 2026-11-12, D824).
 - `SET ROLE`, object owners, `WITH GRANT OPTION`, and schema, sequence and routine privileges
-  (D183).
+  (D183). `SET ROLE`, `SET ROLE NONE` and `RESET ROLE`: **code written, unbuilt** (code-only mode, 2026-11-12,
+  D827).
 - Schema, type, parameter (`GRANT SET ON PARAMETER`) and tablespace grants stored, so the
   inquiry functions and `pg_namespace.nspacl` follow them; `information_schema.role_routine_grants`
   and `role_udt_grants` (D326, D344).

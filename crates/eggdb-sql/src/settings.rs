@@ -458,6 +458,7 @@ pub(crate) struct Settings {
     pub(crate) oracle_user_schema: Option<String>,
     pub(crate) checked_role: Option<String>,
     pub(crate) login_role: Option<String>,
+    pub(crate) role_before_set_role: Option<(Option<String>, bool)>,
     pub(crate) database_names: Vec<String>,
 }
 
@@ -518,6 +519,7 @@ impl Default for Settings {
             oracle_user_schema: None,
             checked_role: None,
             login_role: None,
+            role_before_set_role: None,
             database_names: Vec::new(),
         }
     }
@@ -718,6 +720,19 @@ impl Settings {
 
     pub(crate) fn set_session_user(&mut self, user: &str) {
         self.values.insert("session_authorization", user.to_owned());
+    }
+
+    /// The role `SET ROLE` chose, or `None` when the session acts as its own user.
+    pub(crate) fn set_role(&self) -> Option<&str> {
+        self.values.get("role").map(String::as_str).filter(|role| !role.is_empty() && *role != "none")
+    }
+
+    pub(crate) fn choose_role(&mut self, role: Option<&str>) {
+        self.values.insert("role", role.unwrap_or("none").to_owned());
+    }
+
+    pub(crate) fn is_superuser(&self) -> bool {
+        self.values.get("is_superuser").is_none_or(|shown| shown == "on")
     }
 
     pub(crate) fn reset_all(&mut self) {
