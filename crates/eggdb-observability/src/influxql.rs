@@ -424,6 +424,24 @@ impl Reader {
         }
     }
 
+    fn where_clause(&mut self) -> Result<Option<String>, String> {
+        if !self.keyword("where") {
+            return Ok(None);
+        }
+        let start = self.at;
+        let mut depth = 0usize;
+        while let Some(token) = self.peek() {
+            match token {
+                Token::Open => depth += 1,
+                Token::Close => depth = depth.saturating_sub(1),
+                _ if depth == 0 && STOP_WORDS.iter().any(|word| token.keyword(word)) => break,
+                _ => {}
+            }
+            self.at += 1;
+        }
+        condition_sql(&self.tokens[start..self.at]).map(Some)
+    }
+
     fn alias(&mut self) -> Result<Option<String>, String> {
         if self.keyword("as") { self.name().map(Some) } else { Ok(None) }
     }
@@ -1320,8 +1338,67 @@ fn show(session: &mut Session<'_>, reader: &mut Reader, database: &str) -> Resul
         return Ok(vec![series_json("databases", None, &["name".to_owned()], &[vec![json_string(database)]])]);
     }
     if reader.keyword("measurements") {
-        let rows: Vec<Vec<String>> = catalog.keys().map(|name| vec![json_string(name)]).collect();
+        let mut names: Vec<String> = catalog.keys().cloned().collect();
+        if reader.keyword("with") {
+            reader.expect_keyword("measurement")?;
+            let operator = match reader.next() {
+                Some(Token::Operator(operator)) => operator,
+                other => return Err(format!("found {other:?}, expected =, !=, =~ or !~")),
+            };
+            match (operator.as_str(), reader.next()) {
+                ("=~" | "!~", Some(Token::Regex(pattern))) => {
+                    let matching = matching_measurements(session, &catalog, &pattern)?;
+                    let keep = operator == "=~";
+                    names.retain(|name| matching.contains(name) == keep);
+                }
+                ("=" | "!=", Some(Token::Name { text, .. })) => {
+                    let keep = operator == "=";
+                    names.retain(|name| (*name == text) == keep);
+                }
+                (_, other) => return Err(format!("found {other:?} in WITH MEASUREMENT")),
+            }
+        }
+        let rows: Vec<Vec<String>> = names.iter().map(|name| vec![json_string(name)]).collect();
         return Ok(vec![series_json("measurements", None, &["name".to_owned()], &rows)]);
+    }
+    if reader.keyword("series") {
+        let measurement = from(reader)?;
+        let condition = reader.where_clause()?;
+        let mut keys = Vec::new();
+        for (name, columns) in keys_of(&catalog, measurement.as_ref()) {
+            let tags: Vec<&String> = columns.iter().filter(|(_, kind)| text(kind)).map(|(column, _)| column).collect();
+            if tags.is_empty() {
+                keys.push(name.clone());
+                continue;
+            }
+            let selected: Vec<String> = tags.iter().map(|tag| column(tag)).collect();
+            let mut sql = format!("SELECT DISTINCT {} FROM {SCHEMA}.{}", selected.join(", "), identifier(name));
+            if let Some(condition) = &condition {
+                sql.push_str(&format!(" WHERE {condition}"));
+            }
+            let result = run(session, &sql)?
+                .into_iter()
+                .rev()
+                .find(|result| result.columns.is_some())
+                .ok_or("the query returned no rows")?;
+            for row in &result.rows {
+                let mut pairs: Vec<(String, String)> = tags
+                    .iter()
+                    .zip(row)
+                    .filter_map(|(tag, value)| value.to_text().filter(|value| !value.is_empty()).map(|value| ((*tag).clone(), value)))
+                    .collect();
+                pairs.sort();
+                let mut key = name.clone();
+                for (tag, value) in pairs {
+                    key.push_str(&format!(",{tag}={value}"));
+                }
+                keys.push(key);
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        let rows: Vec<Vec<String>> = keys.iter().map(|key| vec![json_string(key)]).collect();
+        return Ok(vec![series_json("", None, &["key".to_owned()], &rows)]);
     }
     if reader.keyword("retention") {
         reader.expect_keyword("policies")?;
@@ -1423,6 +1500,26 @@ fn statements(text: &str) -> Vec<String> {
     found.into_iter().filter(|statement| !statement.trim().is_empty()).collect()
 }
 
+/// `DELETE [FROM measurement] [WHERE condition]` and `DROP SERIES [FROM measurement] [WHERE
+/// condition]`: the matching points of the measurement, or of every measurement without
+/// `FROM`, are deleted; at least one of `FROM` and `WHERE` is required, as in InfluxDB.
+fn delete_points(session: &mut Session<'_>, reader: &mut Reader) -> Result<Vec<String>, String> {
+    let measurement = if reader.keyword("from") { Some(reader.name()?) } else { None };
+    let condition = reader.where_clause()?;
+    if measurement.is_none() && condition.is_none() {
+        return Err("DELETE needs FROM or WHERE".to_owned());
+    }
+    let catalog = crate::store::catalog(session)?;
+    for (name, _) in keys_of(&catalog, measurement.as_ref()) {
+        let mut sql = format!("DELETE FROM {SCHEMA}.{}", identifier(name));
+        if let Some(condition) = &condition {
+            sql.push_str(&format!(" WHERE {condition}"));
+        }
+        run(session, &sql)?;
+    }
+    Ok(Vec::new())
+}
+
 fn statement(session: &mut Session<'_>, text: &str, database: &str, epoch: Option<&str>) -> Result<Vec<String>, String> {
     let mut reader = Reader { tokens: tokens(text)?, at: 0 };
     if reader.keyword("select") {
@@ -1435,7 +1532,23 @@ fn statement(session: &mut Session<'_>, text: &str, database: &str, epoch: Optio
     if reader.keyword("create") && reader.keyword("database") {
         return Ok(Vec::new());
     }
-    Err(format!("error parsing query: found {:?}, expected SELECT, SHOW or CREATE DATABASE", reader.tokens.first()))
+    if reader.keyword("drop") {
+        if reader.keyword("measurement") {
+            let measurement = reader.name()?;
+            run(session, &format!("DROP TABLE IF EXISTS {SCHEMA}.{}", identifier(&measurement)))?;
+            let _ = run(
+                session,
+                &format!("DELETE FROM metrics_meta.tag_keys WHERE measurement = {}", crate::store::literal(&measurement)),
+            );
+            return Ok(Vec::new());
+        }
+        reader.expect_keyword("series")?;
+        return delete_points(session, &mut reader);
+    }
+    if reader.keyword("delete") {
+        return delete_points(session, &mut reader);
+    }
+    Err(format!("error parsing query: found {:?}, expected SELECT, SHOW, CREATE, DROP or DELETE", reader.tokens.first()))
 }
 
 /// The answer to InfluxDB 1.x's `/query`: each statement of `text` (InfluxQL `SELECT` over a

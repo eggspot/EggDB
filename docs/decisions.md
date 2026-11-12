@@ -736,3 +736,4 @@ its full title with its status.
 - [D709](decisions/D709.md) Code-only batch 357 (M11): `read_netcdf` for NetCDF classic files
 - [D710](decisions/D710.md) Code-only batch 358 (M12): `geotiff_info`, TIFF and GeoTIFF headers as JSON
 - [D711](decisions/D711.md) Code-only batch 359 (M12): `read_geotiff`, pixels of TIFF and GeoTIFF images
+- [D712](decisions/D712.md) Code-only batch 360 (M16): InfluxQL `SHOW SERIES`, `WITH MEASUREMENT`, `DROP MEASUREMENT`, `DROP SERIES` and `DELETE`
