@@ -1469,7 +1469,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-11, D545).
 - Kafka transactions and idempotent producers (D33, D213). Idempotent producers: **code written,
   unbuilt** (code-only mode, 2026-11-11, D546); transactions: **code written, unbuilt** (code-only mode,
-  2026-11-12, D694). Left: transaction timeouts.
+  2026-11-12, D694); transaction timeouts: **code written, unbuilt** (code-only mode, 2026-11-12, D717).
 - Kafka's flexible request versions, SASL, and topic creation and deletion APIs (D213). Topic creation and
   deletion: **code written, unbuilt** (code-only mode, 2026-11-11, D492). SASL/PLAIN: **code written, unbuilt** (code-only mode,
   2026-11-11, D493).

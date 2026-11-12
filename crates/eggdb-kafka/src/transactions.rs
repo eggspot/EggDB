@@ -9,6 +9,14 @@ const ABORTED: u8 = 8;
 const INVALID_PRODUCER_ID_MAPPING: i16 = 49;
 const MOST_PARTITIONS: usize = 10_000;
 const UNKNOWN_FIRST_OFFSET: i64 = -1;
+const DEFAULT_TIMEOUT_MS: i32 = 60_000;
+/// The longest `transaction.timeout.ms` a producer may ask for, Kafka's default
+/// `transaction.max.timeout.ms`.
+pub(crate) const MOST_TIMEOUT_MS: i32 = 900_000;
+/// Kafka's `INVALID_TRANSACTION_TIMEOUT` error code.
+pub(crate) const INVALID_TRANSACTION_TIMEOUT: i16 = 50;
+const SWEEP_INTERVAL_MS: i64 = 10_000;
+static LAST_SWEEP_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// A pending offset commit of a transaction: group, topic, partition, offset and metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +36,8 @@ struct Transaction {
     epoch: i16,
     partitions: Vec<(String, i32)>,
     offsets: Vec<PendingOffset>,
+    timeout_ms: i32,
+    started_ms: i64,
 }
 
 fn put_text(out: &mut Vec<u8>, text: &str) {
@@ -88,7 +98,23 @@ impl Transaction {
             out.extend_from_slice(&pending.offset.to_be_bytes());
             put_text(&mut out, &pending.metadata);
         }
+        out.extend_from_slice(&self.timeout_ms.to_be_bytes());
+        out.extend_from_slice(&self.started_ms.to_be_bytes());
         out
+    }
+
+    fn is_open(&self) -> bool {
+        !self.partitions.is_empty() || !self.offsets.is_empty()
+    }
+
+    fn start_if_new(&mut self, now_ms: i64) {
+        if !self.is_open() {
+            self.started_ms = now_ms;
+        }
+    }
+
+    fn expired(&self, now_ms: i64) -> bool {
+        self.is_open() && now_ms.saturating_sub(self.started_ms) > i64::from(self.timeout_ms)
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
@@ -109,7 +135,9 @@ impl Transaction {
                 metadata: cursor.text()?,
             });
         }
-        Some(Self { producer_id, epoch, partitions, offsets })
+        let timeout_ms = cursor.i32().unwrap_or(DEFAULT_TIMEOUT_MS);
+        let started_ms = cursor.i64().unwrap_or(0);
+        Some(Self { producer_id, epoch, partitions, offsets, timeout_ms, started_ms })
     }
 }
 
@@ -141,6 +169,49 @@ fn aborted_key(topic: &str, partition: i32, first_offset: i64) -> Vec<u8> {
 
 fn stored(keys: &dyn KeysRead, transactional_id: &str) -> Result<Option<Transaction>, String> {
     Ok(keys.get(&transaction_key(transactional_id))?.and_then(|raw| Transaction::decode(&raw)))
+}
+
+fn fence(transaction: &mut Transaction) {
+    transaction.epoch = transaction.epoch.saturating_add(1);
+}
+
+/// The transaction of `transactional_id`, after aborting it and raising its epoch when it has
+/// been open longer than its timeout, so its producer is fenced as Kafka's coordinator does.
+fn current(keys: &mut dyn KeysWrite, transactional_id: &str, now_ms: i64) -> Result<Option<Transaction>, String> {
+    let Some(mut transaction) = stored(&*keys, transactional_id)? else {
+        return Ok(None);
+    };
+    if transaction.expired(now_ms) {
+        finish(keys, &mut transaction, false)?;
+        fence(&mut transaction);
+        keys.put(&transaction_key(transactional_id), &transaction.encode())?;
+    }
+    Ok(Some(transaction))
+}
+
+/// Aborts every transaction open longer than its timeout, at most once every ten seconds per
+/// process, so an abandoned transaction stops holding back `read_committed` readers.
+pub(crate) fn abort_expired(keyspace: &dyn Keyspace) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let now = log::now_ms();
+    let last = LAST_SWEEP_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < SWEEP_INTERVAL_MS
+        || LAST_SWEEP_MS.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_err()
+    {
+        return Ok(());
+    }
+    let expired: Vec<String> = log::read(keyspace, |keys| {
+        Ok(keys
+            .scan(&[TRANSACTION])?
+            .into_iter()
+            .filter(|(_, value)| Transaction::decode(value).is_some_and(|transaction| transaction.expired(now)))
+            .filter_map(|(key, _)| String::from_utf8(key.get(1..)?.to_vec()).ok())
+            .collect())
+    })?;
+    for transactional_id in expired {
+        log::write(keyspace, |keys| current(keys, &transactional_id, now).map(|_| ()))?;
+    }
+    Ok(())
 }
 
 /// Whether `producer_id` has added `topic`'s `partition` to its open transaction, so its
@@ -226,7 +297,7 @@ fn finish(keys: &mut dyn KeysWrite, transaction: &mut Transaction, commit: bool)
 
 /// `InitProducerId` with a `transactional.id`: the same producer id with its epoch raised (a new
 /// id once the epoch runs out), aborting the transaction an earlier instance left open.
-pub(crate) fn init(keyspace: &dyn Keyspace, transactional_id: &str) -> Result<(i64, i16), String> {
+pub(crate) fn init(keyspace: &dyn Keyspace, transactional_id: &str, timeout_ms: i32) -> Result<(i64, i16), String> {
     log::write(keyspace, |keys| {
         let mut transaction = match stored(&*keys, transactional_id)? {
             Some(mut found) => {
@@ -242,10 +313,13 @@ pub(crate) fn init(keyspace: &dyn Keyspace, transactional_id: &str) -> Result<(i
             None => Transaction {
                 producer_id: producers::next_producer_id(keys)?,
                 epoch: 0,
+                timeout_ms,
                 ..Transaction::default()
             },
         };
         transaction.partitions.clear();
+        transaction.timeout_ms = timeout_ms;
+        transaction.started_ms = 0;
         keys.put(&transaction_key(transactional_id), &transaction.encode())?;
         Ok((transaction.producer_id, transaction.epoch))
     })
@@ -272,7 +346,8 @@ pub(crate) fn add_partitions(keyspace: &dyn Keyspace, request: &mut Reader<'_>, 
         existing.push(partitions.iter().map(|partition| (0..count).contains(partition)).collect::<Vec<_>>());
     }
     let codes = log::write(keyspace, |keys| {
-        let mut found = stored(&*keys, &transactional_id)?;
+        let now = log::now_ms();
+        let mut found = current(keys, &transactional_id, now)?;
         let check = checked(found.as_ref(), producer_id, epoch);
         let mut codes = Vec::new();
         for ((topic, partitions), exists) in topics.iter().zip(&existing) {
@@ -284,6 +359,7 @@ pub(crate) fn add_partitions(keyspace: &dyn Keyspace, request: &mut Reader<'_>, 
                     error::UNKNOWN_TOPIC_OR_PARTITION
                 } else if let Some(transaction) = found.as_mut() {
                     if !transaction.partitions.iter().any(|(known, index)| known == topic && index == partition) {
+                        transaction.start_if_new(now);
                         if transaction.partitions.len() >= MOST_PARTITIONS {
                             return Err("a transaction may hold at most 10,000 partitions".to_owned());
                         }
@@ -320,7 +396,10 @@ pub(crate) fn add_offsets(keyspace: &dyn Keyspace, request: &mut Reader<'_>, bod
     let producer_id = request.i64()?;
     let epoch = request.i16()?;
     let _group = request.string()?;
-    let code = log::read(keyspace, |keys| Ok(checked(stored(keys, &transactional_id)?.as_ref(), producer_id, epoch)))?;
+    let code = log::write(keyspace, |keys| {
+        let found = current(keys, &transactional_id, log::now_ms())?;
+        Ok(checked(found.as_ref(), producer_id, epoch))
+    })?;
     body.i32(0).i16(code);
     Ok(())
 }
@@ -345,11 +424,13 @@ pub(crate) fn offset_commit(keyspace: &dyn Keyspace, version: i16, request: &mut
         Ok((topic, partitions))
     })?;
     let code = log::write(keyspace, |keys| {
-        let mut found = stored(&*keys, &transactional_id)?;
+        let now = log::now_ms();
+        let mut found = current(keys, &transactional_id, now)?;
         let check = checked(found.as_ref(), producer_id, epoch);
         if let (error::NONE, Some(transaction)) = (check, found.as_mut()) {
             for (topic, partitions) in &topics {
                 for (partition, offset, metadata) in partitions {
+                    transaction.start_if_new(now);
                     transaction.offsets.retain(|pending| {
                         !(pending.group == group && pending.topic == *topic && pending.partition == *partition)
                     });
@@ -385,7 +466,8 @@ pub(crate) fn end(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut 
     let epoch = request.i16()?;
     let commit = request.i8()? != 0;
     let code = log::write(keyspace, |keys| {
-        let mut found = stored(&*keys, &transactional_id)?;
+        let now = log::now_ms();
+        let mut found = current(keys, &transactional_id, now)?;
         let check = checked(found.as_ref(), producer_id, epoch);
         let Some(transaction) = found.as_mut().filter(|_| check == error::NONE) else {
             return Ok(check);
@@ -419,12 +501,35 @@ mod tests {
                 offset: 40,
                 metadata: String::new(),
             }],
+            timeout_ms: 30_000,
+            started_ms: 1_000,
         };
         assert_eq!(Transaction::decode(&state.encode()), Some(state));
         let keyspace = MemoryKeyspace::default();
-        let (id, epoch) = init(&keyspace, "payments").unwrap();
-        assert_eq!(init(&keyspace, "payments").unwrap(), (id, epoch + 1));
-        assert_ne!(init(&keyspace, "other").unwrap().0, id);
+        let (id, epoch) = init(&keyspace, "payments", 60_000).unwrap();
+        assert_eq!(init(&keyspace, "payments", 60_000).unwrap(), (id, epoch + 1));
+        assert_ne!(init(&keyspace, "other", 60_000).unwrap().0, id);
+    }
+
+    #[test]
+    fn transactions_open_past_their_timeout_are_aborted_and_fenced() {
+        let keyspace = MemoryKeyspace::default();
+        let (id, epoch) = init(&keyspace, "slow", 1_000).unwrap();
+        log::write(&keyspace, |keys| {
+            let mut transaction = stored(&*keys, "slow")?.unwrap_or_default();
+            transaction.start_if_new(5_000);
+            transaction.partitions.push(("t".to_owned(), 0));
+            keys.put(&open_key("t", 0, id), &UNKNOWN_FIRST_OFFSET.to_be_bytes())?;
+            keys.put(&transaction_key("slow"), &transaction.encode())?;
+            let kept = current(keys, "slow", 5_900)?.unwrap_or_default();
+            assert_eq!(kept.epoch, epoch);
+            let aborted = current(keys, "slow", 6_001)?.unwrap_or_default();
+            assert_eq!(aborted.epoch, epoch + 1);
+            assert!(aborted.partitions.is_empty());
+            assert!(!partition_open(&*keys, "t", 0, id)?);
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

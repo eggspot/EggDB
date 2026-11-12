@@ -741,3 +741,4 @@ its full title with its status.
 - [D714](decisions/D714.md) Code-only batch 362 (M8): text extracted from PDF files in `extract_text`
 - [D715](decisions/D715.md) Code-only batch 363 (M11): Zarr v2 and v3 arrays in SQL with `read_zarr`
 - [D716](decisions/D716.md) Code-only batch 364 (M10): MySQL `b'...'`, `0b...` and `0x...` literals
+- [D717](decisions/D717.md) Code-only batch 365 (M14): Kafka transaction timeouts, aborting and fencing expired transactions

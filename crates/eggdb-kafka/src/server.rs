@@ -420,10 +420,14 @@ fn produce(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer)
 
 fn init_producer_id(keyspace: &dyn Keyspace, request: &mut Reader<'_>, body: &mut Writer) -> Parsed<()> {
     let transactional_id = request.string()?;
-    let _transaction_timeout = request.i32()?;
+    let transaction_timeout = request.i32()?;
     body.i32(0);
     if let Some(transactional_id) = transactional_id {
-        match crate::transactions::init(keyspace, &transactional_id) {
+        if !(1..=crate::transactions::MOST_TIMEOUT_MS).contains(&transaction_timeout) {
+            body.i16(crate::transactions::INVALID_TRANSACTION_TIMEOUT).i64(-1).i16(-1);
+            return Ok(());
+        }
+        match crate::transactions::init(keyspace, &transactional_id, transaction_timeout) {
             Ok((id, epoch)) => body.i16(error::NONE).i64(id).i16(epoch),
             Err(_) => body.i16(UNKNOWN_SERVER_ERROR).i64(-1).i16(-1),
         };
@@ -574,6 +578,9 @@ pub(crate) fn answer_for(
     } else if *login != Login::Done {
         return None;
     } else {
+        if crate::transactions::abort_expired(keyspace).is_err() {
+            return None;
+        }
         let outcome = match key {
             METADATA => metadata(keyspace, config, version, &mut request, &mut body).map(|()| true),
             PRODUCE => produce(keyspace, &mut request, &mut body),
