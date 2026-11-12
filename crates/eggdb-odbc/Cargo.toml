@@ -1,0 +1,23 @@
+[package]
+name = "eggdb-odbc"
+autotests = false
+description = "EggDB's ODBC driver: the embedded database for ODBC applications, on EggDB's C API."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "eggdb_odbc"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-capi = { path = "../eggdb-capi" }
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"
