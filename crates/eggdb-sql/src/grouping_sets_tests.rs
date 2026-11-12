@@ -528,7 +528,9 @@ fn sql_server_and_oracle_take_one_grouping_argument_and_name_their_errors() {
     assert_eq!(vendor_code(&mut tsql, "SELECT GROUPING(region, item) FROM sales GROUP BY ROLLUP(region, item)"), Some(174));
     assert_eq!(vendor_code(&mut tsql, "SELECT GROUPING(qty) FROM sales GROUP BY ROLLUP(region, item)"), Some(8161));
     last(&mut tsql, "SELECT GROUPING(region) AS g FROM sales GROUP BY ROLLUP(region, item)");
-    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
-    assert_eq!(vendor_code(&mut oracle, "SELECT GROUPING(region, item) FROM sales GROUP BY ROLLUP(region, item)"), Some(909));
-    assert_eq!(vendor_code(&mut oracle, "SELECT GROUPING(qty) FROM sales GROUP BY ROLLUP(region, item)"), Some(979));
+    let oracle_store = MemoryStore::default();
+    let mut oracle = Session::with_dialect(&oracle_store, Dialect::Oracle);
+    last(&mut oracle, "CREATE TABLE orders (region VARCHAR2(10), item VARCHAR2(10), qty NUMBER)");
+    assert_eq!(vendor_code(&mut oracle, "SELECT GROUPING(region, item) FROM orders GROUP BY ROLLUP(region, item)"), Some(909));
+    assert_eq!(vendor_code(&mut oracle, "SELECT GROUPING(qty) FROM orders GROUP BY ROLLUP(region, item)"), Some(979));
 }
