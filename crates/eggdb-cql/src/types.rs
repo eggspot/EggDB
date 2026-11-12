@@ -884,6 +884,19 @@ fn mismatch(value: &Value, cql: CqlType) -> String {
     )
 }
 
+/// One JSON element of a stored user-type value (a selected field) in the binary form of
+/// `cql`, or `None` for NULL.
+pub(crate) fn encode_json_element(value: &Value, cql: CqlType) -> Result<Option<Vec<u8>>, String> {
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    let node = parse_document(&value.to_text().unwrap_or_default()).map_err(|error| error.message)?;
+    if node.value == Json::Null {
+        return Ok(None);
+    }
+    encode_json(&node, cql, 0).map(Some)
+}
+
 /// `value` in the binary form of `cql`, or `None` for NULL.
 pub(crate) fn encode_value(value: &Value, cql: CqlType) -> Result<Option<Vec<u8>>, String> {
     if matches!(value, Value::Null) {

@@ -5,7 +5,7 @@ use crate::frame::{
     declared_stream, response, take_request,
 };
 use crate::translate::{Catalog, Outcome, TableInfo, literal, translate};
-use crate::types::{CqlType, encode_value, parameter_text};
+use crate::types::{CqlType, encode_json_element, encode_value, parameter_text};
 use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_sql::{Dialect, KeyValueStore, QueryResult, Session, SqlError};
 use std::collections::BTreeMap;
@@ -708,7 +708,7 @@ impl<'s> Connection<'_, 's> {
                     &[vec![Some(vec![u8::from(applied)])]],
                 ));
             }
-            Outcome::Rows(info) => {
+            Outcome::Rows(info, selected) => {
                 let Some(result) = results
                     .into_iter()
                     .rev()
@@ -717,16 +717,22 @@ impl<'s> Connection<'_, 's> {
                     return Err(failure(SERVER_ERROR, "the query returned no rows result"));
                 };
                 let columns = result.columns.unwrap_or_default();
-                let kinds: Vec<CqlType> = columns
+                let chosen = (selected.len() == columns.len()).then_some(&selected);
+                let kinds: Vec<(CqlType, bool)> = columns
                     .iter()
-                    .map(|column| {
-                        if column.name == "count"
+                    .enumerate()
+                    .map(|(at, column)| {
+                        if let Some(chosen) = chosen.and_then(|chosen| chosen.get(at)) {
+                            (chosen.cql, chosen.json_element)
+                        } else if column.name == "count"
                             && column.sql_type == Some(eggdb_sql::SqlType::BigInt)
                         {
-                            CqlType::BigInt
+                            (CqlType::BigInt, false)
                         } else {
-                            info.column_type(&column.name)
-                                .unwrap_or_else(|| CqlType::from_sql_type(column.sql_type.as_ref()))
+                            let cql = info
+                                .column_type(&column.name)
+                                .unwrap_or_else(|| CqlType::from_sql_type(column.sql_type.as_ref()));
+                            (cql, false)
                         }
                     })
                     .collect();
@@ -735,7 +741,13 @@ impl<'s> Connection<'_, 's> {
                     let cells = row
                         .iter()
                         .zip(&kinds)
-                        .map(|(value, cql)| encode_value(value, *cql))
+                        .map(|(value, (cql, json_element))| {
+                            if *json_element {
+                                encode_json_element(value, *cql)
+                            } else {
+                                encode_value(value, *cql)
+                            }
+                        })
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|message| failure(SERVER_ERROR, message))?;
                     rows.push(cells);
@@ -743,7 +755,7 @@ impl<'s> Connection<'_, 's> {
                 let described: Vec<(String, ColumnKind)> = columns
                     .iter()
                     .zip(&kinds)
-                    .map(|(column, cql)| (column.name.clone(), ColumnKind::Simple(*cql)))
+                    .map(|(column, (cql, _))| (column.name.clone(), ColumnKind::Simple(*cql)))
                     .collect();
                 return Ok(rows_result(&info.keyspace, &info.table, &described, &rows));
             }
@@ -803,7 +815,11 @@ impl<'s> Connection<'_, 's> {
             Selection::Columns(chosen) => {
                 let mut picked = Vec::new();
                 let mut positions = Vec::new();
-                for (name, alias) in chosen {
+                for selector in chosen {
+                    if selector.field.is_some() {
+                        return Err(invalid("field selection reads user-type columns of user tables only".to_owned()));
+                    }
+                    let (name, alias) = (&selector.column, &selector.alias);
                     let at = columns
                         .iter()
                         .position(|(column, _)| column == name)

@@ -79,7 +79,7 @@ fn resolved_columns(columns: &[ColumnDefinition], keyspace: &str, catalog: &mut 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Void,
-    Rows(Box<TableInfo>),
+    Rows(Box<TableInfo>, Vec<ResultColumn>),
     Applied(String, String),
     SetKeyspace(String),
     SchemaChange {
@@ -88,6 +88,15 @@ pub(crate) enum Outcome {
         keyspace: String,
         name: Option<String>,
     },
+}
+
+/// A column of a `SELECT`'s result: its name, its CQL type, and whether the stored value is
+/// a JSON element of a user type (a selected field) rather than the column itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResultColumn {
+    pub(crate) name: String,
+    pub(crate) cql: CqlType,
+    pub(crate) json_element: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -662,18 +671,49 @@ fn select(
     conditions: &[Relation],
     order: &[(String, bool)],
     limit: Option<&Term>,
-) -> Result<(), String> {
+) -> Result<Vec<ResultColumn>, String> {
     let target = qualified(&info.keyspace, &info.table);
+    let mut result = Vec::new();
     let projection = match selection {
         Selection::All => "*".to_owned(),
         Selection::Count => "count(*) AS \"count\"".to_owned(),
         Selection::Columns(columns) => {
             let mut parts = Vec::new();
-            for (name, alias) in columns {
-                column(info, name)?;
-                parts.push(match alias {
-                    Some(alias) => format!("{} AS {}", identifier(name), identifier(alias)),
-                    None => identifier(name),
+            for selector in columns {
+                let cql = column(info, &selector.column)?;
+                let (expression, cql, json_element, selected_name) = match &selector.field {
+                    None => (identifier(&selector.column), cql, false, selector.column.clone()),
+                    Some(field) => {
+                        let CqlType::Udt(user_type) = cql else {
+                            return Err(format!(
+                                "Invalid field selection: {} of type {} is not a user type",
+                                selector.column,
+                                cql.name()
+                            ));
+                        };
+                        let at = user_type
+                            .fields
+                            .iter()
+                            .position(|(name, _)| name == field)
+                            .ok_or_else(|| format!("Type {} has no field {field}", user_type.name))?;
+                        (
+                            format!("(({})::jsonb -> {at})", identifier(&selector.column)),
+                            user_type.fields[at].1,
+                            true,
+                            format!("{}.{field}", selector.column),
+                        )
+                    }
+                };
+                let name = selector.alias.clone().unwrap_or(selected_name);
+                parts.push(if selector.field.is_none() && selector.alias.is_none() {
+                    expression
+                } else {
+                    format!("{expression} AS {}", identifier(&name))
+                });
+                result.push(ResultColumn {
+                    name,
+                    cql,
+                    json_element,
                 });
             }
             parts.join(", ")
@@ -720,7 +760,7 @@ fn select(
         builder.sql(" LIMIT ");
         builder.term(limit, "[limit]", CqlType::Int)?;
     }
-    Ok(())
+    Ok(result)
 }
 
 fn statement(
@@ -1241,8 +1281,8 @@ fn statement(
         } => {
             let keyspace = keyspace_of(table, current)?;
             let info = catalog.table(&keyspace, &table.table)?;
-            select(builder, &info, selection, conditions, order, limit.as_ref())?;
-            (Outcome::Rows(Box::new(info)), keyspace, table.table.clone())
+            let result = select(builder, &info, selection, conditions, order, limit.as_ref())?;
+            (Outcome::Rows(Box::new(info), result), keyspace, table.table.clone())
         }
         Statement::Batch(statements) => {
             builder.sql("BEGIN; ");

@@ -211,7 +211,15 @@ pub(crate) struct TableName {
 pub(crate) enum Selection {
     All,
     Count,
-    Columns(Vec<(String, Option<String>)>),
+    Columns(Vec<Selector>),
+}
+
+/// One selected column, or one field of a user-type column (`home.street`), and its alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Selector {
+    pub(crate) column: String,
+    pub(crate) field: Option<String>,
+    pub(crate) alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -973,16 +981,21 @@ impl Parser {
         } else {
             let mut columns = Vec::new();
             loop {
-                let name = self.identifier()?;
+                let column = self.identifier()?;
                 if matches!(self.peek(), Some(Token::Symbol("("))) {
                     return Err(unsupported("functions in a selection"));
                 }
+                let field = if self.eat_symbol(".") {
+                    Some(self.identifier()?)
+                } else {
+                    None
+                };
                 let alias = if self.eat_word("as") {
                     Some(self.identifier()?)
                 } else {
                     None
                 };
-                columns.push((name, alias));
+                columns.push(Selector { column, field, alias });
                 if !self.eat_symbol(",") {
                     break;
                 }

@@ -4,7 +4,7 @@ use crate::frame::{
     STARTUP,
 };
 use crate::server::{ServerConfig, serve_stream};
-use crate::translate::{Catalog, TableInfo, translate};
+use crate::translate::{Catalog, Outcome, TableInfo, translate};
 use crate::types::{CqlType, encode_value, parameter_text, varint_round_trip};
 use eggdb_sql::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, ScanDirection, Session, SqlResult,
@@ -826,4 +826,31 @@ fn stored_user_types_read_back_without_a_lookup() {
     assert_eq!(element.id(), 0x0030);
     let bytes = crate::types::encode_text("[\"Main\",null]", *element).unwrap();
     assert_eq!(parameter_text(Some(&bytes), *element).unwrap().as_deref(), Some("[\"Main\",null]"));
+}
+
+#[test]
+fn user_type_fields_are_selected_by_name() {
+    let selected = typed_sql("SELECT k, home.street, home.number AS n FROM people WHERE k = 'a'").unwrap();
+    assert!(
+        selected.starts_with("SELECT \"k\", ((\"home\")::jsonb -> 0) AS \"home.street\", ((\"home\")::jsonb -> 1) AS \"n\" FROM"),
+        "{selected}"
+    );
+    assert!(typed_sql("SELECT home.floor FROM people").is_err());
+    assert!(typed_sql("SELECT k.street FROM people").is_err());
+    let (statement, markers) = parse("SELECT home.number AS n FROM people").unwrap();
+    let translated = translate(&statement, markers, Some("ks"), &mut TypedCatalog).unwrap();
+    let Outcome::Rows(_, columns) = &translated.outcome else {
+        panic!("a rows outcome");
+    };
+    assert_eq!(columns[0].name, "n");
+    assert_eq!(columns[0].cql, CqlType::Int);
+    assert!(columns[0].json_element);
+    let number = crate::types::encode_json_element(&eggdb_sql::Value::Text("5".to_owned()), CqlType::Int).unwrap();
+    assert_eq!(number, Some(5i32.to_be_bytes().to_vec()));
+    let street = crate::types::encode_json_element(&eggdb_sql::Value::Text("\"Main\"".to_owned()), CqlType::Varchar).unwrap();
+    assert_eq!(street, Some(b"Main".to_vec()));
+    assert_eq!(
+        crate::types::encode_json_element(&eggdb_sql::Value::Text("null".to_owned()), CqlType::Int).unwrap(),
+        None
+    );
 }
