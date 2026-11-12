@@ -314,15 +314,68 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
     None
 }
 
+const MOST_REPETITIONS: usize = 10;
+
+#[derive(Debug, Clone)]
 struct Path {
     nodes: Vec<ElementPattern>,
     edges: Vec<(ElementPattern, Direction)>,
 }
 
-fn path(text: &str) -> SqlResult<Path> {
+#[derive(Debug, Clone)]
+struct EdgeStep {
+    pattern: ElementPattern,
+    direction: Direction,
+    least: usize,
+    most: usize,
+    quantified: bool,
+}
+
+fn split_paths(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut start = 0;
+    for (at, byte) in text.bytes().enumerate() {
+        match byte {
+            b'\'' => quoted = !quoted,
+            b'(' | b'[' | b'{' if !quoted => depth += 1,
+            b')' | b']' | b'}' if !quoted => depth = depth.saturating_sub(1),
+            b',' if !quoted && depth == 0 => {
+                parts.push(&text[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+fn rebound(condition: &str, from: &str, to: &str) -> String {
+    let lower = condition.to_ascii_lowercase();
+    let needle = format!("{from}.");
+    let mut out = String::with_capacity(condition.len());
+    let mut at = 0;
+    while let Some(found) = lower.get(at..).and_then(|rest| rest.find(&needle)) {
+        let start = at + found;
+        let end = start + needle.len();
+        out.push_str(&condition[at..start]);
+        if start == 0 || !is_word_byte(lower.as_bytes()[start - 1]) {
+            out.push_str(&format!("{to}."));
+        } else {
+            out.push_str(&condition[start..end]);
+        }
+        at = end;
+    }
+    out.push_str(&condition[at..]);
+    out
+}
+
+fn path(text: &str) -> SqlResult<Vec<Path>> {
     let bytes = text.as_bytes();
     let mut nodes = Vec::new();
-    let mut edges = Vec::new();
+    let mut steps = Vec::new();
     let mut at = 0;
     let mut between = 0;
     let mut in_edge = false;
@@ -352,7 +405,7 @@ fn path(text: &str) -> SqlResult<Path> {
             }
             let inner = text.get(start + 1..at).ok_or_else(|| invalid("an element pattern is not closed"))?;
             if !nodes.is_empty() {
-                edges.push(edge_pattern(text.get(between..start).unwrap_or_default().trim())?);
+                steps.push(edge_step(text.get(between..start).unwrap_or_default().trim())?);
             }
             between = at + 1;
             nodes.push(element_pattern(inner));
@@ -367,13 +420,81 @@ fn path(text: &str) -> SqlResult<Path> {
     if nodes.is_empty() || !text.get(between..).unwrap_or_default().trim().is_empty() {
         return Err(invalid("a path pattern starts and ends with a node in parentheses"));
     }
-    Ok(Path { nodes, edges })
+    let mut expanded = vec![Path { nodes: vec![nodes[0].clone()], edges: Vec::new() }];
+    for (index, step) in steps.iter().enumerate() {
+        let mut grown = Vec::new();
+        for partial in &expanded {
+            for length in step.least..=step.most {
+                let mut path = partial.clone();
+                for repetition in 1..=length {
+                    let mut pattern = step.pattern.clone();
+                    if step.quantified
+                        && let Some(variable) = pattern.variable.clone()
+                    {
+                        let named = format!("{variable}_{repetition}");
+                        pattern.condition = pattern.condition.map(|condition| rebound(&condition, &variable, &named));
+                        pattern.variable = Some(named);
+                    }
+                    path.edges.push((pattern, step.direction));
+                    path.nodes.push(if repetition == length { nodes[index + 1].clone() } else { ElementPattern::default() });
+                }
+                if path.edges.len() + 1 > MOST_PATH_ELEMENTS {
+                    return Err(invalid("a path pattern of more than 40 edges"));
+                }
+                grown.push(path);
+                if grown.len() > MOST_COMBINATIONS {
+                    return Err(too_many_combinations());
+                }
+            }
+        }
+        expanded = grown;
+    }
+    Ok(expanded)
 }
 
-fn edge_pattern(text: &str) -> SqlResult<(ElementPattern, Direction)> {
+fn too_many_combinations() -> SqlError {
+    SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        format!("a GRAPH_TABLE pattern stands for more than {MOST_COMBINATIONS} combinations of tables; name labels to narrow it"),
+    )
+}
+
+fn quantifier(compact: &str) -> SqlResult<(&str, Option<(usize, usize)>)> {
+    if compact.ends_with('+') || compact.ends_with('*') {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "a quantified edge in GRAPH_TABLE needs an upper bound, such as {1,5}",
+        ));
+    }
+    let Some(open) = compact.strip_suffix('}').and_then(|inner| inner.rfind('{')) else {
+        return Ok((compact, None));
+    };
+    let inside = &compact[open + 1..compact.len() - 1];
+    let number = |text: &str| text.parse::<usize>().map_err(|_| invalid(format!("the quantifier {{{inside}}} is not a pair of counts")));
+    let (least, most) = match inside.split_once(',') {
+        Some((least, most)) if !most.is_empty() => (if least.is_empty() { 1 } else { number(least)? }, number(most)?),
+        Some(_) => {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                "a quantified edge in GRAPH_TABLE needs an upper bound, such as {1,5}",
+            ));
+        }
+        None => (number(inside)?, number(inside)?),
+    };
+    if least == 0 {
+        return Err(SqlError::new(SqlState::FEATURE_NOT_SUPPORTED, "a quantified edge in GRAPH_TABLE repeats at least once"));
+    }
+    if least > most || most > MOST_REPETITIONS {
+        return Err(invalid(format!("a quantifier counts from 1 up to {MOST_REPETITIONS}, the smaller count first")));
+    }
+    Ok((&compact[..open], Some((least, most))))
+}
+
+fn edge_step(text: &str) -> SqlResult<EdgeStep> {
     let compact: String = text.chars().filter(|character| !character.is_whitespace()).collect();
-    let backward = compact.starts_with("<-");
-    let forward = compact.ends_with("->");
+    let (arrow, counts) = quantifier(&compact)?;
+    let backward = arrow.starts_with("<-");
+    let forward = arrow.ends_with("->");
     let direction = match (backward, forward) {
         (true, false) => Direction::Backward,
         (false, true) => Direction::Forward,
@@ -384,7 +505,8 @@ fn edge_pattern(text: &str) -> SqlResult<(ElementPattern, Direction)> {
         (Some(open), Some(close)) if open < close => element_pattern(&text[open + 1..close]),
         _ => ElementPattern::default(),
     };
-    Ok((pattern, direction))
+    let (least, most) = counts.unwrap_or((1, 1));
+    Ok(EdgeStep { pattern, direction, least, most, quantified: counts.is_some() })
 }
 
 impl PropertyGraph {
@@ -397,54 +519,103 @@ impl PropertyGraph {
     }
 }
 
+#[derive(Clone)]
 struct Combination<'g> {
     nodes: Vec<&'g ElementTable>,
     edges: Vec<(&'g ElementTable, bool)>,
 }
 
-fn combinations<'g>(graph: &'g PropertyGraph, path: &Path) -> Vec<Combination<'g>> {
-    let mut done = Vec::new();
-    for first in graph.vertices.iter().filter(|vertex| PropertyGraph::matches(vertex, &path.nodes[0])) {
-        let mut partial = vec![Combination { nodes: vec![first], edges: Vec::new() }];
-        for (index, (edge_pattern, direction)) in path.edges.iter().enumerate() {
-            let mut grown = Vec::new();
-            for combination in partial {
-                let Some(&from) = combination.nodes.last() else {
+type Bound<'g> = Vec<(String, &'g ElementTable)>;
+
+fn allowed(bound: &Bound<'_>, variable: &str, element: &ElementTable) -> bool {
+    bound.iter().all(|(name, found)| name != variable || std::ptr::eq(*found, element))
+}
+
+fn with_variables<'g>(bound: &Bound<'g>, path: &Path, names: &PathNames, combination: &Combination<'g>) -> Bound<'g> {
+    let mut out = bound.clone();
+    for (index, &node) in combination.nodes.iter().enumerate() {
+        if path.nodes[index].variable.is_some() && !out.iter().any(|(name, _)| *name == names.nodes[index]) {
+            out.push((names.nodes[index].clone(), node));
+        }
+    }
+    for (index, &(edge, _)) in combination.edges.iter().enumerate() {
+        if path.edges[index].0.variable.is_some() && !out.iter().any(|(name, _)| *name == names.edges[index]) {
+            out.push((names.edges[index].clone(), edge));
+        }
+    }
+    out
+}
+
+fn combinations<'g>(graph: &'g PropertyGraph, path: &Path, names: &PathNames, bound: &Bound<'g>) -> SqlResult<Vec<Combination<'g>>> {
+    let fits_node = |index: usize, vertex: &ElementTable, partial: &Combination<'_>| {
+        PropertyGraph::matches(vertex, &path.nodes[index])
+            && (path.nodes[index].variable.is_none()
+                || (allowed(bound, &names.nodes[index], vertex)
+                    && (0..index).all(|earlier| names.nodes[earlier] != names.nodes[index] || std::ptr::eq(partial.nodes[earlier], vertex))))
+    };
+    let mut partial: Vec<Combination<'g>> = Vec::new();
+    for first in &graph.vertices {
+        let empty = Combination { nodes: Vec::new(), edges: Vec::new() };
+        if fits_node(0, first, &empty) {
+            partial.push(Combination { nodes: vec![first], edges: Vec::new() });
+        }
+    }
+    for (index, (edge_pattern, direction)) in path.edges.iter().enumerate() {
+        let mut grown = Vec::new();
+        for combination in &partial {
+            let Some(&from) = combination.nodes.last() else {
+                continue;
+            };
+            for edge in graph.edges.iter().filter(|edge| PropertyGraph::matches(edge, edge_pattern)) {
+                if edge_pattern.variable.is_some() && !allowed(bound, &names.edges[index], edge) {
                     continue;
+                }
+                let orientations: &[bool] = match direction {
+                    Direction::Forward => &[true],
+                    Direction::Backward => &[false],
+                    Direction::Either => &[true, false],
                 };
-                for edge in graph.edges.iter().filter(|edge| PropertyGraph::matches(edge, edge_pattern)) {
-                    let orientations: &[bool] = match direction {
-                        Direction::Forward => &[true],
-                        Direction::Backward => &[false],
-                        Direction::Either => &[true, false],
+                for &forward in orientations {
+                    let (near, far) = if forward { (&edge.source, &edge.destination) } else { (&edge.destination, &edge.source) };
+                    let (Some(near), Some(far)) = (near, far) else {
+                        continue;
                     };
-                    for &forward in orientations {
-                        let (near, far) = if forward { (&edge.source, &edge.destination) } else { (&edge.destination, &edge.source) };
-                        let (Some(near), Some(far)) = (near, far) else {
-                            continue;
-                        };
-                        let near_matches = graph.vertex(&near.vertex).is_some_and(|vertex| vertex.alias == from.alias);
-                        let Some(to) = graph.vertex(&far.vertex) else {
-                            continue;
-                        };
-                        if near_matches && PropertyGraph::matches(to, &path.nodes[index + 1]) && grown.len() < MOST_COMBINATIONS {
-                            let mut nodes = combination.nodes.clone();
-                            nodes.push(to);
-                            let mut edges = combination.edges.clone();
-                            edges.push((edge, forward));
-                            grown.push(Combination { nodes, edges });
+                    let near_matches = graph.vertex(&near.vertex).is_some_and(|vertex| vertex.alias == from.alias);
+                    let Some(to) = graph.vertex(&far.vertex) else {
+                        continue;
+                    };
+                    if near_matches && fits_node(index + 1, to, combination) {
+                        if grown.len() >= MOST_COMBINATIONS {
+                            return Err(too_many_combinations());
                         }
+                        let mut next = combination.clone();
+                        next.nodes.push(to);
+                        next.edges.push((edge, forward));
+                        grown.push(next);
                     }
                 }
             }
-            partial = grown;
         }
-        done.extend(partial);
-        if done.len() >= MOST_COMBINATIONS {
-            break;
-        }
+        partial = grown;
     }
-    done
+    Ok(partial)
+}
+
+struct PathNames {
+    nodes: Vec<String>,
+    edges: Vec<String>,
+}
+
+fn path_names(path: &Path, anonymous: &mut usize) -> PathNames {
+    let mut next = |variable: &Option<String>, kind: &str| {
+        variable.clone().unwrap_or_else(|| {
+            *anonymous += 1;
+            format!("eggdb_{kind}_{anonymous}")
+        })
+    };
+    let nodes = path.nodes.iter().map(|node| next(&node.variable, "node")).collect();
+    let edges: Vec<String> = path.edges.iter().map(|(edge, _)| next(&edge.variable, "edge")).collect();
+    PathNames { nodes, edges }
 }
 
 fn joined(left: &str, left_columns: &[String], right: &str, right_columns: &[String]) -> String {
@@ -488,8 +659,58 @@ fn replace_reference(text: &str, variable: &str, property: &str, column: &str) -
     out
 }
 
-/// The query a `GRAPH_TABLE` body (`graph MATCH pattern [WHERE ...] COLUMNS (...)`) stands
-/// for over `graph`.
+fn from_clause<'g>(paths: &[(&PathNames, &Combination<'g>)]) -> SqlResult<(String, Vec<(String, &'g ElementTable)>)> {
+    let mut from = String::new();
+    let mut variables: Vec<(String, &'g ElementTable)> = Vec::new();
+    for (names, combination) in paths {
+        let first = &names.nodes[0];
+        if !variables.iter().any(|(name, _)| name == first) {
+            if !from.is_empty() {
+                from.push_str(" CROSS JOIN ");
+            }
+            from.push_str(&format!("{} AS {first}", combination.nodes[0].table));
+            variables.push((first.clone(), combination.nodes[0]));
+        }
+        for (index, &(edge, forward)) in combination.edges.iter().enumerate() {
+            let (near, far) = if forward { (&edge.source, &edge.destination) } else { (&edge.destination, &edge.source) };
+            let (Some(near), Some(far)) = (near, far) else {
+                continue;
+            };
+            let edge_alias = &names.edges[index];
+            if variables.iter().any(|(name, _)| name == edge_alias) {
+                return Err(SqlError::new(
+                    SqlState::FEATURE_NOT_SUPPORTED,
+                    format!("the edge variable {edge_alias} appears twice in a GRAPH_TABLE pattern"),
+                ));
+            }
+            let to_alias = &names.nodes[index + 1];
+            let near_condition = joined(edge_alias, &near.columns, &names.nodes[index], &near.vertex_columns);
+            let far_condition = joined(edge_alias, &far.columns, to_alias, &far.vertex_columns);
+            variables.push((edge_alias.clone(), edge));
+            if variables.iter().any(|(name, _)| name == to_alias) {
+                from.push_str(&format!(" JOIN {} AS {edge_alias} ON {near_condition} AND {far_condition}", edge.table));
+            } else {
+                from.push_str(&format!(
+                    " JOIN {} AS {edge_alias} ON {near_condition} JOIN {} AS {to_alias} ON {far_condition}",
+                    edge.table,
+                    combination.nodes[index + 1].table,
+                ));
+                variables.push((to_alias.clone(), combination.nodes[index + 1]));
+            }
+        }
+    }
+    Ok((from, variables))
+}
+
+fn path_conditions(path: &Path) -> impl Iterator<Item = String> + '_ {
+    path.nodes
+        .iter()
+        .filter_map(|node| node.condition.clone())
+        .chain(path.edges.iter().filter_map(|(edge, _)| edge.condition.clone()))
+}
+
+/// The query a `GRAPH_TABLE` body (`graph MATCH pattern [, pattern ...] [WHERE ...] COLUMNS
+/// (...)`) stands for over `graph`.
 pub(crate) fn graph_table_query(graph: &PropertyGraph, body: &str) -> SqlResult<String> {
     let match_at = find_word(body, "match").ok_or_else(|| invalid("GRAPH_TABLE needs MATCH"))?;
     let rest = &body[match_at + 5..];
@@ -503,53 +724,60 @@ pub(crate) fn graph_table_query(graph: &PropertyGraph, body: &str) -> SqlResult<
         .strip_prefix('(')
         .and_then(|inner| inner.strip_suffix(')'))
         .ok_or_else(|| invalid("COLUMNS lists its columns in parentheses"))?;
-    if find_word(pattern_text, ",").is_some() {
-        return Err(SqlError::new(SqlState::FEATURE_NOT_SUPPORTED, "GRAPH_TABLE with several path patterns is not supported yet"));
+    let mut instances: Vec<Vec<Path>> = vec![Vec::new()];
+    for text in split_paths(pattern_text) {
+        let alternatives = path(text.trim())?;
+        let mut grown = Vec::new();
+        for instance in &instances {
+            for alternative in &alternatives {
+                let mut next = instance.clone();
+                next.push(alternative.clone());
+                grown.push(next);
+                if grown.len() > MOST_COMBINATIONS {
+                    return Err(too_many_combinations());
+                }
+            }
+        }
+        instances = grown;
     }
-    let path = path(pattern_text.trim())?;
-    let found = combinations(graph, &path);
-    if found.is_empty() {
+    let mut selects = Vec::new();
+    for instance in &instances {
+        let mut anonymous = 0usize;
+        let names: Vec<PathNames> = instance.iter().map(|path| path_names(path, &mut anonymous)).collect();
+        let mut assignments: Vec<(Vec<Combination<'_>>, Bound<'_>)> = vec![(Vec::new(), Vec::new())];
+        for (path, path_names) in instance.iter().zip(&names) {
+            let mut grown = Vec::new();
+            for (chosen, bound) in &assignments {
+                for combination in combinations(graph, path, path_names, bound)? {
+                    let bound = with_variables(bound, path, path_names, &combination);
+                    let mut chosen = chosen.clone();
+                    chosen.push(combination);
+                    grown.push((chosen, bound));
+                    if grown.len() + selects.len() > MOST_COMBINATIONS {
+                        return Err(too_many_combinations());
+                    }
+                }
+            }
+            assignments = grown;
+        }
+        for (chosen, _) in assignments {
+            let parts: Vec<(&PathNames, &Combination<'_>)> = names.iter().zip(&chosen).collect();
+            let (from, variables) = from_clause(&parts)?;
+            let mut conditions: Vec<String> = instance.iter().flat_map(path_conditions).collect();
+            conditions.extend(filter.map(str::to_owned));
+            let filter = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", conditions.iter().map(|condition| format!("({condition})")).collect::<Vec<_>>().join(" AND "))
+            };
+            selects.push(renamed(&format!("SELECT {columns} FROM {from}{filter}"), &variables));
+        }
+    }
+    if selects.is_empty() {
         return Err(SqlError::new(
             SqlState::UNDEFINED_OBJECT,
             format!("no tables of the property graph {} match the pattern's labels and directions", graph.name),
         ));
-    }
-    let mut selects = Vec::new();
-    for combination in found {
-        let node_name = |index: usize| path.nodes[index].variable.clone().unwrap_or_else(|| format!("eggdb_node_{index}"));
-        let edge_name = |index: usize| path.edges[index].0.variable.clone().unwrap_or_else(|| format!("eggdb_edge_{index}"));
-        let mut from = format!("{} AS {}", combination.nodes[0].table, node_name(0));
-        let mut variables: Vec<(String, &ElementTable)> = vec![(node_name(0), combination.nodes[0])];
-        for (index, (edge, forward)) in combination.edges.iter().enumerate() {
-            let (near, far) = if *forward { (&edge.source, &edge.destination) } else { (&edge.destination, &edge.source) };
-            let (Some(near), Some(far)) = (near, far) else {
-                continue;
-            };
-            let edge_alias = edge_name(index);
-            let to_alias = node_name(index + 1);
-            from.push_str(&format!(
-                " JOIN {} AS {edge_alias} ON {} JOIN {} AS {to_alias} ON {}",
-                edge.table,
-                joined(&edge_alias, &near.columns, &node_name(index), &near.vertex_columns),
-                combination.nodes[index + 1].table,
-                joined(&edge_alias, &far.columns, &to_alias, &far.vertex_columns),
-            ));
-            variables.push((edge_alias, edge));
-            variables.push((to_alias, combination.nodes[index + 1]));
-        }
-        let mut conditions: Vec<String> = path
-            .nodes
-            .iter()
-            .filter_map(|node| node.condition.clone())
-            .chain(path.edges.iter().filter_map(|(edge, _)| edge.condition.clone()))
-            .collect();
-        conditions.extend(filter.map(str::to_owned));
-        let filter = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.iter().map(|condition| format!("({condition})")).collect::<Vec<_>>().join(" AND "))
-        };
-        selects.push(renamed(&format!("SELECT {columns} FROM {from}{filter}"), &variables));
     }
     Ok(format!("({})", selects.join(" UNION ALL ")))
 }
@@ -865,6 +1093,17 @@ mod tests {
         );
         let either = graph_table_query(&graph, " MATCH (x)-[k]-(y) COLUMNS (x.id)").unwrap();
         assert_eq!(either.matches("UNION ALL").count(), 1);
+        let two = graph_table_query(&graph, " MATCH (x)-[k]->(y), (y)-[j]->(z) COLUMNS (z.id)").unwrap();
+        assert_eq!(
+            two,
+            "(SELECT z.id FROM person AS x JOIN knows AS k ON k.a = x.id JOIN person AS y ON k.b = y.id JOIN knows AS j ON j.a = y.id JOIN person AS z ON j.b = z.id)"
+        );
+        let cycle = graph_table_query(&graph, " MATCH (x)-[k]->(y)-[j]->(x) COLUMNS (x.id)").unwrap();
+        assert!(cycle.ends_with("JOIN knows AS j ON j.a = y.id AND j.b = x.id)"));
+        let quantified = graph_table_query(&graph, " MATCH (x)-[k]->{1,3}(y) COLUMNS (y.id)").unwrap();
+        assert_eq!(quantified.matches("UNION ALL").count(), 2);
+        assert!(quantified.contains("JOIN knows AS k_3 ON k_3.a = eggdb_node_2.id"));
+        assert!(graph_table_query(&graph, " MATCH (x)-[k]->+(y) COLUMNS (y.id)").is_err());
         let spans = graph_tables("SELECT * FROM GRAPH_TABLE (social MATCH (a) COLUMNS (a.id)) AS g").unwrap();
         assert_eq!(spans[0].1, "social");
         assert_eq!(graph_command("create property graph g vertex tables (t)"), Some(true));
