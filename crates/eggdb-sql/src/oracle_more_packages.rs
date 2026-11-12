@@ -67,6 +67,12 @@ pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static s
         ("dbms_crypto", "encrypt") => ("oracle_dbms_crypto_encrypt", 3, 4),
         ("dbms_crypto", "decrypt") => ("oracle_dbms_crypto_decrypt", 3, 4),
         ("dbms_utility", "get_time") => ("oracle_dbms_utility_get_time", 0, 0),
+        ("utl_encode", "base64_encode") => ("oracle_utl_encode_base64_encode", 1, 1),
+        ("utl_encode", "base64_decode") => ("oracle_utl_encode_base64_decode", 1, 1),
+        ("utl_i18n", "string_to_raw") => ("oracle_utl_i18n_string_to_raw", 1, 2),
+        ("utl_i18n", "raw_to_char") => ("oracle_utl_i18n_raw_to_char", 1, 2),
+        ("utl_url", "escape") => ("oracle_utl_url_escape", 1, 3),
+        ("utl_url", "unescape") => ("oracle_utl_url_unescape", 1, 2),
         _ => return None,
     })
 }
@@ -106,6 +112,10 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_assert_qualified_sql_name"
         | "oracle_dbms_assert_enquote_name"
         | "oracle_dbms_assert_enquote_literal" => SqlType::Text,
+        "oracle_utl_i18n_raw_to_char" | "oracle_utl_url_escape" | "oracle_utl_url_unescape" => SqlType::Text,
+        "oracle_utl_encode_base64_encode" | "oracle_utl_encode_base64_decode" | "oracle_utl_i18n_string_to_raw" => {
+            SqlType::Bytea
+        }
         "oracle_dbms_crypto_hash"
         | "oracle_dbms_crypto_mac"
         | "oracle_dbms_crypto_randombytes"
@@ -269,10 +279,131 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         && !name.starts_with("oracle_utl_match_")
         && !name.starts_with("oracle_dbms_crypto_")
         && !name.starts_with("oracle_dbms_utility_")
+        && !name.starts_with("oracle_utl_encode_")
+        && !name.starts_with("oracle_utl_i18n_")
+        && !name.starts_with("oracle_utl_url_")
     {
         return None;
     }
+    if let Some(result) = text_package(name, values) {
+        return Some(result);
+    }
     Some(evaluate(name, values))
+}
+
+const URL_UNRESERVED: &str = "-_.!~*'()";
+const URL_RESERVED: &str = ";/?:@&=+$,[]";
+
+fn charset_of(values: &[Value], at: usize) -> SqlResult<Charset> {
+    let name = values.get(at).filter(|value| !value.is_null()).and_then(Value::to_text).unwrap_or_else(|| "AL32UTF8".to_owned());
+    match name.to_ascii_uppercase().replace(['-', '_'], "").as_str() {
+        "AL32UTF8" | "UTF8" => Ok(Charset::Utf8),
+        "WE8ISO8859P1" | "ISO88591" | "WE8MSWIN1252" | "US7ASCII" => Ok(Charset::Latin1),
+        _ => Err(SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!("ORA-{ORACLE_NUMERIC_OR_VALUE:05}: character set {name} is not supported yet"),
+        )
+        .with_oracle_code(ORACLE_NUMERIC_OR_VALUE)),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Charset {
+    Utf8,
+    Latin1,
+}
+
+fn encoded(text: &str, charset: Charset) -> Vec<u8> {
+    match charset {
+        Charset::Utf8 => text.as_bytes().to_vec(),
+        Charset::Latin1 => text.chars().map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?')).collect(),
+    }
+}
+
+fn decoded(bytes: &[u8], charset: Charset) -> String {
+    match charset {
+        Charset::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+        Charset::Latin1 => bytes.iter().map(|byte| char::from(*byte)).collect(),
+    }
+}
+
+fn raw_input(value: &Value) -> Vec<u8> {
+    match value {
+        Value::Bytea(bytes) => bytes.clone(),
+        other => other.to_text().map(String::into_bytes).unwrap_or_default(),
+    }
+}
+
+fn text_package(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    if !name.starts_with("oracle_utl_encode_") && !name.starts_with("oracle_utl_i18n_") && !name.starts_with("oracle_utl_url_") {
+        return None;
+    }
+    let first = values.first()?;
+    if first.is_null() {
+        return Some(Ok(Value::Null));
+    }
+    Some(match name {
+        "oracle_utl_encode_base64_encode" => Ok(Value::Bytea(eggdb_crypto::base64_encode(&raw_input(first)).into_bytes())),
+        "oracle_utl_encode_base64_decode" => {
+            let compact: Vec<u8> = raw_input(first).into_iter().filter(|byte| !byte.is_ascii_whitespace()).collect();
+            eggdb_crypto::base64_decode(&compact).map(Value::Bytea).map_err(|_| {
+                SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    format!("ORA-{ORACLE_NUMERIC_OR_VALUE:05}: the input is not base64"),
+                )
+                .with_oracle_code(ORACLE_NUMERIC_OR_VALUE)
+            })
+        }
+        "oracle_utl_i18n_string_to_raw" => {
+            charset_of(values, 1).map(|charset| Value::Bytea(encoded(&first.to_text().unwrap_or_default(), charset)))
+        }
+        "oracle_utl_i18n_raw_to_char" => charset_of(values, 1).map(|charset| Value::Text(decoded(&raw_input(first), charset))),
+        "oracle_utl_url_escape" => {
+            let escape_reserved = matches!(values.get(1), Some(Value::Boolean(true)));
+            charset_of(values, 2).map(|charset| {
+                let url = first.to_text().unwrap_or_default();
+                let mut out = String::with_capacity(url.len());
+                for character in url.chars() {
+                    let kept = character.is_ascii_alphanumeric()
+                        || URL_UNRESERVED.contains(character)
+                        || (!escape_reserved && (URL_RESERVED.contains(character) || character == '%'));
+                    if kept {
+                        out.push(character);
+                    } else {
+                        for byte in encoded(&character.to_string(), charset) {
+                            out.push_str(&format!("%{byte:02X}"));
+                        }
+                    }
+                }
+                Value::Text(out)
+            })
+        }
+        "oracle_utl_url_unescape" => charset_of(values, 1).map(|charset| {
+            let url = first.to_text().unwrap_or_default();
+            let bytes = url.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut at = 0;
+            while at < bytes.len() {
+                let escaped = (bytes[at] == b'%')
+                    .then(|| bytes.get(at + 1..at + 3))
+                    .flatten()
+                    .and_then(|hex| std::str::from_utf8(hex).ok())
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                match escaped {
+                    Some(byte) => {
+                        out.push(byte);
+                        at += 3;
+                    }
+                    None => {
+                        out.push(bytes[at]);
+                        at += 1;
+                    }
+                }
+            }
+            Value::Text(decoded(&out, charset))
+        }),
+        _ => return None,
+    })
 }
 
 fn evaluate(name: &str, values: &[Value]) -> SqlResult<Value> {
