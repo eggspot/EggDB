@@ -1,14 +1,21 @@
 //! EggDB's RDF store (D38, D886): triples and quads kept on EggDB's key-value transactions
 //! through [`eggdb_keyspace::Keyspace`], read from N-Triples, N-Quads, Turtle and TriG, and
-//! written out as N-Quads. Everything is written from the W3C recommendations (RDF 1.1
-//! Concepts, N-Triples, N-Quads, Turtle, TriG); no other RDF store's code is used or read.
+//! written out as N-Quads, and queried with SPARQL 1.1 ([`query`]). Everything is written from
+//! the W3C recommendations (RDF 1.1 Concepts, N-Triples, N-Quads, Turtle, TriG, SPARQL 1.1
+//! Query Language and Query Results formats); no other RDF store's code is used or read.
 
 mod sparql_ast;
+mod sparql_eval;
 mod sparql_parser;
+mod sparql_regex;
+mod sparql_results;
+mod sparql_values;
 mod store;
 mod syntax;
 mod term;
 
+pub use sparql_eval::QueryOutcome;
+pub use sparql_results::{ResultFormat, write_results};
 pub use syntax::{Format, parse};
 pub use term::{
     Literal, Quad, RDF_FIRST, RDF_LANG_STRING, RDF_NIL, RDF_REST, RDF_TYPE, Term, XSD_BOOLEAN,
@@ -196,6 +203,15 @@ pub fn export(keyspace: &dyn Keyspace, db: u32) -> RdfResult<String> {
     })
 }
 
+/// Runs a SPARQL 1.1 query (relative IRIs against `base`) on a snapshot of database `db`.
+pub fn query(keyspace: &dyn Keyspace, db: u32, text: &str, base: &str) -> RdfResult<QueryOutcome> {
+    let parsed = sparql_parser::parse_query(text, base)?;
+    reading(keyspace, db, &mut |read| {
+        let evaluator = sparql_eval::Evaluator::new(read, parsed.dataset.as_ref())?;
+        evaluator.query(&parsed)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +229,80 @@ mod tests {
         assert_eq!(exported.lines().count(), 5);
         assert!(exported.ends_with("<http://a> <http://b> <http://c> <http://example.org/g> .\n"), "{exported}");
         assert!(load(&keyspace, 0, "\"x\" <http://b> <http://c> .", Format::Turtle, "", None).is_err());
+    }
+
+    fn rows(outcome: QueryOutcome) -> Vec<Vec<Option<Term>>> {
+        match outcome {
+            QueryOutcome::Solutions { rows, .. } => rows,
+            other => panic!("solutions, not {other:?}"),
+        }
+    }
+
+    fn plain(text: &str) -> Option<Term> {
+        Some(Term::Literal(Literal::string(text)))
+    }
+
+    #[test]
+    fn sparql_queries_answer_over_loaded_data() {
+        let keyspace = MemoryKeyspace::default();
+        let data = r#"@prefix ex: <http://example.org/> .
+            ex:ann a ex:Person ; ex:name "Ann" ; ex:age 31 ; ex:knows ex:bob, ex:cid .
+            ex:bob a ex:Person ; ex:name "Bob" ; ex:age 17 ; ex:knows ex:cid .
+            ex:cid a ex:Person ; ex:name "Cid" .
+            ex:g1 { ex:ann ex:email "ann@example.org" }"#;
+        load(&keyspace, 0, data, Format::TriG, "", None).unwrap();
+        let adults = query(
+            &keyspace,
+            0,
+            "PREFIX ex: <http://example.org/> SELECT ?name WHERE { ?p a ex:Person ; ex:name ?name ; ex:age ?age FILTER(?age >= 18) }",
+            "",
+        )
+        .unwrap();
+        assert_eq!(rows(adults), vec![vec![plain("Ann")]]);
+        let counted = query(
+            &keyspace,
+            0,
+            "PREFIX ex: <http://example.org/> SELECT ?name (COUNT(?friend) AS ?friends) WHERE { ?p ex:name ?name OPTIONAL { ?p ex:knows ?friend } } GROUP BY ?name ORDER BY DESC(?friends) ?name",
+            "",
+        )
+        .unwrap();
+        let counted = rows(counted);
+        assert_eq!(counted.len(), 3);
+        assert_eq!(counted[0][0], plain("Ann"));
+        assert_eq!(counted[0][1], Some(Term::Literal(Literal::typed("2", XSD_INTEGER))));
+        assert_eq!(counted[2][1], Some(Term::Literal(Literal::typed("0", XSD_INTEGER))));
+        let reach = query(
+            &keyspace,
+            0,
+            "PREFIX ex: <http://example.org/> SELECT DISTINCT ?who WHERE { ex:ann ex:knows+ ?who } ORDER BY ?who",
+            "",
+        )
+        .unwrap();
+        assert_eq!(rows(reach).len(), 2);
+        let graph = query(
+            &keyspace,
+            0,
+            "PREFIX ex: <http://example.org/> SELECT ?g ?mail WHERE { GRAPH ?g { ?p ex:email ?mail } }",
+            "",
+        )
+        .unwrap();
+        assert_eq!(rows(graph), vec![vec![Some(Term::iri("http://example.org/g1")), plain("ann@example.org")]]);
+        assert_eq!(
+            query(&keyspace, 0, "ASK { <http://example.org/bob> <http://example.org/knows> ?x }", "").unwrap(),
+            QueryOutcome::Boolean(true)
+        );
+        let built = query(
+            &keyspace,
+            0,
+            "PREFIX ex: <http://example.org/> CONSTRUCT { ?b ex:knownBy ?a } WHERE { ?a ex:knows ?b }",
+            "",
+        )
+        .unwrap();
+        let QueryOutcome::Graph(triples) = built else {
+            panic!("a graph");
+        };
+        assert_eq!(triples.len(), 3);
+        let missing = query(&keyspace, 0, "SELECT * WHERE { ?s <http://nothing> ?o }", "").unwrap();
+        assert!(rows(missing).is_empty());
     }
 }

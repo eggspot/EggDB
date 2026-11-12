@@ -912,3 +912,4 @@ its full title with its status.
 - [D885](decisions/D885.md) Code-only batch 533 (M13): range conditions read graph property indexes
 - [D886](decisions/D886.md) Code-only batch 534 (M13): an RDF quad store with N-Triples, N-Quads, Turtle and TriG
 - [D887](decisions/D887.md) Code-only batch 535 (M13): a SPARQL 1.1 query and update reader
+- [D888](decisions/D888.md) Code-only batch 536 (M13): SPARQL 1.1 queries evaluated

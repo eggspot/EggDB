@@ -1534,8 +1534,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The graph algorithms as procedures in SQL/PGQ (D248).
 - RDF triples and quads with SPARQL 1.1 (D38). Check: the W3C SPARQL suite. The quad store and its readers (N-Triples,
   N-Quads, Turtle, TriG) in `eggdb-rdf`: **code written, unbuilt** (code-only mode, 2026-11-12, D886); the SPARQL
-  1.1 query and update reader: **code written, unbuilt** (code-only mode, 2026-11-12, D887). Left: evaluating
-  queries and updates, the protocol, and the server wiring.
+  1.1 query and update reader: **code written, unbuilt** (code-only mode, 2026-11-12, D887); queries evaluated with
+  the four result formats: **code written, unbuilt** (code-only mode, 2026-11-12, D888). Left: updates, the
+  protocol, and the server wiring.
 - The LDBC benchmark against Neo4j (D7, D206).
 
 ### M14 Backup, point-in-time recovery and replication
