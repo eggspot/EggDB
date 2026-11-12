@@ -788,3 +788,4 @@ its full title with its status.
 - [D761](decisions/D761.md) Code-only batch 409 (M6b): evidence reports for SOC 2, HIPAA and PCI DSS, `CREATE EXTENSION eggdb_compliance`
 - [D762](decisions/D762.md) Code-only batch 410 (M6b): row-level legal holds, records schedules and EDRM eDiscovery export in `eggdb_retention`
 - [D763](decisions/D763.md) Code-only batch 411 (M6b): marketplace listings of shared data, `CREATE EXTENSION eggdb_marketplace`
+- [D764](decisions/D764.md) Code-only batch 412 (M6b): tenants isolated by schema, copied from a template and upgraded with it

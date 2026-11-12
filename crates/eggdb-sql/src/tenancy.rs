@@ -51,6 +51,119 @@ BEGIN
     INSERT INTO eggdb_tenancy.isolated (table_schema, table_name, tenant_column) VALUES (schema_name, table_name, tenant_column);
 END
 $$;
+CREATE TABLE eggdb_tenancy.tenant_schemas (
+    tenant text PRIMARY KEY,
+    schema_name text NOT NULL UNIQUE,
+    template_schema text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE FUNCTION eggdb_tenancy.copy_table(template_schema text, table_name text, target_schema text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    found_column record;
+    found_constraint record;
+    key_columns text;
+    sequence_name text;
+BEGIN
+    EXECUTE format('CREATE TABLE %I.%I AS SELECT * FROM %I.%I WHERE false', target_schema, table_name, template_schema, table_name);
+    FOR found_column IN SELECT c.column_name AS name, c.is_nullable AS nullable, c.column_default AS default_value FROM information_schema.columns c
+            WHERE c.table_schema = copy_table.template_schema AND c.table_name = copy_table.table_name ORDER BY c.ordinal_position LOOP
+        IF found_column.nullable = 'NO' THEN
+            EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I SET NOT NULL', target_schema, table_name, found_column.name);
+        END IF;
+        IF found_column.default_value LIKE 'nextval(%' THEN
+            sequence_name := table_name || '_' || found_column.name || '_seq';
+            EXECUTE format('CREATE SEQUENCE %I.%I', target_schema, sequence_name);
+            EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I SET DEFAULT nextval(%L)', target_schema, table_name, found_column.name, quote_ident(target_schema) || '.' || quote_ident(sequence_name));
+            EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %I.%I TO %I', target_schema, sequence_name, target_schema);
+        ELSIF found_column.default_value IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I SET DEFAULT %s', target_schema, table_name, found_column.name, found_column.default_value);
+        END IF;
+    END LOOP;
+    FOR found_constraint IN SELECT tc.constraint_name AS name, tc.constraint_type AS kind FROM information_schema.table_constraints tc
+            WHERE tc.table_schema = copy_table.template_schema AND tc.table_name = copy_table.table_name AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+            ORDER BY tc.constraint_type, tc.constraint_name LOOP
+        SELECT string_agg(quote_ident(k.column_name), ', ' ORDER BY k.ordinal_position) INTO key_columns FROM information_schema.key_column_usage k
+            WHERE k.constraint_schema = copy_table.template_schema AND k.constraint_name = found_constraint.name AND k.table_name = copy_table.table_name;
+        EXECUTE format('ALTER TABLE %I.%I ADD %s (%s)', target_schema, table_name, found_constraint.kind, key_columns);
+    END LOOP;
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.%I TO %I', target_schema, table_name, target_schema);
+END
+$$;
+CREATE FUNCTION eggdb_tenancy.create_tenant_schema(tenant text, template_schema text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    found_table record;
+    copied bigint := 0;
+BEGIN
+    IF EXISTS (SELECT 1 FROM eggdb_tenancy.tenant_schemas s WHERE s.tenant = create_tenant_schema.tenant) THEN
+        RAISE EXCEPTION 'tenant % already has a schema', tenant USING ERRCODE = '42710';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname = create_tenant_schema.tenant) THEN
+        EXECUTE format('CREATE ROLE %I', tenant);
+    END IF;
+    EXECUTE format('CREATE SCHEMA %I', tenant);
+    EXECUTE format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', tenant);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', tenant, tenant);
+    FOR found_table IN SELECT t.table_name AS name FROM information_schema.tables t WHERE t.table_schema = create_tenant_schema.template_schema AND t.table_type = 'BASE TABLE' ORDER BY t.table_name LOOP
+        PERFORM eggdb_tenancy.copy_table(template_schema, found_table.name, tenant);
+        copied := copied + 1;
+    END LOOP;
+    INSERT INTO eggdb_tenancy.tenant_schemas (tenant, schema_name, template_schema) VALUES (create_tenant_schema.tenant, create_tenant_schema.tenant, create_tenant_schema.template_schema);
+    RETURN copied;
+END
+$$;
+CREATE FUNCTION eggdb_tenancy.upgrade_tenant_schemas(template_schema text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    tenant_schema record;
+    found_table record;
+    missing record;
+    column_type text;
+    changes bigint := 0;
+BEGIN
+    FOR tenant_schema IN SELECT s.schema_name AS name FROM eggdb_tenancy.tenant_schemas s WHERE s.template_schema = upgrade_tenant_schemas.template_schema ORDER BY s.tenant LOOP
+        FOR found_table IN SELECT t.table_name AS name FROM information_schema.tables t WHERE t.table_schema = upgrade_tenant_schemas.template_schema AND t.table_type = 'BASE TABLE' ORDER BY t.table_name LOOP
+            IF NOT EXISTS (SELECT 1 FROM information_schema.tables t WHERE t.table_schema = tenant_schema.name AND t.table_name = found_table.name) THEN
+                PERFORM eggdb_tenancy.copy_table(template_schema, found_table.name, tenant_schema.name);
+                changes := changes + 1;
+                CONTINUE;
+            END IF;
+            FOR missing IN SELECT c.column_name, c.data_type, c.character_maximum_length, c.numeric_precision, c.numeric_scale, c.is_nullable, c.column_default
+                    FROM information_schema.columns c
+                    WHERE c.table_schema = upgrade_tenant_schemas.template_schema AND c.table_name = found_table.name
+                      AND NOT EXISTS (SELECT 1 FROM information_schema.columns d WHERE d.table_schema = tenant_schema.name AND d.table_name = found_table.name AND d.column_name = c.column_name)
+                    ORDER BY c.ordinal_position LOOP
+                column_type := CASE missing.data_type
+                    WHEN 'character varying' THEN coalesce('varchar(' || missing.character_maximum_length || ')', 'varchar')
+                    WHEN 'character' THEN 'char(' || coalesce(missing.character_maximum_length, 1) || ')'
+                    WHEN 'numeric' THEN coalesce('numeric(' || missing.numeric_precision || ', ' || missing.numeric_scale || ')', 'numeric')
+                    WHEN 'ARRAY' THEN NULL
+                    WHEN 'USER-DEFINED' THEN NULL
+                    ELSE missing.data_type
+                END;
+                IF column_type IS NULL OR missing.column_default LIKE 'nextval(%' THEN
+                    RAISE EXCEPTION 'column %.% cannot be copied to the tenant schemas by upgrade_tenant_schemas: add it by hand', found_table.name, missing.column_name USING ERRCODE = '0A000';
+                END IF;
+                EXECUTE format('ALTER TABLE %I.%I ADD COLUMN %I %s%s%s', tenant_schema.name, found_table.name, missing.column_name, column_type,
+                    CASE WHEN missing.column_default IS NULL THEN '' ELSE ' DEFAULT ' || missing.column_default END,
+                    CASE WHEN missing.is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END);
+                changes := changes + 1;
+            END LOOP;
+        END LOOP;
+    END LOOP;
+    RETURN changes;
+END
+$$;
+CREATE FUNCTION eggdb_tenancy.drop_tenant_schema(tenant text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    found_schema text;
+BEGIN
+    SELECT s.schema_name INTO found_schema FROM eggdb_tenancy.tenant_schemas s WHERE s.tenant = drop_tenant_schema.tenant;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant % has no schema', tenant USING ERRCODE = '42704';
+    END IF;
+    EXECUTE format('DROP SCHEMA %I CASCADE', found_schema);
+    DELETE FROM eggdb_tenancy.tenant_schemas s WHERE s.tenant = drop_tenant_schema.tenant;
+END
+$$;
 ";
 
 #[cfg(test)]
@@ -203,5 +316,27 @@ mod tests {
             run(&mut session, "SELECT body FROM notes ORDER BY id").unwrap(),
             "body\none\ntwo\nSELECT 2"
         );
+    }
+
+    #[test]
+    fn tenant_schemas_copy_the_template_and_follow_its_changes() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_tenancy",
+            "CREATE SCHEMA app_template",
+            "CREATE TABLE app_template.notes (id serial PRIMARY KEY, body text NOT NULL)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(run(&mut session, "SELECT eggdb_tenancy.create_tenant_schema('acme', 'app_template') AS tables").unwrap(), "tables\n1\nSELECT 1");
+        run(&mut session, "INSERT INTO acme.notes (body) VALUES ('first')").unwrap();
+        assert_eq!(run(&mut session, "INSERT INTO acme.notes (id, body) VALUES (1, 'again')").unwrap_err().state().code(), "23505");
+        run(&mut session, "ALTER TABLE app_template.notes ADD COLUMN pinned boolean NOT NULL DEFAULT false").unwrap();
+        assert_eq!(run(&mut session, "SELECT eggdb_tenancy.upgrade_tenant_schemas('app_template') AS changes").unwrap(), "changes\n1\nSELECT 1");
+        assert_eq!(run(&mut session, "SELECT id, body, pinned FROM acme.notes").unwrap(), "id|body|pinned\n1|first|f\nSELECT 1");
+        assert_eq!(run(&mut session, "SELECT count(*) AS roles FROM pg_catalog.pg_roles WHERE rolname = 'acme'").unwrap(), "roles\n1\nSELECT 1");
+        run(&mut session, "SELECT eggdb_tenancy.drop_tenant_schema('acme')").unwrap();
+        assert!(run(&mut session, "SELECT * FROM acme.notes").is_err());
     }
 }

@@ -761,7 +761,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-12, D751), in `eggdb_secrets`.
 - An LDAP v3 server, SCIM, and the published Active Directory protocols (MS-ADTS) after D58's
   legal check (D54).
-- Isolation of tenants by schema or by database, beside isolation by row (D32, D234).
+- Isolation of tenants by schema or by database, beside isolation by row (D32, D234). By schema: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D764). Left: by database.
 - SECURITY.md's scope: denial of service from hostile input, sandbox escapes and protocol attacks
   (D45).
 

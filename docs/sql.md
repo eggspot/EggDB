@@ -3421,6 +3421,24 @@ cascading foreign key may change or remove its rows: the quota trigger fires for
 cascade changes, as for an `UPDATE`. A
 tenant with `max_rows` gets SQLSTATE `53400` once it holds that many rows in a table.
 
+Tenants can also get a schema each (D764):
+
+```sql
+CREATE SCHEMA app_template;
+CREATE TABLE app_template.notes (id serial PRIMARY KEY, body text NOT NULL);
+SELECT eggdb_tenancy.create_tenant_schema('acme', 'app_template');
+SELECT eggdb_tenancy.upgrade_tenant_schemas('app_template');
+SELECT eggdb_tenancy.drop_tenant_schema('acme');
+```
+
+`create_tenant_schema(tenant, template)` creates a role and a schema both named after the tenant (so the default
+search path, `"$user", public`, finds the tenant's tables first when it connects as that role), copies each table of
+the template schema without its rows (columns, `NOT NULL`, defaults, primary keys and unique constraints; serial
+columns get the tenant's own sequences), takes the schema away from `PUBLIC` and grants the tenant role use of its
+own tables only. `upgrade_tenant_schemas(template)` brings every tenant schema made from a template up to date with
+it, adding new tables and new columns, and returns the changes made. `drop_tenant_schema(tenant)` drops the
+tenant's schema and everything in it; the role stays.
+
 ## Ledger tables (eggdb_ledger)
 
 `CREATE EXTENSION eggdb_ledger` makes tables append-only and tamper-evident (D236):
