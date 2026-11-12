@@ -954,3 +954,4 @@ its full title with its status.
 - [D927](decisions/D927.md) Code-only batch 575 (M6c): column-level lineage captured from statements
 - [D928](decisions/D928.md) Code-only batch 576 (M6c): byte quotas per tenant
 - [D929](decisions/D929.md) Code-only batch 577 (M4): renaming and counting collections in the C API
+- [D930](decisions/D930.md) Code-only batch 578 (M4): key-value transactions and collections in the Python driver

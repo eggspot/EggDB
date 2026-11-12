@@ -48,3 +48,25 @@ class DbApiTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeyValueTest(unittest.TestCase):
+    def test_collections_hold_keys_apart_and_rename_and_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with eggdb.open_key_value(os.path.join(directory, "kv.db")) as store:
+                with store.write() as transaction:
+                    self.assertTrue(transaction.create_collection("sessions"))
+                    transaction.put("s:1", b"ada", collection="sessions")
+                    transaction.put("s:2", "grace", collection="sessions")
+                    transaction.put("plain", b"default")
+                with store.read() as transaction:
+                    self.assertEqual(transaction.get("s:1", collection="sessions"), b"ada")
+                    self.assertIsNone(transaction.get("s:1"))
+                    self.assertEqual([key for key, _ in transaction.scan(prefix="s:", collection="sessions")], [b"s:1", b"s:2"])
+                    self.assertEqual(transaction.collection_stats("sessions")["entries"], 2)
+                with store.write() as transaction:
+                    transaction.rename_collection("sessions", "logins")
+                    self.assertTrue(transaction.delete("s:2", collection="logins"))
+                with store.read() as transaction:
+                    self.assertEqual(transaction.collections(), ["logins"])
+                    self.assertEqual(transaction.get("s:1", collection="logins"), b"ada")

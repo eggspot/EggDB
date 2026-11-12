@@ -1,6 +1,8 @@
 """EggDB's Python driver: DB-API 2.0 (PEP 249) on EggDB's C API, embedded in the process.
 
 ``connect(path, dialect="sqlite")`` opens a database file; ``":memory:"`` opens one in memory.
+``open_key_value(path)`` opens the same file's key-value store: transactions over the default
+key space and its named collections.
 Placeholders are ``?`` (``paramstyle = "qmark"``) in every dialect. The shared library is
 found through ``EGGDB_LIBRARY``, next to this package, or on the system's library path.
 """
@@ -83,6 +85,22 @@ class _Parameter(Structure):
     _fields_ = [("text", c_char_p), ("len", c_size_t)]
 
 
+class _Entry(Structure):
+    _fields_ = [
+        ("key", POINTER(c_uint8)),
+        ("key_len", c_size_t),
+        ("value", POINTER(c_uint8)),
+        ("value_len", c_size_t),
+    ]
+
+
+class _CollectionStats(Structure):
+    _fields_ = [("entries", c_uint64), ("key_bytes", c_uint64), ("value_bytes", c_uint64)]
+
+
+_SCAN_REVERSE, _SCAN_END_INCLUSIVE, _SCAN_PREFIX = 1, 2, 4
+
+
 class _Result(Structure):
     _fields_ = [
         ("tag", c_char_p),
@@ -127,6 +145,23 @@ def _api():
         ),
         "eggdb_sql_close": (c_int, [c_void_p]),
         "eggdb_sql_connect": (c_int, [c_char_p, POINTER(c_void_p)]),
+        "eggdb_free": (None, [POINTER(c_uint8), c_size_t]),
+        "eggdb_begin_read": (c_int, [c_void_p, POINTER(c_void_p)]),
+        "eggdb_begin_write": (c_int, [c_void_p, POINTER(c_void_p)]),
+        "eggdb_commit": (c_int, [c_void_p, POINTER(c_uint64)]),
+        "eggdb_rollback": (c_int, [c_void_p]),
+        "eggdb_get": (c_int, [c_void_p, c_char_p, c_char_p, c_size_t, POINTER(POINTER(c_uint8)), POINTER(c_size_t)]),
+        "eggdb_put": (c_int, [c_void_p, c_char_p, c_char_p, c_size_t, c_char_p, c_size_t]),
+        "eggdb_put_with_expiry": (c_int, [c_void_p, c_char_p, c_char_p, c_size_t, c_char_p, c_size_t, c_uint64]),
+        "eggdb_delete": (c_int, [c_void_p, c_char_p, c_char_p, c_size_t, POINTER(c_int)]),
+        "eggdb_create_collection": (c_int, [c_void_p, c_char_p, POINTER(c_int)]),
+        "eggdb_drop_collection": (c_int, [c_void_p, c_char_p, POINTER(c_int)]),
+        "eggdb_rename_collection": (c_int, [c_void_p, c_char_p, c_char_p]),
+        "eggdb_collection_names": (c_int, [c_void_p, POINTER(POINTER(c_uint8)), POINTER(c_size_t), POINTER(c_size_t)]),
+        "eggdb_collection_stats": (c_int, [c_void_p, c_char_p, POINTER(_CollectionStats)]),
+        "eggdb_scan_open": (c_int, [c_void_p, c_char_p, c_char_p, c_size_t, c_char_p, c_size_t, c_uint32, POINTER(c_void_p)]),
+        "eggdb_scan_next": (c_int, [c_void_p, c_void_p, c_size_t, POINTER(POINTER(_Entry)), POINTER(c_size_t)]),
+        "eggdb_scan_free": (None, [c_void_p]),
     }
     for name, (restype, argtypes) in prototypes.items():
         function = getattr(library, name)
@@ -393,6 +428,213 @@ class Cursor:
     def __iter__(self):
         while self._rows:
             yield self._rows.pop(0)
+
+
+def _key_bytes(value):
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    if _is_bytes(value):
+        return bytes(value)
+    raise InterfaceError("keys and values are bytes or str")
+
+
+def _name(collection):
+    return None if collection is None else str(collection).encode("utf-8")
+
+
+def _checked(status):
+    if status != 0:
+        _raise_last(status)
+
+
+class Transaction:
+    """One key-value transaction: a snapshot to read, or a write that commits atomically.
+
+    Every call takes `collection`, a collection's name, or None for the default key space."""
+
+    def __init__(self, handle, writing):
+        self._handle = handle
+        self.writing = writing
+
+    def _live(self):
+        if self._handle is None:
+            raise InterfaceError("the transaction has ended")
+        return self._handle
+
+    def get(self, key, collection=None):
+        """The value of `key`, or None when it is absent or has expired."""
+        api = _api()
+        key = _key_bytes(key)
+        data = POINTER(c_uint8)()
+        length = c_size_t()
+        _checked(api.eggdb_get(self._live(), _name(collection), key, len(key), byref(data), byref(length)))
+        if not data:
+            return None
+        try:
+            return ctypes.string_at(data, length.value)
+        finally:
+            api.eggdb_free(data, length.value)
+
+    def put(self, key, value, collection=None, ttl_ms=None):
+        """Stores `value` under `key`, with a time to live in milliseconds when `ttl_ms` is given."""
+        api = _api()
+        key, value = _key_bytes(key), _key_bytes(value)
+        if ttl_ms is None:
+            _checked(api.eggdb_put(self._live(), _name(collection), key, len(key), value, len(value)))
+        else:
+            _checked(api.eggdb_put_with_expiry(self._live(), _name(collection), key, len(key), value, len(value), int(ttl_ms)))
+
+    def delete(self, key, collection=None):
+        """Removes `key`; True when it was there."""
+        key = _key_bytes(key)
+        deleted = c_int()
+        _checked(_api().eggdb_delete(self._live(), _name(collection), key, len(key), byref(deleted)))
+        return bool(deleted.value)
+
+    def scan(self, start=None, end=None, prefix=None, reverse=False, end_inclusive=False, collection=None):
+        """The (key, value) pairs from `start` up to `end`, or those whose key begins with
+        `prefix`, in key order (the other way with `reverse`), read in batches."""
+        api = _api()
+        flags = (_SCAN_REVERSE if reverse else 0) | (_SCAN_END_INCLUSIVE if end_inclusive else 0)
+        if prefix is not None:
+            flags |= _SCAN_PREFIX
+            start, end = prefix, None
+        start = None if start is None else _key_bytes(start)
+        end = None if end is None else _key_bytes(end)
+        scan = c_void_p()
+        _checked(
+            api.eggdb_scan_open(
+                self._live(),
+                _name(collection),
+                start,
+                0 if start is None else len(start),
+                end,
+                0 if end is None else len(end),
+                flags,
+                byref(scan),
+            )
+        )
+        try:
+            while True:
+                entries = POINTER(_Entry)()
+                count = c_size_t()
+                _checked(api.eggdb_scan_next(self._live(), scan, 0, byref(entries), byref(count)))
+                if count.value == 0:
+                    return
+                batch = [
+                    (
+                        ctypes.string_at(entries[index].key, entries[index].key_len),
+                        ctypes.string_at(entries[index].value, entries[index].value_len),
+                    )
+                    for index in range(count.value)
+                ]
+                yield from batch
+        finally:
+            api.eggdb_scan_free(scan)
+
+    def create_collection(self, name):
+        """Creates the collection `name`; True when it was made, False when it was there."""
+        created = c_int()
+        _checked(_api().eggdb_create_collection(self._live(), _name(name), byref(created)))
+        return bool(created.value)
+
+    def drop_collection(self, name):
+        """Drops the collection `name` with its keys; True when it was there."""
+        dropped = c_int()
+        _checked(_api().eggdb_drop_collection(self._live(), _name(name), byref(dropped)))
+        return bool(dropped.value)
+
+    def rename_collection(self, name, new_name):
+        """Renames the collection `name` to `new_name`, keeping its keys."""
+        _checked(_api().eggdb_rename_collection(self._live(), _name(name), _name(new_name)))
+
+    def collections(self):
+        """The collections' names, in name order."""
+        api = _api()
+        data = POINTER(c_uint8)()
+        length = c_size_t()
+        count = c_size_t()
+        _checked(api.eggdb_collection_names(self._live(), byref(data), byref(length), byref(count)))
+        if not data:
+            return []
+        try:
+            joined = ctypes.string_at(data, length.value)
+        finally:
+            api.eggdb_free(data, length.value)
+        return [name.decode("utf-8") for name in joined.split(b"\0")[: count.value]]
+
+    def collection_stats(self, name):
+        """The entries, key bytes and value bytes the collection `name` holds (read transactions)."""
+        stats = _CollectionStats()
+        _checked(_api().eggdb_collection_stats(self._live(), _name(name), byref(stats)))
+        return {"entries": stats.entries, "key_bytes": stats.key_bytes, "value_bytes": stats.value_bytes}
+
+    def commit(self):
+        """Ends the transaction, committing its writes; returns the commit's stamp."""
+        stamp = c_uint64()
+        handle, self._handle = self._live(), None
+        _checked(_api().eggdb_commit(handle, byref(stamp)))
+        return stamp.value
+
+    def rollback(self):
+        """Ends the transaction without committing its writes."""
+        if self._handle is not None:
+            handle, self._handle = self._handle, None
+            _checked(_api().eggdb_rollback(handle))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        if kind is None and self._handle is not None:
+            self.commit()
+        else:
+            self.rollback()
+        return False
+
+
+class KeyValue:
+    """An embedded database file's key-value store."""
+
+    def __init__(self, path, read_only):
+        options = _Options(_OPEN_READ_ONLY if read_only else 0, 0, 0)
+        database = c_void_p()
+        _checked(_api().eggdb_open(os.fsencode(os.fspath(path)), byref(options), byref(database)))
+        self._database = database
+
+    def _begin(self, writing):
+        if self._database is None:
+            raise InterfaceError("the store is closed")
+        handle = c_void_p()
+        begin = _api().eggdb_begin_write if writing else _api().eggdb_begin_read
+        _checked(begin(self._database, byref(handle)))
+        return Transaction(handle, writing)
+
+    def read(self):
+        """A read transaction over one snapshot."""
+        return self._begin(False)
+
+    def write(self):
+        """A write transaction; as a context manager it commits when the block ends normally."""
+        return self._begin(True)
+
+    def close(self):
+        """Closes the file."""
+        if self._database is not None:
+            _api().eggdb_close(self._database)
+            self._database = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        self.close()
+        return False
+
+
+def open_key_value(path, read_only=False):
+    """Opens the key-value store of the database file at `path`."""
+    return KeyValue(path, read_only)
 
 
 def _is_server_url(path):
