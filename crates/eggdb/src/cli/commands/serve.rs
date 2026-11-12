@@ -1860,6 +1860,9 @@ impl Session<'_> {
 const AUDIT_VARIABLE: &str = "EGGDB_AUDIT";
 const AUDIT_TABLES_VARIABLE: &str = "EGGDB_AUDIT_TABLES";
 const AUDIT_DIGEST_EVERY: u64 = 1000;
+const AUDIT_ROTATE_VARIABLE: &str = "EGGDB_AUDIT_ROTATE_MB";
+const AUDIT_KEEP_DAYS_VARIABLE: &str = "EGGDB_AUDIT_KEEP_DAYS";
+const DEFAULT_AUDIT_ROTATE_BYTES: u64 = 512 << 20;
 static AUDIT_RECORDS_WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn audit_server_events_from_environment(database: &std::path::Path) {
@@ -1871,6 +1874,11 @@ fn audit_server_events_from_environment(database: &std::path::Path) {
         eggdb_sql::audit_events::set_audited_tables(tables.split(',').map(|name| name.trim().to_owned()).collect());
     }
     let log = eggdb_mcp::audit::AuditLog::new(eggdb_mcp::audit::audit_path_for(database));
+    let rotate_bytes = std::env::var(AUDIT_ROTATE_VARIABLE)
+        .ok()
+        .and_then(|megabytes| megabytes.parse::<u64>().ok())
+        .map_or(DEFAULT_AUDIT_ROTATE_BYTES, |megabytes| megabytes.saturating_mul(1 << 20).max(1 << 20));
+    let keep_days = std::env::var(AUDIT_KEEP_DAYS_VARIABLE).ok().and_then(|days| days.parse::<u64>().ok());
     eggdb_sql::audit_events::set_audit_sink(Box::new(move |event| {
         let record = eggdb_mcp::audit::server_event_record(
             event.kind.name(),
@@ -1880,6 +1888,18 @@ fn audit_server_events_from_environment(database: &std::path::Path) {
             event.detail,
             event.succeeded,
         );
+        if log.size() >= rotate_bytes {
+            match log.rotate() {
+                Ok(Some(archived)) => eprintln!("eggdb serve: audit file moved aside to {}", archived.display()),
+                Ok(None) => {}
+                Err(failure) => eprintln!("eggdb serve: the audit file could not be moved aside: {failure}"),
+            }
+            if let Some(days) = keep_days
+                && let Err(failure) = log.remove_rotated_older_than(days)
+            {
+                eprintln!("eggdb serve: old audit files could not be removed: {failure}");
+            }
+        }
         match log.append_with_digest(&record) {
             Ok(digest) => {
                 let written = AUDIT_RECORDS_WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;

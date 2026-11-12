@@ -115,6 +115,99 @@ impl AuditLog {
 }
 
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const ROTATED_EVENT_PREFIX: &str = ",\"event\":\"rotated\"";
+const SECONDS_PER_DAY: u64 = 86_400;
+
+impl AuditLog {
+    /// The file's size in bytes, 0 when it does not exist yet.
+    pub fn size(&self) -> u64 {
+        std::fs::metadata(&self.path).map_or(0, |metadata| metadata.len())
+    }
+
+    /// Moves the audit file aside as `<file>.<unix seconds>` and starts a new one whose first
+    /// record (`"event":"rotated"`) links to the moved file's newest digest and names it, so the
+    /// chain goes on across files. Returns the moved file's path, or `None` when there was no
+    /// file to move.
+    pub fn rotate(&self) -> Result<Option<PathBuf>, AuditFailure> {
+        let failure = |error: io::Error| AuditFailure {
+            reason: describe(&error),
+        };
+        let mut file = match eggdb_platform::user_files::open_private_append_no_follow(&self.path) {
+            Ok(file) => file,
+            Err(error) => return Err(failure(error)),
+        };
+        lock(&file, LOCK_WAIT).map_err(failure)?;
+        let size = file.metadata().map_err(failure)?.len();
+        if size == 0 {
+            return Ok(None);
+        }
+        let newest = last_line_digest(&mut file, size).map_err(failure)?;
+        let seconds = now_unix_ms() / 1000;
+        let mut archived = OsString::from(self.path.as_os_str());
+        archived.push(format!(".{seconds}"));
+        let archived = PathBuf::from(archived);
+        if archived.exists() {
+            return Err(AuditFailure {
+                reason: format!("{} already exists", archived.display()),
+            });
+        }
+        std::fs::rename(&self.path, &archived).map_err(failure)?;
+        let name = archived
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut out = JsonOut::new();
+        out.begin_object()
+            .key("event")
+            .string("rotated")
+            .key("time")
+            .string(&now_rfc3339())
+            .key("previous_file")
+            .string(&name)
+            .end_object();
+        let record = out.finish();
+        let rest = record.strip_prefix('{').unwrap_or(&record);
+        let first = format!("{{\"prev\":\"{newest}\",{rest}\n");
+        let mut fresh = eggdb_platform::user_files::open_private_append_no_follow(&self.path).map_err(failure)?;
+        fresh.write_all(first.as_bytes()).map_err(failure)?;
+        fresh.sync_data().map_err(failure)?;
+        Ok(Some(archived))
+    }
+
+    /// Removes the files [`AuditLog::rotate`] moved aside more than `keep_days` days ago,
+    /// by their exact names, and returns how many it removed.
+    pub fn remove_rotated_older_than(&self, keep_days: u64) -> Result<usize, AuditFailure> {
+        let failure = |error: io::Error| AuditFailure {
+            reason: describe(&error),
+        };
+        let (Some(directory), Some(stem)) = (self.path.parent(), self.path.file_name()) else {
+            return Ok(0);
+        };
+        let directory = if directory.as_os_str().is_empty() { Path::new(".") } else { directory };
+        let stem = format!("{}.", stem.to_string_lossy());
+        let cutoff = (now_unix_ms() / 1000).saturating_sub(keep_days.saturating_mul(SECONDS_PER_DAY));
+        let mut removed = 0;
+        for entry in std::fs::read_dir(directory).map_err(failure)? {
+            let entry = entry.map_err(failure)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(seconds) = name.strip_prefix(&stem).and_then(|suffix| suffix.parse::<u64>().ok()) else {
+                continue;
+            };
+            if seconds < cutoff && entry.file_type().map_err(failure)?.is_file() {
+                std::fs::remove_file(directory.join(&name)).map_err(failure)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+}
+
+fn starts_rotated(line: &[u8]) -> bool {
+    std::str::from_utf8(line)
+        .ok()
+        .and_then(|text| text.get(9 + 64 + 1..))
+        .is_some_and(|rest| rest.starts_with(ROTATED_EVENT_PREFIX))
+}
 const TAIL_BYTES: u64 = 1 << 20;
 
 fn hex(bytes: &[u8]) -> String {
@@ -193,6 +286,7 @@ pub fn verify_chain_to_anchor(path: &Path, anchor: Option<&str>) -> io::Result<C
         };
         match prev_of(&line) {
             Some(link) if link == previous => report.chained += 1,
+            Some(_) if number == 1 && starts_rotated(&line) => report.chained += 1,
             Some(_) => {
                 report.first_break.get_or_insert(number);
             }
@@ -1158,6 +1252,27 @@ mod chain_tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
+    #[test]
+    fn rotating_continues_the_chain_in_a_new_file_and_old_files_are_removed_by_age() {
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-audit-rotate-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("app.eggdb.mcp-audit.jsonl");
+        let log = AuditLog::new(path.clone());
+        let newest = log.append_with_digest("{\"event\":\"call\",\"n\":0}").unwrap();
+        let archived = log.rotate().unwrap().expect("a moved file");
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.starts_with(&format!("{{\"prev\":\"{newest}\",\"event\":\"rotated\"")), "{first}");
+        log.append("{\"event\":\"call\",\"n\":1}").unwrap();
+        let report = verify_chain(&path).unwrap();
+        assert_eq!((report.chained, report.first_break), (2, None));
+        assert_eq!(log.remove_rotated_older_than(1).unwrap(), 0);
+        assert!(archived.exists());
+        std::fs::remove_file(&archived).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     #[test]
     fn an_anchor_kept_elsewhere_finds_its_record_until_the_end_is_cut_off() {
         let directory =
