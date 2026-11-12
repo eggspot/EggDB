@@ -647,7 +647,6 @@ fn evaluate(expr: &Expr, row: &Row) -> Result<Flux, String> {
     Ok(match expr {
         Expr::Column(name) => row.get(name).map_or(Flux::Null, flux_of),
         Expr::Text(text) => Flux::Text(text.clone()),
-        Expr::Number(number) if number.fract() == 0.0 && number.abs() < 9e15 => Flux::Integer(*number as i64),
         Expr::Number(number) => Flux::Float(*number),
         Expr::Boolean(flag) => Flux::Boolean(*flag),
         Expr::Null => Flux::Null,
