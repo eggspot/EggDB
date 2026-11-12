@@ -739,3 +739,4 @@ its full title with its status.
 - [D712](decisions/D712.md) Code-only batch 360 (M16): InfluxQL `SHOW SERIES`, `WITH MEASUREMENT`, `DROP MEASUREMENT`, `DROP SERIES` and `DELETE`
 - [D713](decisions/D713.md) Code-only batch 361 (M16): Flux row expressions, `filter` after transformations, `map`, `pivot`, `rename` and `duplicate`
 - [D714](decisions/D714.md) Code-only batch 362 (M8): text extracted from PDF files in `extract_text`
+- [D715](decisions/D715.md) Code-only batch 363 (M11): Zarr v2 and v3 arrays in SQL with `read_zarr`

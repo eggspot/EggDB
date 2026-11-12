@@ -100,6 +100,7 @@ mod mysql_set;
 mod mysql_variables;
 mod name_resolution;
 mod netcdf;
+mod zarr;
 mod new_files;
 mod file_readers;
 mod notifications;

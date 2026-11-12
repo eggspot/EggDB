@@ -93,7 +93,52 @@ pub(crate) fn rows(
 
 /// Whether `name` is one of the file-reading functions.
 pub(crate) fn reads_files(name: &str) -> bool {
-    matches!(name, "read_parquet" | "read_arrow" | "read_csv" | "read_vcf" | "read_bam" | "read_netcdf" | "read_geotiff")
+    matches!(
+        name,
+        "read_parquet" | "read_arrow" | "read_csv" | "read_vcf" | "read_bam" | "read_netcdf" | "read_geotiff" | "read_zarr"
+    )
+}
+
+const ZARR_COLUMNS: [(&str, SqlType); 2] = [
+    ("coordinates", SqlType::Array(crate::arrays::ArrayElement::BigInt)),
+    ("value", SqlType::Double),
+];
+
+/// The rows of `read_zarr(path)`: one per element of the Zarr array stored under the directory
+/// `path`, with its `coordinates` and `value`; its metadata and chunks are read through the
+/// session's file reader.
+pub(crate) fn zarr_rows(
+    values: &[Value],
+    names: &[String],
+    types: &[Option<SqlType>],
+    sink: &mut RecordSink<'_>,
+) -> SqlResult<()> {
+    let Some(path) = values.first().and_then(Value::to_text) else {
+        return Ok(());
+    };
+    let read = |file: &str| crate::new_files::read_file(file, MOST_FILE_BYTES);
+    let wanted: Vec<Option<usize>> = names
+        .iter()
+        .map(|name| ZARR_COLUMNS.iter().position(|(column, _)| column.eq_ignore_ascii_case(name)))
+        .collect();
+    for (coordinates, value) in crate::zarr::elements(&path, &read)? {
+        let coordinates = crate::arrays::ArrayValue::new(
+            crate::arrays::ArrayElement::BigInt,
+            coordinates.into_iter().map(Value::BigInt).collect(),
+        );
+        let record: [Value; 2] = [Value::Array(Box::new(coordinates)), Value::Double(value)];
+        let mut row = Vec::with_capacity(names.len());
+        for (at, position) in wanted.iter().enumerate() {
+            let value = position.map_or(Value::Null, |position| record[position].clone());
+            let declared = types.get(at + 1).copied().flatten();
+            row.push(match declared {
+                Some(sql_type) if !value.is_null() && value.sql_type() != Some(sql_type) => convert(value, sql_type, Conversion::Explicit)?,
+                _ => value,
+            });
+        }
+        sink(row)?;
+    }
+    Ok(())
 }
 
 const GEOTIFF_COLUMNS: [(&str, SqlType); 5] = [
@@ -564,6 +609,9 @@ pub(crate) fn discovered_columns(name: &str, path: &str) -> SqlResult<Vec<(Strin
     }
     if name == "read_geotiff" {
         return Ok(GEOTIFF_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
+    }
+    if name == "read_zarr" {
+        return Ok(ZARR_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
     }
     if name == "read_csv" {
         let text = text_file(path)?;

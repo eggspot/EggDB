@@ -18,6 +18,7 @@ eggdb-geo = { path = "../eggdb-geo" }
 eggdb-arrow = { path = "../eggdb-arrow" }
 eggdb-parquet = { path = "../eggdb-parquet" }
 eggdb-search = { path = "../eggdb-search" }
+eggdb-storage = { path = "../eggdb-storage" }
 eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }
 eggdb-text = { path = "../eggdb-text" }
 eggdb-vector = { path = "../eggdb-vector" }

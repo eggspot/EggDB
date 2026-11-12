@@ -1319,7 +1319,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   embedded in other applications (D46, D238).
 - Spreadsheet-style tables with formula columns, and a grid view of them in the client (D38).
 - Arrays: SQL/MDA, Zarr, HDF5 and NetCDF (D57). NetCDF classic files (`read_netcdf`): **code written, unbuilt**
-  (code-only mode, 2026-11-12, D709). Left: SQL/MDA, Zarr, HDF5 and NetCDF-4.
+  (code-only mode, 2026-11-12, D709). Zarr v2 and v3 arrays (`read_zarr`, raw, zlib, gzip and zstd chunks): **code
+  written, unbuilt** (code-only mode, 2026-11-12, D715). Left: SQL/MDA, Zarr sharding and Blosc, HDF5 and NetCDF-4.
 - Genomics: VCF, BAM and CRAM, and htsget (D57). VCF files in SQL (`read_vcf`, gzip and BGZF read): **code written,
   unbuilt** (code-only mode, 2026-11-12, D707); BAM (`read_bam`): **code written, unbuilt** (code-only mode,
   2026-11-12, D708). Left: CRAM and htsget.
