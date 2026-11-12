@@ -1,5 +1,5 @@
 use crate::scandinavian::Language;
-use crate::{dutch, english, finnish, french, german, hungarian, italian, portuguese, russian, spanish};
+use crate::{dutch, english, finnish, french, german, hungarian, indonesian, italian, portuguese, russian, spanish};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -107,11 +107,13 @@ pub enum Config {
     Finnish,
     /// Lower case words, Hungarian stop words dropped, Hungarian stems.
     Hungarian,
+    /// Lower case words and Indonesian stems; Snowball has no Indonesian stop word list.
+    Indonesian,
 }
 
 impl Config {
     /// The configuration named `name` (`english`, `german`, `spanish`, `swedish`, `norwegian`,
-    /// `danish`, `italian`, `russian`, `dutch`, `portuguese`, `french`, `finnish`, `hungarian`, `simple`, optionally
+    /// `danish`, `italian`, `russian`, `dutch`, `portuguese`, `french`, `finnish`, `hungarian`, `indonesian`, `simple`, optionally
     /// `pg_catalog.`-qualified).
     pub fn named(name: &str) -> Option<Self> {
         match name
@@ -134,6 +136,7 @@ impl Config {
             "french" => Some(Self::French),
             "finnish" => Some(Self::Finnish),
             "hungarian" => Some(Self::Hungarian),
+            "indonesian" => Some(Self::Indonesian),
             _ => None,
         }
     }
@@ -163,6 +166,7 @@ impl Config {
             Self::Finnish => Some(finnish::stem(&lower)),
             Self::Hungarian if hungarian::is_stop_word(&lower) => None,
             Self::Hungarian => Some(hungarian::stem(&lower)),
+            Self::Indonesian => Some(indonesian::stem(&lower)),
             Self::Swedish | Self::Norwegian | Self::Danish => {
                 let language = match self {
                     Self::Swedish => Language::Swedish,
