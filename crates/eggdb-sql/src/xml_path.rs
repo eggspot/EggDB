@@ -1192,7 +1192,11 @@ fn ordered(mut nodes: Vec<Target>) -> Vec<Target> {
 }
 
 /// The internal names of the XPath functions.
-pub(crate) const FUNCTIONS: [&str; 8] = [
+/// The internal function a parsed `XMLQUERY` becomes.
+pub(crate) const QUERY: &str = "eggdb_xmlquery";
+
+pub(crate) const FUNCTIONS: [&str; 9] = [
+    QUERY,
     "updatexml",
     "xpath",
     "xpath_exists",
@@ -1207,7 +1211,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "xpath" => SqlType::Array(ArrayElement::Text),
         "xpath_exists" | "xml_is_well_formed" | "xml_is_well_formed_document" | "xml_is_well_formed_content" => SqlType::Boolean,
-        "extractvalue" | "updatexml" => SqlType::Text,
+        "extractvalue" | "updatexml" | QUERY => SqlType::Text,
         "existsnode" => SqlType::Integer,
         _ => return None,
     })
@@ -1268,6 +1272,17 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 _ => Value::Text(xml.clone()),
             },
             _ => Value::Text(xml.clone()),
+        }),
+        (QUERY, [xml, path, ..]) => evaluated(xml, path).map(|(document, outcome)| match outcome {
+            Outcome::Nodes(nodes) if nodes.is_empty() && matches!(values.get(2), Some(Value::Boolean(true))) => Value::Null,
+            Outcome::Nodes(nodes) => {
+                let mut out = String::new();
+                for node in nodes {
+                    document.serialize(node, &mut out);
+                }
+                Value::Text(out)
+            }
+            other => Value::Text(document.string_of(&other)),
         }),
         ("existsnode", [xml, path, ..]) => {
             evaluated(xml, path).map(|(_, outcome)| Value::Integer(i32::from(Document::boolean_of(&outcome))))

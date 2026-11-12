@@ -1191,7 +1191,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Check: a deep hierarchy against a recursive `WITH` on SQLite.
 - Oracle's XML functions (the SQL/XML publishing functions: **code written, unbuilt**, D454;
   `EXTRACTVALUE` and `EXISTSNODE`: **code written, unbuilt**, D690; `XMLTABLE`: **code written, unbuilt**, D692;
-  `XMLQUERY` and `XMLType` left) and `TO_DATE(... DEFAULT ... ON
+  `XMLQUERY` and `XMLEXISTS` over XPath 1.0: **code written, unbuilt**, D693; `XMLType` left) and `TO_DATE(... DEFAULT ... ON
   CONVERSION ERROR)` (sql.md; the
   conversion functions' `DEFAULT ... ON CONVERSION ERROR`: **code written, unbuilt**, code-only
   mode, 2026-11-11, D431; `CAST ... DEFAULT` and `VALIDATE_CONVERSION`: **code written, unbuilt**, code-only

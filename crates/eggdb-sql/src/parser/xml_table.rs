@@ -26,12 +26,6 @@ impl Parser<'_> {
         self.is_word("xmltable") && self.peek_kind_at(1) == &TokenKind::LeftParen
     }
 
-    fn skip_passing_mechanism(&mut self) {
-        if self.is_word("by") && (self.is_word_at(1, "ref") || self.is_word_at(1, "value")) {
-            self.at += 2;
-        }
-    }
-
     fn string_literal(&mut self) -> SqlResult<String> {
         let TokenKind::String(text) = self.peek_kind() else {
             return Err(self.unexpected());
@@ -49,9 +43,9 @@ impl Parser<'_> {
         }
         let row_path = self.string_literal()?;
         self.expect_word("passing")?;
-        self.skip_passing_mechanism();
+        self.skip_xml_passing_mechanism();
         let document = self.expression()?;
-        self.skip_passing_mechanism();
+        self.skip_xml_passing_mechanism();
         let mut names = Vec::new();
         let mut types = Vec::new();
         let mut plan = Vec::new();

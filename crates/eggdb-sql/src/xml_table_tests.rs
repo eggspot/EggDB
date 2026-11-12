@@ -40,3 +40,17 @@ fn oracle_xmltable_without_columns_returns_column_value() {
     let rows = last(&mut session, &format!("SELECT * FROM XMLTABLE('/shop/item/name' PASSING {SHOP})"));
     assert!(rows.contains("<name>egg</name>"), "{rows}");
 }
+
+#[test]
+fn xmlquery_serializes_and_xmlexists_tests() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    let rows = last(
+        &mut session,
+        &format!("SELECT XMLQUERY('/shop/item[@id=\"2\"]/name' PASSING {SHOP} RETURNING CONTENT) FROM dual"),
+    );
+    assert!(rows.contains("<name>milk</name>"), "{rows}");
+    let mut postgres = Session::with_dialect(&store, Dialect::PostgreSql);
+    let exists = last(&mut postgres, &format!("SELECT XMLEXISTS('//item[@id=\"9\"]' PASSING BY REF {SHOP})"));
+    assert!(exists.contains('f'), "{exists}");
+}

@@ -64,8 +64,9 @@ impl Parser<'_> {
         }
     }
 
-    /// `XMLELEMENT`, `XMLFOREST`, `XMLCONCAT`, `XMLAGG`, `XMLCOMMENT`, `XMLPI`, `XMLSERIALIZE` and
-    /// `XMLPARSE` after their name, as PostgreSQL and Oracle write them; `None` for another name.
+    /// `XMLELEMENT`, `XMLFOREST`, `XMLCONCAT`, `XMLAGG`, `XMLCOMMENT`, `XMLPI`, `XMLSERIALIZE`,
+    /// `XMLPARSE`, `XMLQUERY` and `XMLEXISTS` after their name, as PostgreSQL and Oracle write them;
+    /// `None` for another name.
     pub(super) fn xml_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         if !(self.postgresql() || self.oracle()) || self.peek_kind() != &TokenKind::LeftParen {
             return Ok(None);
@@ -232,8 +233,48 @@ impl Parser<'_> {
                 self.expect(&TokenKind::RightParen)?;
                 call(xml::FRAGMENT, vec![value], position)
             }
+            "xmlquery" | "xmlexists" => {
+                self.at += 1;
+                let TokenKind::String(path) = self.peek_kind() else {
+                    return Err(self.unexpected());
+                };
+                let path = text(path.as_ref().to_owned(), position);
+                self.at += 1;
+                self.expect_word("passing")?;
+                self.skip_xml_passing_mechanism();
+                let document = self.expression()?;
+                self.skip_xml_passing_mechanism();
+                let mut null_on_empty = false;
+                if name.text == "xmlquery" {
+                    self.expect_word("returning")?;
+                    if !self.take_word("content") {
+                        self.expect_word("sequence")?;
+                    }
+                    if self.take_word("null") {
+                        self.expect_word("on")?;
+                        self.expect_word("empty")?;
+                        null_on_empty = true;
+                    }
+                }
+                self.expect(&TokenKind::RightParen)?;
+                if name.text == "xmlexists" {
+                    call("xpath_exists", vec![path, document], position)
+                } else {
+                    let flag = Expr {
+                        kind: ExprKind::Literal(Literal::Boolean(null_on_empty)),
+                        position,
+                    };
+                    call(crate::xml_path::QUERY, vec![document, path, flag], position)
+                }
+            }
             _ => return Ok(None),
         };
         Ok(Some(expr))
+    }
+
+    pub(super) fn skip_xml_passing_mechanism(&mut self) {
+        if self.is_word("by") && (self.is_word_at(1, "ref") || self.is_word_at(1, "value")) {
+            self.at += 2;
+        }
     }
 }
