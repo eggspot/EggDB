@@ -5,6 +5,25 @@ CREATE TABLE eggdb_catalog.tags (schema_name text NOT NULL, table_name text NOT 
 CREATE TABLE eggdb_catalog.quality_rules (rule_name text PRIMARY KEY, schema_name text NOT NULL, table_name text NOT NULL, row_condition text NOT NULL, description text);
 CREATE TABLE eggdb_catalog.quality_results (rule_name text NOT NULL, checked_at timestamptz NOT NULL DEFAULT now(), checked_rows bigint NOT NULL, failed_rows bigint NOT NULL);
 CREATE TABLE eggdb_catalog.lineage (source_asset text NOT NULL, target_asset text NOT NULL, job_name text NOT NULL DEFAULT '', PRIMARY KEY (source_asset, target_asset, job_name));
+CREATE TABLE eggdb_catalog.column_lineage (source_asset text NOT NULL, source_column text NOT NULL, target_asset text NOT NULL, target_column text NOT NULL, job_name text NOT NULL DEFAULT '', PRIMARY KEY (source_asset, source_column, target_asset, target_column, job_name));
+CREATE FUNCTION eggdb_catalog.capture_lineage(job text, statement text) RETURNS integer LANGUAGE plpgsql AS $$
+DECLARE
+    found jsonb := eggdb_column_lineage(statement);
+    target text := found ->> 'target';
+    entry record;
+    source text;
+    captured integer := 0;
+BEGIN
+    FOR entry IN SELECT c.value AS body FROM jsonb_array_elements(found -> 'columns') c LOOP
+        FOR source IN SELECT s.value FROM jsonb_array_elements_text(entry.body -> 'sources') s LOOP
+            INSERT INTO eggdb_catalog.lineage VALUES (regexp_replace(source, '\.[^.]*$', ''), target, job) ON CONFLICT DO NOTHING;
+            INSERT INTO eggdb_catalog.column_lineage VALUES (regexp_replace(source, '\.[^.]*$', ''), regexp_replace(source, '^.*\.', ''), target, entry.body ->> 'column', job) ON CONFLICT DO NOTHING;
+            captured := captured + 1;
+        END LOOP;
+    END LOOP;
+    RETURN captured;
+END
+$$;
 CREATE FUNCTION eggdb_catalog.check_quality() RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE
     rule record;
@@ -31,6 +50,16 @@ BEGIN
     ) SELECT reached, min(distance) FROM walked GROUP BY reached ORDER BY 2, 1;
 END
 $$;
+CREATE FUNCTION eggdb_catalog.column_lineage_facet(job text, asset text) RETURNS jsonb LANGUAGE sql AS $$
+    SELECT CASE WHEN count(*) = 0 THEN '{}'::jsonb ELSE jsonb_build_object('columnLineage', jsonb_build_object(
+        '_producer', 'https://github.com/eggspot/EggDB',
+        '_schemaURL', 'https://openlineage.io/spec/facets/1-0-1/ColumnLineageDatasetFacet.json',
+        'fields', jsonb_object_agg(f.target_column, f.inputs))) END
+    FROM (
+        SELECT l.target_column, jsonb_build_object('inputFields', jsonb_agg(jsonb_build_object('namespace', 'eggdb', 'name', l.source_asset, 'field', l.source_column) ORDER BY l.source_asset, l.source_column)) AS inputs
+        FROM eggdb_catalog.column_lineage l WHERE l.job_name = job AND l.target_asset = asset GROUP BY l.target_column
+    ) f
+$$;
 CREATE FUNCTION eggdb_catalog.openlineage_event(job text, event_type text) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE
     inputs jsonb;
@@ -41,7 +70,7 @@ BEGIN
     END IF;
     SELECT coalesce(jsonb_agg(jsonb_build_object('namespace', 'eggdb', 'name', a) ORDER BY a), '[]'::jsonb) INTO inputs
         FROM (SELECT DISTINCT source_asset AS a FROM eggdb_catalog.lineage WHERE job_name = job) s;
-    SELECT coalesce(jsonb_agg(jsonb_build_object('namespace', 'eggdb', 'name', a) ORDER BY a), '[]'::jsonb) INTO outputs
+    SELECT coalesce(jsonb_agg(jsonb_build_object('namespace', 'eggdb', 'name', a, 'facets', eggdb_catalog.column_lineage_facet(job, a)) ORDER BY a), '[]'::jsonb) INTO outputs
         FROM (SELECT DISTINCT target_asset AS a FROM eggdb_catalog.lineage WHERE job_name = job) t;
     RETURN jsonb_build_object(
         'eventType', event_type,
@@ -373,6 +402,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn column_lineage_is_captured_from_statements() {
+        let store = catalog();
+        let mut session = Session::new(&store);
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT eggdb_catalog.capture_lineage('build_mart', 'INSERT INTO mart.revenue (customer, total) SELECT c.name, sum(o.amount) FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.name') AS captured"
+            )
+            .unwrap(),
+            "captured\n2\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT source_asset, source_column, target_column FROM eggdb_catalog.column_lineage ORDER BY 3").unwrap(),
+            "source_asset|source_column|target_column\ncustomers|name|customer\norders|amount|total\nSELECT 2"
+        );
+        let facet = run(
+            &mut session,
+            "SELECT e -> 'outputs' -> 0 -> 'facets' -> 'columnLineage' -> 'fields' -> 'total' AS total FROM (SELECT eggdb_catalog.openlineage_event('build_mart', 'COMPLETE') AS e) AS event",
+        )
+        .unwrap();
+        assert!(facet.contains("\"field\": \"amount\""), "{facet}");
     }
 
     #[test]

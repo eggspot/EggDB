@@ -888,7 +888,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A metering API (usage per tenant, database and query) with hooks for billing, and chargeback
   and showback reports on it (D44, D58). **Code written, unbuilt** (code-only mode, 2026-11-12, D760), for SQL
   statements; storage and the other protocols are left.
-- Column-level lineage captured from queries (D51, D244).
+- Column-level lineage captured from queries (D51, D244). **Code written, unbuilt** (code-only mode, 2026-11-12, D927): `eggdb_column_lineage` and
+  `eggdb_catalog.capture_lineage`, with OpenLineage's column lineage facet.
 - The Apache Atlas and OpenMetadata APIs (D51).
 - A schema registry and data contracts (D51). **Code written, unbuilt** (code-only mode, 2026-11-12, D753).
 - Master data: entity resolution, match and merge, and golden records (D51). **Code written, unbuilt** (code-only mode,

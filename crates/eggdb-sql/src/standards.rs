@@ -1,7 +1,8 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 27] = [
+pub(crate) const FUNCTIONS: [&str; 28] = [
+    "eggdb_column_lineage",
     "eggdb_pdf_table",
     "fhir_validate",
     "opcua_decode",
@@ -582,6 +583,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("iso20022_parse", [_]) => iso20022_parse(text),
         ("icalendar_parse", [_]) => crate::calendar_cards::icalendar(text).and_then(jsonb),
         ("vcard_parse", [_]) => crate::calendar_cards::vcard(text).and_then(jsonb),
+        ("eggdb_column_lineage", [_]) => crate::column_lineage::lineage(text).and_then(jsonb),
         _ => Err(SqlError::new(
             SqlState::UNDEFINED_FUNCTION,
             format!("{name} does not take {} arguments", values.len()),
