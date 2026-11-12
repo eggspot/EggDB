@@ -1319,7 +1319,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Spreadsheet-style tables with formula columns, and a grid view of them in the client (D38).
 - Arrays: SQL/MDA, Zarr, HDF5 and NetCDF (D57).
 - Genomics: VCF, BAM and CRAM, and htsget (D57). VCF files in SQL (`read_vcf`, gzip and BGZF read): **code written,
-  unbuilt** (code-only mode, 2026-11-12, D707). Left: BAM, CRAM and htsget.
+  unbuilt** (code-only mode, 2026-11-12, D707); BAM (`read_bam`): **code written, unbuilt** (code-only mode,
+  2026-11-12, D708). Left: CRAM and htsget.
 
 ### M12 Vectors, geospatial and AI
 - A stored `vector(n)` type with its dimension checked, binary send and receive and a catalog

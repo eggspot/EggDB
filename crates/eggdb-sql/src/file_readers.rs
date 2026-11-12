@@ -93,7 +93,202 @@ pub(crate) fn rows(
 
 /// Whether `name` is one of the file-reading functions.
 pub(crate) fn reads_files(name: &str) -> bool {
-    matches!(name, "read_parquet" | "read_arrow" | "read_csv" | "read_vcf")
+    matches!(name, "read_parquet" | "read_arrow" | "read_csv" | "read_vcf" | "read_bam")
+}
+
+const BAM_MAGIC: &[u8] = b"BAM\x01";
+const BAM_COLUMNS: [(&str, SqlType); 12] = [
+    ("qname", SqlType::Text),
+    ("flag", SqlType::Integer),
+    ("rname", SqlType::Text),
+    ("pos", SqlType::BigInt),
+    ("mapq", SqlType::Integer),
+    ("cigar", SqlType::Text),
+    ("rnext", SqlType::Text),
+    ("pnext", SqlType::BigInt),
+    ("tlen", SqlType::BigInt),
+    ("seq", SqlType::Text),
+    ("qual", SqlType::Text),
+    ("tags", SqlType::Jsonb),
+];
+const CIGAR_OPERATIONS: &[u8; 9] = b"MIDNSHP=X";
+const SEQUENCE_CODES: &[u8; 16] = b"=ACMGRSVTWYHKDBN";
+
+fn bam_error(path: &str, message: &str) -> SqlError {
+    SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {message}"))
+}
+
+struct BamCursor<'b> {
+    bytes: &'b [u8],
+    at: usize,
+}
+
+impl<'b> BamCursor<'b> {
+    fn take(&mut self, count: usize) -> Option<&'b [u8]> {
+        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len())?;
+        let taken = &self.bytes[self.at..end];
+        self.at = end;
+        Some(taken)
+    }
+
+    fn i32(&mut self) -> Option<i32> {
+        Some(i32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+}
+
+fn bam_tag_value(cursor: &mut BamCursor<'_>, kind: u8) -> Option<String> {
+    Some(match kind {
+        b'A' => json_text(&char::from(cursor.u8()?).to_string()),
+        b'c' => (cursor.u8()? as i8).to_string(),
+        b'C' => cursor.u8()?.to_string(),
+        b's' => (cursor.u16()? as i16).to_string(),
+        b'S' => cursor.u16()?.to_string(),
+        b'i' => cursor.i32()?.to_string(),
+        b'I' => cursor.u32()?.to_string(),
+        b'f' => {
+            let number = f32::from_le_bytes(cursor.take(4)?.try_into().ok()?);
+            if number.is_finite() { number.to_string() } else { "null".to_owned() }
+        }
+        b'Z' | b'H' => {
+            let rest = &cursor.bytes[cursor.at..];
+            let end = rest.iter().position(|byte| *byte == 0)?;
+            let text = String::from_utf8_lossy(&rest[..end]).into_owned();
+            cursor.at += end + 1;
+            json_text(&text)
+        }
+        b'B' => {
+            let subtype = cursor.u8()?;
+            let count = cursor.u32()? as usize;
+            if count > cursor.bytes.len() {
+                return None;
+            }
+            let items: Option<Vec<String>> = (0..count).map(|_| bam_tag_value(cursor, subtype)).collect();
+            format!("[{}]", items?.join(","))
+        }
+        _ => return None,
+    })
+}
+
+/// The rows of `read_bam(path)`: one per alignment of a BAM file (BGZF-compressed), as SAM shows
+/// it: `qname`, `flag`, `rname` and `rnext` by reference name (`*` read as `NULL`), 1-based `pos`
+/// and `pnext`, `mapq`, `cigar`, `tlen`, `seq`, `qual` as Phred+33 text, and the optional fields
+/// as a JSON object of tag to value.
+pub(crate) fn bam_rows(
+    values: &[Value],
+    names: &[String],
+    types: &[Option<SqlType>],
+    sink: &mut RecordSink<'_>,
+) -> SqlResult<()> {
+    let Some(path) = values.first().and_then(Value::to_text) else {
+        return Ok(());
+    };
+    let compressed = crate::new_files::read_file(&path, MOST_FILE_BYTES)?;
+    let bytes = eggdb_content::gunzip(&compressed, MOST_FILE_BYTES)
+        .map_err(|error| SqlError::new(SqlState::DATA_CORRUPTED, format!("{path}: {error}")))?;
+    crate::memory::check_value_bytes(bytes.len())?;
+    let mut cursor = BamCursor { bytes: &bytes, at: 0 };
+    if cursor.take(4) != Some(BAM_MAGIC) {
+        return Err(bam_error(&path, "not a BAM file"));
+    }
+    let header_length = cursor.u32().ok_or_else(|| bam_error(&path, "the header is cut short"))? as usize;
+    cursor.take(header_length).ok_or_else(|| bam_error(&path, "the header is cut short"))?;
+    let reference_count = cursor.u32().ok_or_else(|| bam_error(&path, "the references are cut short"))? as usize;
+    let mut references = Vec::new();
+    for _ in 0..reference_count.min(bytes.len()) {
+        let name_length = cursor.u32().ok_or_else(|| bam_error(&path, "a reference is cut short"))? as usize;
+        let name = cursor.take(name_length).ok_or_else(|| bam_error(&path, "a reference is cut short"))?;
+        cursor.u32().ok_or_else(|| bam_error(&path, "a reference is cut short"))?;
+        references.push(String::from_utf8_lossy(name.strip_suffix(&[0]).unwrap_or(name)).into_owned());
+    }
+    let reference = |id: i32| usize::try_from(id).ok().and_then(|at| references.get(at)).map_or(Value::Null, |name| Value::Text(name.clone()));
+    let wanted: Vec<Option<usize>> = names
+        .iter()
+        .map(|name| BAM_COLUMNS.iter().position(|(column, _)| column.eq_ignore_ascii_case(name)))
+        .collect();
+    while cursor.at < bytes.len() {
+        let block_size = cursor.u32().ok_or_else(|| bam_error(&path, "an alignment is cut short"))? as usize;
+        let block = cursor.take(block_size).ok_or_else(|| bam_error(&path, "an alignment is cut short"))?;
+        let mut record = BamCursor { bytes: block, at: 0 };
+        let short = || bam_error(&path, "an alignment's fields are cut short");
+        let reference_id = record.i32().ok_or_else(short)?;
+        let pos = record.i32().ok_or_else(short)?;
+        let name_length = usize::from(record.u8().ok_or_else(short)?);
+        let mapq = record.u8().ok_or_else(short)?;
+        record.u16().ok_or_else(short)?;
+        let cigar_count = usize::from(record.u16().ok_or_else(short)?);
+        let flag = record.u16().ok_or_else(short)?;
+        let sequence_length = usize::try_from(record.i32().ok_or_else(short)?).unwrap_or(0);
+        let next_reference = record.i32().ok_or_else(short)?;
+        let next_pos = record.i32().ok_or_else(short)?;
+        let template_length = record.i32().ok_or_else(short)?;
+        let read_name = record.take(name_length).ok_or_else(short)?;
+        let mut cigar = String::new();
+        for _ in 0..cigar_count {
+            let operation = record.u32().ok_or_else(short)?;
+            let code = CIGAR_OPERATIONS.get((operation & 0xf) as usize).copied().unwrap_or(b'?');
+            cigar.push_str(&(operation >> 4).to_string());
+            cigar.push(char::from(code));
+        }
+        let packed = record.take(sequence_length.div_ceil(2)).ok_or_else(short)?;
+        let sequence: String = (0..sequence_length)
+            .map(|at| {
+                let byte = packed[at / 2];
+                let code = if at % 2 == 0 { byte >> 4 } else { byte & 0xf };
+                char::from(SEQUENCE_CODES[usize::from(code)])
+            })
+            .collect();
+        let qualities = record.take(sequence_length).ok_or_else(short)?;
+        let quality = if qualities.first().is_none_or(|first| *first == 0xff) {
+            Value::Null
+        } else {
+            Value::Text(qualities.iter().map(|score| char::from(score.saturating_add(33))).collect())
+        };
+        let mut tags = Vec::new();
+        while record.at + 3 <= block.len() {
+            let tag = record.take(2).ok_or_else(short)?;
+            let kind = record.u8().ok_or_else(short)?;
+            let value = bam_tag_value(&mut record, kind).ok_or_else(|| bam_error(&path, "an optional field is damaged"))?;
+            tags.push(format!("{}:{value}", json_text(&String::from_utf8_lossy(tag))));
+        }
+        let read_name = String::from_utf8_lossy(read_name.strip_suffix(&[0]).unwrap_or(read_name)).into_owned();
+        let row_values: [Value; 12] = [
+            if read_name == "*" { Value::Null } else { Value::Text(read_name) },
+            Value::Integer(i32::from(flag)),
+            reference(reference_id),
+            if pos < 0 { Value::Null } else { Value::BigInt(i64::from(pos) + 1) },
+            Value::Integer(i32::from(mapq)),
+            if cigar.is_empty() { Value::Null } else { Value::Text(cigar) },
+            reference(next_reference),
+            if next_pos < 0 { Value::Null } else { Value::BigInt(i64::from(next_pos) + 1) },
+            Value::BigInt(i64::from(template_length)),
+            if sequence.is_empty() { Value::Null } else { Value::Text(sequence) },
+            quality,
+            crate::json::normalize(&format!("{{{}}}", tags.join(","))).map(Value::Jsonb)?,
+        ];
+        let mut row = Vec::with_capacity(names.len());
+        for (at, position) in wanted.iter().enumerate() {
+            let value = position.map_or(Value::Null, |position| row_values[position].clone());
+            let declared = types.get(at + 1).copied().flatten();
+            row.push(match declared {
+                Some(sql_type) if !value.is_null() && value.sql_type() != Some(sql_type) => convert(value, sql_type, Conversion::Explicit)?,
+                _ => value,
+            });
+        }
+        sink(row)?;
+    }
+    Ok(())
 }
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -252,6 +447,9 @@ fn sql_type_of(column_type: ColumnType) -> SqlType {
 pub(crate) fn discovered_columns(name: &str, path: &str) -> SqlResult<Vec<(String, SqlType)>> {
     if name == "read_vcf" {
         return Ok(VCF_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
+    }
+    if name == "read_bam" {
+        return Ok(BAM_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
     }
     if name == "read_csv" {
         let text = text_file(path)?;
@@ -447,6 +645,19 @@ mod tests {
             vcf_samples(Some("GT:DP"), &["NA1"], &["0|1:."]),
             "{\"NA1\":{\"GT\":\"0|1\",\"DP\":null}}"
         );
+    }
+
+    #[test]
+    fn bam_tags_read_their_types() {
+        let bytes = [b'i', 0x2a, 0, 0, 0];
+        let mut cursor = BamCursor { bytes: &bytes[1..], at: 0 };
+        assert_eq!(bam_tag_value(&mut cursor, bytes[0]).as_deref(), Some("42"));
+        let text = b"RG1\0";
+        let mut cursor = BamCursor { bytes: text, at: 0 };
+        assert_eq!(bam_tag_value(&mut cursor, b'Z').as_deref(), Some("\"RG1\""));
+        let array = [b'C', 2, 0, 0, 0, 7, 9];
+        let mut cursor = BamCursor { bytes: &array, at: 0 };
+        assert_eq!(bam_tag_value(&mut cursor, b'B').as_deref(), Some("[7,9]"));
     }
 
     #[test]

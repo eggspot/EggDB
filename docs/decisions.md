@@ -732,3 +732,4 @@ its full title with its status.
 - [D705](decisions/D705.md) Code-only batch 353 (M11): `read_arrow` for Arrow IPC files and streams
 - [D706](decisions/D706.md) Code-only batch 354 (M11): `read_parquet`, `read_arrow` and `read_csv` take their columns from the file
 - [D707](decisions/D707.md) Code-only batch 355 (M11): `read_vcf`, and gzip and BGZF for the text file readers
+- [D708](decisions/D708.md) Code-only batch 356 (M11): `read_bam` for BAM alignment files
