@@ -23,6 +23,7 @@ pub(crate) struct PlsqlSession {
     packages: Vec<PackageInstance>,
     generations: u64,
     contexts: std::collections::BTreeMap<(String, String), String>,
+    pub(crate) dynamic_cursors: crate::plpgsql::DynamicCursors,
 }
 
 #[derive(Debug)]

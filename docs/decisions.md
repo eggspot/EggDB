@@ -1022,3 +1022,4 @@ its full title with its status.
 - [D995](decisions/D995.md) Code-only batch 643 (M10): SQL Server's @@DBTS and MIN_ACTIVE_ROWVERSION()
 - [D996](decisions/D996.md) Code-only batch 644 (M10): EF Core 9 and mssql-jdbc getSchemas() in tds-apps
 - [D997](decisions/D997.md) Code-only batch 645 (M10): Oracle database links to PostgreSQL, MySQL and SQL Server
+- [D998](decisions/D998.md) Code-only batch 646 (M10): Oracle's DBMS_SQL

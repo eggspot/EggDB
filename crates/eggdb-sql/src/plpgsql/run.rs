@@ -4,6 +4,8 @@ mod dbms_output;
 mod dbms_rls;
 mod dbms_scheduler;
 mod dbms_session;
+mod dbms_sql;
+pub(crate) use dbms_sql::DynamicCursors;
 mod plsql;
 mod plsql_triggers;
 
@@ -1235,6 +1237,11 @@ impl<'r> Run<'r> {
         {
             return Ok(flow);
         }
+        if self.oracle
+            && let Some(flow) = self.dbms_sql_call(text)?
+        {
+            return Ok(flow);
+        }
         let dialect = self.dialect();
         self.refresh_cursor_attributes();
         let (statement, _) = parsed_changing_settings(
@@ -1318,6 +1325,8 @@ impl<'r> Run<'r> {
     }
 
     fn text_value(&mut self, text: &str) -> SqlResult<Value> {
+        let resolved = self.with_dbms_sql_results(text)?;
+        let text = resolved.as_str();
         let query = if self.oracle {
             format!("SELECT {text} FROM dual")
         } else {

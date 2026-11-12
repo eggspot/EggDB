@@ -21,7 +21,7 @@ pub(crate) use conditions::{condition_name, condition_states};
 pub(crate) use frame::{FrameVariable, RoutineFrame};
 pub(crate) use raise::{push_statement_notices, take_raised_notices};
 pub(crate) use run::{
-    Call, OpenCursor, PlsqlTriggerCall, PlsqlTriggerEnd, Returned, TransactionControl,
+    Call, DynamicCursors, OpenCursor, PlsqlTriggerCall, PlsqlTriggerEnd, Returned, TransactionControl,
     TransactionEnd, TriggerCall, invoke, invoke_nonatomic, local_program, local_routines,
     routine_depth, run_anonymous_block, run_inline, run_inline_nonatomic, run_mysql_inline,
     run_plsql_trigger,
