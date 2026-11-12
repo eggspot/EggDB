@@ -805,7 +805,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and showback reports on it (D44, D58).
 - Column-level lineage captured from queries (D51, D244).
 - The Apache Atlas and OpenMetadata APIs (D51).
-- A schema registry and data contracts (D51).
+- A schema registry and data contracts (D51). **Code written, unbuilt** (code-only mode, 2026-11-12, D753).
 - Master data: entity resolution, match and merge, and golden records (D51). **Code written, unbuilt** (code-only mode,
   2026-11-12, D749).
 - Data profiling and data-quality rules at scale (D42, D51). Profiling (`eggdb_catalog.profile`): **code written,

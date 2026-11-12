@@ -3614,6 +3614,28 @@ linked records into clusters in `eggdb_catalog.entity_members`, and `golden_reco
 key_column, target_table [, survivorship])` writes one golden record per cluster, each column taken by its rule
 (`first`, `last`, `longest`, `max` or `min`).
 
+The extension is also a schema registry with data contracts (D753):
+
+```sql
+SELECT eggdb_catalog.register_schema('customers-value',
+    '{"fields": [{"name": "id", "type": "integer", "required": true}, {"name": "email", "type": "text"}]}');
+INSERT INTO eggdb_catalog.contracts (contract_name, schema_name, table_name, subject, owner, freshness_column, minimum_rows)
+    VALUES ('customers feed', 'public', 'customers', 'customers-value', 'crm-team', 'updated_at', 1000);
+SELECT * FROM eggdb_catalog.check_contract('customers feed');
+```
+
+- `register_schema(subject, definition)` returns the schema's version, reusing the number of an identical schema. A
+  subject's mode in `schema_subjects.compatibility` is `NONE`, `BACKWARD` (the default: the new schema reads data
+  written with the latest one), `FORWARD` (the latest reads data written with the new one), `FULL` (both), or their
+  `_TRANSITIVE` forms, which check every earlier version. A breaking schema fails with SQLSTATE 42804 and its problems.
+- `schema_differences(reader, writer)` lists those problems: a required field with no `default` that the writer
+  lacks, a different `type`, or a required field the writer may leave null. `describe_table(schema, table)` returns a
+  table's schema in the same shape, with `information_schema`'s type names.
+- `check_contract(name)` checks a contract's clauses (the table against the subject's latest schema, the newest
+  `freshness_column` value within `freshness_limit`, one day by default, at least `minimum_rows` rows, and every
+  quality rule on the table), returns a row per clause with `passed` and a detail, and keeps them in
+  `contract_results`.
+
 ## Privacy: format-preserving tokens, noise and k-anonymity
 
 Three tools for sharing data without exposing people (D245):

@@ -159,6 +159,138 @@ BEGIN
     RETURN made;
 END
 $$;
+CREATE TABLE eggdb_catalog.schema_subjects (subject text PRIMARY KEY, compatibility text NOT NULL DEFAULT 'BACKWARD' CHECK (compatibility IN ('NONE', 'BACKWARD', 'BACKWARD_TRANSITIVE', 'FORWARD', 'FORWARD_TRANSITIVE', 'FULL', 'FULL_TRANSITIVE')));
+CREATE TABLE eggdb_catalog.schema_versions (subject text NOT NULL REFERENCES eggdb_catalog.schema_subjects (subject), version integer NOT NULL, definition jsonb NOT NULL, registered_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (subject, version));
+CREATE FUNCTION eggdb_catalog.describe_table(schema_name text, table_name text) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE
+    fields jsonb;
+BEGIN
+    SELECT jsonb_agg(jsonb_build_object('name', c.column_name, 'type', c.data_type, 'required', c.is_nullable = 'NO') ORDER BY c.ordinal_position) INTO fields
+        FROM information_schema.columns c WHERE c.table_schema = describe_table.schema_name AND c.table_name = describe_table.table_name;
+    IF fields IS NULL THEN
+        RAISE EXCEPTION 'table %.% does not exist', schema_name, table_name USING ERRCODE = '42P01';
+    END IF;
+    RETURN jsonb_build_object('fields', fields);
+END
+$$;
+CREATE FUNCTION eggdb_catalog.schema_differences(reader jsonb, writer jsonb) RETURNS TABLE (field text, problem text) LANGUAGE plpgsql AS $$
+DECLARE
+    wanted_row record;
+    wanted jsonb;
+    given jsonb;
+    required boolean;
+BEGIN
+    FOR wanted_row IN SELECT f.value AS definition FROM jsonb_array_elements(coalesce(reader -> 'fields', '[]'::jsonb)) f LOOP
+        wanted := wanted_row.definition;
+        required := coalesce((wanted ->> 'required')::boolean, false) AND (wanted -> 'default') IS NULL;
+        given := NULL;
+        SELECT w.value INTO given FROM jsonb_array_elements(coalesce(writer -> 'fields', '[]'::jsonb)) w WHERE w.value ->> 'name' = wanted ->> 'name';
+        field := wanted ->> 'name';
+        IF given IS NULL THEN
+            IF required THEN
+                problem := 'required field missing';
+                RETURN NEXT;
+            END IF;
+        ELSIF (given ->> 'type') IS DISTINCT FROM (wanted ->> 'type') THEN
+            problem := format('type %s, expected %s', given ->> 'type', wanted ->> 'type');
+            RETURN NEXT;
+        ELSIF required AND NOT coalesce((given ->> 'required')::boolean, false) THEN
+            problem := 'may be null, expected required';
+            RETURN NEXT;
+        END IF;
+    END LOOP;
+END
+$$;
+CREATE FUNCTION eggdb_catalog.register_schema(subject text, definition jsonb) RETURNS integer LANGUAGE plpgsql AS $$
+DECLARE
+    mode text;
+    found_version integer;
+    previous record;
+    issues text;
+BEGIN
+    IF jsonb_typeof(register_schema.definition -> 'fields') IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'a schema needs a fields array' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO eggdb_catalog.schema_subjects (subject) VALUES (register_schema.subject) ON CONFLICT (subject) DO NOTHING;
+    SELECT s.compatibility INTO mode FROM eggdb_catalog.schema_subjects s WHERE s.subject = register_schema.subject;
+    SELECT v.version INTO found_version FROM eggdb_catalog.schema_versions v WHERE v.subject = register_schema.subject AND v.definition = register_schema.definition;
+    IF found_version IS NOT NULL THEN
+        RETURN found_version;
+    END IF;
+    FOR previous IN SELECT v.version, v.definition FROM eggdb_catalog.schema_versions v
+            WHERE v.subject = register_schema.subject
+              AND (mode LIKE '%TRANSITIVE' OR v.version = (SELECT max(m.version) FROM eggdb_catalog.schema_versions m WHERE m.subject = register_schema.subject))
+            ORDER BY v.version LOOP
+        IF mode LIKE 'BACKWARD%' OR mode LIKE 'FULL%' THEN
+            SELECT string_agg(d.field || ': ' || d.problem, '; ') INTO issues FROM eggdb_catalog.schema_differences(register_schema.definition, previous.definition) d;
+            IF issues IS NOT NULL THEN
+                RAISE EXCEPTION 'the schema cannot read version % of %: %', previous.version, subject, issues USING ERRCODE = '42804';
+            END IF;
+        END IF;
+        IF mode LIKE 'FORWARD%' OR mode LIKE 'FULL%' THEN
+            SELECT string_agg(d.field || ': ' || d.problem, '; ') INTO issues FROM eggdb_catalog.schema_differences(previous.definition, register_schema.definition) d;
+            IF issues IS NOT NULL THEN
+                RAISE EXCEPTION 'version % of % cannot read the schema: %', previous.version, subject, issues USING ERRCODE = '42804';
+            END IF;
+        END IF;
+    END LOOP;
+    SELECT coalesce(max(v.version), 0) + 1 INTO found_version FROM eggdb_catalog.schema_versions v WHERE v.subject = register_schema.subject;
+    INSERT INTO eggdb_catalog.schema_versions (subject, version, definition) VALUES (register_schema.subject, found_version, register_schema.definition);
+    RETURN found_version;
+END
+$$;
+CREATE TABLE eggdb_catalog.contracts (contract_name text PRIMARY KEY, schema_name text NOT NULL, table_name text NOT NULL, subject text REFERENCES eggdb_catalog.schema_subjects (subject), owner text, freshness_column text, freshness_limit interval, minimum_rows bigint CHECK (minimum_rows >= 0));
+CREATE TABLE eggdb_catalog.contract_results (contract_name text NOT NULL, checked_at timestamptz NOT NULL DEFAULT now(), clause text NOT NULL, passed boolean NOT NULL, detail text);
+CREATE FUNCTION eggdb_catalog.check_contract(contract_name text) RETURNS TABLE (clause text, passed boolean, detail text) LANGUAGE plpgsql AS $$
+DECLARE
+    agreed record;
+    promised jsonb;
+    issues text;
+    counted bigint;
+    failed bigint;
+    newest timestamptz;
+    rule record;
+BEGIN
+    SELECT * INTO agreed FROM eggdb_catalog.contracts c WHERE c.contract_name = check_contract.contract_name;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'contract % does not exist', check_contract.contract_name USING ERRCODE = '42704';
+    END IF;
+    IF agreed.subject IS NOT NULL THEN
+        SELECT v.definition INTO promised FROM eggdb_catalog.schema_versions v WHERE v.subject = agreed.subject ORDER BY v.version DESC LIMIT 1;
+        SELECT string_agg(d.field || ': ' || d.problem, '; ') INTO issues
+            FROM eggdb_catalog.schema_differences(promised, eggdb_catalog.describe_table(agreed.schema_name, agreed.table_name)) d;
+        clause := 'schema';
+        passed := promised IS NOT NULL AND issues IS NULL;
+        detail := CASE WHEN promised IS NULL THEN 'the subject has no schema' ELSE issues END;
+        INSERT INTO eggdb_catalog.contract_results (contract_name, clause, passed, detail) VALUES (check_contract.contract_name, clause, passed, detail);
+        RETURN NEXT;
+    END IF;
+    IF agreed.freshness_column IS NOT NULL THEN
+        EXECUTE format('SELECT max(%I)::timestamptz FROM %I.%I', agreed.freshness_column, agreed.schema_name, agreed.table_name) INTO newest;
+        clause := 'freshness';
+        passed := newest IS NOT NULL AND newest >= now() - coalesce(agreed.freshness_limit, interval '1 day');
+        detail := coalesce('newest row at ' || newest::text, 'no rows');
+        INSERT INTO eggdb_catalog.contract_results (contract_name, clause, passed, detail) VALUES (check_contract.contract_name, clause, passed, detail);
+        RETURN NEXT;
+    END IF;
+    IF agreed.minimum_rows IS NOT NULL THEN
+        EXECUTE format('SELECT count(*) FROM %I.%I', agreed.schema_name, agreed.table_name) INTO counted;
+        clause := 'volume';
+        passed := counted >= agreed.minimum_rows;
+        detail := format('%s rows, at least %s promised', counted, agreed.minimum_rows);
+        INSERT INTO eggdb_catalog.contract_results (contract_name, clause, passed, detail) VALUES (check_contract.contract_name, clause, passed, detail);
+        RETURN NEXT;
+    END IF;
+    FOR rule IN SELECT q.rule_name, q.row_condition FROM eggdb_catalog.quality_rules q WHERE q.schema_name = agreed.schema_name AND q.table_name = agreed.table_name ORDER BY q.rule_name LOOP
+        EXECUTE format('SELECT coalesce(sum(CASE WHEN coalesce((%s), false) THEN 0 ELSE 1 END), 0) FROM %I.%I', rule.row_condition, agreed.schema_name, agreed.table_name) INTO failed;
+        clause := 'quality: ' || rule.rule_name;
+        passed := failed = 0;
+        detail := format('%s rows break it', failed);
+        INSERT INTO eggdb_catalog.contract_results (contract_name, clause, passed, detail) VALUES (check_contract.contract_name, clause, passed, detail);
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
 "#;
 
 #[cfg(test)]
@@ -241,5 +373,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn schema_registry_checks_compatibility_and_contracts_check_tables() {
+        let store = catalog();
+        let mut session = Session::new(&store);
+        let first = r#"{"fields": [{"name": "id", "type": "integer", "required": true}, {"name": "email", "type": "text"}]}"#;
+        let breaking = r#"{"fields": [{"name": "id", "type": "integer", "required": true}, {"name": "email", "type": "text"}, {"name": "tier", "type": "text", "required": true}]}"#;
+        let widened = r#"{"fields": [{"name": "id", "type": "integer", "required": true}, {"name": "email", "type": "text"}, {"name": "country", "type": "text"}]}"#;
+        assert_eq!(run(&mut session, &format!("SELECT eggdb_catalog.register_schema('customers-value', '{first}') AS version")).unwrap(), "version\n1\nSELECT 1");
+        assert_eq!(run(&mut session, &format!("SELECT eggdb_catalog.register_schema('customers-value', '{first}') AS version")).unwrap(), "version\n1\nSELECT 1");
+        let refused = run(&mut session, &format!("SELECT eggdb_catalog.register_schema('customers-value', '{breaking}')")).unwrap_err();
+        assert!(refused.to_string().contains("tier: required field missing"), "{refused}");
+        assert_eq!(run(&mut session, &format!("SELECT eggdb_catalog.register_schema('customers-value', '{widened}') AS version")).unwrap(), "version\n2\nSELECT 1");
+        for sql in [
+            "INSERT INTO eggdb_catalog.contracts (contract_name, schema_name, table_name, subject, owner, minimum_rows) VALUES ('customers feed', 'public', 'customers', 'customers-value', 'crm-team', 5)",
+            "INSERT INTO eggdb_catalog.quality_rules (rule_name, schema_name, table_name, row_condition) VALUES ('ids positive', 'public', 'customers', 'id > 0')",
+        ] {
+            run(&mut session, sql).unwrap();
+        }
+        assert_eq!(
+            run(&mut session, "SELECT clause, passed, detail FROM eggdb_catalog.check_contract('customers feed')").unwrap(),
+            "clause|passed|detail\nschema|t|\nvolume|f|3 rows, at least 5 promised\nquality: ids positive|t|0 rows break it\nSELECT 3"
+        );
+        assert_eq!(run(&mut session, "SELECT count(*) AS kept FROM eggdb_catalog.contract_results").unwrap(), "kept\n3\nSELECT 1");
     }
 }
