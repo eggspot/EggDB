@@ -306,6 +306,18 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
+        if operation == GROUPING && arguments.len() != 1 && (self.sqlserver() || self.oracle()) {
+            let error = if self.sqlserver() {
+                SqlError::new(
+                    SqlState::SYNTAX_ERROR,
+                    "The grouping function requires 1 argument(s).",
+                )
+                .with_sqlserver_code(174)
+            } else {
+                SqlError::new(SqlState::SYNTAX_ERROR, "invalid number of arguments").with_oracle_code(909)
+            };
+            return Err(error.at(name.position));
+        }
         Ok(Some(Expr {
             kind: ExprKind::Function {
                 name: operation.to_owned(),

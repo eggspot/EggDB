@@ -871,3 +871,4 @@ its full title with its status.
 - [D844](decisions/D844.md) Code-only batch 492 (M16): CQL system_schema.types
 - [D845](decisions/D845.md) Code-only batch 493 (M12): a stored geometry type
 - [D846](decisions/D846.md) Code-only batch 494 (M12): geometry typmods as checks
+- [D847](decisions/D847.md) Code-only batch 495 (M5): one-argument GROUPING in SQL Server and Oracle

@@ -746,11 +746,20 @@ impl Analyzer<'_> {
                     .key_shapes
                     .iter()
                     .position(|key| *key == shape)
-                    .ok_or_else(|| {
-                        grouping_error(
+                    .ok_or_else(|| match crate::constraints::current_dialect() {
+                        crate::Dialect::SqlServer => SqlError::new(
+                            SqlState::GROUPING_ERROR,
+                            "Argument 1 of the GROUPING function does not match any of the expressions in the GROUP BY clause.",
+                        )
+                        .with_sqlserver_code(8161)
+                        .at(argument.position),
+                        crate::Dialect::Oracle => SqlError::new(SqlState::GROUPING_ERROR, "not a GROUP BY expression")
+                            .with_oracle_code(979)
+                            .at(argument.position),
+                        _ => grouping_error(
                             "arguments to GROUPING must be grouping expressions of the associated query level",
                             argument.position,
-                        )
+                        ),
                     })?;
                 keys.push(key);
             }

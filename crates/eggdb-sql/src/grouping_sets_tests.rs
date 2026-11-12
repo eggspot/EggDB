@@ -512,3 +512,23 @@ fn a_hostile_group_by_is_refused_before_its_sets_are_built() {
     assert_eq!(state, "54023");
     assert_eq!(message, "GROUPING must have fewer than 32 arguments");
 }
+
+fn vendor_code(session: &mut Session<'_>, sql: &str) -> Option<u16> {
+    match run(session, sql) {
+        Ok(outputs) => panic!("{sql} succeeded: {outputs:?}"),
+        Err(error) => error.vendor_code(),
+    }
+}
+
+#[test]
+fn sql_server_and_oracle_take_one_grouping_argument_and_name_their_errors() {
+    let store = MemoryStore::default();
+    let mut tsql = Session::with_dialect(&store, Dialect::SqlServer);
+    last(&mut tsql, "CREATE TABLE sales (region varchar(10), item varchar(10), qty int)");
+    assert_eq!(vendor_code(&mut tsql, "SELECT GROUPING(region, item) FROM sales GROUP BY ROLLUP(region, item)"), Some(174));
+    assert_eq!(vendor_code(&mut tsql, "SELECT GROUPING(qty) FROM sales GROUP BY ROLLUP(region, item)"), Some(8161));
+    last(&mut tsql, "SELECT GROUPING(region) AS g FROM sales GROUP BY ROLLUP(region, item)");
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    assert_eq!(vendor_code(&mut oracle, "SELECT GROUPING(region, item) FROM sales GROUP BY ROLLUP(region, item)"), Some(909));
+    assert_eq!(vendor_code(&mut oracle, "SELECT GROUPING(qty) FROM sales GROUP BY ROLLUP(region, item)"), Some(979));
+}

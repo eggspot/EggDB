@@ -515,7 +515,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Grouping sets: SQL Server's and Oracle's one-argument `GROUPING` and their own error numbers
   for grouping-set mistakes, grouping sets beside window functions checked against each manual,
   and `GROUPING` of outer references in a subquery; `ROLLUP`, `CUBE`, `GROUPING SETS` and
-  `WITH ROLLUP` are built (D298).
+  `WITH ROLLUP` are built (D298). SQL Server's and Oracle's one-argument `GROUPING` and their error numbers: **code
+  written, unbuilt** (code-only mode, 2026-11-12, D847).
 - An index read in place of the sort when a nullable column whose NULLs must move is not the
   first `ORDER BY` column after the ones fixed by `=`, or a later `ORDER BY` column may hold
   NULLs (D341 reads the first such column in two ranges only).
