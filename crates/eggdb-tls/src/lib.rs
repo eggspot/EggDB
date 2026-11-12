@@ -52,7 +52,10 @@ pub mod verify;
 pub mod x509;
 mod x509_time;
 
-pub use config::{ClientConfig, MaximumVersion, MinimumVersion, ServerConfig, ServerVerification};
+pub use config::{
+    ClientAuthentication, ClientConfig, MaximumVersion, MinimumVersion, ServerConfig,
+    ServerVerification,
+};
 pub use error::TlsError;
 pub use server_connection::ServerConnection;
 pub use session::SessionInfo;

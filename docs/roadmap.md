@@ -717,7 +717,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M6b The rest of security
 - Kerberos/GSSAPI logins (D22, D185).
 - TLS client certificates, requested and verified by the TLS layer (D22, D161, D185). Check:
-  psql with `sslcert` in the `tls-clients` job.
+  psql with `sslcert` in the `tls-clients` job. **Code written, unbuilt** (code-only mode, 2026-11-12, D803): TLS 1.3 only. Left: TLS 1.2's
+  CertificateRequest, a `serve` option in place of `EGGDB_TLS_CLIENT_CA`, and the `tls-clients` check.
 - LDAP search-and-bind, StartTLS and LDAPS (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D802).
   Left: a directory in CI.
 - PostgreSQL 18's `OAUTHBEARER` mechanism (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D801).

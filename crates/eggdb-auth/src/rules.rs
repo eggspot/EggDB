@@ -14,6 +14,8 @@
 //! - `oauth jwks=keys.json issuer=... audience=... discovery=https://login.example/.well-known/openid-configuration
 //!   [scope=openid] [user_claim=sub] [leeway=60]`: the same token sent through SASL's `OAUTHBEARER`, as
 //!   PostgreSQL 18's clients send it; a client without a token is pointed at `discovery` to get one.
+//! - `cert`: a TLS client certificate whose common name is the user name; the server must ask
+//!   clients for certificates (`EGGDB_TLS_CLIENT_CA`).
 //! - `reject`: the user may not log in.
 
 use crate::jwt::{JwtKeys, JwtPolicy};
@@ -50,6 +52,8 @@ pub enum AuthMethod {
         /// The scope a client asks the issuer for.
         scope: String,
     },
+    /// A TLS client certificate, checked by the TLS layer, whose common name is the user.
+    Certificate,
     /// No login.
     Reject,
 }
@@ -218,6 +222,7 @@ impl AuthRules {
                         search,
                     })
                 }
+                "cert" => AuthMethod::Certificate,
                 "jwt" | "oauth" => {
                     let path = required(&found, "jwks", line)?;
                     let document = read_key_set(Path::new(path)).map_err(|error| RulesError {
@@ -253,7 +258,7 @@ impl AuthRules {
                     return Err(RulesError {
                         line,
                         message: format!(
-                            "unknown method {other}; use scram-sha-256, ldap, jwt, oauth or reject"
+                            "unknown method {other}; use scram-sha-256, ldap, jwt, oauth, cert or reject"
                         ),
                     });
                 }

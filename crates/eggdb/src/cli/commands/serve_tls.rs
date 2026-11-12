@@ -11,6 +11,7 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 
+const CLIENT_CA_VARIABLE: &str = "EGGDB_TLS_CLIENT_CA";
 const SELF_SIGNED_DAYS: i64 = 365;
 const SECONDS_PER_DAY: i64 = 86_400;
 const POSTGRESQL_ALPN: &[u8] = b"postgresql";
@@ -235,6 +236,17 @@ pub(super) fn tls_setup(
     })?;
     let minimum_version = options.tls_min_version.unwrap_or_default();
     config.minimum_version = minimum_version;
+    if let Some(path) = std::env::var_os(CLIENT_CA_VARIABLE).filter(|path| !path.is_empty()) {
+        let text = std::fs::read_to_string(&path).map_err(|error| {
+            usage(format!(
+                "cannot read {CLIENT_CA_VARIABLE} {}: {error}",
+                std::path::Path::new(&path).display()
+            ))
+        })?;
+        let trust = eggdb_tls::verify::TrustStore::from_pem(&text)
+            .map_err(|error| usage(format!("{CLIENT_CA_VARIABLE}: {error}")))?;
+        config.client_authentication = eggdb_tls::ClientAuthentication::Optional { trust };
+    }
     let with_protocol = |protocol: Option<&[u8]>| {
         let mut config = config.clone();
         config.application_protocols = protocol.map(|name| vec![name.to_vec()]).unwrap_or_default();

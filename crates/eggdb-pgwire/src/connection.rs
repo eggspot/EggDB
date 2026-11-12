@@ -610,6 +610,32 @@ fn authenticate_externally<S: KeyValueStore>(
     if matches!(method, eggdb_auth::AuthMethod::Reject) {
         return refuse_login(wire, shared, user, "the rule file rejects the user");
     }
+    if matches!(method, eggdb_auth::AuthMethod::Certificate) {
+        let named = wire.tls().and_then(|info| info.peer_certificates.first()).map(|leaf| {
+            leaf.subject()
+                .common_names()
+                .iter()
+                .any(|name| name == user)
+        });
+        let why = match named {
+            None => Some("the client sent no TLS certificate"),
+            Some(false) => Some("the client certificate's common name is not the user name"),
+            Some(true) => None,
+        };
+        if let Some(why) = why {
+            return refuse_login(wire, shared, user, why);
+        }
+        if !may_log_in(store, user) {
+            return refuse_login(
+                wire,
+                shared,
+                user,
+                "no stored role with LOGIN has this name",
+            );
+        }
+        wire.outbox.authentication_ok();
+        return AuthenticationOutcome::Authenticated;
+    }
     if method.sends_secret_in_clear() && wire.tls().is_none() && !wire.is_local() {
         fatal(
             wire,
@@ -662,6 +688,7 @@ fn authenticate_externally<S: KeyValueStore>(
         }
         eggdb_auth::AuthMethod::ScramSha256
         | eggdb_auth::AuthMethod::Reject
+        | eggdb_auth::AuthMethod::Certificate
         | eggdb_auth::AuthMethod::OAuthBearer { .. } => Err("no external method".to_owned()),
     };
     if let Err(why) = checked {

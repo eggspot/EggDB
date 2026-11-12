@@ -5,18 +5,21 @@ use std::io::{Read, Write};
 
 use crate::alert::AlertDescription;
 use crate::cipher_suite::{CipherSuite, version};
-use crate::config::{MaximumVersion, MinimumVersion, ServerConfig};
+use crate::config::{ClientAuthentication, MaximumVersion, MinimumVersion, ServerConfig};
 use crate::error::TlsError;
 use crate::handshake::{
-    CertificateMessage, ClientHello, DigitallySigned, EncryptedExtensions, Extension,
+    CertificateMessage, CertificateRequest, ClientHello, DigitallySigned, EncryptedExtensions, Extension,
     HELLO_RETRY_REQUEST_RANDOM, KeyShareEntry, ServerHello, certificate_verify_content,
     extension_type, finished_message, handshake_type, message_body, message_hash_message,
 };
 use crate::key_schedule::{KeySchedule, finished_verify_data, traffic_keys};
 use crate::negotiation::{
-    EphemeralKey, SUPPORTED_GROUPS, choose_application_protocol, choose_signature_scheme,
-    scheme_algorithm,
+    EphemeralKey, SUPPORTED_GROUPS, SUPPORTED_SIGNATURE_SCHEMES, choose_application_protocol,
+    choose_signature_scheme, scheme_algorithm, scheme_fits_key,
 };
+use crate::signature::verify_signature;
+use crate::verify::{KeyPurpose, verify_certificate_chain};
+use crate::x509::Certificate;
 use crate::private_key::FillRandom;
 use crate::record::{Tls13RecordProtection, content_type};
 use crate::record_layer::{Protection, RecordLayer};
@@ -52,6 +55,12 @@ pub(crate) fn handshake<S: Read + Write>(
         versions.contains(&version::TLS12)
     };
     if config.minimum_version == MinimumVersion::Tls12 && offers_tls12 {
+        if matches!(config.client_authentication, ClientAuthentication::Required { .. }) {
+            return Err(TlsError::protocol(
+                AlertDescription::ProtocolVersion,
+                "client certificates are checked over TLS 1.3 only",
+            ));
+        }
         return crate::server12::handshake(layer, config, message, hello, fill_random);
     }
     Err(TlsError::protocol(
@@ -226,6 +235,21 @@ fn tls13<S: Read + Write>(
     transcript.update(&encrypted_extensions);
     layer.queue(content_type::HANDSHAKE, &encrypted_extensions)?;
 
+    let client_trust = match &config.client_authentication {
+        ClientAuthentication::None => None,
+        ClientAuthentication::Optional { trust } => Some((trust, false)),
+        ClientAuthentication::Required { trust } => Some((trust, true)),
+    };
+    if client_trust.is_some() {
+        let request = CertificateRequest {
+            request_context: Vec::new(),
+            extensions: vec![Extension::signature_algorithms(&SUPPORTED_SIGNATURE_SCHEMES)],
+        }
+        .encode();
+        transcript.update(&request);
+        layer.queue(content_type::HANDSHAKE, &request)?;
+    }
+
     let chain: Vec<&[u8]> = config
         .chain()
         .iter()
@@ -262,6 +286,10 @@ fn tls13<S: Read + Write>(
         schedule.enter_application(&transcript.current());
     layer.set_write_protection(protection(&application_secrets.server)?);
 
+    let peer_certificates = match client_trust {
+        Some((trust, required)) => read_client_certificate(layer, &mut transcript, trust, required)?,
+        None => Vec::new(),
+    };
     let expected = finished_verify_data(hash, &handshake_secrets.client, &transcript.current());
     let (message_type, client_finished) = layer.read_handshake_message(None)?;
     if message_type != handshake_type::FINISHED {
@@ -285,7 +313,7 @@ fn tls13<S: Read + Write>(
             cipher_suite: suite,
             application_protocol,
             server_name,
-            peer_certificates: Vec::new(),
+            peer_certificates,
             server_certificate: config.chain().first().cloned(),
         },
         traffic: Traffic::Tls13(Tls13Traffic {
@@ -297,3 +325,86 @@ fn tls13<S: Read + Write>(
         }),
     })
 }
+
+fn read_client_certificate<S: Read + Write>(
+    layer: &mut RecordLayer<S>,
+    transcript: &mut crate::cipher_suite::TranscriptHash,
+    trust: &crate::verify::TrustStore,
+    required: bool,
+) -> Result<Vec<Certificate>, TlsError> {
+    let (message_type, message) = layer.read_handshake_message(None)?;
+    if message_type != handshake_type::CERTIFICATE {
+        return Err(TlsError::protocol(
+            AlertDescription::UnexpectedMessage,
+            "expected the client's Certificate",
+        ));
+    }
+    transcript.update(&message);
+    let certificate_message = CertificateMessage::decode_tls13(message_body(&message))?;
+    if !certificate_message.request_context.is_empty() {
+        return Err(TlsError::protocol(
+            AlertDescription::IllegalParameter,
+            "the client's Certificate has a request context",
+        ));
+    }
+    if certificate_message.entries.is_empty() {
+        if required {
+            return Err(TlsError::protocol(
+                AlertDescription::CertificateRequired,
+                "the client sent no certificate",
+            ));
+        }
+        return Ok(Vec::new());
+    }
+    let chain = certificate_message
+        .entries
+        .iter()
+        .map(|entry| Certificate::from_der(&entry.certificate))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            TlsError::protocol(
+                AlertDescription::BadCertificate,
+                "the client's certificate could not be parsed",
+            )
+        })?;
+    verify_certificate_chain(
+        &chain,
+        trust,
+        KeyPurpose::ClientAuthentication,
+        crate::client::unix_now(),
+    )?;
+    let before_verify = transcript.current();
+    let (message_type, message) = layer.read_handshake_message(None)?;
+    if message_type != handshake_type::CERTIFICATE_VERIFY {
+        return Err(TlsError::protocol(
+            AlertDescription::UnexpectedMessage,
+            "expected the client's CertificateVerify",
+        ));
+    }
+    transcript.update(&message);
+    let signed = DigitallySigned::decode(message_body(&message))?;
+    let leaf_key = chain[0].public_key();
+    let algorithm = scheme_algorithm(signed.scheme, true)
+        .filter(|_| {
+            SUPPORTED_SIGNATURE_SCHEMES.contains(&signed.scheme)
+                && scheme_fits_key(signed.scheme, leaf_key)
+        })
+        .ok_or(TlsError::protocol(
+            AlertDescription::IllegalParameter,
+            "the client signed with a scheme the server did not offer",
+        ))?;
+    verify_signature(
+        algorithm,
+        leaf_key,
+        &certificate_verify_content(false, &before_verify),
+        &signed.signature,
+    )
+    .map_err(|_| {
+        TlsError::protocol(
+            AlertDescription::DecryptError,
+            "the client's CertificateVerify does not verify",
+        )
+    })?;
+    Ok(chain)
+}
+

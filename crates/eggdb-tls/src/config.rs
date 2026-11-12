@@ -60,6 +60,27 @@ pub struct ServerConfig {
     pub minimum_version: MinimumVersion,
     /// The highest version offered.
     pub maximum_version: MaximumVersion,
+    /// Whether clients are asked for certificates, and what they must chain to.
+    pub client_authentication: ClientAuthentication,
+}
+
+/// Whether a server asks clients for certificates (TLS 1.3's CertificateRequest).
+#[derive(Debug, Clone, Default)]
+pub enum ClientAuthentication {
+    /// Clients are not asked.
+    #[default]
+    None,
+    /// Clients are asked; one that sends no certificate still connects, and one that sends a
+    /// certificate must chain to `trust`.
+    Optional {
+        /// The certificate authorities client certificates must chain to.
+        trust: TrustStore,
+    },
+    /// Every client must send a certificate that chains to `trust`.
+    Required {
+        /// The certificate authorities client certificates must chain to.
+        trust: TrustStore,
+    },
 }
 
 impl ServerConfig {
@@ -86,6 +107,7 @@ impl ServerConfig {
             application_protocols: Vec::new(),
             minimum_version: MinimumVersion::default(),
             maximum_version: MaximumVersion::default(),
+            client_authentication: ClientAuthentication::None,
         })
     }
 
