@@ -1532,7 +1532,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-11, D436), with FastRP embeddings; Leiden: **code
   written, unbuilt** (code-only mode, 2026-11-12, D607). Left: learned embeddings.
 - The graph algorithms as procedures in SQL/PGQ (D248).
-- RDF triples and quads with SPARQL 1.1 (D38). Check: the W3C SPARQL suite.
+- RDF triples and quads with SPARQL 1.1 (D38). Check: the W3C SPARQL suite. The quad store and its readers (N-Triples,
+  N-Quads, Turtle, TriG) in `eggdb-rdf`: **code written, unbuilt** (code-only mode, 2026-11-12, D886). Left: SPARQL
+  query and update, the protocol, and the server wiring.
 - The LDBC benchmark against Neo4j (D7, D206).
 
 ### M14 Backup, point-in-time recovery and replication

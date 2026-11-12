@@ -1,0 +1,13 @@
+[package]
+name = "eggdb-rdf"
+description = "EggDB's RDF store: triples and quads on EggDB's key-value transactions, N-Triples, N-Quads, Turtle and TriG readers, and SPARQL 1.1 written from the W3C recommendations."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-keyspace = { path = "../eggdb-keyspace" }
