@@ -1363,7 +1363,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   writing, several row groups, streaming (D202). Check: a benchmark against DuckDB's reader.
   Statistics and several row groups when writing: **code written, unbuilt** (code-only mode,
   2026-11-12, D572); GZIP and ZSTD pages, read and written: **code written, unbuilt** (code-only mode, 2026-11-12,
-  D734).
+  D734); nested columns read (lists, maps and structs of plain values, as JSON text): **code written, unbuilt**
+  (code-only mode, 2026-11-12, D838). Left: deeper nesting (lists of structs and the like), writing nested columns,
+  and streaming.
 - `read_parquet` and the other file readers in SQL, after D202's decision on which files a
   server's SQL may open (D29, D202). The rule (embedded sessions read local files, servers none) and `read_parquet`
   with a column definition list: **code written, unbuilt** (code-only mode, 2026-11-12, D703); `read_csv`: **code
