@@ -3,6 +3,112 @@ use eggdb_parquet::{Cell, Column, ColumnType};
 
 const VARIABLE: &str = "EGGDB_FOREIGN_SOURCES";
 const SQL_SERVER_PASSWORD: &str = "SQLCMDPASSWORD";
+const PASSWORD_FILE: &str = "EGGDB_FOREIGN_PASSFILE";
+const ROW_LIMIT: &str = "EGGDB_FOREIGN_ROW_LIMIT";
+const TIMEOUT_SECONDS: &str = "EGGDB_FOREIGN_TIMEOUT_SECONDS";
+const ROLES_MARK: &str = "#roles=";
+const MOST_PASSWORD_FILE_BYTES: u64 = 1 << 20;
+
+struct Entry {
+    prefix: String,
+    roles: Vec<String>,
+}
+
+impl Entry {
+    fn parse(text: &str) -> Self {
+        match text.split_once(ROLES_MARK) {
+            Some((prefix, roles)) => Self {
+                prefix: prefix.trim().to_owned(),
+                roles: roles.split('+').map(str::trim).filter(|role| !role.is_empty()).map(str::to_owned).collect(),
+            },
+            None => Self { prefix: text.trim().to_owned(), roles: Vec::new() },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Limits {
+    rows: Option<u64>,
+    timeout: Option<std::time::Duration>,
+}
+
+impl Limits {
+    fn from_environment() -> Self {
+        let number = |name: &str| std::env::var(name).ok().and_then(|text| text.trim().parse::<u64>().ok()).filter(|number| *number > 0);
+        Self { rows: number(ROW_LIMIT), timeout: number(TIMEOUT_SECONDS).map(std::time::Duration::from_secs) }
+    }
+
+    fn read(
+        &self,
+        prefixes: &[String],
+        source: &str,
+        query: &str,
+        row: &mut dyn FnMut(String) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let mut counted = 0u64;
+        let limits = *self;
+        read(prefixes, source, query, &mut |text| {
+            counted += 1;
+            if let Some(most) = limits.rows
+                && counted > most
+            {
+                return Err(format!("the source gave more than {most} rows ({ROW_LIMIT})"));
+            }
+            if let Some(timeout) = limits.timeout
+                && started.elapsed() > timeout
+            {
+                return Err(format!("the read took longer than {} seconds ({TIMEOUT_SECONDS})", timeout.as_secs()));
+            }
+            row(text)
+        })
+    }
+}
+
+fn password_fields(line: &str) -> Vec<String> {
+    let mut fields = vec![String::new()];
+    let mut characters = line.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => {
+                if let (Some(next), Some(field)) = (characters.next(), fields.last_mut()) {
+                    field.push(next);
+                }
+            }
+            ':' => fields.push(String::new()),
+            other => {
+                if let Some(field) = fields.last_mut() {
+                    field.push(other);
+                }
+            }
+        }
+    }
+    fields
+}
+
+fn password_in(text: &str, host: &str, port: u16, database: &str, user: &str) -> Option<String> {
+    let port = port.to_string();
+    text.lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(password_fields)
+        .find(|fields| {
+            fields.len() == 5
+                && [host, port.as_str(), database, user]
+                    .iter()
+                    .zip(fields.iter())
+                    .all(|(wanted, field)| field == "*" || field.eq_ignore_ascii_case(wanted))
+        })
+        .map(|fields| fields[4].clone())
+}
+
+fn password_from_file(host: &str, port: u16, database: &str, user: &str) -> Option<String> {
+    use std::io::Read;
+    let path = std::env::var(PASSWORD_FILE).ok()?;
+    let mut text = String::new();
+    std::fs::File::open(path).ok()?.take(MOST_PASSWORD_FILE_BYTES).read_to_string(&mut text).ok()?;
+    password_in(&text, host, port, database, user)
+}
 const MOST_CSV_BYTES: u64 = 1 << 30;
 const MICROS_PER_MS: i64 = 1000;
 const MS_PER_DAY: i64 = 86_400_000;
@@ -15,18 +121,33 @@ pub(super) fn allow_from_environment() {
     let Ok(text) = std::env::var(VARIABLE) else {
         return;
     };
-    let prefixes: Vec<String> = text
+    let entries: Vec<Entry> = text
         .split(',')
         .map(str::trim)
-        .filter(|prefix| !prefix.is_empty())
-        .map(str::to_owned)
+        .filter(|entry| !entry.is_empty())
+        .map(Entry::parse)
         .collect();
-    if prefixes.is_empty() {
+    if entries.is_empty() {
         return;
     }
-    eggdb_sql::set_foreign_source(Box::new(move |source, query, row| {
-        read(&prefixes, source, query, row)
+    let prefixes: Vec<String> = entries.iter().map(|entry| entry.prefix.clone()).collect();
+    let limits = Limits::from_environment();
+    eggdb_sql::set_foreign_source(Box::new(move |request, row| {
+        if let Some(role) = request.role
+            && !role_may_read(&entries, role, request.source)
+        {
+            return Err(eggdb_sql::ForeignFailure::Denied(shown_source(request.source)));
+        }
+        limits
+            .read(&prefixes, request.source, request.query, row)
+            .map_err(eggdb_sql::ForeignFailure::Failed)
     }));
+}
+
+fn role_may_read(entries: &[Entry], role: &str, source: &str) -> bool {
+    entries
+        .iter()
+        .any(|entry| entry.roles.iter().any(|allowed| allowed == role) && allows(&entry.prefix, source))
 }
 
 fn object(names: &[String], values: impl Iterator<Item = String>) -> String {
@@ -115,7 +236,8 @@ fn read_postgresql(
 ) -> Result<(), String> {
     let mut options = eggdb_pgwire::client::parse_postgres_url(url)?;
     if options.password.is_none() {
-        options.password = std::env::var("PGPASSWORD").ok();
+        options.password = password_from_file(&options.host, options.port, &options.database, &options.user)
+            .or_else(|| std::env::var("PGPASSWORD").ok());
     }
     let mut client =
         eggdb_pgwire::client::PgClient::connect(&options).map_err(|error| error.to_string())?;
@@ -149,7 +271,8 @@ fn read_sql_server(
 ) -> Result<(), String> {
     let mut options = eggdb_tdswire::client::parse_sql_server_url(url)?;
     if options.password.is_none() {
-        options.password = std::env::var(SQL_SERVER_PASSWORD).ok();
+        options.password = password_from_file(&options.host, options.port, &options.database, &options.user)
+            .or_else(|| std::env::var(SQL_SERVER_PASSWORD).ok());
     }
     let mut client = eggdb_tdswire::client::TdsClient::connect(&options).map_err(|error| error.to_string())?;
     let statement = format!("{} FOR JSON PATH, INCLUDE_NULL_VALUES", query.trim().trim_end_matches(';'));
@@ -355,7 +478,7 @@ fn allowed_file(allowed: &str, source: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{allows, csv_fields, decimal_text, read};
+    use super::{Entry, allows, csv_fields, decimal_text, password_in, read, role_may_read};
 
     #[test]
     fn database_entries_allow_only_their_own_host_port_and_user() {
@@ -451,5 +574,21 @@ mod tests {
         assert!(!csv_fields("1,\"two, \"\"quoted\"\"", &mut fields, &mut field, &mut quoted));
         assert!(csv_fields("lines\",3", &mut fields, &mut field, &mut quoted));
         assert_eq!(fields, vec!["1".to_owned(), "two, \"quoted\"\nlines".to_owned(), "3".to_owned()]);
+    }
+
+    #[test]
+    fn roles_on_entries_and_passwords_per_source() {
+        let entries = vec![
+            Entry::parse("postgresql://reader@crm.internal/sales#roles=analyst+etl"),
+            Entry::parse("file:/data/lake/"),
+        ];
+        assert_eq!(entries[0].prefix, "postgresql://reader@crm.internal/sales");
+        assert!(role_may_read(&entries, "etl", "postgresql://reader@crm.internal/sales"));
+        assert!(!role_may_read(&entries, "intern", "postgresql://reader@crm.internal/sales"));
+        assert!(!role_may_read(&entries, "analyst", "postgresql://reader@crm.internal/hr"));
+        let passwords = "# comment\ncrm.internal:5432:sales:reader:s3cr\\:et\n*:*:*:reader:fallback\n";
+        assert_eq!(password_in(passwords, "crm.internal", 5432, "sales", "reader").as_deref(), Some("s3cr:et"));
+        assert_eq!(password_in(passwords, "other.internal", 5432, "x", "reader").as_deref(), Some("fallback"));
+        assert_eq!(password_in(passwords, "crm.internal", 5432, "sales", "admin"), None);
     }
 }

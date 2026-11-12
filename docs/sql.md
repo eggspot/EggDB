@@ -4098,8 +4098,14 @@ entries of `EGGDB_FOREIGN_SOURCES` (for example `postgresql://reports@10.0.0.7,f
 A PostgreSQL or SQL Server entry allows exactly that user on that host and port (and only its database when it
 names one, and a source's `sslrootcert` only when the entry gives the same one); a `file:` entry
 allows the files under that directory once both paths are made absolute, so `..` cannot leave it.
-A source outside them is refused with SQLSTATE `HV000`, and only a superuser may call the
-function (`42501`). With none set, the function answers `0A000`.
+A source outside them is refused with SQLSTATE `HV000`. A superuser may read every allowed source; another role only
+the sources of entries that name it after `#roles=` (`postgresql://reports@10.0.0.7#roles=analyst+etl`), and is
+refused others with `42501` (D770). With none set, the function answers `0A000`.
+
+Passwords can be kept per source in the file `EGGDB_FOREIGN_PASSFILE` names, in PostgreSQL's `.pgpass` format
+(`host:port:database:user:password`, `*` matching anything, `\:` and `\\` escaping), for PostgreSQL and SQL Server
+sources alike; the first matching line wins, before `PGPASSWORD` or `SQLCMDPASSWORD`. `EGGDB_FOREIGN_ROW_LIMIT` stops a
+call that reads more rows and `EGGDB_FOREIGN_TIMEOUT_SECONDS` one that reads for longer (both `HV000`).
 
 ## Scheduled copies (eggdb_etl)
 

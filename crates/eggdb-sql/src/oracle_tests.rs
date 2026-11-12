@@ -36,7 +36,7 @@ fn a_text_constant_meets_a_date_through_the_nls_format_under_the_statement_guard
         String::new(),
         None,
         false,
-        false,
+        None,
     );
     let _clock = crate::datetime::enter_statement(crate::time_zones::TimeZone::UTC);
     let _nls = enter(Arc::new(NlsParameters::default()));

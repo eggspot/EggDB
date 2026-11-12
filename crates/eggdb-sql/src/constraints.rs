@@ -27,7 +27,7 @@ struct Context {
     owner: String,
     identity_insert_table: Option<String>,
     keeps_identity_values: bool,
-    role_checked: bool,
+    checked_role: Option<String>,
 }
 
 thread_local! {
@@ -50,7 +50,7 @@ pub(crate) fn enter(
     owner: String,
     identity_insert_table: Option<String>,
     keeps_identity_values: bool,
-    role_checked: bool,
+    checked_role: Option<String>,
 ) -> ContextGuard {
     let context = Context {
         dialect,
@@ -59,7 +59,7 @@ pub(crate) fn enter(
         owner,
         identity_insert_table,
         keeps_identity_values,
-        role_checked,
+        checked_role,
     };
     ContextGuard(CONTEXT.with(|current| current.borrow_mut().replace(context)))
 }
@@ -79,7 +79,7 @@ fn context() -> Context {
             owner: String::new(),
             identity_insert_table: None,
             keeps_identity_values: false,
-            role_checked: true,
+            checked_role: Some(String::new()),
         })
     })
 }
@@ -89,7 +89,14 @@ pub(crate) fn role_is_checked() -> bool {
         context
             .borrow()
             .as_ref()
-            .is_none_or(|context| context.role_checked)
+            .is_none_or(|context| context.checked_role.is_some())
+    })
+}
+
+pub(crate) fn checked_role() -> Option<String> {
+    CONTEXT.with(|context| match context.borrow().as_ref() {
+        Some(context) => context.checked_role.clone(),
+        None => Some(String::new()),
     })
 }
 

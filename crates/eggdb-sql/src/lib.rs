@@ -382,7 +382,7 @@ pub use dump::{DumpReport, dump_sql};
 pub use eggdb_auth::scram::{ScramParts, parse_scram_verifier};
 pub use enums::EnumValue;
 pub use error::{SqlError, SqlResult, SqlState};
-pub use foreign::{ForeignSource, set_foreign_source};
+pub use foreign::{ForeignFailure, ForeignRequest, ForeignSource, set_foreign_source};
 pub use hstore::HstoreValue;
 pub use indexes::IndexCheck;
 pub use interval::{Interval, IntervalFields};

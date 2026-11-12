@@ -2,11 +2,31 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::{SqlType, Value};
 use std::sync::OnceLock;
 
-/// Reads a foreign source for `eggdb_foreign(source, query)`: `source` names it (a URL) and
-/// `query` says what to read there; each row goes to the sink as the text of one JSON object,
-/// and the sink's error stops the read.
+/// One call of `eggdb_foreign(source, query)`: the source's URL, what to read there, and the
+/// role asking, `None` for a superuser.
+#[derive(Debug, Clone, Copy)]
+pub struct ForeignRequest<'a> {
+    /// The source, a URL.
+    pub source: &'a str,
+    /// What to read there.
+    pub query: &'a str,
+    /// The role that called, or `None` when a superuser did.
+    pub role: Option<&'a str>,
+}
+
+/// Why a foreign read failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignFailure {
+    /// The calling role may not read this source (SQLSTATE `42501`).
+    Denied(String),
+    /// The source could not be read (SQLSTATE `HV000`).
+    Failed(String),
+}
+
+/// Reads a foreign source for `eggdb_foreign(source, query)`; each row goes to the sink as the
+/// text of one JSON object, and the sink's error stops the read.
 pub type ForeignSource = Box<
-    dyn Fn(&str, &str, &mut dyn FnMut(String) -> Result<(), String>) -> Result<(), String>
+    dyn Fn(&ForeignRequest<'_>, &mut dyn FnMut(String) -> Result<(), String>) -> Result<(), ForeignFailure>
         + Send
         + Sync,
 >;
@@ -46,20 +66,15 @@ pub(crate) fn foreign_rows(
     ) else {
         return Ok(());
     };
-    if crate::constraints::role_is_checked() {
-        return Err(SqlError::new(
-            SqlState::INSUFFICIENT_PRIVILEGE,
-            "permission denied to read foreign sources",
-        )
-        .with_hint("Only a superuser may call eggdb_foreign."));
-    }
+    let role = crate::constraints::checked_role();
     let Some(reader) = SOURCE.get() else {
         return Err(SqlError::not_supported(
             "foreign sources are off: the program running this SQL allows none (eggdb reads EGGDB_FOREIGN_SOURCES)",
         ));
     };
     let mut failure = None;
-    let outcome = reader(&source, &query, &mut |row| {
+    let request = ForeignRequest { source: &source, query: &query, role: role.as_deref() };
+    let outcome = reader(&request, &mut |row| {
         sink(Value::Json(row)).map_err(|error| {
             let message = error.message().to_owned();
             failure = Some(error);
@@ -69,10 +84,9 @@ pub(crate) fn foreign_rows(
     if let Some(error) = failure {
         return Err(error);
     }
-    outcome.map_err(|message| {
-        SqlError::new(
-            SqlState::FDW_ERROR,
-            format!("eggdb_foreign({source}): {message}"),
-        )
+    outcome.map_err(|failure| match failure {
+        ForeignFailure::Denied(message) => SqlError::new(SqlState::INSUFFICIENT_PRIVILEGE, format!("permission denied to read {message}"))
+            .with_hint("A superuser may read every allowed source; other roles only those whose EGGDB_FOREIGN_SOURCES entry names them."),
+        ForeignFailure::Failed(message) => SqlError::new(SqlState::FDW_ERROR, format!("eggdb_foreign({source}): {message}")),
     })
 }

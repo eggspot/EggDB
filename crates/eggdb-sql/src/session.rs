@@ -2323,7 +2323,7 @@ impl<'s> Session<'s> {
             },
             self.identity_insert_table.clone(),
             self.keeps_identity_values,
-            self.settings.checked_role.is_some(),
+            self.settings.checked_role.clone(),
         )
     }
 

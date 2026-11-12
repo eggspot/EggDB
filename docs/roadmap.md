@@ -1692,7 +1692,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - CouchDB's replication protocol (D48).
 - Foreign tables with declared columns and filter pushdown (D29, D229).
 - Foreign sources: MySQL, SQL Server, HTTP, S3 and Parquet over object storage (D29, D229).
-- Credentials per source, permission per role, and a timeout and row limit per call (D229).
+- Credentials per source, permission per role, and a timeout and row limit per call (D229). **Code written, unbuilt**
+  (code-only mode, 2026-11-12, D770).
 - Joins across servers planned as one distributed query, and federated SQL across EggDB clusters
   in Trino's style (D18, D46, D229).
 - A fleet control plane: inventory, upgrades in canary waves and placement by hardware class
