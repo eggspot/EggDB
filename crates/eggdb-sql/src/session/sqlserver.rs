@@ -554,6 +554,7 @@ impl<'s> Session<'s> {
             }
             SqlServerStatement::SecurityPolicy(command) => self.run_security_policy(command),
             SqlServerStatement::DdlTrigger(command) => self.run_ddl_trigger_command(command),
+            SqlServerStatement::PartitionScheme(command) => self.run_partition_scheme_command(command),
             SqlServerStatement::InsertBulk(_) => Err(SqlError::new(
                 SqlState::INTERNAL_ERROR,
                 "an INSERT BULK statement reached the statement runner",

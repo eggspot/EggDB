@@ -23,6 +23,7 @@ pub(crate) mod sqlserver;
 pub(crate) mod sqlserver_agent;
 mod sqlserver_security;
 mod sqlserver_ddl_triggers;
+mod sqlserver_partitions;
 mod oracle_system_triggers;
 mod transaction_settings;
 mod triggers;
@@ -3651,6 +3652,14 @@ impl<'s> Session<'s> {
             Statement::Cursor(command) => self.cursor_command(command, io),
             Statement::Show { name } => self.show(name.as_deref()),
             Statement::CreateTable(create) => {
+                let scheme_ranges = match create
+                    .partition_by
+                    .as_ref()
+                    .and_then(|partitioning| partitioning.scheme.clone())
+                {
+                    Some(scheme) => Some(self.partition_scheme_ranges(&scheme)?),
+                    None => None,
+                };
                 let created = self.write("CREATE TABLE", |writer, tables| {
                     binding.create_table(writer, tables, create)?;
                     crate::sqlite_schema_text::create_table(writer, tables, create, dialect)
@@ -3672,7 +3681,14 @@ impl<'s> Session<'s> {
                     .constraints
                     .iter()
                     .chain(create.columns.iter().flat_map(|column| column.constraints.iter()));
-                created.and_then(|answer| self.keep_set_member_order(&table, constraints).map(|()| answer))
+                let created = created
+                    .and_then(|answer| self.keep_set_member_order(&table, constraints).map(|()| answer));
+                match (created, scheme_ranges) {
+                    (Ok(answer), Some(ranges)) => {
+                        self.create_scheme_partitions(&table, &ranges).map(|()| answer)
+                    }
+                    (outcome, _) => outcome,
+                }
             }
             Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;

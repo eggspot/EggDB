@@ -811,6 +811,9 @@ impl<'t> Parser<'t> {
             "create" | "alter" | "drop" if self.at_security_policy() => {
                 self.sqlserver_security_policy()?
             }
+            "create" | "drop" if self.at_partition_scheme_command() => {
+                self.sqlserver_partition_command()?
+            }
             "create" if self.is_word_at(1, "sequence") => {
                 self.at += 1;
                 self.sqlserver_create_sequence()?
@@ -1772,22 +1775,15 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn skip_storage_clause(&mut self) -> SqlResult<()> {
-        if !self.take_word("on") {
-            return Ok(());
-        }
-        self.label()?;
-        if self.take(&TokenKind::LeftParen) {
-            self.label()?;
-            self.expect(&TokenKind::RightParen)?;
-        }
-        Ok(())
+        self.storage_clause().map(drop)
     }
 
-    pub(super) fn sqlserver_table_tail(&mut self) -> SqlResult<()> {
+    pub(super) fn sqlserver_table_tail(&mut self) -> SqlResult<Option<(crate::ast::Name, crate::ast::Name)>> {
+        let mut scheme = None;
         loop {
             let position = self.position();
             if self.is_word("on") {
-                self.skip_storage_clause()?;
+                scheme = self.storage_clause()?.or(scheme);
             } else if self.take_word("textimage_on") {
                 self.label()?;
             } else if self.is_word("filestream_on") {
@@ -1804,7 +1800,7 @@ impl<'t> Parser<'t> {
                 }
                 self.expect(&TokenKind::RightParen)?;
             } else {
-                return Ok(());
+                return Ok(scheme);
             }
         }
     }

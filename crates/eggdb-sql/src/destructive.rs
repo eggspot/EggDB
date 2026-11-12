@@ -462,6 +462,7 @@ fn sqlserver(
         SqlServerStatement::Use(_)
         | SqlServerStatement::SecurityPolicy(_)
         | SqlServerStatement::DdlTrigger(_)
+        | SqlServerStatement::PartitionScheme(_)
         | SqlServerStatement::NoCount(_)
         | SqlServerStatement::ImplicitTransactions(_)
         | SqlServerStatement::IdentityInsert { .. }

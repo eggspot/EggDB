@@ -104,6 +104,7 @@ impl Parser<'_> {
             row_movement: None,
             interval: None,
             position,
+            scheme: None,
         };
         if self.postgresql() {
             return Ok(partition_by);

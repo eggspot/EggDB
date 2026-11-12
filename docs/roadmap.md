@@ -400,7 +400,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `42883` for an unknown function in a PostgreSQL key (D316). MySQL's functions and integer-only keys and
   `42883`: **code written, unbuilt** (code-only mode, 2026-11-10, D359). Oracle's `DISABLE ROW
   MOVEMENT` and `ORA-14402`: **code written, unbuilt** (code-only mode, 2026-11-10, D361).
-- Oracle's interval partitioning and SQL Server's partition schemes (D169); interval
+- Oracle's interval partitioning and SQL Server's partition schemes (D169); SQL Server's partition functions and
+  schemes, with tables created `ON scheme(column)`: **code written, unbuilt** (code-only mode, 2026-11-13, D975); interval
   partitioning: **code written, unbuilt** (code-only mode, 2026-11-10, D362; left: an `UPDATE` that
   moves a row above the transition, `SET INTERVAL`); MySQL's
   `SUBPARTITION BY`, `LOAD DATA ... PARTITION`, `INSERT IGNORE` skipping rows outside a

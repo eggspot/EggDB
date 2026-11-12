@@ -551,6 +551,7 @@ fn subpartitioning(
         row_movement: Some(true),
         interval: None,
         position: sub.position,
+        scheme: None,
     }))
 }
 

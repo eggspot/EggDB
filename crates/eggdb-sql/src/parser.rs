@@ -2,6 +2,7 @@ mod asof;
 mod foreign_tables;
 mod sqlserver_security;
 mod sqlserver_ddl_triggers;
+mod sqlserver_partitions;
 mod qualify;
 mod oracle_system_triggers;
 mod constraints;
@@ -2143,9 +2144,11 @@ impl<'t> Parser<'t> {
         if self.sqlite() {
             self.sqlite_table_finish(&name, &mut columns, &primary_key, &integer_columns)?;
         }
-        if self.sqlserver() {
-            self.sqlserver_table_tail()?;
-        }
+        let partition_scheme = if self.sqlserver() {
+            self.sqlserver_table_tail()?
+        } else {
+            None
+        };
         if self.oracle() {
             self.skip_table_physical_properties()?;
         }
@@ -2158,7 +2161,18 @@ impl<'t> Parser<'t> {
         let partition_by = if self.is_word("partition") && self.is_word_at(1, "by") {
             Some(self.partition_by()?)
         } else {
-            None
+            partition_scheme.map(|(scheme, column)| crate::ast::PartitionBy {
+                strategy: crate::ast::PartitionStrategy::Range,
+                key: vec![crate::ast::PartitionKeyPart::Column(column)],
+                partitions: Vec::new(),
+                hash_partitions: None,
+                mysql_integer_key: false,
+                subpartition_by: None,
+                row_movement: None,
+                interval: None,
+                position: scheme.position,
+                scheme: Some(scheme),
+            })
         };
         if self.postgresql() {
             self.table_access_method()?;

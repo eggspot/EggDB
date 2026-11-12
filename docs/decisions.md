@@ -999,3 +999,4 @@ its full title with its status.
 - [D972](decisions/D972.md) Code-only batch 620 (M6f): SQLTables and SQLColumns in the ODBC driver
 - [D973](decisions/D973.md) Code-only batch 621 (M6f): the ODBC driver's wide-character entry points
 - [D974](decisions/D974.md) Code-only batch 622 (M14): compaction's lock window closed by checking the locked file is still at its path
+- [D975](decisions/D975.md) Code-only batch 623 (M2): SQL Server's partition functions and schemes

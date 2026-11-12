@@ -659,6 +659,7 @@ pub(crate) enum SqlServerStatement {
     InsertBulk(crate::bulk_load::InsertBulk),
     SecurityPolicy(Box<crate::sqlserver_security::SecurityPolicyCommand>),
     DdlTrigger(Box<crate::sqlserver_ddl_triggers::DdlTriggerCommand>),
+    PartitionScheme(Box<crate::sqlserver_partitions::PartitionSchemeCommand>),
     Declare(Vec<VariableDeclaration>),
     SetVariable {
         variable: Name,
@@ -1454,6 +1455,7 @@ pub(crate) struct PartitionBy {
     pub(crate) row_movement: Option<bool>,
     pub(crate) interval: Option<String>,
     pub(crate) position: usize,
+    pub(crate) scheme: Option<Name>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
