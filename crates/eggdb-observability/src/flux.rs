@@ -245,12 +245,44 @@ impl Parser {
         }
     }
 
+    #[cfg(test)]
     fn pipeline(&mut self) -> Result<Vec<Call>, String> {
         let mut calls = vec![self.call()?];
         while self.eat("|>") {
             calls.push(self.call()?);
         }
         Ok(calls)
+    }
+
+    fn statement(&mut self) -> Result<Option<Statement>, String> {
+        while matches!(self.peek(), Some(Token::Name(word)) if word == "import")
+            && matches!(self.tokens.get(self.at + 1), Some(Token::Text(_)))
+        {
+            self.at += 2;
+        }
+        if self.peek().is_none() {
+            return Ok(None);
+        }
+        let assigns = matches!(self.peek(), Some(Token::Name(_))) && matches!(self.tokens.get(self.at + 1), Some(Token::Symbol("=")));
+        let assign = if assigns {
+            let name = self.name()?;
+            self.expect("=")?;
+            Some(name)
+        } else {
+            None
+        };
+        let names_stream = matches!(self.peek(), Some(Token::Name(_)))
+            && !matches!(self.tokens.get(self.at + 1), Some(Token::Symbol("(" | ".")));
+        let (head, mut calls) = if names_stream {
+            (Head::Variable(self.name()?), Vec::new())
+        } else {
+            let first = self.call()?;
+            if first.name == "join" { (Head::Join(first), Vec::new()) } else { (Head::From, vec![first]) }
+        };
+        while self.eat("|>") {
+            calls.push(self.call()?);
+        }
+        Ok(Some(Statement { assign, head, calls }))
     }
 
     fn call(&mut self) -> Result<Call, String> {
@@ -1063,7 +1095,20 @@ struct Outcome {
     tables: Vec<Table>,
 }
 
-fn execute(session: &mut Session<'_>, calls: &[Call]) -> Result<Outcome, String> {
+#[derive(Debug, Clone)]
+struct Stream {
+    tables: Vec<Table>,
+    start: i64,
+    stop: i64,
+}
+
+struct Applied {
+    stream: Stream,
+    result: String,
+    yielded: bool,
+}
+
+fn execute(session: &mut Session<'_>, calls: &[Call]) -> Result<Applied, String> {
     if calls.first().is_none_or(|call| call.name != "from") {
         return Err("a query starts with from()".to_owned());
     }
@@ -1082,12 +1127,22 @@ fn execute(session: &mut Session<'_>, calls: &[Call]) -> Result<Outcome, String>
         }
         next += 1;
     }
-    let mut tables = source_tables(session, start, stop, &pushed)?;
+    let tables = source_tables(session, start, stop, &pushed)?;
+    let rest: Vec<&Call> = calls
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(index, _)| *index != range && !(*index > range && *index < next))
+        .map(|(_, call)| call)
+        .collect();
+    apply(Stream { tables, start, stop }, &rest)
+}
+
+fn apply(stream: Stream, calls: &[&Call]) -> Result<Applied, String> {
+    let Stream { mut tables, start, stop } = stream;
     let mut result = "_result".to_owned();
-    for (index, call) in calls.iter().enumerate().skip(1) {
-        if index == range || (index > range && index < next) {
-            continue;
-        }
+    let mut yielded = false;
+    for call in calls {
         tables = match call.name.as_str() {
             "filter" => {
                 let Some(Argument::Predicate { body, .. }) = call.argument("fn") else {
@@ -1283,13 +1338,122 @@ fn execute(session: &mut Session<'_>, calls: &[Call]) -> Result<Outcome, String>
                 if let Some(Argument::Text(name)) = call.argument("name") {
                     result = name.clone();
                 }
+                yielded = true;
                 tables
             }
             other => return Err(format!("function {other}() is not supported yet")),
         };
     }
     tables.retain(|table| !table.rows.is_empty());
-    Ok(Outcome { result, tables })
+    Ok(Applied {
+        stream: Stream { tables, start, stop },
+        result,
+        yielded,
+    })
+}
+
+fn on_values(row: &Row, on: &[String]) -> Option<Vec<String>> {
+    on.iter().map(|column| row.get(column).and_then(Value::to_text)).collect()
+}
+
+fn joined(call: &Call, streams: &BTreeMap<String, Stream>) -> Result<Stream, String> {
+    let Some(Argument::Record(pairs)) = call.argument("tables") else {
+        return Err("join needs tables: {a: first, b: second}".to_owned());
+    };
+    let [(left_name, Argument::Name(left_stream)), (right_name, Argument::Name(right_stream))] = pairs.as_slice() else {
+        return Err("join takes exactly two streams named by variables".to_owned());
+    };
+    if matches!(call.argument("method"), Some(Argument::Text(method)) if method != "inner") {
+        return Err("join supports method: \"inner\" only".to_owned());
+    }
+    let on = names(call.argument("on"))?;
+    if on.is_empty() {
+        return Err("join needs on: [columns]".to_owned());
+    }
+    let stream_named = |name: &str| streams.get(name).ok_or_else(|| format!("undefined identifier {name}"));
+    let (left, right) = (stream_named(left_stream)?, stream_named(right_stream)?);
+    let columns_of = |stream: &Stream| -> Vec<String> {
+        let mut columns: Vec<String> = stream.tables.iter().flat_map(|table| table.rows.iter()).flat_map(|row| row.keys().cloned()).collect();
+        columns.sort();
+        columns.dedup();
+        columns
+    };
+    let (left_columns, right_columns) = (columns_of(left), columns_of(right));
+    let mut by_key: BTreeMap<Vec<String>, Vec<&Row>> = BTreeMap::new();
+    for row in right.tables.iter().flat_map(|table| table.rows.iter()) {
+        if let Some(key) = on_values(row, &on) {
+            by_key.entry(key).or_default().push(row);
+        }
+    }
+    let renamed = |column: &str, other_side: &[String], side: &str| {
+        if other_side.iter().any(|other| other == column) {
+            format!("{column}_{side}")
+        } else {
+            column.to_owned()
+        }
+    };
+    let mut rows = Vec::new();
+    for left_row in left.tables.iter().flat_map(|table| table.rows.iter()) {
+        let Some(key) = on_values(left_row, &on) else {
+            continue;
+        };
+        for right_row in by_key.get(&key).map(Vec::as_slice).unwrap_or_default() {
+            if rows.len() >= MOST_ROWS {
+                return Err(format!("join makes more than {MOST_ROWS} rows"));
+            }
+            let mut row = Row::new();
+            for (column, value) in left_row.iter() {
+                if on.contains(column) {
+                    row.insert(column.clone(), value.clone());
+                } else {
+                    row.insert(renamed(column, &right_columns, left_name), value.clone());
+                }
+            }
+            for (column, value) in right_row.iter().filter(|(column, _)| !on.contains(column)) {
+                row.insert(renamed(column, &left_columns, right_name), value.clone());
+            }
+            rows.push(row);
+        }
+    }
+    let key_of = |stream: &Stream| stream.tables.first().map(|table| table.key.clone()).unwrap_or_default();
+    let (left_key, right_key) = (key_of(left), key_of(right));
+    let key: Vec<String> = on
+        .iter()
+        .filter(|column| left_key.contains(column) && right_key.contains(column))
+        .cloned()
+        .collect();
+    let mut tables = regroup(vec![Table { key: Vec::new(), rows }], key);
+    tables.retain(|table| !table.rows.is_empty());
+    Ok(Stream {
+        tables,
+        start: left.start.min(right.start),
+        stop: left.stop.max(right.stop),
+    })
+}
+
+#[derive(Debug, Clone)]
+enum Head {
+    From,
+    Variable(String),
+    Join(Call),
+}
+
+#[derive(Debug, Clone)]
+struct Statement {
+    assign: Option<String>,
+    head: Head,
+    calls: Vec<Call>,
+}
+
+fn run_statement(session: &mut Session<'_>, statement: &Statement, streams: &BTreeMap<String, Stream>) -> Result<Applied, String> {
+    match &statement.head {
+        Head::From => execute(session, &statement.calls),
+        Head::Variable(name) => {
+            let stream = streams.get(name).cloned().ok_or_else(|| format!("undefined identifier {name}"))?;
+            apply(stream, &statement.calls.iter().collect::<Vec<_>>())
+        }
+        Head::Join(call) => apply(joined(call, streams)?, &statement.calls.iter().collect::<Vec<_>>()),
+    }
 }
 
 fn datatype(values: &[&Value]) -> &'static str {
@@ -1392,12 +1556,25 @@ pub(crate) fn query_text(body: &[u8], content_type: Option<&str>) -> Result<Stri
 /// returns InfluxDB 2's annotated CSV.
 pub(crate) fn answer(session: &mut Session<'_>, query: &str) -> Result<String, String> {
     let mut parser = Parser { tokens: tokens(query)?, at: 0 };
-    let calls = parser.pipeline()?;
-    if parser.at < parser.tokens.len() {
-        return Err(format!("unexpected {:?} after the pipeline", parser.peek()));
+    let mut streams: BTreeMap<String, Stream> = BTreeMap::new();
+    let mut outcomes = Vec::new();
+    while let Some(statement) = parser.statement()? {
+        let applied = run_statement(session, &statement, &streams)?;
+        let shown = statement.assign.is_none() || applied.yielded;
+        if shown {
+            outcomes.push(Outcome {
+                result: applied.result,
+                tables: applied.stream.tables.clone(),
+            });
+        }
+        if let Some(name) = statement.assign {
+            streams.insert(name, applied.stream);
+        }
     }
-    let outcome = execute(session, &calls)?;
-    Ok(annotated_csv(&outcome))
+    if outcomes.is_empty() {
+        return Err("the query yields no result".to_owned());
+    }
+    Ok(outcomes.iter().map(annotated_csv).collect())
 }
 
 #[cfg(test)]
@@ -1470,5 +1647,55 @@ mod tests {
         row.insert("_value".to_owned(), Value::Double(5.0));
         assert_eq!(evaluate(&fields[0].1, &row).unwrap(), Flux::Float(11.0));
         assert_eq!(evaluate(&fields[1].1, &row).unwrap(), Flux::Text("high".to_owned()));
+    }
+
+    #[test]
+    fn programs_assign_streams_and_join_them() {
+        let mut parser = Parser {
+            tokens: tokens(
+                r#"import "join"
+                cpu = from(bucket: "b") |> range(start: -1h) |> filter(fn: (r) => r._measurement == "cpu")
+                mem = from(bucket: "b") |> range(start: -1h)
+                join(tables: {cpu: cpu, mem: mem}, on: ["_time", "host"]) |> yield(name: "both")"#,
+            )
+            .unwrap(),
+            at: 0,
+        };
+        let first = parser.statement().unwrap().unwrap();
+        assert_eq!(first.assign.as_deref(), Some("cpu"));
+        assert!(matches!(first.head, Head::From));
+        assert_eq!(first.calls.len(), 3);
+        let second = parser.statement().unwrap().unwrap();
+        assert_eq!(second.assign.as_deref(), Some("mem"));
+        let third = parser.statement().unwrap().unwrap();
+        let Head::Join(join) = &third.head else {
+            panic!("a join");
+        };
+        assert!(parser.statement().unwrap().is_none());
+        let row = |host: &str, value: f64| {
+            let mut row = Row::new();
+            row.insert("_time".to_owned(), Value::BigInt(1));
+            row.insert("host".to_owned(), Value::Text(host.to_owned()));
+            row.insert("_value".to_owned(), Value::Double(value));
+            row
+        };
+        let stream = |rows: Vec<Row>| Stream {
+            tables: vec![Table { key: vec!["host".to_owned()], rows }],
+            start: 0,
+            stop: 10,
+        };
+        let streams = BTreeMap::from([
+            ("cpu".to_owned(), stream(vec![row("a", 0.5), row("b", 0.25)])),
+            ("mem".to_owned(), stream(vec![row("a", 512.0)])),
+        ]);
+        let joined = joined(join, &streams).unwrap();
+        assert_eq!(joined.tables.len(), 1);
+        let only = &joined.tables[0].rows[0];
+        assert_eq!(only["_value_cpu"], Value::Double(0.5));
+        assert_eq!(only["_value_mem"], Value::Double(512.0));
+        assert_eq!(joined.tables[0].key, vec!["host".to_owned()]);
+        let applied = apply(joined, &third.calls.iter().collect::<Vec<_>>()).unwrap();
+        assert!(applied.yielded);
+        assert_eq!(applied.result, "both");
     }
 }

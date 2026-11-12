@@ -936,3 +936,4 @@ its full title with its status.
 - [D909](decisions/D909.md) Code-only batch 557 (M6a): GraphQL nested inserts
 - [D910](decisions/D910.md) Code-only batch 558 (M6a): OData navigation properties and $expand
 - [D911](decisions/D911.md) Code-only batch 559 (M9): MongoDB user-defined roles
+- [D912](decisions/D912.md) Code-only batch 560 (M16): Flux variables, several results and join
