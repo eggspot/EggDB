@@ -1378,7 +1378,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Arrow Flight SQL and ADBC (D29).
 - NDJSON, ORC and Avro (D29). NDJSON: **code written, unbuilt** (code-only mode, 2026-11-11, D505).
   Avro: **code written, unbuilt** (code-only mode, 2026-11-11, D509). ORC (`read_orc`, flat columns): **code
-  written, unbuilt** (code-only mode, 2026-11-12, D735). Left: ORC's nested columns.
+  written, unbuilt** (code-only mode, 2026-11-12, D735); ORC list, map and struct columns as JSON text: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D836). Left: ORC unions.
 - Apache Iceberg and Hudi tables, and Delta Lake after D58's legal check, read and written, with
   an Iceberg REST catalog (D29, D46).
 - Excel files read and written as tables: `.xlsx` (OOXML), and `.xls` (MS-XLS) after D58's

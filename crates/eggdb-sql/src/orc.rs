@@ -556,10 +556,174 @@ fn values(kind: Kind, streams: &Streams<'_>, count: usize) -> Result<Vec<Cell>, 
     })
 }
 
+const TYPE_LIST: u64 = 10;
+const TYPE_MAP: u64 = 11;
+const TYPE_STRUCT: u64 = 12;
+const MOST_NESTING: usize = 32;
+const DAYS_FROM_0000_TO_1970: i64 = 719_468;
+
+fn json_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn civil_date(days: i64) -> String {
+    let shifted = days + DAYS_FROM_0000_TO_1970;
+    let era = shifted.div_euclid(146_097);
+    let of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let day_of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn cell_json(kind: Kind, cell: &Cell) -> String {
+    match (kind, cell) {
+        (_, Cell::Null) => "null".to_owned(),
+        (_, Cell::Boolean(flag)) => flag.to_string(),
+        (Kind::Date, Cell::Int(days)) => json_text(&civil_date(*days)),
+        (Kind::Timestamp, Cell::Int(micros)) => {
+            let days = micros.div_euclid(86_400_000_000);
+            let within = micros.rem_euclid(86_400_000_000);
+            json_text(&format!(
+                "{}T{:02}:{:02}:{:02}.{:06}",
+                civil_date(days),
+                within / 3_600_000_000,
+                within / 60_000_000 % 60,
+                within / 1_000_000 % 60,
+                within % 1_000_000
+            ))
+        }
+        (_, Cell::Int(number)) => number.to_string(),
+        (_, Cell::Float(number)) if number.is_finite() => number.to_string(),
+        (_, Cell::Float(number)) => json_text(&number.to_string()),
+        (Kind::Text, Cell::Bytes(bytes)) => json_text(&String::from_utf8_lossy(bytes)),
+        (_, Cell::Bytes(bytes)) => json_text(&bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+        (Kind::Decimal { scale, .. }, Cell::Decimal(unscaled)) => {
+            let digits = unscaled.unsigned_abs().to_string();
+            let scale = scale as usize;
+            let padded = if digits.len() <= scale { format!("{}{digits}", "0".repeat(scale + 1 - digits.len())) } else { digits };
+            let (whole, fraction) = padded.split_at(padded.len() - scale);
+            let sign = if *unscaled < 0 { "-" } else { "" };
+            if scale == 0 { format!("{sign}{whole}") } else { format!("{sign}{whole}.{fraction}") }
+        }
+        (_, Cell::Decimal(unscaled)) => unscaled.to_string(),
+    }
+}
+
+struct Stripe<'f> {
+    types: &'f [Vec<(u64, Field<'f>)>],
+    streams: &'f dyn Fn(usize) -> Result<Streams<'static>, String>,
+}
+
+impl Stripe<'_> {
+    fn json(&self, type_id: usize, slots: usize, depth: usize) -> Result<Vec<String>, String> {
+        if depth > MOST_NESTING {
+            return Err(damaged("types are nested too deeply"));
+        }
+        if slots > MOST_VALUES {
+            return Err("a nested column holds more than 268,435,456 values".to_owned());
+        }
+        let described = self.types.get(type_id).ok_or_else(|| damaged("a nested type is missing"))?;
+        let streams = (self.streams)(type_id)?;
+        let present = match streams.get(PRESENT) {
+            Some(raw) => booleans(raw, slots)?,
+            None => vec![true; slots],
+        };
+        let count = present.iter().filter(|present| **present).count();
+        let code = number(described, 1).unwrap_or(u64::MAX);
+        let children = numbers(described, 2)?
+            .into_iter()
+            .map(|child| usize::try_from(child).map_err(|_| damaged("a type id is out of range")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let present_values: Vec<String> = match code {
+            TYPE_LIST | TYPE_MAP => {
+                let lengths = integers(streams.need(LENGTH)?, count, false, streams.version_two())?;
+                let mut total = 0usize;
+                for length in &lengths {
+                    total = total.saturating_add(usize::try_from(*length).map_err(|_| damaged("a length is negative"))?);
+                }
+                let mut out = Vec::with_capacity(count);
+                if code == TYPE_LIST {
+                    let [item] = children.as_slice() else {
+                        return Err(damaged("a list type has other than one child"));
+                    };
+                    let items = self.json(*item, total, depth + 1)?;
+                    let mut at = 0usize;
+                    for length in lengths {
+                        let end = at + length as usize;
+                        out.push(format!("[{}]", items.get(at..end).ok_or_else(|| damaged("list lengths run past their items"))?.join(",")));
+                        at = end;
+                    }
+                } else {
+                    let [key, value] = children.as_slice() else {
+                        return Err(damaged("a map type has other than two children"));
+                    };
+                    let keys = self.json(*key, total, depth + 1)?;
+                    let values = self.json(*value, total, depth + 1)?;
+                    let mut at = 0usize;
+                    for length in lengths {
+                        let end = at + length as usize;
+                        let mut members = Vec::with_capacity(length as usize);
+                        for index in at..end {
+                            let key = keys.get(index).ok_or_else(|| damaged("map lengths run past their keys"))?;
+                            let key = if key.starts_with('"') { key.clone() } else { json_text(key) };
+                            members.push(format!("{key}:{}", values.get(index).ok_or_else(|| damaged("map lengths run past their values"))?));
+                        }
+                        out.push(format!("{{{}}}", members.join(",")));
+                        at = end;
+                    }
+                }
+                out
+            }
+            TYPE_STRUCT => {
+                let names: Vec<String> = messages(described, 3).iter().map(|raw| String::from_utf8_lossy(raw).into_owned()).collect();
+                let mut fields = Vec::with_capacity(children.len());
+                for child in &children {
+                    fields.push(self.json(*child, count, depth + 1)?);
+                }
+                (0..count)
+                    .map(|row| {
+                        let members: Vec<String> = fields
+                            .iter()
+                            .enumerate()
+                            .map(|(at, values)| {
+                                let name = names.get(at).cloned().unwrap_or_else(|| format!("_col{at}"));
+                                format!("{}:{}", json_text(&name), values.get(row).map_or("null", String::as_str))
+                            })
+                            .collect();
+                        format!("{{{}}}", members.join(","))
+                    })
+                    .collect()
+            }
+            other => {
+                let kind = kind_of(other, number(described, 5).unwrap_or(38), number(described, 6).unwrap_or(0))
+                    .ok_or_else(|| format!("ORC type {other} inside a nested column is not supported yet"))?;
+                values(kind, &streams, count)?.iter().map(|cell| cell_json(kind, cell)).collect()
+            }
+        };
+        let mut found = present_values.into_iter();
+        Ok(present.into_iter().map(|present| if present { found.next().unwrap_or_else(|| "null".to_owned()) } else { "null".to_owned() }).collect())
+    }
+}
+
 /// The flat columns of an ORC file (Apache ORC's format, versions 0.11 and 0.12): booleans,
 /// integers, floats, strings, binary, dates, timestamps and decimals, with no, ZLIB, Snappy or
-/// ZSTD compression, direct and dictionary encodings and integer run-length encodings 1 and 2.
-/// Nested columns (lists, maps, structs, unions) are left out.
+/// ZSTD compression, direct and dictionary encodings and integer run-length encodings 1 and 2;
+/// list, map and struct columns as JSON text (D836). Union columns are left out.
 pub(crate) fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
     let length = bytes.len();
     let postscript_length = usize::from(*bytes.last().ok_or_else(|| damaged("the file is empty"))?);
@@ -584,21 +748,23 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
     }
     let children = numbers(root, 2)?;
     let names: Vec<String> = messages(root, 3).iter().map(|raw| String::from_utf8_lossy(raw).into_owned()).collect();
-    let mut columns: Vec<(usize, Kind, Column)> = Vec::new();
+    let mut columns: Vec<(usize, Option<Kind>, Column)> = Vec::new();
     for (index, child) in children.iter().enumerate() {
         let child = usize::try_from(*child).map_err(|_| damaged("a type id is out of range"))?;
         let Some(described) = parsed_types.get(child) else {
             return Err(damaged("a column's type is missing"));
         };
-        let Some(kind) = kind_of(number(described, 1).unwrap_or(u64::MAX), number(described, 5).unwrap_or(38), number(described, 6).unwrap_or(0)) else {
+        let code = number(described, 1).unwrap_or(u64::MAX);
+        let kind = kind_of(code, number(described, 5).unwrap_or(38), number(described, 6).unwrap_or(0));
+        if kind.is_none() && !matches!(code, TYPE_LIST | TYPE_MAP | TYPE_STRUCT) {
             continue;
-        };
+        }
         columns.push((
             child,
             kind,
             Column {
                 name: names.get(index).cloned().unwrap_or_else(|| format!("_col{index}")),
-                column_type: column_type(kind),
+                column_type: kind.map_or(ColumnType::Text, column_type),
                 nullable: true,
                 cells: Vec::new(),
             },
@@ -630,17 +796,17 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
             placed.push((number(&stream, 1).unwrap_or(u64::MAX), number(&stream, 2).unwrap_or(u64::MAX), at, stream_length));
             at = at.saturating_add(stream_length);
         }
-        for (type_id, kind, column) in &mut columns {
+        let streams_of = |type_id: usize| -> Result<Streams<'static>, String> {
             let mut kinds = Vec::new();
             for (stream_kind, stream_column, start, stream_length) in &placed {
-                if *stream_column != *type_id as u64 || !matches!(*stream_kind, PRESENT | DATA | LENGTH | DICTIONARY_DATA | SECONDARY) {
+                if *stream_column != type_id as u64 || !matches!(*stream_kind, PRESENT | DATA | LENGTH | DICTIONARY_DATA | SECONDARY) {
                     continue;
                 }
                 let raw = bytes.get(*start..start.saturating_add(*stream_length)).ok_or_else(|| damaged("a stream is cut short"))?;
                 kinds.push((*stream_kind, decompress(codec, raw)?));
             }
-            let encoding = encodings.get(*type_id);
-            let streams = Streams {
+            let encoding = encodings.get(type_id);
+            Ok(Streams {
                 kinds,
                 encoding: encoding.and_then(|encoding| number(encoding, 1)).unwrap_or(0),
                 dictionary_size: encoding
@@ -649,7 +815,20 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
                     .unwrap_or(0)
                     .min(MOST_VALUES),
                 _file: std::marker::PhantomData,
+            })
+        };
+        for (type_id, kind, column) in &mut columns {
+            let Some(kind) = kind else {
+                let stripe = Stripe {
+                    types: &parsed_types,
+                    streams: &streams_of,
+                };
+                for value in stripe.json(*type_id, rows, 0)? {
+                    column.cells.push(if value == "null" { Cell::Null } else { Cell::Bytes(value.into_bytes()) });
+                }
+                continue;
             };
+            let streams = streams_of(*type_id)?;
             let present = match streams.get(PRESENT) {
                 Some(raw) => booleans(raw, rows)?,
                 None => vec![true; rows],
@@ -683,5 +862,35 @@ mod tests {
         assert_eq!(integers_v1(&[0x61, 0xFF, 0x64], 100, false).unwrap(), (1..=100).rev().collect::<Vec<i64>>());
         assert_eq!(byte_rle(&[0x61, 0x00], 100).unwrap(), vec![0u8; 100]);
         assert_eq!(booleans(&[0xFF, 0x80], 8).unwrap(), vec![true, false, false, false, false, false, false, false]);
+    }
+
+    #[test]
+    fn list_map_and_struct_columns_read_as_json() {
+        let types: Vec<Vec<(u64, Field<'static>)>> = vec![
+            vec![(1, Field::Varint(TYPE_LIST)), (2, Field::Varint(1))],
+            vec![(1, Field::Varint(3))],
+            vec![(1, Field::Varint(TYPE_STRUCT)), (2, Field::Varint(1)), (3, Field::Bytes(b"n"))],
+        ];
+        let streams = |type_id: usize| -> Result<Streams<'static>, String> {
+            let kinds = match type_id {
+                0 => vec![(LENGTH, vec![0xFE, 0x02, 0x01])],
+                1 => vec![(DATA, vec![0xFD, 20, 40, 60])],
+                _ => vec![(PRESENT, vec![0xFF, 0x40])],
+            };
+            Ok(Streams {
+                kinds,
+                encoding: 0,
+                dictionary_size: 0,
+                _file: std::marker::PhantomData,
+            })
+        };
+        let stripe = Stripe { types: &types, streams: &streams };
+        assert_eq!(stripe.json(0, 2, 0).unwrap(), vec!["[10,20]".to_owned(), "[30]".to_owned()]);
+        assert!(stripe.json(0, 3, 0).is_err());
+        let deep: Vec<Vec<(u64, Field<'static>)>> = vec![vec![(1, Field::Varint(TYPE_LIST)), (2, Field::Varint(0))]];
+        let looping = Stripe { types: &deep, streams: &|_| Ok(Streams { kinds: vec![(LENGTH, vec![0x00, 0x00, 0x01])], encoding: 0, dictionary_size: 0, _file: std::marker::PhantomData }) };
+        assert!(looping.json(0, 1, 0).is_err());
+        assert_eq!(civil_date(0), "1970-01-01");
+        assert_eq!(civil_date(19_723), "2024-01-01");
     }
 }
