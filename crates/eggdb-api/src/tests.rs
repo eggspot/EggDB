@@ -368,3 +368,53 @@ fn first_chunk_sizes(answer: &str) -> Vec<usize> {
     }
     sizes
 }
+
+fn graphql(endpoint: &Endpoint<'_, MemoryStore>, query: &str, variables: &str) -> String {
+    let body = format!(
+        "{{\"query\":{},\"variables\":{variables}}}",
+        crate::json_string(query)
+    );
+    let answered = call(endpoint, "POST", "/graphql", &body, None);
+    assert_eq!(answered.status, 200, "{}", text(&answered));
+    text(&answered)
+}
+
+#[test]
+fn graphql_reads_and_writes_tables_with_relationships() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE authors (id integer PRIMARY KEY, name text NOT NULL)",
+        "CREATE TABLE books (id integer PRIMARY KEY, title text NOT NULL, pages integer, author_id integer REFERENCES authors (id))",
+        "INSERT INTO authors VALUES (1, 'Ada'), (2, 'Brian')",
+        "INSERT INTO books VALUES (10, 'Engines', 300, 1), (11, 'Notes', 40, 1), (12, 'C', 270, 2)",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let listed = graphql(
+        &endpoint,
+        "query Long($min: Int!) { books(where: {pages: {_gte: $min}}, order_by: {id: asc}) { id title author { name } } }",
+        "{\"min\":100}",
+    );
+    assert_eq!(
+        listed,
+        "{\"data\":{\"books\":[{\"id\":10,\"title\":\"Engines\",\"author\":{\"name\":\"Ada\"}},{\"id\":12,\"title\":\"C\",\"author\":{\"name\":\"Brian\"}}]}}"
+    );
+    let nested = graphql(&endpoint, "{ authors_by_pk(id: 1) { name books(order_by: {id: desc}) { title } } }", "{}");
+    assert!(nested.contains("\"books\":[{\"title\":\"Notes\"},{\"title\":\"Engines\"}]"), "{nested}");
+    let counted = graphql(&endpoint, "{ books_aggregate { aggregate { count max { pages } } } }", "{}");
+    assert!(counted.contains("\"count\":3"), "{counted}");
+    assert!(counted.contains("\"pages\":300"), "{counted}");
+    let changed = graphql(
+        &endpoint,
+        "mutation { insert_books_one(object: {id: 13, title: \"New\", author_id: 2}) { id } update_books(where: {author_id: {_eq: 2}}, _inc: {pages: 1}) { affected_rows } }",
+        "{}",
+    );
+    assert!(changed.contains("\"insert_books_one\":{\"id\":13}"), "{changed}");
+    assert!(changed.contains("\"affected_rows\":2"), "{changed}");
+    let failed = graphql(&endpoint, "{ nothing { id } }", "{}");
+    assert!(failed.contains("\"errors\""), "{failed}");
+    let refused = graphql(&endpoint, "mutation { insert_books_one(object: {id: 10, title: \"Dup\"}) { id } }", "{}");
+    assert!(refused.contains("\"errors\""), "{refused}");
+}

@@ -714,7 +714,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   document: **code written, unbuilt** (code-only mode, 2026-11-11, D457); JWT sign-in with roles per
   request: **code written, unbuilt** (code-only mode, 2026-11-11, D458); embedded resources (one level):
   **code written, unbuilt** (code-only mode, 2026-11-11, D459).
-- A GraphQL API generated from the schema, in Hasura's style (D37).
+- A GraphQL API generated from the schema, in Hasura's style (D37). Queries, aggregates, relationships from
+  foreign keys and mutations over `POST /graphql`: **code written, unbuilt** (code-only mode, 2026-11-12, D875).
+  Left: introspection, subscriptions and nested inserts.
 - gRPC and OData APIs generated from the schema, OData for Excel, Power BI and SAP (D37).
 - Realtime subscriptions over WebSocket and Server-Sent Events on live queries (D37).
 - End-user sign-in for apps: sign-up, password, magic link, social login and OpenID Connect, with

@@ -6,8 +6,13 @@
 //! `GET /` listing the tables and their columns. Every request runs as SQL in a session of the
 //! signed-in user, so roles and row security apply unchanged. Rows read with `GET` are sent as
 //! they are written out, in HTTP/1.1 chunks, so a large result never sits in memory twice.
-//! PostgREST is a trademark of its owners; EggDB is compatible with its URL conventions.
+//! `POST /graphql` (or `/v1/graphql`) answers GraphQL queries and mutations over the same
+//! tables in Hasura's style.
+//! PostgREST and Hasura are trademarks of their owners; EggDB is compatible with their
+//! conventions.
 
+mod graphql;
+mod graphql_execute;
 mod ogc;
 mod request;
 
@@ -348,6 +353,9 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             } else {
                 self.describe().into()
             };
+        }
+        if path == "graphql" || path == "v1/graphql" {
+            return self.graphql(request).into();
         }
         if path == "ogc" || path.starts_with("ogc/") {
             return self.ogc(&path[3..], request).into();
