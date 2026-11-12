@@ -31,7 +31,20 @@ pub enum SqliteObject {
         /// Its rows, in any order; their rowids must differ.
         rows: Vec<SqliteRow>,
     },
-    /// An index of a rowid table and its entries.
+    /// A `WITHOUT ROWID` table and its rows, kept in an index b-tree ordered by the primary key.
+    WithoutRowidTable {
+        /// The table's name.
+        name: String,
+        /// Its `CREATE TABLE` statement.
+        sql: String,
+        /// Its rows' values in column order, in any order; their primary keys must differ.
+        rows: Vec<Vec<SqliteValue>>,
+        /// The positions of the primary key's columns, in key order.
+        primary_key: Vec<usize>,
+        /// How each primary key column sorts, in key order; a missing one sorts ascending.
+        orders: Vec<KeyOrder>,
+    },
+    /// An index of a table and its entries.
     Index {
         /// The index's name.
         name: String,
@@ -84,6 +97,17 @@ pub fn write_database(objects: &[SqliteObject]) -> Result<Vec<u8>> {
                 let root = index_tree(&mut pages, entries, orders)?;
                 schema_row("index", name, table, root, sql.as_ref())
             }
+            SqliteObject::WithoutRowidTable {
+                name,
+                sql,
+                rows,
+                primary_key,
+                orders,
+            } => {
+                let entries = without_rowid_records(rows, primary_key)?;
+                let root = index_tree(&mut pages, &entries, orders)?;
+                schema_row("table", name, name, root, Some(sql))
+            }
             SqliteObject::View { name, sql } => schema_row("view", name, name, 0, Some(sql)),
             SqliteObject::Trigger { name, table, sql } => {
                 schema_row("trigger", name, table, 0, Some(sql))
@@ -97,6 +121,49 @@ pub fn write_database(objects: &[SqliteObject]) -> Result<Vec<u8>> {
         .collect();
     table_tree(&mut pages, rows, Some(1))?;
     pages.finish()
+}
+
+fn without_rowid_records(
+    rows: &[Vec<SqliteValue>],
+    primary_key: &[usize],
+) -> Result<Vec<Vec<SqliteValue>>> {
+    let columns = rows.first().map_or(0, Vec::len);
+    if primary_key.is_empty()
+        || primary_key.iter().any(|at| *at >= columns.max(1))
+        || (1..primary_key.len()).any(|at| primary_key[..at].contains(&primary_key[at]))
+    {
+        return Err(SqliteFormatError::Damaged(
+            "a WITHOUT ROWID table's primary key does not fit its columns".to_owned(),
+        ));
+    }
+    let mut records = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.len() != columns {
+            return Err(SqliteFormatError::Damaged(
+                "the rows of a WITHOUT ROWID table differ in length".to_owned(),
+            ));
+        }
+        let mut record: Vec<SqliteValue> = primary_key.iter().map(|at| row[*at].clone()).collect();
+        record.extend(
+            row.iter()
+                .enumerate()
+                .filter(|(at, _)| !primary_key.contains(at))
+                .map(|(_, value)| value.clone()),
+        );
+        records.push(record);
+    }
+    let width = primary_key.len();
+    let mut keys: Vec<&[SqliteValue]> = records.iter().map(|record| &record[..width]).collect();
+    keys.sort_by(|left, right| compare_entries(left, right, &[]));
+    if keys
+        .windows(2)
+        .any(|pair| compare_entries(pair[0], pair[1], &[]) == Ordering::Equal)
+    {
+        return Err(SqliteFormatError::Damaged(
+            "two rows of a WITHOUT ROWID table share a primary key".to_owned(),
+        ));
+    }
+    Ok(records)
 }
 
 fn schema_row(

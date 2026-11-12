@@ -99,12 +99,42 @@ fn vacuum_into_is_refused_without_a_file_writer_inside_a_block_and_over_a_file()
 }
 
 #[test]
-fn vacuum_into_refuses_what_it_cannot_write_yet() {
+fn vacuum_into_writes_without_rowid_tables_in_key_order() {
     let store = MemoryStore::default();
     let files = WrittenFiles::default();
     let mut session = Session::with_dialect(&store, Dialect::Sqlite);
     session.set_new_file_writer(&files);
-    run(&mut session, "CREATE TABLE w (k TEXT PRIMARY KEY) WITHOUT ROWID").expect("setup");
-    let error = run(&mut session, "VACUUM INTO 'w.db'").expect_err("WITHOUT ROWID");
-    assert_eq!(error.state(), SqlState::FEATURE_NOT_SUPPORTED, "{error}");
+    run(
+        &mut session,
+        "CREATE TABLE w (n INTEGER, k TEXT PRIMARY KEY, v TEXT UNIQUE) WITHOUT ROWID",
+    )
+    .expect("setup");
+    run(
+        &mut session,
+        "INSERT INTO w VALUES (1, 'b', 'x'), (2, 'a', 'y'), (3, 'c', NULL)",
+    )
+    .expect("rows");
+    run(&mut session, "VACUUM INTO 'w.db'").expect("written");
+    let file = files.file("w.db");
+    let schema = file.schema().expect("schema");
+    let table = schema
+        .iter()
+        .find(|entry| entry.kind == "table" && entry.name == "w")
+        .expect("the table");
+    let rows = file
+        .without_rowid_rows(table.root_page, 3, &[1])
+        .expect("rows");
+    let keys: Vec<SqliteValue> = rows.iter().map(|row| row.values[1].clone()).collect();
+    assert_eq!(keys, vec![
+        SqliteValue::Text("a".to_owned()),
+        SqliteValue::Text("b".to_owned()),
+        SqliteValue::Text("c".to_owned())
+    ]);
+    assert_eq!(rows[0].values[0], SqliteValue::Integer(2));
+    let unique = schema
+        .iter()
+        .find(|entry| entry.kind == "index")
+        .expect("the UNIQUE index");
+    let entries = file.index_records(unique.root_page).expect("entries");
+    assert_eq!(entries[0], vec![SqliteValue::Null, SqliteValue::Text("c".to_owned())]);
 }

@@ -573,7 +573,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631). Left: editing a
   file in place with the rollback journal and the WAL.
 - `WITHOUT ROWID` tables and UTF-16 databases in SQLite files (D180). Reading them (and importing them with
-  `eggdb restore`): **code written, unbuilt** (code-only mode, 2026-11-12, D788). Left: writing them.
+  `eggdb restore`): **code written, unbuilt** (code-only mode, 2026-11-12, D788); writing `WITHOUT ROWID` tables (the
+  writer and `VACUUM INTO`): **code written, unbuilt** (D789). Left: writing UTF-16 files, which only editing a
+  UTF-16 file in place would need.
 - `eggdb restore` from an SQLite file into an EggDB file (D13, D180). **Code written, unbuilt** (code-only mode, 2026-11-12,
   D568).
 - SQLite's dynamic typing for `INTEGER` columns (text kept as text, reals as reals), an integer

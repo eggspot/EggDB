@@ -176,9 +176,32 @@ struct TableCopy<'t> {
     rows: Vec<Vec<Value>>,
     rowids: Vec<i64>,
     alias: Option<usize>,
+    without_rowid: bool,
 }
 
 impl TableCopy<'_> {
+    fn without_rowid_entries(&self, columns: &[usize]) -> Vec<Vec<SqliteValue>> {
+        let key = &self.definition.primary_key;
+        self.rows
+            .iter()
+            .map(|values| {
+                columns
+                    .iter()
+                    .chain(key.iter().filter(|column| !columns.contains(column)))
+                    .map(|column| values.get(*column).map_or(SqliteValue::Null, sqlite_value))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn index_entries(&self, columns: &[usize]) -> Vec<Vec<SqliteValue>> {
+        if self.without_rowid {
+            self.without_rowid_entries(columns)
+        } else {
+            self.entries(columns)
+        }
+    }
+
     fn column(&self, name: &str, position: usize) -> SqlResult<usize> {
         self.definition
             .columns
@@ -252,7 +275,9 @@ fn constraint_keys(
     words: &[Word],
     position: usize,
 ) -> SqlResult<Vec<Vec<usize>>> {
-    let primary_key = (copy.alias.is_none() && !copy.definition.primary_key.is_empty())
+    let primary_key = (!copy.without_rowid
+        && copy.alias.is_none()
+        && !copy.definition.primary_key.is_empty())
         .then(|| copy.definition.primary_key.clone());
     let mut uniques = table
         .indexes
@@ -293,16 +318,24 @@ fn table_objects(
 ) -> SqlResult<()> {
     let text = kept_create_text(reader, table)?;
     let words = words_of(&text);
-    if without_rowid(&words) {
-        return Err(not_written_yet("WITHOUT ROWID tables", position));
-    }
+    let without_rowid = without_rowid(&words);
     let definition = cache.table(reader, &table.name)?.ok_or_else(|| {
         SqlError::new(
             SqlState::INTERNAL_ERROR,
             format!("table \"{}\" vanished while it was copied", table.name),
         )
     })?;
-    let alias = rowid_alias(&definition);
+    if without_rowid && definition.generated.iter().any(|generated| !generated.stored) {
+        return Err(not_written_yet(
+            "WITHOUT ROWID tables with virtual generated columns",
+            position,
+        ));
+    }
+    let alias = if without_rowid {
+        None
+    } else {
+        rowid_alias(&definition)
+    };
     let rows: Vec<Vec<Value>> = crate::execute::every_row(reader, &definition)?
         .into_iter()
         .map(|(_, values)| values)
@@ -329,12 +362,27 @@ fn table_objects(
         rows,
         rowids,
         alias,
+        without_rowid,
     };
-    objects.push(SqliteObject::Table {
-        name: table.name.clone(),
-        sql: text.clone(),
-        rows: copy.records()?,
-    });
+    if without_rowid {
+        objects.push(SqliteObject::WithoutRowidTable {
+            name: table.name.clone(),
+            sql: text.clone(),
+            rows: copy
+                .records()?
+                .into_iter()
+                .map(|row| row.values)
+                .collect(),
+            primary_key: definition.primary_key.clone(),
+            orders: Vec::new(),
+        });
+    } else {
+        objects.push(SqliteObject::Table {
+            name: table.name.clone(),
+            sql: text.clone(),
+            rows: copy.records()?,
+        });
+    }
     let keys = constraint_keys(&copy, table, &words, position)?;
     let explicit: Vec<&IndexSchema> = table
         .indexes
@@ -352,7 +400,7 @@ fn table_objects(
             name: format!("{CONSTRAINT_INDEX_PREFIX}{}_{}", table.name, number + 1),
             table: table.name.clone(),
             sql: None,
-            entries: copy.entries(key),
+            entries: copy.index_entries(key),
             orders: Vec::new(),
         });
     }
@@ -372,7 +420,7 @@ fn table_objects(
             name: index.name.clone(),
             table: table.name.clone(),
             sql: Some(sql),
-            entries: copy.entries(&columns),
+            entries: copy.index_entries(&columns),
             orders: index
                 .orders
                 .iter()

@@ -5502,9 +5502,10 @@ And more, not in the suite yet:
   [schema] INTO 'file'` writes the database as a new SQLite file (its tables, rows, indexes,
   views and triggers) in embedded use (`eggdb sql`, `eggdb shell`, the `libsqlite3` library, and
   sessions given `eggdb::sql::LOCAL_FILES`); a server refuses it with `0A000`, as it does inside
-  a transaction (`25001`), over an existing file (`58030`), and for `WITHOUT ROWID` tables,
-  partial and expression indexes and indexes over `NOCASE` or `RTRIM` columns, which it does
-  not write yet (D631).
+  a transaction (`25001`), over an existing file (`58030`), and for partial and expression
+  indexes and indexes over `NOCASE` or `RTRIM` columns, which it does not write yet (D631).
+  `WITHOUT ROWID` tables are written as SQLite keeps them, in an index b-tree ordered by the
+  primary key, with their other indexes keyed by the primary key instead of a rowid (D789).
 
 ## Known differences from Oracle
 The Oracle suite (`crates/eggdb-sql/correctness/oracle.test`, 773 cases from Oracle's SQL
