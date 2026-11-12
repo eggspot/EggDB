@@ -1,4 +1,4 @@
-use crate::decode::{F32, F64, I32, I64, Module, Reader, WasmError};
+use crate::decode::{F32, F64, FuncType, I32, I64, Module, Reader, WasmError};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -144,20 +144,29 @@ pub struct Instance {
     entry_stack_position: usize,
 }
 
-fn block_arity(reader: &mut Reader<'_>) -> Result<usize, Trap> {
-    match reader.byte()? {
-        0x40 => Ok(0),
-        I32 | I64 | F32 | F64 => Ok(1),
-        _ => Err(Trap::Invalid(
-            "a block type other than empty or one value",
-        )),
+const EMPTY_BLOCK_TYPE: i64 = -64;
+const VALUE_BLOCK_TYPES: std::ops::RangeInclusive<i64> = -4..=-1;
+
+fn block_type(reader: &mut Reader<'_>, types: &[FuncType]) -> Result<(usize, usize), Trap> {
+    let code = reader.signed(33)?;
+    match code {
+        EMPTY_BLOCK_TYPE => Ok((0, 0)),
+        code if VALUE_BLOCK_TYPES.contains(&code) => Ok((0, 1)),
+        code if code >= 0 => {
+            let signature = usize::try_from(code)
+                .ok()
+                .and_then(|index| types.get(index))
+                .ok_or(Trap::Invalid("a block names a type that does not exist"))?;
+            Ok((signature.params.len(), signature.results.len()))
+        }
+        _ => Err(Trap::Invalid("a block type that is not a value type or a type index")),
     }
 }
 
 fn skip_immediates(opcode: u8, reader: &mut Reader<'_>) -> Result<(), Trap> {
     match opcode {
         0x02..=0x04 => {
-            reader.byte()?;
+            reader.signed(33)?;
         }
         0x0c | 0x0d | 0x10 | 0x20..=0x24 => {
             reader.u32()?;
@@ -318,13 +327,14 @@ impl Instance {
         Ok(instance)
     }
 
-    /// Calls the exported function `name` with `arguments`, within `limits`.
-    pub fn call(
+    /// Calls the exported function `name` with `arguments`, within `limits`, and returns all
+    /// of its results in order.
+    pub fn call_values(
         &mut self,
         name: &str,
         arguments: &[Value],
         limits: &Limits,
-    ) -> Result<Option<Value>, Trap> {
+    ) -> Result<Vec<Value>, Trap> {
         let index = self
             .module
             .exports
@@ -347,20 +357,36 @@ impl Instance {
                 _ => return Err(Trap::WrongArguments),
             }
         }
-        let result_type = signature.results.first().copied();
+        let result_types = signature.results.clone();
         let mut fuel = limits.fuel;
         self.entry_stack_position = native_stack_position();
         self.invoke(index, &mut stack, &mut fuel, 0, limits)?;
-        let Some(result_type) = result_type else {
-            return Ok(None);
-        };
-        let bits = stack.pop().ok_or(Trap::Invalid("no result"))?;
-        Ok(Some(match result_type {
-            I32 => Value::I32(as_i32(bits)),
-            I64 => Value::I64(bits as i64),
-            F32 => Value::F32(f32::from_bits(bits as u32)),
-            _ => Value::F64(f64::from_bits(bits)),
-        }))
+        let first = stack
+            .len()
+            .checked_sub(result_types.len())
+            .ok_or(Trap::Invalid("no result"))?;
+        Ok(stack
+            .split_off(first)
+            .into_iter()
+            .zip(result_types)
+            .map(|(bits, result_type)| match result_type {
+                I32 => Value::I32(as_i32(bits)),
+                I64 => Value::I64(bits as i64),
+                F32 => Value::F32(f32::from_bits(bits as u32)),
+                _ => Value::F64(f64::from_bits(bits)),
+            })
+            .collect())
+    }
+
+    /// Calls the exported function `name` with `arguments`, within `limits`, and returns its
+    /// first result (`None` for a function with none).
+    pub fn call(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        limits: &Limits,
+    ) -> Result<Option<Value>, Trap> {
+        Ok(self.call_values(name, arguments, limits)?.into_iter().next())
     }
 
     fn invoke(
@@ -433,6 +459,7 @@ impl Instance {
         results: usize,
     ) -> Result<(), Trap> {
         let base = stack.len();
+        let module = Rc::clone(&self.module);
         let mut labels: Vec<Label> = Vec::new();
         let mut reader = Reader {
             bytes: frame.code,
@@ -450,7 +477,7 @@ impl Instance {
                 0x00 => return Err(Trap::Unreachable),
                 0x01 => {}
                 0x02 | 0x03 => {
-                    let arity = block_arity(&mut reader)?;
+                    let (params, results) = block_type(&mut reader, &module.types)?;
                     let end = frame
                         .targets
                         .get(&position)
@@ -459,14 +486,21 @@ impl Instance {
                     let looping = opcode == 0x03;
                     labels.push(Label {
                         looping,
-                        height: stack.len(),
-                        arity: if looping { 0 } else { arity },
+                        height: stack
+                            .len()
+                            .checked_sub(params)
+                            .ok_or(Trap::Invalid("too few values for a block"))?,
+                        arity: if looping { params } else { results },
                         target: if looping { position } else { end + 1 },
                     });
                 }
                 0x04 => {
-                    let arity = block_arity(&mut reader)?;
+                    let (params, arity) = block_type(&mut reader, &module.types)?;
                     let condition = pop(stack)?;
+                    let height = stack
+                        .len()
+                        .checked_sub(params)
+                        .ok_or(Trap::Invalid("too few values for an if"))?;
                     let targets = *frame
                         .targets
                         .get(&position)
@@ -474,14 +508,14 @@ impl Instance {
                     if condition as u32 != 0 {
                         labels.push(Label {
                             looping: false,
-                            height: stack.len(),
+                            height,
                             arity,
                             target: targets.end + 1,
                         });
                     } else if let Some(otherwise) = targets.otherwise {
                         labels.push(Label {
                             looping: false,
-                            height: stack.len(),
+                            height,
                             arity,
                             target: targets.end + 1,
                         });
@@ -547,7 +581,7 @@ impl Instance {
                     reader.at = label.target;
                     if label.looping {
                         reader.byte()?;
-                        reader.byte()?;
+                        reader.signed(33)?;
                     }
                 }
                 0x10 => {

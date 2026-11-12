@@ -562,8 +562,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - WebAssembly functions: floating point and the rest of the 1.0 instruction set (D232). Check: the
   official spec test suite in CI. Floating point, `call_indirect` with a function table, the start function,
   non-trapping float-to-integer conversions and `memory.copy`/`memory.fill`: **code written, unbuilt** (code-only
-  mode, 2026-11-12, D792). Left: imports (host functions, with the next item), multi-value results, and the spec
-  test suite in CI.
+  mode, 2026-11-12, D792); multi-value results and typed blocks: **code written, unbuilt** (code-only mode,
+  2026-11-12, D861). Left: imports (host functions, with the next item), and the spec test suite in CI.
 - `CREATE FUNCTION ... LANGUAGE wasm`, with type mapping and host functions behind permissions
   (D27, D232). Scalar functions over numbers and booleans (`AS '\x<module>', '<export>'`): **code written,
   unbuilt** (code-only mode, 2026-11-12, D793). Left: text, bytea and other types through the module's memory,

@@ -451,3 +451,76 @@ fn float_to_integer_traps_or_saturates_as_asked() {
         Ok(Some(Value::I32(0)))
     );
 }
+
+#[test]
+fn functions_and_blocks_carry_several_values() {
+    let mut vm = instance(
+        &[
+            Function {
+                params: vec![I32, I32],
+                results: vec![I32, I32],
+                locals: vec![],
+                code: vec![0x20, 1, 0x20, 0, 0x0b],
+                export: "swap",
+            },
+            Function {
+                params: vec![I32, I32],
+                results: vec![I32],
+                locals: vec![],
+                code: vec![0x20, 0, 0x20, 1, 0x10, 0, 0x6b, 0x0b],
+                export: "swapped_difference",
+            },
+            Function {
+                params: vec![I32, I32],
+                results: vec![I32, I32],
+                locals: vec![],
+                code: vec![0x20, 0, 0x20, 1, 0x02, 0x00, 0x10, 0, 0x0b, 0x0b],
+                export: "swap_in_a_block",
+            },
+            Function {
+                params: vec![I32],
+                results: vec![I32],
+                locals: vec![],
+                code: vec![
+                    0x20, 0, 0x03, 0x03, 0x41, 1, 0x6b, 0x22, 0, 0x20, 0, 0x0d, 0, 0x0b, 0x0b,
+                ],
+                export: "count_down",
+            },
+        ],
+        None,
+        &[],
+    );
+    let limits = Limits::default();
+    assert_eq!(
+        vm.call_values("swap", &[Value::I32(1), Value::I32(2)], &limits).unwrap(),
+        vec![Value::I32(2), Value::I32(1)]
+    );
+    assert_eq!(
+        vm.call("swapped_difference", &[Value::I32(10), Value::I32(3)], &limits).unwrap(),
+        Some(Value::I32(-7))
+    );
+    assert_eq!(
+        vm.call_values("swap_in_a_block", &[Value::I32(5), Value::I32(6)], &limits).unwrap(),
+        vec![Value::I32(6), Value::I32(5)]
+    );
+    assert_eq!(
+        vm.call("count_down", &[Value::I32(5)], &limits).unwrap(),
+        Some(Value::I32(0))
+    );
+}
+
+#[test]
+fn a_block_naming_a_missing_type_traps() {
+    let mut vm = instance(
+        &[Function {
+            params: vec![],
+            results: vec![],
+            locals: vec![],
+            code: vec![0x02, 0x09, 0x0b, 0x0b],
+            export: "broken",
+        }],
+        None,
+        &[],
+    );
+    assert!(vm.call("broken", &[], &Limits::default()).is_err());
+}

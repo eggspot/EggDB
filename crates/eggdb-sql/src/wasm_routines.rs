@@ -134,6 +134,11 @@ pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
             "the WebAssembly module exports no function named \"{export}\""
         )));
     };
+    if module.export_result_count(export).unwrap_or(0) > 1 {
+        return Err(SqlError::not_supported(format!(
+            "the WebAssembly function \"{export}\" returns several values; a SQL function returns one"
+        )));
+    }
     if definition
         .parameters
         .iter()

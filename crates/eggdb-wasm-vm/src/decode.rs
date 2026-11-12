@@ -226,9 +226,6 @@ impl Module {
                         let results: Vec<u8> = (0..section.count()?)
                             .map(|_| section.value_type())
                             .collect::<Result<_, _>>()?;
-                        if results.len() > 1 {
-                            return Err(WasmError::Unsupported("several results"));
-                        }
                         module.types.push(FuncType { params, results });
                     }
                 }
@@ -420,8 +417,22 @@ impl Module {
         self.exports.iter().map(|(name, _)| name.as_str())
     }
 
-    /// The parameter types and the result type (`None` for none) of the function exported as
-    /// `name`.
+    /// How many results the function exported as `name` returns; WebAssembly's multi-value
+    /// proposal lets a function return several.
+    pub fn export_result_count(&self, name: &str) -> Option<usize> {
+        let index = self
+            .exports
+            .iter()
+            .find(|(export, _)| export == name)
+            .map(|(_, index)| *index)?;
+        let function = self.functions.get(index as usize)?;
+        self.types
+            .get(function.type_index as usize)
+            .map(|signature| signature.results.len())
+    }
+
+    /// The parameter types and the first result type (`None` for none) of the function
+    /// exported as `name`.
     pub fn export_signature(&self, name: &str) -> Option<(Vec<ValueType>, Option<ValueType>)> {
         let index = self
             .exports
