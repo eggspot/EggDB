@@ -5,11 +5,30 @@ use crate::handshake::{named_group, signature_scheme};
 use crate::private_key::{FillRandom, PrivateKey, generate_p256_private_key};
 use crate::signature::{SignatureAlgorithm, SignatureHash, SubjectPublicKey};
 use eggdb_crypto::{
-    P256PublicKey, X25519_KEY_BYTES, p256_shared_secret, x25519_public_key, x25519_shared_secret,
+    MLKEM_KEY_GENERATION_SEED_BYTES, MLKEM768_CIPHERTEXT_BYTES, MLKEM768_ENCAPSULATION_KEY_BYTES,
+    P256PublicKey, X25519_KEY_BYTES, mlkem768_decapsulate, mlkem768_encapsulate,
+    mlkem768_key_pair, p256_shared_secret, x25519_public_key, x25519_shared_secret,
 };
 
-/// The key exchange groups EggDB supports, in its order of preference.
+/// The key exchange groups EggDB supports in TLS 1.2, in its order of preference.
 pub const SUPPORTED_GROUPS: [u16; 2] = [named_group::X25519, named_group::SECP256R1];
+
+/// The key exchange groups EggDB supports in TLS 1.3, in its order of preference: the hybrid
+/// post-quantum group first.
+pub const TLS13_GROUPS: [u16; 3] = [
+    named_group::X25519_MLKEM768,
+    named_group::X25519,
+    named_group::SECP256R1,
+];
+
+/// The bytes of a client's `X25519MLKEM768` key share: the ML-KEM-768 encapsulation key, then
+/// the X25519 public key.
+pub const X25519_MLKEM768_CLIENT_SHARE_BYTES: usize =
+    MLKEM768_ENCAPSULATION_KEY_BYTES + X25519_KEY_BYTES;
+
+/// The bytes of a server's `X25519MLKEM768` key share: the ML-KEM-768 ciphertext, then the
+/// X25519 public key.
+pub const X25519_MLKEM768_SERVER_SHARE_BYTES: usize = MLKEM768_CIPHERTEXT_BYTES + X25519_KEY_BYTES;
 
 /// The signature schemes a client offers and accepts, in its order of preference.
 pub const SUPPORTED_SIGNATURE_SCHEMES: [u16; 7] = [
@@ -115,6 +134,78 @@ pub enum EphemeralKey {
     X25519([u8; X25519_KEY_BYTES]),
     /// A P-256 private key.
     P256(eggdb_crypto::P256PrivateKey),
+    /// A client's `X25519MLKEM768` keys: the ML-KEM-768 key pair and an X25519 private scalar.
+    X25519MlKem768 {
+        /// The ML-KEM-768 encapsulation key the share carries.
+        encapsulation: Vec<u8>,
+        /// The ML-KEM-768 decapsulation key.
+        decapsulation: Vec<u8>,
+        /// The X25519 private scalar.
+        scalar: [u8; X25519_KEY_BYTES],
+    },
+}
+
+/// What a server answers to a client's key share: the share it sends back and the shared secret.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ServerKeyExchange {
+    /// The server's key share.
+    pub share: Vec<u8>,
+    /// The shared secret both sides now hold.
+    pub shared_secret: Vec<u8>,
+}
+
+impl std::fmt::Debug for ServerKeyExchange {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerKeyExchange")
+            .field("share_bytes", &self.share.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The server's side of the key exchange in `group` with the client's `client_share`: `Ok(None)`
+/// when the group is unsupported or the client's share is malformed or of low order.
+pub fn server_key_exchange(
+    group: u16,
+    client_share: &[u8],
+    fill_random: FillRandom<'_>,
+) -> std::io::Result<Option<ServerKeyExchange>> {
+    if group != named_group::X25519_MLKEM768 {
+        let Some(ephemeral) = EphemeralKey::generate(group, fill_random)? else {
+            return Ok(None);
+        };
+        return Ok(ephemeral
+            .shared_secret(client_share)
+            .map(|shared_secret| ServerKeyExchange {
+                share: ephemeral.public_key(),
+                shared_secret,
+            }));
+    }
+    if client_share.len() != X25519_MLKEM768_CLIENT_SHARE_BYTES {
+        return Ok(None);
+    }
+    let (encapsulation, x25519_peer) = client_share.split_at(MLKEM768_ENCAPSULATION_KEY_BYTES);
+    let mut message = [0u8; 32];
+    fill_random(&mut message)?;
+    let mut scalar = [0u8; X25519_KEY_BYTES];
+    fill_random(&mut scalar)?;
+    let Ok((ciphertext, mlkem_secret)) = mlkem768_encapsulate(encapsulation, &message) else {
+        return Ok(None);
+    };
+    let Ok(peer): Result<&[u8; X25519_KEY_BYTES], _> = x25519_peer.try_into() else {
+        return Ok(None);
+    };
+    let Ok(x25519_secret) = x25519_shared_secret(&scalar, peer) else {
+        return Ok(None);
+    };
+    let mut share = ciphertext;
+    share.extend_from_slice(&x25519_public_key(&scalar));
+    let mut shared_secret = mlkem_secret.to_vec();
+    shared_secret.extend_from_slice(&x25519_secret);
+    Ok(Some(ServerKeyExchange {
+        share,
+        shared_secret,
+    }))
 }
 
 impl std::fmt::Debug for EphemeralKey {
@@ -122,6 +213,7 @@ impl std::fmt::Debug for EphemeralKey {
         formatter.write_str(match self {
             Self::X25519(_) => "EphemeralKey::X25519",
             Self::P256(_) => "EphemeralKey::P256",
+            Self::X25519MlKem768 { .. } => "EphemeralKey::X25519MlKem768",
         })
     }
 }
@@ -136,6 +228,18 @@ impl EphemeralKey {
                 Ok(Some(Self::X25519(scalar)))
             }
             named_group::SECP256R1 => Ok(Some(Self::P256(generate_p256_private_key(fill_random)?))),
+            named_group::X25519_MLKEM768 => {
+                let mut seed = [0u8; MLKEM_KEY_GENERATION_SEED_BYTES];
+                fill_random(&mut seed)?;
+                let mut scalar = [0u8; X25519_KEY_BYTES];
+                fill_random(&mut scalar)?;
+                let (encapsulation, decapsulation) = mlkem768_key_pair(&seed);
+                Ok(Some(Self::X25519MlKem768 {
+                    encapsulation,
+                    decapsulation,
+                    scalar,
+                }))
+            }
             _ => Ok(None),
         }
     }
@@ -145,15 +249,25 @@ impl EphemeralKey {
         match self {
             Self::X25519(_) => named_group::X25519,
             Self::P256(_) => named_group::SECP256R1,
+            Self::X25519MlKem768 { .. } => named_group::X25519_MLKEM768,
         }
     }
 
     /// The public key as a key share carries it: 32 bytes for X25519, the uncompressed point for
-    /// P-256.
+    /// P-256, and the encapsulation key then the X25519 public key for `X25519MLKEM768`.
     pub fn public_key(&self) -> Vec<u8> {
         match self {
             Self::X25519(scalar) => x25519_public_key(scalar).to_vec(),
             Self::P256(key) => key.public_key().to_sec1_uncompressed().to_vec(),
+            Self::X25519MlKem768 {
+                encapsulation,
+                scalar,
+                ..
+            } => {
+                let mut share = encapsulation.clone();
+                share.extend_from_slice(&x25519_public_key(scalar));
+                share
+            }
         }
     }
 
@@ -175,6 +289,22 @@ impl EphemeralKey {
                 p256_shared_secret(key, &peer)
                     .ok()
                     .map(|secret| secret.to_vec())
+            }
+            Self::X25519MlKem768 {
+                decapsulation,
+                scalar,
+                ..
+            } => {
+                if peer_public_key.len() != X25519_MLKEM768_SERVER_SHARE_BYTES {
+                    return None;
+                }
+                let (ciphertext, x25519_peer) = peer_public_key.split_at(MLKEM768_CIPHERTEXT_BYTES);
+                let mlkem_secret = mlkem768_decapsulate(decapsulation, ciphertext).ok()?;
+                let peer: &[u8; X25519_KEY_BYTES] = x25519_peer.try_into().ok()?;
+                let x25519_secret = x25519_shared_secret(scalar, peer).ok()?;
+                let mut secret = mlkem_secret.to_vec();
+                secret.extend_from_slice(&x25519_secret);
+                Some(secret)
             }
         }
     }
@@ -207,6 +337,56 @@ mod tests {
             let other = second.shared_secret(&first.public_key()).unwrap();
             assert_eq!(one, other);
         }
+    }
+
+    #[test]
+    fn the_hybrid_group_agrees_on_a_64_byte_secret() {
+        let mut client_random = fixed_random(7);
+        let client = EphemeralKey::generate(named_group::X25519_MLKEM768, &mut client_random)
+            .unwrap()
+            .unwrap();
+        assert_eq!(client.group(), named_group::X25519_MLKEM768);
+        let share = client.public_key();
+        assert_eq!(share.len(), X25519_MLKEM768_CLIENT_SHARE_BYTES);
+        let mut server_random = fixed_random(11);
+        let answer = server_key_exchange(named_group::X25519_MLKEM768, &share, &mut server_random)
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer.share.len(), X25519_MLKEM768_SERVER_SHARE_BYTES);
+        assert_eq!(answer.shared_secret.len(), 64);
+        assert_eq!(client.shared_secret(&answer.share), Some(answer.shared_secret));
+        assert!(client.shared_secret(&[1u8; 32]).is_none());
+        let mut truncated = share.clone();
+        truncated.pop();
+        assert!(
+            server_key_exchange(named_group::X25519_MLKEM768, &truncated, &mut server_random)
+                .unwrap()
+                .is_none()
+        );
+        let mut low_order = share;
+        low_order[MLKEM768_ENCAPSULATION_KEY_BYTES..].fill(0);
+        assert!(
+            server_key_exchange(named_group::X25519_MLKEM768, &low_order, &mut server_random)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_classic_groups_answer_through_server_key_exchange() {
+        for group in SUPPORTED_GROUPS {
+            let mut client_random = fixed_random(3);
+            let client = EphemeralKey::generate(group, &mut client_random)
+                .unwrap()
+                .unwrap();
+            let mut server_random = fixed_random(5);
+            let answer = server_key_exchange(group, &client.public_key(), &mut server_random)
+                .unwrap()
+                .unwrap();
+            assert_eq!(client.shared_secret(&answer.share), Some(answer.shared_secret));
+        }
+        let mut random = fixed_random(1);
+        assert!(server_key_exchange(0x0018, &[4; 65], &mut random).unwrap().is_none());
     }
 
     #[test]

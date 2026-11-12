@@ -10,6 +10,7 @@ use eggdb_tls::config::{
     ClientConfig, MaximumVersion, MinimumVersion, ServerConfig, ServerVerification,
 };
 use eggdb_tls::error::TlsError;
+use eggdb_tls::handshake::named_group;
 use eggdb_tls::self_signed::{SelfSignedCertificateRequest, generate_self_signed_certificate};
 use eggdb_tls::stream::TlsStream;
 use eggdb_tls::verify::{ServerName, TrustStore};
@@ -130,6 +131,16 @@ fn both_sides_agree_on_the_channel_binding_and_exported_keys() {
         server.export_keying_material(b"EXPORTER-test", Some(b"context"), 32),
         client.export_keying_material(b"EXPORTER-test", Some(b"context"), 32)
     );
+}
+
+#[test]
+fn tls13_agrees_on_the_post_quantum_hybrid_group() {
+    let (server_config, certificate) = server_setup("db.example.com");
+    let client_config = full_verification(&certificate, "db.example.com");
+    let (server, client) = run_handshake(server_config, client_config);
+    let (server, client) = (server.expect("server"), client.expect("client"));
+    assert_eq!(server.info().key_exchange_group, named_group::X25519_MLKEM768);
+    assert_eq!(client.info().key_exchange_group, named_group::X25519_MLKEM768);
 }
 
 #[test]

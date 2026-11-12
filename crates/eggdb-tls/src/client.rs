@@ -15,7 +15,7 @@ use crate::handshake::{
 };
 use crate::key_schedule::{KeySchedule, finished_verify_data, traffic_keys};
 use crate::negotiation::{
-    EphemeralKey, SUPPORTED_GROUPS, SUPPORTED_SIGNATURE_SCHEMES, scheme_algorithm, scheme_fits_key,
+    EphemeralKey, SUPPORTED_GROUPS, SUPPORTED_SIGNATURE_SCHEMES, TLS13_GROUPS, scheme_algorithm, scheme_fits_key,
 };
 use crate::private_key::FillRandom;
 use crate::record::{Tls13RecordProtection, content_type};
@@ -85,7 +85,7 @@ fn client_hello(
     config: &ClientConfig,
     random: [u8; 32],
     session_id: &[u8],
-    share: KeyShareEntry,
+    shares: &[KeyShareEntry],
     cookie: Option<&[u8]>,
 ) -> ClientHello {
     let offer_tls12 = config.offers_tls12();
@@ -101,11 +101,15 @@ fn client_hello(
     .filter_map(|(offered, version)| offered.then_some(version))
     .collect();
     extensions.push(Extension::client_supported_versions(&versions));
-    extensions.push(Extension::supported_groups(&SUPPORTED_GROUPS));
+    if config.offers_tls13() {
+        extensions.push(Extension::supported_groups(&TLS13_GROUPS));
+    } else {
+        extensions.push(Extension::supported_groups(&SUPPORTED_GROUPS));
+    }
     extensions.push(Extension::signature_algorithms(
         &SUPPORTED_SIGNATURE_SCHEMES,
     ));
-    extensions.push(Extension::client_key_shares(&[share]));
+    extensions.push(Extension::client_key_shares(shares));
     if !config.application_protocols.is_empty() {
         let protocols: Vec<&[u8]> = config
             .application_protocols
@@ -133,6 +137,16 @@ fn client_hello(
         compression_methods: vec![0],
         extensions,
     }
+}
+
+fn key_shares(ephemerals: &[EphemeralKey]) -> Vec<KeyShareEntry> {
+    ephemerals
+        .iter()
+        .map(|ephemeral| KeyShareEntry {
+            group: ephemeral.group(),
+            key_exchange: ephemeral.public_key(),
+        })
+        .collect()
 }
 
 fn read_server_hello<S: Read + Write>(
@@ -164,14 +178,19 @@ pub(crate) fn handshake<S: Read + Write>(
     fill_random(&mut random)?;
     let mut session_id = vec![0u8; 32];
     fill_random(&mut session_id)?;
-    let mut ephemeral = EphemeralKey::generate(named_group::X25519, &mut *fill_random)?.ok_or(
-        TlsError::protocol(AlertDescription::InternalError, "X25519 is unavailable"),
-    )?;
-    let share = KeyShareEntry {
-        group: ephemeral.group(),
-        key_exchange: ephemeral.public_key(),
+    let first_groups: &[u16] = if config.offers_tls13() {
+        &[named_group::X25519_MLKEM768, named_group::X25519]
+    } else {
+        &[named_group::X25519]
     };
-    let mut hello_message = client_hello(config, random, &session_id, share, None).encode();
+    let mut ephemerals = Vec::with_capacity(first_groups.len());
+    for &group in first_groups {
+        ephemerals.push(EphemeralKey::generate(group, &mut *fill_random)?.ok_or(
+            TlsError::protocol(AlertDescription::InternalError, "a key exchange group is unavailable"),
+        )?);
+    }
+    let mut hello_message =
+        client_hello(config, random, &session_id, &key_shares(&ephemerals), None).encode();
     layer.queue(content_type::HANDSHAKE, &hello_message)?;
     layer.flush()?;
 
@@ -187,8 +206,8 @@ pub(crate) fn handshake<S: Read + Write>(
             ))?;
         let group = server_hello.retry_group()?.unwrap_or(0);
         if server_hello.selected_version()? != Some(version::TLS13)
-            || !SUPPORTED_GROUPS.contains(&group)
-            || group == ephemeral.group()
+            || !TLS13_GROUPS.contains(&group)
+            || ephemerals.iter().any(|ephemeral| ephemeral.group() == group)
         {
             return Err(TlsError::protocol(
                 AlertDescription::IllegalParameter,
@@ -198,19 +217,21 @@ pub(crate) fn handshake<S: Read + Write>(
         let mut transcript = suite.hash().transcript();
         transcript.update(&message_hash_message(&suite.hash().digest(&hello_message)));
         transcript.update(&server_hello_message);
-        ephemeral = EphemeralKey::generate(group, &mut *fill_random)?.ok_or(TlsError::protocol(
-            AlertDescription::InternalError,
-            "unsupported group requested",
-        ))?;
-        let share = KeyShareEntry {
-            group,
-            key_exchange: ephemeral.public_key(),
-        };
+        ephemerals = vec![EphemeralKey::generate(group, &mut *fill_random)?.ok_or(
+            TlsError::protocol(AlertDescription::InternalError, "unsupported group requested"),
+        )?];
         let cookie = server_hello
             .extension(extension_type::COOKIE)
             .map(<[u8]>::to_vec);
         hello_message =
-            client_hello(config, random, &session_id, share, cookie.as_deref()).encode();
+            client_hello(
+                config,
+                random,
+                &session_id,
+                &key_shares(&ephemerals),
+                cookie.as_deref(),
+            )
+            .encode();
         transcript.update(&hello_message);
         layer.queue_change_cipher_spec();
         sent_change_cipher_spec = true;
@@ -282,12 +303,16 @@ pub(crate) fn handshake<S: Read + Write>(
         fresh
     });
     transcript.update(&server_hello_message);
-    let server_share = server_hello
-        .key_share()?
-        .filter(|share| share.group == ephemeral.group())
+    let server_share = server_hello.key_share()?.ok_or(TlsError::protocol(
+        AlertDescription::IllegalParameter,
+        "the ServerHello carries no key share",
+    ))?;
+    let ephemeral = ephemerals
+        .iter()
+        .find(|ephemeral| ephemeral.group() == server_share.group)
         .ok_or(TlsError::protocol(
             AlertDescription::IllegalParameter,
-            "the server's key share is not in the client's group",
+            "the server's key share is not in a group the client sent",
         ))?;
     let shared_secret =
         ephemeral
@@ -432,6 +457,7 @@ pub(crate) fn handshake<S: Read + Write>(
             server_name: config.server_name_indication.clone(),
             server_certificate: chain.first().cloned(),
             peer_certificates: chain,
+            key_exchange_group: server_share.group,
         },
         traffic: Traffic::Tls13(Tls13Traffic {
             hash,

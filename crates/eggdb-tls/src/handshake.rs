@@ -77,6 +77,8 @@ pub mod named_group {
     pub const SECP256R1: u16 = 0x0017;
     /// `x25519`.
     pub const X25519: u16 = 0x001d;
+    /// `X25519MLKEM768`: ML-KEM-768 and X25519 together, the hybrid post-quantum group.
+    pub const X25519_MLKEM768: u16 = 0x11ec;
 }
 
 /// Signature schemes.

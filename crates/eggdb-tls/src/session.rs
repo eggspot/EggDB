@@ -21,6 +21,9 @@ pub struct SessionInfo {
     pub peer_certificates: Vec<Certificate>,
     /// The server's own certificate: the peer's leaf on a client, the served leaf on a server.
     pub server_certificate: Option<Certificate>,
+    /// The key exchange group, a [`crate::handshake::named_group`] value; `X25519MLKEM768`
+    /// marks a post-quantum hybrid key exchange.
+    pub key_exchange_group: u16,
 }
 
 impl SessionInfo {

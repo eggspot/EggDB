@@ -14,8 +14,8 @@ use crate::handshake::{
 };
 use crate::key_schedule::{KeySchedule, finished_verify_data, traffic_keys};
 use crate::negotiation::{
-    EphemeralKey, SUPPORTED_GROUPS, SUPPORTED_SIGNATURE_SCHEMES, choose_application_protocol,
-    choose_signature_scheme, scheme_algorithm, scheme_fits_key,
+    SUPPORTED_SIGNATURE_SCHEMES, ServerKeyExchange, TLS13_GROUPS, choose_application_protocol,
+    choose_signature_scheme, scheme_algorithm, scheme_fits_key, server_key_exchange,
 };
 use crate::signature::verify_signature;
 use crate::verify::{KeyPurpose, verify_certificate_chain};
@@ -78,7 +78,7 @@ pub(crate) fn choose_suite(offered: &[u16], tls13: bool) -> Option<CipherSuite> 
 
 fn preferred_share(hello: &ClientHello) -> Result<Option<KeyShareEntry>, TlsError> {
     let shares = hello.key_shares()?;
-    Ok(SUPPORTED_GROUPS
+    Ok(TLS13_GROUPS
         .into_iter()
         .find_map(|group| shares.iter().find(|share| share.group == group).cloned()))
 }
@@ -101,7 +101,7 @@ fn tls13<S: Read + Write>(
         Some(share) => (first_hello, first_message, share),
         None => {
             let groups = first_hello.supported_groups()?;
-            let group = SUPPORTED_GROUPS
+            let group = TLS13_GROUPS
                 .into_iter()
                 .find(|group| groups.contains(group))
                 .ok_or(TlsError::protocol(
@@ -178,15 +178,15 @@ fn tls13<S: Read + Write>(
     })?;
     let server_name = hello.server_name()?;
 
-    let ephemeral = EphemeralKey::generate(share.group, &mut *fill_random)?.ok_or(
-        TlsError::protocol(AlertDescription::InternalError, "unsupported group chosen"),
-    )?;
-    let shared_secret = ephemeral
-        .shared_secret(&share.key_exchange)
-        .ok_or(TlsError::protocol(
+    let ServerKeyExchange {
+        share: server_share,
+        shared_secret,
+    } = server_key_exchange(share.group, &share.key_exchange, &mut *fill_random)?.ok_or(
+        TlsError::protocol(
             AlertDescription::IllegalParameter,
             "the client's key share is not a valid public key",
-        ))?;
+        ),
+    )?;
     let mut random = [0u8; 32];
     fill_random(&mut random)?;
     let server_hello = ServerHello {
@@ -199,7 +199,7 @@ fn tls13<S: Read + Write>(
             Extension::server_supported_version(version::TLS13),
             Extension::server_key_share(&KeyShareEntry {
                 group: share.group,
-                key_exchange: ephemeral.public_key(),
+                key_exchange: server_share,
             }),
         ],
     }
@@ -315,6 +315,7 @@ fn tls13<S: Read + Write>(
             server_name,
             peer_certificates,
             server_certificate: config.chain().first().cloned(),
+            key_exchange_group: share.group,
         },
         traffic: Traffic::Tls13(Tls13Traffic {
             hash,
