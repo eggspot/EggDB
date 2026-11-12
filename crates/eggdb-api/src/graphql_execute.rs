@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 const MAX_FRAGMENT_DEPTH: usize = 32;
 
-const AGGREGATE_FUNCTIONS: [&str; 10] = [
+pub(crate) const AGGREGATE_FUNCTIONS: [&str; 10] = [
     "sum",
     "avg",
     "max",
@@ -31,11 +31,11 @@ const AGGREGATE_FUNCTIONS: [&str; 10] = [
 ];
 
 #[derive(Debug, Clone)]
-struct ForeignKey {
-    child: String,
-    child_columns: Vec<String>,
-    parent: String,
-    parent_columns: Vec<String>,
+pub(crate) struct ForeignKey {
+    pub(crate) child: String,
+    pub(crate) child_columns: Vec<String>,
+    pub(crate) parent: String,
+    pub(crate) parent_columns: Vec<String>,
 }
 
 enum Relationship {
@@ -163,12 +163,12 @@ fn row_texts(result: &QueryResult) -> Vec<String> {
         .collect()
 }
 
-struct Context<'d> {
+pub(crate) struct Context<'d> {
     variables: HashMap<String, GqlValue>,
     fragments: &'d [Fragment],
     schema: String,
-    tables: Vec<String>,
-    foreign_keys: Vec<ForeignKey>,
+    pub(crate) tables: Vec<String>,
+    pub(crate) foreign_keys: Vec<ForeignKey>,
     aliases: usize,
 }
 
@@ -198,7 +198,7 @@ impl Context<'_> {
         }
     }
 
-    fn argument(&self, field: &Field, name: &str) -> Option<GqlValue> {
+    pub(crate) fn argument(&self, field: &Field, name: &str) -> Option<GqlValue> {
         field.argument(name).map(|value| self.resolve(value))
     }
 
@@ -223,7 +223,7 @@ impl Context<'_> {
         Ok(true)
     }
 
-    fn fields(&self, selections: &[Selection], depth: usize) -> Result<Vec<Field>, String> {
+    pub(crate) fn fields(&self, selections: &[Selection], depth: usize) -> Result<Vec<Field>, String> {
         if depth > MAX_FRAGMENT_DEPTH {
             return Err("fragments nest too deeply or spread themselves".to_owned());
         }
@@ -999,8 +999,9 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         for field in &fields {
             let value = if field.name == "__typename" {
                 json_string("query_root")
-            } else if field.name.starts_with("__") {
-                return Err(validation("introspection is not served yet".to_owned()));
+            } else if field.name == "__schema" || field.name == "__type" {
+                let model = self.schema_model(context).map_err(|error| (error.message().to_owned(), error.state().code().to_owned()))?;
+                crate::graphql_schema::introspect(context, &model, field).map_err(validation)?
             } else {
                 let (sql, list) = context.query_sql(field).map_err(validation)?;
                 let results = self

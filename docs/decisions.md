@@ -900,3 +900,4 @@ its full title with its status.
 - [D873](decisions/D873.md) Code-only batch 521 (M5): Oracle DDL and database event triggers
 - [D874](decisions/D874.md) Code-only batch 522 (M5): named parameters in libsqlite3
 - [D875](decisions/D875.md) Code-only batch 523 (M6a): a GraphQL API generated from the schema
+- [D876](decisions/D876.md) Code-only batch 524 (M6a): GraphQL introspection

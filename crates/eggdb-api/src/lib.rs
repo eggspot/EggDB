@@ -13,6 +13,7 @@
 
 mod graphql;
 mod graphql_execute;
+mod graphql_schema;
 mod ogc;
 mod request;
 

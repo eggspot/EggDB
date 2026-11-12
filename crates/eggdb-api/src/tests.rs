@@ -413,6 +413,14 @@ fn graphql_reads_and_writes_tables_with_relationships() {
     );
     assert!(changed.contains("\"insert_books_one\":{\"id\":13}"), "{changed}");
     assert!(changed.contains("\"affected_rows\":2"), "{changed}");
+    let described = graphql(
+        &endpoint,
+        "query Introspect { __schema { queryType { name } types { kind name fields { name type { kind ofType { kind name } } } } } __type(name: \"books\") { name fields { name } } }",
+        "{}",
+    );
+    assert!(described.contains("\"queryType\":{\"name\":\"query_root\"}"), "{described}");
+    assert!(described.contains("\"name\":\"books_bool_exp\""), "{described}");
+    assert!(described.contains("\"__type\":{\"name\":\"books\",\"fields\":[{\"name\":\"id\"}"), "{described}");
     let failed = graphql(&endpoint, "{ nothing { id } }", "{}");
     assert!(failed.contains("\"errors\""), "{failed}");
     let refused = graphql(&endpoint, "mutation { insert_books_one(object: {id: 10, title: \"Dup\"}) { id } }", "{}");
