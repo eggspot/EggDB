@@ -1237,7 +1237,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mysqlpump and MySQL Shell dumps (D198). Check: a PyMySQL check of a restored file. `LOAD DATA
   LOCAL INFILE`: **code written, unbuilt** (code-only mode, 2026-11-11, D423); server-side files
   stay refused.
-- MariaDB's sequences (D10, roadmap item 32). **Code written, unbuilt** (code-only mode, 2026-11-11, D424). Left:
+- MariaDB's sequences (D10, roadmap item 32). **Code written, unbuilt** (code-only mode, 2026-11-11, D424);
   reading a sequence as a table, `CREATE OR REPLACE SEQUENCE` and `SHOW CREATE SEQUENCE`: **code written,
   unbuilt** (code-only mode, 2026-11-11, D500, D501, D502).
 - MySQL's `JSON_VALUE` and `JSON_TABLE` with MySQL's path language (D289). **Code written, unbuilt**
@@ -1564,7 +1564,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `eggdb export --sql` with views, sequences, comments and every constraint (D24, PR #86). **Code written,
   unbuilt** for the PostgreSQL dialect (code-only mode, 2026-11-11, D446). Roles, memberships, table grants, routines and triggers
   in the PostgreSQL dump: **code written, unbuilt** (code-only mode, 2026-11-12, D842).
-- Immutable (WORM) backups that ransomware can't alter (D53).
+- Immutable (WORM) backups that ransomware can't alter (D53). Copies archived into S3-compatible buckets under Object
+  Lock (`eggdb backup --lock-days`): **code written, unbuilt** (code-only mode, 2026-11-12, D919). Left: a locked
+  manifest, and WORM for local archives.
 - Backups through `eggdb serve`'s clients, compaction of a file `serve` holds, and progress
   reports (D141).
 - Compaction's lock window closed: the platform layer tells whether a file it locked is still

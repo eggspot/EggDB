@@ -101,6 +101,7 @@ impl Bucket {
         query: &str,
         body: &[u8],
         max_body: usize,
+        extra: &[(String, String)],
     ) -> Result<eggdb_http::ClientResponse, String> {
         let path = format!(
             "/{}/{}",
@@ -120,6 +121,7 @@ impl Bucket {
             ),
             ("x-amz-date".to_owned(), format_amz_date(now())),
         ];
+        headers.extend(extra.iter().cloned());
         let query_option = (!query.is_empty()).then_some(query);
         let signed = SignedRequest {
             method,
@@ -128,9 +130,11 @@ impl Bucket {
             headers: &headers,
             body,
         };
+        let mut signed_names = vec!["host", "x-amz-content-sha256", "x-amz-date"];
+        signed_names.extend(extra.iter().map(|(name, _)| name.as_str()));
         let value = authorization(
             &signed,
-            &["host", "x-amz-content-sha256", "x-amz-date"],
+            &signed_names,
             &self.access_key,
             &self.secret,
             &self.region,
@@ -166,7 +170,7 @@ impl Bucket {
 
     /// Stores `body` as `key`.
     pub fn put(&self, key: &str, body: &[u8]) -> Result<(), String> {
-        let response = self.call("PUT", key, "", body, 1 << 20)?;
+        let response = self.call("PUT", key, "", body, 1 << 20, &[])?;
         if response.status / 100 == 2 {
             Ok(())
         } else {
@@ -174,9 +178,26 @@ impl Bucket {
         }
     }
 
+    /// Stores `body` as `key` under S3 Object Lock in compliance mode until `retain_until` (an
+    /// RFC 3339 time): until then nobody, the account's root included, can delete or
+    /// overwrite that version. The bucket must have Object Lock enabled.
+    pub fn put_locked(&self, key: &str, body: &[u8], retain_until: &str) -> Result<(), String> {
+        let extra = vec![
+            ("content-md5".to_owned(), eggdb_crypto::base64_encode(&eggdb_crypto::md5_checksum(body))),
+            ("x-amz-object-lock-mode".to_owned(), "COMPLIANCE".to_owned()),
+            ("x-amz-object-lock-retain-until-date".to_owned(), retain_until.to_owned()),
+        ];
+        let response = self.call("PUT", key, "", body, 1 << 20, &extra)?;
+        if response.status / 100 == 2 {
+            Ok(())
+        } else {
+            Err(Self::refused(&response, &format!("storing {key} under a lock")))
+        }
+    }
+
     /// The object `key`, or `None` when there is none.
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let response = self.call("GET", key, "", b"", self.max_object)?;
+        let response = self.call("GET", key, "", b"", self.max_object, &[])?;
         match response.status {
             200 => Ok(Some(response.body)),
             404 => Ok(None),
@@ -186,7 +207,7 @@ impl Bucket {
 
     /// Deletes `key`.
     pub fn delete(&self, key: &str) -> Result<(), String> {
-        let response = self.call("DELETE", key, "", b"", 1 << 20)?;
+        let response = self.call("DELETE", key, "", b"", 1 << 20, &[])?;
         if response.status / 100 == 2 || response.status == 404 {
             Ok(())
         } else {
@@ -209,7 +230,7 @@ impl Bucket {
                     uri_encode(token.as_bytes(), false)
                 );
             }
-            let response = self.call("GET", "", &query, b"", MAX_LIST_BODY)?;
+            let response = self.call("GET", "", &query, b"", MAX_LIST_BODY, &[])?;
             if response.status != 200 {
                 return Err(Self::refused(&response, &format!("listing {prefix}")));
             }

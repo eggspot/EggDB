@@ -13,6 +13,7 @@ const MOST_TIME_LIMIT_SECONDS: u64 = 300;
 const MOST_CALL_GAP_MS: u64 = 10_000;
 const MOST_BUSY_TIMEOUT_MS: u64 = 3_600_000;
 const SMALLEST_CONNECTION_MEMORY: usize = 1 << 20;
+const MOST_LOCK_DAYS: u64 = 36_500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandName {
@@ -209,6 +210,7 @@ impl CommandName {
             OptionName::Verify => self == Self::Audit,
             OptionName::Kql => self == Self::Sql,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
+            OptionName::LockDays => self == Self::Backup,
             OptionName::Compress => matches!(
                 self,
                 Self::Put
@@ -525,6 +527,7 @@ enum OptionName {
     Arrow,
     SqlDump,
     WholeDump,
+    LockDays,
     Table,
     Header,
     Delimiter,
@@ -561,6 +564,7 @@ impl OptionName {
             b"help" => Self::Help,
             b"version" => Self::Version,
             b"page-size" => Self::PageSize,
+            b"lock-days" => Self::LockDays,
             b"compress" => Self::Compress,
             b"create" => Self::Create,
             b"prefix" => Self::Prefix,
@@ -821,6 +825,7 @@ pub(crate) struct Request {
     pub(crate) step: Option<u64>,
     pub(crate) swap: SwapOptions,
     pub(crate) copy: Option<PathBuf>,
+    pub(crate) lock_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1281,6 +1286,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         step: None,
         swap: SwapOptions::default(),
         copy: None,
+        lock_days: None,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -1321,6 +1327,20 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::KeyFile => {
                 request.encryption_key = Some(read_key_file(value).map_err(usage)?);
+            }
+            OptionName::LockDays => {
+                request.lock_days = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|days| (1..=MOST_LOCK_DAYS).contains(days))
+                        .and_then(|days| u32::try_from(days).ok())
+                        .ok_or_else(|| {
+                            usage(format!(
+                                "{} must be a whole number of days from 1 to {MOST_LOCK_DAYS}, not '{}'",
+                                option.spelled,
+                                shown(value)
+                            ))
+                        })?,
+                );
             }
             OptionName::PageSize => {
                 request.page_size = Some(parse_page_size(&option.spelled, value).map_err(usage)?);

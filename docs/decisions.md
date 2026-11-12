@@ -943,3 +943,4 @@ its full title with its status.
 - [D916](decisions/D916.md) Code-only batch 564 (M18): foreign servers and foreign tables with declared columns
 - [D917](decisions/D917.md) Code-only batch 565 (M18): IMPORT FOREIGN SCHEMA
 - [D918](decisions/D918.md) Code-only batch 566 (M5): Transact-SQL character classes in LIKE
+- [D919](decisions/D919.md) Code-only batch 567 (M14): WORM backups through S3 Object Lock

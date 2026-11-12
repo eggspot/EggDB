@@ -22,6 +22,12 @@ impl Session<'_> {
         {
             return self.backup_into_bucket(url);
         }
+        if self.request.lock_days.is_some() {
+            return Err(Failure::usage(
+                "--lock-days locks copies in an S3 bucket with Object Lock; give an s3:// archive",
+                Some(crate::cli::args::CommandName::Backup),
+            ));
+        }
         if copy.is_dir() {
             return self.backup_into_directory(&copy);
         }

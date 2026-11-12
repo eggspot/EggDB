@@ -10,6 +10,7 @@ pub(super) const MANIFEST: &str = "manifest.jsonl";
 const STAGING_SUFFIX: &str = ".restoring";
 const UPLOAD_SUFFIX: &str = ".uploading";
 pub(super) const BUCKET_SCHEME: &str = "s3://";
+const MS_PER_DAY: i64 = 86_400_000;
 
 fn bucket(url: &str) -> Result<eggdb_s3::client::Location, String> {
     let largest = usize::try_from(16u64 << 30).unwrap_or(usize::MAX);
@@ -323,6 +324,7 @@ fn upload_copy(
     name: &str,
     taken_at_ms: i64,
     shown: &str,
+    locked_until_ms: Option<i64>,
 ) -> Result<(String, u64), String> {
     let verified = eggdb::Database::open_with(staging, eggdb::Options::default().read_only(true))
         .and_then(|copy| copy.check())
@@ -333,16 +335,22 @@ fn upload_copy(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    location.bucket.put(&location.key(name), &bytes)?;
-    let line = JsonObject::new()
+    match locked_until_ms {
+        Some(until) => location.bucket.put_locked(&location.key(name), &bytes, &rfc3339(until))?,
+        None => location.bucket.put(&location.key(name), &bytes)?,
+    }
+    let mut line = JsonObject::new()
         .string("file", name)
         .string("taken_at", &rfc3339(taken_at_ms))
         .number("taken_at_ms", u64::try_from(taken_at_ms).unwrap_or(0))
         .number("bytes", bytes.len() as u64)
         .number("entries", verified.entries)
         .string("sha256", &sha256)
-        .boolean("verified", true)
-        .line();
+        .boolean("verified", true);
+    if let Some(until) = locked_until_ms {
+        line = line.string("locked_until", &rfc3339(until));
+    }
+    let line = line.line();
     let mut manifest_text = location
         .bucket
         .get(&location.key(MANIFEST))?
@@ -464,7 +472,11 @@ impl Session<'_> {
         let copied = db.backup_to(&staging);
         drop(db);
         copied.map_err(|error| failed(format!("cannot copy {} for {url}: {error}", self.file)))?;
-        let outcome = upload_copy(&location, &staging, &name, taken_at_ms, &self.file);
+        let locked_until_ms = self
+            .request
+            .lock_days
+            .map(|days| taken_at_ms.saturating_add(i64::from(days) * MS_PER_DAY));
+        let outcome = upload_copy(&location, &staging, &name, taken_at_ms, &self.file, locked_until_ms);
         let _ = std::fs::remove_file(&staging);
         let (line, entries) = outcome.map_err(failed)?;
         match self.format {
