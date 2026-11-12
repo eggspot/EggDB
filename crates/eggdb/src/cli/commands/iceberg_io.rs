@@ -3,7 +3,7 @@ use super::avro_io::columns_of as avro_columns;
 use crate::cli::args::CommandName;
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::render;
-use eggdb_parquet::{Cell, Column};
+use eggdb_parquet::{Cell, Column, ColumnType};
 use eggdb_sql::json::{Json, Node, parse_document};
 use std::path::{Path, PathBuf};
 
@@ -217,6 +217,192 @@ fn table_columns(location: &Path) -> Result<Vec<Column>, String> {
     Ok(merged)
 }
 
+
+const AVRO_MAGIC: &[u8] = b"Obj\x01";
+const MANIFEST_ENTRY_SCHEMA: &str = r#"{"type":"record","name":"manifest_entry","fields":[{"name":"status","type":"int","field-id":0},{"name":"snapshot_id","type":"long","field-id":1},{"name":"data_file","type":{"type":"record","name":"r2","fields":[{"name":"file_path","type":"string","field-id":100},{"name":"file_format","type":"string","field-id":101},{"name":"partition","type":{"type":"record","name":"r102","fields":[]},"field-id":102},{"name":"record_count","type":"long","field-id":103},{"name":"file_size_in_bytes","type":"long","field-id":104},{"name":"block_size_in_bytes","type":"long","field-id":105}]},"field-id":2}]}"#;
+const MANIFEST_FILE_SCHEMA: &str = r#"{"type":"record","name":"manifest_file","fields":[{"name":"manifest_path","type":"string","field-id":500},{"name":"manifest_length","type":"long","field-id":501},{"name":"partition_spec_id","type":"int","field-id":502},{"name":"added_snapshot_id","type":"long","field-id":503},{"name":"added_data_files_count","type":"int","field-id":504},{"name":"existing_data_files_count","type":"int","field-id":505},{"name":"deleted_data_files_count","type":"int","field-id":506},{"name":"added_rows_count","type":"long","field-id":512},{"name":"existing_rows_count","type":"long","field-id":513},{"name":"deleted_rows_count","type":"long","field-id":514}]}"#;
+const ADDED: i64 = 1;
+const BLOCK_SIZE: i64 = 64 << 20;
+
+fn put_long(out: &mut Vec<u8>, value: i64) {
+    let mut zigzag = ((value << 1) ^ (value >> 63)) as u64;
+    while zigzag >= 0x80 {
+        out.push((zigzag as u8 & 0x7F) | 0x80);
+        zigzag >>= 7;
+    }
+    out.push(zigzag as u8);
+}
+
+fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    put_long(out, bytes.len() as i64);
+    out.extend_from_slice(bytes);
+}
+
+fn avro_file(schema: &str, metadata: &[(&str, String)], records: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let mut sync = [0u8; 16];
+    eggdb_platform::secure_random::fill(&mut sync).map_err(|error| error.to_string())?;
+    let mut out = AVRO_MAGIC.to_vec();
+    put_long(&mut out, metadata.len() as i64 + 2);
+    put_bytes(&mut out, b"avro.schema");
+    put_bytes(&mut out, schema.as_bytes());
+    put_bytes(&mut out, b"avro.codec");
+    put_bytes(&mut out, b"null");
+    for (key, value) in metadata {
+        put_bytes(&mut out, key.as_bytes());
+        put_bytes(&mut out, value.as_bytes());
+    }
+    put_long(&mut out, 0);
+    out.extend_from_slice(&sync);
+    let data: Vec<u8> = records.concat();
+    put_long(&mut out, records.len() as i64);
+    put_long(&mut out, data.len() as i64);
+    out.extend_from_slice(&data);
+    out.extend_from_slice(&sync);
+    Ok(out)
+}
+
+fn iceberg_type(column_type: ColumnType) -> String {
+    match column_type {
+        ColumnType::Boolean => "boolean".to_owned(),
+        ColumnType::Int32 => "int".to_owned(),
+        ColumnType::Int64 => "long".to_owned(),
+        ColumnType::Float => "float".to_owned(),
+        ColumnType::Double => "double".to_owned(),
+        ColumnType::Text => "string".to_owned(),
+        ColumnType::Binary => "binary".to_owned(),
+        ColumnType::Date => "date".to_owned(),
+        ColumnType::Timestamp { utc: false } => "timestamp".to_owned(),
+        ColumnType::Timestamp { utc: true } => "timestamptz".to_owned(),
+        ColumnType::Decimal { precision, scale } => format!("decimal({precision}, {scale})"),
+    }
+}
+
+fn json_text(text: &str) -> String {
+    let mut out = String::from("\"");
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            control if u32::from(control) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(control))),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn random_uuid() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    eggdb_platform::secure_random::fill(&mut bytes).map_err(|error| error.to_string())?;
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
+}
+
+fn schema_json(columns: &[Column]) -> String {
+    let fields: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(|(at, column)| {
+            format!(
+                "{{\"id\":{},\"name\":{},\"required\":false,\"type\":{}}}",
+                at + 1,
+                json_text(&column.name),
+                json_text(&iceberg_type(column.column_type))
+            )
+        })
+        .collect();
+    format!("{{\"type\":\"struct\",\"schema-id\":0,\"fields\":[{}]}}", fields.join(","))
+}
+
+fn name_mapping(columns: &[Column]) -> String {
+    let fields: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(|(at, column)| format!("{{\"field-id\":{},\"names\":[{}]}}", at + 1, json_text(&column.name)))
+        .collect();
+    format!("[{}]", fields.join(","))
+}
+
+/// Writes `columns` as a new Iceberg table (format version 1, unpartitioned, one snapshot) at
+/// the directory `location`, which must not hold a table yet.
+fn write_table(location: &Path, columns: &[Column], now_millis: i64) -> Result<(), String> {
+    let metadata_directory = location.join("metadata");
+    let data_directory = location.join("data");
+    if metadata_directory.exists() {
+        return Err(format!("{} already holds an Iceberg table", location.display()));
+    }
+    std::fs::create_dir_all(&metadata_directory).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&data_directory).map_err(|error| error.to_string())?;
+    let absolute = std::fs::canonicalize(location).map_err(|error| error.to_string())?;
+    let uri = |path: &Path| format!("file://{}", path.display());
+    let rows = columns.first().map_or(0, |column| column.cells.len()) as i64;
+    let snapshot = now_millis.max(1);
+    let data_path = absolute.join("data").join(format!("00000-0-{}.parquet", random_uuid()?));
+    let data = eggdb_parquet::write(columns).map_err(|error| error.0)?;
+    std::fs::write(&data_path, &data).map_err(|error| error.to_string())?;
+    let schema = schema_json(columns);
+    let mut entry = Vec::new();
+    put_long(&mut entry, ADDED);
+    put_long(&mut entry, snapshot);
+    put_bytes(&mut entry, uri(&data_path).as_bytes());
+    put_bytes(&mut entry, b"PARQUET");
+    put_long(&mut entry, rows);
+    put_long(&mut entry, data.len() as i64);
+    put_long(&mut entry, BLOCK_SIZE);
+    let manifest = avro_file(
+        MANIFEST_ENTRY_SCHEMA,
+        &[
+            ("schema", schema.clone()),
+            ("partition-spec", "[]".to_owned()),
+            ("partition-spec-id", "0".to_owned()),
+            ("format-version", "1".to_owned()),
+        ],
+        &[entry],
+    )?;
+    let manifest_path = absolute.join("metadata").join(format!("{}-m0.avro", random_uuid()?));
+    std::fs::write(&manifest_path, &manifest).map_err(|error| error.to_string())?;
+    let mut listed = Vec::new();
+    put_bytes(&mut listed, uri(&manifest_path).as_bytes());
+    put_long(&mut listed, manifest.len() as i64);
+    put_long(&mut listed, 0);
+    put_long(&mut listed, snapshot);
+    put_long(&mut listed, 1);
+    put_long(&mut listed, 0);
+    put_long(&mut listed, 0);
+    put_long(&mut listed, rows);
+    put_long(&mut listed, 0);
+    put_long(&mut listed, 0);
+    let list = avro_file(MANIFEST_FILE_SCHEMA, &[("format-version", "1".to_owned())], &[listed])?;
+    let list_path = absolute.join("metadata").join(format!("snap-{snapshot}-1-{}.avro", random_uuid()?));
+    std::fs::write(&list_path, &list).map_err(|error| error.to_string())?;
+    let metadata = format!(
+        concat!(
+            "{{\"format-version\":1,\"table-uuid\":\"{uuid}\",\"location\":{location},\"last-updated-ms\":{now},",
+            "\"last-column-id\":{last_column},\"schema\":{schema},\"current-schema-id\":0,\"schemas\":[{schema}],",
+            "\"partition-spec\":[],\"default-spec-id\":0,\"partition-specs\":[{{\"spec-id\":0,\"fields\":[]}}],",
+            "\"last-partition-id\":999,\"default-sort-order-id\":0,\"sort-orders\":[{{\"order-id\":0,\"fields\":[]}}],",
+            "\"properties\":{{\"schema.name-mapping.default\":{mapping}}},\"current-snapshot-id\":{snapshot},",
+            "\"snapshots\":[{{\"snapshot-id\":{snapshot},\"timestamp-ms\":{now},\"summary\":{{\"operation\":\"append\",",
+            "\"added-data-files\":\"1\",\"added-records\":\"{rows}\"}},\"manifest-list\":{list},\"schema-id\":0}}],",
+            "\"snapshot-log\":[{{\"timestamp-ms\":{now},\"snapshot-id\":{snapshot}}}],\"metadata-log\":[]}}"
+        ),
+        uuid = random_uuid()?,
+        location = json_text(&uri(&absolute)),
+        now = now_millis,
+        last_column = columns.len(),
+        schema = schema,
+        mapping = json_text(&name_mapping(columns)),
+        snapshot = snapshot,
+        rows = rows,
+        list = json_text(&uri(&list_path)),
+    );
+    std::fs::write(metadata_directory.join("v1.metadata.json"), metadata).map_err(|error| error.to_string())?;
+    std::fs::write(metadata_directory.join("version-hint.text"), "1").map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 impl Session<'_> {
     pub(super) fn import_iceberg(&mut self, location: &Path) -> Result<Exit, Failure> {
         let shown = render::text(location.display().to_string().as_bytes());
@@ -230,6 +416,20 @@ impl Session<'_> {
         let columns = table_columns(location)
             .map_err(|error| Failure::database(format!("cannot import {shown}: {error}"), Exit::DatabaseError))?;
         self.import_columns(&shown, &table, &columns)
+    }
+
+    pub(super) fn export_iceberg(&mut self, location: &Path) -> Result<Exit, Failure> {
+        let shown = render::text(location.display().to_string().as_bytes());
+        let (table, columns, rows) = match self.table_columns()? {
+            Ok(found) => found,
+            Err(exit) => return Ok(exit),
+        };
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as i64);
+        write_table(location, &columns, now_millis)
+            .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;
+        Ok(self.written(&table, &shown, rows))
     }
 }
 
@@ -267,5 +467,10 @@ mod tests {
         assert!(table.local("s3://bucket/orders/data.parquet").is_err());
         assert_eq!(leading_number("00012-uuid.metadata.json"), Some(12));
         assert_eq!(leading_number("v3.metadata.json"), Some(3));
+        let mut zigzag = Vec::new();
+        put_long(&mut zigzag, -1);
+        put_long(&mut zigzag, 64);
+        assert_eq!(zigzag, [0x01, 0x80, 0x01]);
+        assert_eq!(iceberg_type(ColumnType::Timestamp { utc: true }), "timestamptz");
     }
 }

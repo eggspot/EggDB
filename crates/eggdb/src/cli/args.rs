@@ -328,7 +328,8 @@ impl CommandName {
             }
             OptionName::Arrow => matches!(self, Self::Export | Self::Import),
             OptionName::ParquetCompression => self == Self::Export,
-            OptionName::Dbf | OptionName::Copybook | OptionName::Ebcdic | OptionName::Iceberg => self == Self::Import,
+            OptionName::Dbf | OptionName::Copybook | OptionName::Ebcdic => self == Self::Import,
+            OptionName::Iceberg => matches!(self, Self::Import | Self::Export),
             OptionName::SqlDump | OptionName::WholeDump => self == Self::Export,
             OptionName::OnConflict
             | OptionName::Csv

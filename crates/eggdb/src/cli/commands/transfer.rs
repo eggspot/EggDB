@@ -41,6 +41,9 @@ impl Session<'_> {
         if let Some(target) = self.request.csv.avro.clone() {
             return self.export_avro(&target);
         }
+        if let Some(location) = self.request.csv.iceberg.clone() {
+            return self.export_iceberg(&location);
+        }
         if self.request.csv.whole_dump {
             return self.export_whole_dump();
         }
