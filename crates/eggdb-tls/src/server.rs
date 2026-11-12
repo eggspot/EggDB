@@ -14,8 +14,8 @@ use crate::handshake::{
 };
 use crate::key_schedule::{KeySchedule, finished_verify_data, traffic_keys};
 use crate::negotiation::{
-    SUPPORTED_SIGNATURE_SCHEMES, ServerKeyExchange, TLS13_GROUPS, choose_application_protocol,
-    choose_signature_scheme, scheme_algorithm, scheme_fits_key, server_key_exchange,
+    SUPPORTED_SIGNATURE_SCHEMES, ServerKeyExchange, choose_application_protocol,
+    choose_signature_scheme, scheme_algorithm, scheme_fits_key, server_key_exchange, tls13_groups,
 };
 use crate::signature::verify_signature;
 use crate::verify::{KeyPurpose, verify_certificate_chain};
@@ -69,18 +69,18 @@ pub(crate) fn handshake<S: Read + Write>(
     ))
 }
 
-pub(crate) fn choose_suite(offered: &[u16], tls13: bool) -> Option<CipherSuite> {
+pub(crate) fn choose_suite(offered: &[u16], tls13: bool, fips_only: bool) -> Option<CipherSuite> {
     CipherSuite::ALL
         .into_iter()
-        .filter(|suite| suite.is_tls13() == tls13)
+        .filter(|suite| suite.is_tls13() == tls13 && (!fips_only || suite.is_fips_approved()))
         .find(|suite| offered.contains(&suite.id()))
 }
 
-fn preferred_share(hello: &ClientHello) -> Result<Option<KeyShareEntry>, TlsError> {
+fn preferred_share(hello: &ClientHello, fips_only: bool) -> Result<Option<KeyShareEntry>, TlsError> {
     let shares = hello.key_shares()?;
-    Ok(TLS13_GROUPS
-        .into_iter()
-        .find_map(|group| shares.iter().find(|share| share.group == group).cloned()))
+    Ok(tls13_groups(fips_only)
+        .iter()
+        .find_map(|group| shares.iter().find(|share| share.group == *group).cloned()))
 }
 
 fn tls13<S: Read + Write>(
@@ -90,19 +90,20 @@ fn tls13<S: Read + Write>(
     first_hello: ClientHello,
     fill_random: FillRandom<'_>,
 ) -> Result<Established, TlsError> {
-    let suite = choose_suite(&first_hello.cipher_suites, true).ok_or(TlsError::protocol(
+    let suite = choose_suite(&first_hello.cipher_suites, true, config.fips_only).ok_or(TlsError::protocol(
         AlertDescription::HandshakeFailure,
         "no TLS 1.3 cipher suite in common",
     ))?;
     let hash = suite.hash();
     let mut transcript = hash.transcript();
     let mut sent_change_cipher_spec = false;
-    let (hello, hello_message, share) = match preferred_share(&first_hello)? {
+    let (hello, hello_message, share) = match preferred_share(&first_hello, config.fips_only)? {
         Some(share) => (first_hello, first_message, share),
         None => {
             let groups = first_hello.supported_groups()?;
-            let group = TLS13_GROUPS
-                .into_iter()
+            let group = tls13_groups(config.fips_only)
+                .iter()
+                .copied()
                 .find(|group| groups.contains(group))
                 .ok_or(TlsError::protocol(
                     AlertDescription::HandshakeFailure,

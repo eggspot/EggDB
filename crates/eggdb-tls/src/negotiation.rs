@@ -21,6 +21,23 @@ pub const TLS13_GROUPS: [u16; 3] = [
     named_group::SECP256R1,
 ];
 
+/// The TLS 1.3 groups of the FIPS-only mode: ML-KEM-768 is the approved part of the hybrid, and
+/// P-256 is approved on its own.
+pub const FIPS_TLS13_GROUPS: [u16; 2] = [named_group::X25519_MLKEM768, named_group::SECP256R1];
+
+/// The TLS 1.2 groups of the FIPS-only mode.
+pub const FIPS_TLS12_GROUPS: [u16; 1] = [named_group::SECP256R1];
+
+/// The TLS 1.3 groups in order of preference, the FIPS-only ones when `fips_only` is set.
+pub fn tls13_groups(fips_only: bool) -> &'static [u16] {
+    if fips_only { &FIPS_TLS13_GROUPS } else { &TLS13_GROUPS }
+}
+
+/// The TLS 1.2 groups in order of preference, the FIPS-only ones when `fips_only` is set.
+pub fn tls12_groups(fips_only: bool) -> &'static [u16] {
+    if fips_only { &FIPS_TLS12_GROUPS } else { &SUPPORTED_GROUPS }
+}
+
 /// The bytes of a client's `X25519MLKEM768` key share: the ML-KEM-768 encapsulation key, then
 /// the X25519 public key.
 pub const X25519_MLKEM768_CLIENT_SHARE_BYTES: usize =

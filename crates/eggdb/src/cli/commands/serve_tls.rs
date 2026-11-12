@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 const CLIENT_CA_VARIABLE: &str = "EGGDB_TLS_CLIENT_CA";
+const FIPS_VARIABLE: &str = "EGGDB_FIPS";
 const SELF_SIGNED_DAYS: i64 = 365;
 const SECONDS_PER_DAY: i64 = 86_400;
 const POSTGRESQL_ALPN: &[u8] = b"postgresql";
@@ -247,6 +248,7 @@ pub(super) fn tls_setup(
             .map_err(|error| usage(format!("{CLIENT_CA_VARIABLE}: {error}")))?;
         config.client_authentication = eggdb_tls::ClientAuthentication::Optional { trust };
     }
+    config.fips_only = std::env::var(FIPS_VARIABLE).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
     let with_protocol = |protocol: Option<&[u8]>| {
         let mut config = config.clone();
         config.application_protocols = protocol.map(|name| vec![name.to_vec()]).unwrap_or_default();

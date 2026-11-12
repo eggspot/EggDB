@@ -14,7 +14,7 @@ use crate::handshake::{
     extension_type, finished_message, handshake_message, handshake_type, message_body, named_group,
 };
 use crate::negotiation::{
-    EphemeralKey, SUPPORTED_GROUPS, choose_application_protocol, choose_signature_scheme,
+    EphemeralKey, choose_application_protocol, tls12_groups, choose_signature_scheme,
     scheme_algorithm,
 };
 use crate::private_key::FillRandom;
@@ -40,7 +40,7 @@ pub(crate) fn tls12_protection(
         ))
 }
 
-fn suite_for_key(offered: &[u16], key: &SubjectPublicKey) -> Option<CipherSuite> {
+fn suite_for_key(offered: &[u16], key: &SubjectPublicKey, fips_only: bool) -> Option<CipherSuite> {
     let authentication = match key {
         SubjectPublicKey::P256(_) => Tls12Authentication::Ecdsa,
         SubjectPublicKey::Rsa(_) => Tls12Authentication::Rsa,
@@ -48,7 +48,7 @@ fn suite_for_key(offered: &[u16], key: &SubjectPublicKey) -> Option<CipherSuite>
     };
     CipherSuite::ALL
         .into_iter()
-        .filter(|suite| suite.tls12_authentication() == Some(authentication))
+        .filter(|suite| suite.tls12_authentication() == Some(authentication) && (!fips_only || suite.is_fips_approved()))
         .find(|suite| offered.contains(&suite.id()))
 }
 
@@ -59,7 +59,7 @@ pub(crate) fn handshake<S: Read + Write>(
     hello: ClientHello,
     fill_random: FillRandom<'_>,
 ) -> Result<Established, TlsError> {
-    let suite = suite_for_key(&hello.cipher_suites, &config.private_key().public_key()).ok_or(
+    let suite = suite_for_key(&hello.cipher_suites, &config.private_key().public_key(), config.fips_only).ok_or(
         TlsError::protocol(
             AlertDescription::HandshakeFailure,
             "no TLS 1.2 cipher suite in common",
@@ -92,8 +92,9 @@ pub(crate) fn handshake<S: Read + Write>(
     let group = if client_groups.is_empty() {
         named_group::SECP256R1
     } else {
-        SUPPORTED_GROUPS
-            .into_iter()
+        tls12_groups(config.fips_only)
+            .iter()
+            .copied()
             .find(|group| client_groups.contains(group))
             .ok_or(TlsError::protocol(
                 AlertDescription::HandshakeFailure,

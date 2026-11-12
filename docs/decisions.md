@@ -836,3 +836,4 @@ its full title with its status.
 - [D809](decisions/D809.md) Code-only batch 457 (M16): CQL user-defined types
 - [D810](decisions/D810.md) Code-only batch 458 (M16): JetStream object stores (stream names by subject)
 - [D811](decisions/D811.md) Code-only batch 459 (M16): JetStream mirrors and sources
+- [D812](decisions/D812.md) Code-only batch 460 (M6b): a FIPS-only mode in TLS

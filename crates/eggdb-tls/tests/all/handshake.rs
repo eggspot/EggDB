@@ -134,6 +134,32 @@ fn both_sides_agree_on_the_channel_binding_and_exported_keys() {
 }
 
 #[test]
+fn the_fips_only_mode_keeps_to_aes_gcm_and_approved_groups() {
+    let (mut server_config, certificate) = server_setup("db.example.com");
+    server_config.fips_only = true;
+    let client_config = full_verification(&certificate, "db.example.com");
+    let (server, client) = run_handshake(server_config.clone(), client_config.clone());
+    let client = client.expect("client");
+    server.expect("server");
+    assert_ne!(client.info().cipher_suite, CipherSuite::Tls13ChaCha20Poly1305Sha256);
+    assert!(client.info().cipher_suite.is_fips_approved());
+    assert_eq!(client.info().key_exchange_group, named_group::X25519_MLKEM768);
+
+    let mut tls12_client = client_config;
+    tls12_client.maximum_version = MaximumVersion::Tls12;
+    tls12_client.minimum_version = MinimumVersion::Tls12;
+    tls12_client.fips_only = true;
+    let mut tls12_server = server_config;
+    tls12_server.minimum_version = MinimumVersion::Tls12;
+    let (server, client) = run_handshake(tls12_server, tls12_client);
+    let client = client.expect("TLS 1.2 client");
+    server.expect("TLS 1.2 server");
+    assert_eq!(client.info().version, version::TLS12);
+    assert_eq!(client.info().key_exchange_group, named_group::SECP256R1);
+    assert!(client.info().cipher_suite.is_fips_approved());
+}
+
+#[test]
 fn tls13_agrees_on_the_post_quantum_hybrid_group() {
     let (server_config, certificate) = server_setup("db.example.com");
     let client_config = full_verification(&certificate, "db.example.com");

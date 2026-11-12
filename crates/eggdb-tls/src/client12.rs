@@ -13,7 +13,7 @@ use crate::handshake::{
     extension_type, finished_message, handshake_type, message_body,
 };
 use crate::negotiation::{
-    EphemeralKey, SUPPORTED_GROUPS, SUPPORTED_SIGNATURE_SCHEMES, scheme_algorithm, scheme_fits_key,
+    EphemeralKey, SUPPORTED_SIGNATURE_SCHEMES, tls12_groups, scheme_algorithm, scheme_fits_key,
 };
 use crate::private_key::FillRandom;
 use crate::record::Tls12RecordProtection;
@@ -102,7 +102,7 @@ pub(crate) fn handshake<S: Read + Write>(
         ));
     }
     let key_exchange = EcdheServerKeyExchange::decode(message_body(&message))?;
-    if !SUPPORTED_GROUPS.contains(&key_exchange.group) {
+    if !tls12_groups(config.fips_only).contains(&key_exchange.group) {
         return Err(TlsError::protocol(
             AlertDescription::IllegalParameter,
             "the server chose a group the client did not offer",

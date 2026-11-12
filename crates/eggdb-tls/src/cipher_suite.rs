@@ -271,6 +271,11 @@ impl CipherSuite {
         Self::ALL.into_iter().find(|suite| suite.id() == id)
     }
 
+    /// Whether the suite uses only FIPS-approved algorithms: AES-GCM, not ChaCha20-Poly1305.
+    pub fn is_fips_approved(self) -> bool {
+        self.aead() != AeadKind::ChaCha20Poly1305
+    }
+
     /// Whether the suite belongs to TLS 1.3.
     pub fn is_tls13(self) -> bool {
         matches!(

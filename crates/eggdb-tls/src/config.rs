@@ -62,6 +62,9 @@ pub struct ServerConfig {
     pub maximum_version: MaximumVersion,
     /// Whether clients are asked for certificates, and what they must chain to.
     pub client_authentication: ClientAuthentication,
+    /// Only FIPS-approved algorithms: AES-GCM suites, and P-256 or the ML-KEM hybrid for key
+    /// exchange.
+    pub fips_only: bool,
 }
 
 /// Whether a server asks clients for certificates (TLS 1.3's CertificateRequest).
@@ -108,6 +111,7 @@ impl ServerConfig {
             minimum_version: MinimumVersion::default(),
             maximum_version: MaximumVersion::default(),
             client_authentication: ClientAuthentication::None,
+            fips_only: false,
         })
     }
 
@@ -156,6 +160,9 @@ pub struct ClientConfig {
     pub minimum_version: MinimumVersion,
     /// The highest version offered.
     pub maximum_version: MaximumVersion,
+    /// Only FIPS-approved algorithms: AES-GCM suites, and P-256 or the ML-KEM hybrid for key
+    /// exchange.
+    pub fips_only: bool,
 }
 
 impl ClientConfig {
@@ -172,6 +179,7 @@ impl ClientConfig {
             application_protocols: Vec::new(),
             minimum_version: MinimumVersion::default(),
             maximum_version: MaximumVersion::default(),
+            fips_only: false,
         }
     }
 

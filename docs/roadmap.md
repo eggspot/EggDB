@@ -749,7 +749,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Encrypting an existing file and rotating keys online (D23, D187).
 - KMS, HSM and Vault-compatible key sources (D23, D187).
 - Per-column and per-tenant keys (D23, D187, D234).
-- A mode that uses FIPS-approved algorithms only (D23).
+- A mode that uses FIPS-approved algorithms only (D23). In TLS (`EGGDB_FIPS=1`, `fips_only`): **code written, unbuilt**
+  (code-only mode, 2026-11-12, D812). Left: logins (MySQL's SHA-1 `mysql_native_password`), the `serve` option and a
+  validated-module claim, which needs a CMVP certificate.
 - A path to post-quantum key exchange in TLS (D23). SHA-3 and ML-KEM-768 in `eggdb-crypto`: **code written, unbuilt**
   (code-only mode, 2026-11-12, D804); the X25519MLKEM768 hybrid group, preferred in TLS 1.3 on both sides: **code written,
   unbuilt** (code-only mode, 2026-11-12, D805). Left: NIST's ML-KEM known-answer vectors and a constant-time review.

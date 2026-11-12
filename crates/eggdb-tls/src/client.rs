@@ -15,7 +15,7 @@ use crate::handshake::{
 };
 use crate::key_schedule::{KeySchedule, finished_verify_data, traffic_keys};
 use crate::negotiation::{
-    EphemeralKey, SUPPORTED_GROUPS, SUPPORTED_SIGNATURE_SCHEMES, TLS13_GROUPS, scheme_algorithm, scheme_fits_key,
+    EphemeralKey, SUPPORTED_SIGNATURE_SCHEMES, scheme_algorithm, scheme_fits_key, tls12_groups, tls13_groups,
 };
 use crate::private_key::FillRandom;
 use crate::record::{Tls13RecordProtection, content_type};
@@ -70,6 +70,7 @@ pub(crate) fn check_server_certificates(
 fn offered_suites(config: &ClientConfig) -> Vec<u16> {
     CipherSuite::ALL
         .into_iter()
+        .filter(|suite| !config.fips_only || suite.is_fips_approved())
         .filter(|suite| {
             if suite.is_tls13() {
                 config.offers_tls13()
@@ -102,9 +103,9 @@ fn client_hello(
     .collect();
     extensions.push(Extension::client_supported_versions(&versions));
     if config.offers_tls13() {
-        extensions.push(Extension::supported_groups(&TLS13_GROUPS));
+        extensions.push(Extension::supported_groups(tls13_groups(config.fips_only)));
     } else {
-        extensions.push(Extension::supported_groups(&SUPPORTED_GROUPS));
+        extensions.push(Extension::supported_groups(tls12_groups(config.fips_only)));
     }
     extensions.push(Extension::signature_algorithms(
         &SUPPORTED_SIGNATURE_SCHEMES,
@@ -178,10 +179,11 @@ pub(crate) fn handshake<S: Read + Write>(
     fill_random(&mut random)?;
     let mut session_id = vec![0u8; 32];
     fill_random(&mut session_id)?;
-    let first_groups: &[u16] = if config.offers_tls13() {
-        &[named_group::X25519_MLKEM768, named_group::X25519]
-    } else {
-        &[named_group::X25519]
+    let first_groups: &[u16] = match (config.offers_tls13(), config.fips_only) {
+        (true, false) => &[named_group::X25519_MLKEM768, named_group::X25519],
+        (true, true) => &[named_group::X25519_MLKEM768, named_group::SECP256R1],
+        (false, false) => &[named_group::X25519],
+        (false, true) => &[named_group::SECP256R1],
     };
     let mut ephemerals = Vec::with_capacity(first_groups.len());
     for &group in first_groups {
@@ -206,7 +208,7 @@ pub(crate) fn handshake<S: Read + Write>(
             ))?;
         let group = server_hello.retry_group()?.unwrap_or(0);
         if server_hello.selected_version()? != Some(version::TLS13)
-            || !TLS13_GROUPS.contains(&group)
+            || !tls13_groups(config.fips_only).contains(&group)
             || ephemerals.iter().any(|ephemeral| ephemeral.group() == group)
         {
             return Err(TlsError::protocol(
