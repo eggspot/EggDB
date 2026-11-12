@@ -530,3 +530,49 @@ fn map_columns_read_as_json_objects_keyed_by_text() {
         vec![Cell::Bytes(b"{\"a\":1,\"b\":2}".to_vec()), Cell::Bytes(b"{}".to_vec())]
     );
 }
+
+#[test]
+fn sparse_union_columns_read_each_rows_member() {
+    use crate::flatbuffer::Field;
+    let build = |builder: &mut crate::flatbuffer::Builder| {
+        let number = leaf_field(builder, "n", 2, &[Some(Field::I32(32)), Some(Field::Bool(true))]);
+        let text = leaf_field(builder, "s", 5, &[]);
+        parent_field(builder, "either", 14, &[Some(Field::I16(0))], &[number, text])
+    };
+    let stream = one_column_stream(
+        build,
+        3,
+        &[[3, 0], [3, 0], [3, 0]],
+        &[
+            &[0, 1, 0],
+            &[],
+            &[5, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0],
+            &[],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+            b"x",
+        ],
+    );
+    let columns = read(&stream).expect("the stream reads");
+    assert_eq!(
+        columns[0].cells,
+        vec![
+            Cell::Bytes(b"5".to_vec()),
+            Cell::Bytes(b"\"x\"".to_vec()),
+            Cell::Bytes(b"7".to_vec())
+        ]
+    );
+    let unknown = one_column_stream(
+        build,
+        3,
+        &[[3, 0], [3, 0], [3, 0]],
+        &[
+            &[0, 5, 0],
+            &[],
+            &[5, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0],
+            &[],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+            b"x",
+        ],
+    );
+    assert!(read(&unknown).is_err());
+}

@@ -23,6 +23,8 @@ const TYPE_STRUCT: u8 = 13;
 const TYPE_LARGE_LIST: u8 = 21;
 const TYPE_FIXED_SIZE_LIST: u8 = 16;
 const TYPE_MAP: u8 = 17;
+const TYPE_UNION: u8 = 14;
+const UNION_DENSE: i16 = 1;
 const MOST_FIXED_LIST_SIZE: i32 = 1 << 20;
 const MOST_NESTING: usize = 32;
 const DAYS_FROM_0000_TO_1970: i64 = 719_468;
@@ -144,6 +146,16 @@ impl<'b> Table<'b> {
             .collect()
     }
 
+    fn i32s(&self, index: usize) -> Option<Vec<i32>> {
+        let (start, count) = self.vector(index)?;
+        if count > MAX_FIELDS {
+            return None;
+        }
+        (0..count)
+            .map(|item| u32_at(self.bytes, start + item * 4).map(|value| value as i32))
+            .collect()
+    }
+
     fn pairs(&self, index: usize) -> Option<Vec<(i64, i64)>> {
         let Some((start, count)) = self.vector(index) else {
             return Some(Vec::new());
@@ -250,6 +262,7 @@ enum Shape {
     List { large: bool, item: Box<Shape> },
     FixedList { size: usize, item: Box<Shape> },
     Map { text_keys: bool, key: Box<Shape>, value: Box<Shape> },
+    Union { dense: bool, type_ids: Vec<i32>, children: Vec<Shape> },
     Struct(Vec<(String, Shape)>),
 }
 
@@ -294,6 +307,30 @@ fn shape_of(field: &Table<'_>, depth: usize) -> Result<Shape, String> {
             Ok(Shape::FixedList {
                 size: usize::try_from(size).unwrap_or(0),
                 item: Box::new(shape_of(item, depth + 1)?),
+            })
+        }
+        TYPE_UNION => {
+            if children.is_empty() || children.len() > 128 {
+                return Err(damaged("a union type has no members or too many"));
+            }
+            let details = field.table(3);
+            let dense = details.as_ref().is_some_and(|table| table.i16(0, 0) == UNION_DENSE);
+            let type_ids = match details.as_ref().and_then(|table| table.i32s(1)) {
+                Some(ids) if ids.len() == children.len() => ids,
+                Some(_) => return Err(damaged("a union's type ids do not match its members")),
+                None => (0..children.len()).map(|index| index as i32).collect(),
+            };
+            let mut members = Vec::with_capacity(children.len());
+            for child in &children {
+                if child.table(4).is_some() {
+                    return Err("dictionary-encoded values inside unions are not supported yet".to_owned());
+                }
+                members.push(shape_of(child, depth + 1)?);
+            }
+            Ok(Shape::Union {
+                dense,
+                type_ids,
+                children: members,
             })
         }
         TYPE_MAP => {
@@ -414,7 +451,11 @@ fn decode_json(shape: &Shape, batch: &mut Batch<'_>, rows: usize) -> Result<Vec<
     if usize::try_from(length).ok() != Some(rows) {
         return Err(damaged("a nested column's length differs from its parent's"));
     }
-    let validity_buffer = batch.buffer()?;
+    let validity_buffer = if matches!(kind, Shape::Union { .. }) {
+        std::borrow::Cow::Borrowed(&[][..])
+    } else {
+        batch.buffer()?
+    };
     let validity: &[u8] = &validity_buffer;
     let present = |index: usize| nulls == 0 || validity.is_empty() || bit(validity, index).unwrap_or(false);
     match kind {
@@ -506,6 +547,45 @@ fn decode_json(shape: &Shape, batch: &mut Batch<'_>, rows: usize) -> Result<Vec<
                 } else {
                     format!("[{}]", pairs.join(","))
                 });
+            }
+            Ok(out)
+        }
+        Shape::Union { dense, type_ids, children } => {
+            let types_buffer = batch.buffer()?;
+            let types: &[u8] = &types_buffer;
+            if types.len() < rows {
+                return Err(damaged("a union's type ids are short"));
+            }
+            let offsets_buffer = if *dense { Some(batch.buffer()?) } else { None };
+            let mut members = Vec::with_capacity(children.len());
+            for child in children {
+                let (length, _) = *batch
+                    .nodes
+                    .get(batch.next_node)
+                    .ok_or_else(|| damaged("a batch has too few field nodes"))?;
+                let length = usize::try_from(length)
+                    .ok()
+                    .filter(|length| u64::try_from(*length).unwrap_or(u64::MAX) <= MAX_ROWS)
+                    .ok_or_else(|| damaged("a union member's length is out of range"))?;
+                if !*dense && length != rows {
+                    return Err(damaged("a sparse union member's length differs from the union's"));
+                }
+                members.push(decode_json(child, batch, length)?);
+            }
+            let mut out = Vec::with_capacity(rows);
+            for (index, &code) in types.iter().take(rows).enumerate() {
+                let member = type_ids
+                    .iter()
+                    .position(|id| *id == i32::from(code as i8))
+                    .ok_or_else(|| damaged("a union row names an unknown member"))?;
+                let at = match &offsets_buffer {
+                    Some(offsets) => offset_at(offsets, index, false)?,
+                    None => index,
+                };
+                let value = members[member]
+                    .get(at)
+                    .ok_or_else(|| damaged("a union's offset lies outside its member"))?;
+                out.push(value.clone());
             }
             Ok(out)
         }
