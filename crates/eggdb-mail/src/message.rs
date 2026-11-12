@@ -71,7 +71,7 @@ fn quoted_printable_word(text: &str) -> Vec<u8> {
     out
 }
 
-fn text_in(charset: &str, bytes: &[u8]) -> Option<String> {
+pub(crate) fn text_in(charset: &str, bytes: &[u8]) -> Option<String> {
     match charset.to_ascii_lowercase().as_str() {
         "utf-8" | "utf8" | "us-ascii" => Some(String::from_utf8_lossy(bytes).into_owned()),
         "iso-8859-1" | "latin1" | "windows-1252" => Some(bytes.iter().map(|byte| char::from(*byte)).collect()),

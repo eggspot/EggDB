@@ -1778,8 +1778,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (secure channel, sessions, subscriptions).
 - Email stores with IMAP, JMAP and SMTP (D56). The store and an SMTP receiver (`eggdb-mail`, `--smtp-listen`): **code
   written, unbuilt** (code-only mode, 2026-11-12, D892); IMAP (`--imap-listen`): **code written, unbuilt** (code-only
-  mode, 2026-11-12, D893); JMAP (`--jmap-listen`): **code written, unbuilt** (code-only mode, 2026-11-12, D894). Left:
-  MIME parts and attachments, IMAP `IDLE`, JMAP uploads, submission and push, and TLS.
+  mode, 2026-11-12, D893); JMAP (`--jmap-listen`): **code written, unbuilt** (code-only mode, 2026-11-12, D894); MIME
+  parts and attachments: **code written, unbuilt** (code-only mode, 2026-11-12, D902). Left: IMAP `IDLE`, JMAP
+  uploads, submission and push, and TLS.
 - CalDAV, CardDAV and WebDAV (D56). iCalendar and vCard read as jCal and jCard (`icalendar_parse`,
   `vcard_parse`): **code written, unbuilt** (code-only mode, 2026-11-12, D702); the WebDAV, CalDAV and CardDAV server
   (`eggdb-dav`, `--dav-listen`): **code written, unbuilt** (code-only mode, 2026-11-12, D895); `time-range` filters

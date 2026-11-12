@@ -1,10 +1,12 @@
 //! JMAP over the email store (D894): the session resource and API of RFC 8620 with the mail
 //! methods of RFC 8621 that read and organise mail: `Core/echo`, `Mailbox/get`,
 //! `Mailbox/query`, `Mailbox/set`, `Email/query`, `Email/get`, `Email/set` and
-//! `Thread/get`, result references between calls, and blob downloads.
+//! `Thread/get`, result references between calls, and blob downloads of whole messages and of
+//! their MIME parts, with each email's body structure, text and HTML bodies and attachments.
 
 use crate::json::{Json, parse, string};
-use crate::message::{addresses, body_start, decoded_words, headers, parse_rfc5322_date, utc_date};
+use crate::message::{addresses, decoded_words, headers, parse_rfc5322_date, utc_date};
+use crate::mime::{self, Part};
 use crate::store::{self, INBOX, Mailbox, MailError, StoredMessage};
 use crate::ServerConfig;
 use eggdb_http::{Request, Response};
@@ -143,7 +145,86 @@ fn message_ids(value: Option<String>) -> Json {
 }
 
 fn body_text(raw: &[u8]) -> String {
-    String::from_utf8_lossy(&raw[body_start(raw)..]).into_owned()
+    let root = mime::parse(raw);
+    let parts = BodyParts::of(&root);
+    parts.text.iter().map(|(_, part)| mime::text_of(raw, part).0).collect::<Vec<_>>().join("\n")
+}
+
+struct BodyParts<'p> {
+    text: Vec<(String, &'p Part)>,
+    html: Vec<(String, &'p Part)>,
+    attachments: Vec<(String, &'p Part)>,
+}
+
+impl<'p> BodyParts<'p> {
+    fn of(root: &'p Part) -> Self {
+        let mut plain = Vec::new();
+        let mut html = Vec::new();
+        let mut attachments = Vec::new();
+        for (number, part) in mime::leaves(root) {
+            let shown = !part.is_attachment() && part.major == "text";
+            match (shown, part.minor.as_str()) {
+                (true, "plain") => plain.push((number, part)),
+                (true, "html") => html.push((number, part)),
+                _ => attachments.push((number, part)),
+            }
+        }
+        let text = if plain.is_empty() { html.clone() } else { plain.clone() };
+        let html = if html.is_empty() { plain } else { html };
+        Self { text, html, attachments }
+    }
+}
+
+fn part_json(email: &str, raw: &[u8], number: Option<&str>, part: &Part) -> Json {
+    let mut fields = vec![
+        ("partId".to_owned(), number.map_or(Json::Null, |number| Json::String(number.to_owned()))),
+        (
+            "blobId".to_owned(),
+            number.map_or(Json::Null, |number| Json::String(format!("{email}p{number}"))),
+        ),
+        ("size".to_owned(), Json::Number(mime::decoded_body(raw, part).len() as f64)),
+        ("type".to_owned(), Json::String(format!("{}/{}", part.major, part.minor))),
+        (
+            "charset".to_owned(),
+            match (part.parameter("charset"), part.major.as_str()) {
+                (Some(charset), _) => Json::String(charset.to_owned()),
+                (None, "text") => Json::String("us-ascii".to_owned()),
+                (None, _) => Json::Null,
+            },
+        ),
+        ("disposition".to_owned(), part.disposition.as_ref().map_or(Json::Null, |(kind, _)| Json::String(kind.clone()))),
+        ("name".to_owned(), part.file_name().map_or(Json::Null, |name| Json::String(decoded_words(name)))),
+        (
+            "cid".to_owned(),
+            part.id.as_deref().map_or(Json::Null, |id| Json::String(id.trim().trim_start_matches('<').trim_end_matches('>').to_owned())),
+        ),
+    ];
+    if part.is_multipart() {
+        fields.push(("subParts".to_owned(), Json::Array(Vec::new())));
+    }
+    Json::Object(fields)
+}
+
+fn structure_json(email: &str, raw: &[u8], part: &Part, number: &str) -> Json {
+    if !part.is_multipart() {
+        return part_json(email, raw, Some(if number.is_empty() { "1" } else { number }), part);
+    }
+    let Json::Object(mut fields) = part_json(email, raw, None, part) else {
+        return Json::Null;
+    };
+    let children = part
+        .children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let child_number = if number.is_empty() { (index + 1).to_string() } else { format!("{number}.{}", index + 1) };
+            structure_json(email, raw, child, &child_number)
+        })
+        .collect();
+    if let Some((_, slot)) = fields.iter_mut().find(|(name, _)| name == "subParts") {
+        *slot = Json::Array(children);
+    }
+    Json::Object(fields)
 }
 
 /// The JMAP endpoint over one account.
@@ -273,11 +354,28 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
         let Ok(store) = self.snapshot() else {
             return text_reply(500, "the store could not be read");
         };
-        match store.find(blob) {
-            Some((_, message)) => Response {
+        let (email, part_number) = match blob.rsplit_once('p') {
+            Some((email, number)) if email.contains('_') => (email, Some(number)),
+            _ => (blob, None),
+        };
+        let Some((_, message)) = store.find(email) else {
+            return text_reply(404, "no such blob");
+        };
+        let Some(number) = part_number else {
+            return Response {
                 status: 200,
                 content_type: "message/rfc822".to_owned(),
                 body: message.raw.clone(),
+                headers: Vec::new(),
+            };
+        };
+        let numbers: Option<Vec<usize>> = number.split('.').map(|piece| piece.parse().ok()).collect();
+        let root = mime::parse(&message.raw);
+        match numbers.as_deref().and_then(|numbers| mime::part_at(&root, numbers)) {
+            Some(part) => Response {
+                status: 200,
+                content_type: format!("{}/{}", part.major, part.minor),
+                body: mime::decoded_body(&message.raw, part),
                 headers: Vec::new(),
             },
             None => text_reply(404, "no such blob"),
@@ -554,8 +652,13 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
         let fields = headers(&message.raw);
         let value = |name: &str| fields.iter().find(|(found, _)| found.eq_ignore_ascii_case(name)).map(|(_, value)| value.clone());
         let decoded = |name: &str| value(name).map(|text| decoded_words(&text));
+        let root = mime::parse(&message.raw);
+        let parts = BodyParts::of(&root);
         let text = body_text(&message.raw);
         let preview: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(PREVIEW_CHARS).collect();
+        let listed = |list: &[(String, &Part)]| {
+            Json::Array(list.iter().map(|(number, part)| part_json(&id, &message.raw, Some(number.as_str()), part)).collect())
+        };
         let keywords: Vec<(String, Json)> = message.flags.iter().filter_map(|flag| keyword_of(flag)).map(|keyword| (keyword, Json::Bool(true))).collect();
         let mut all = vec![
             ("id".to_owned(), Json::String(id.clone())),
@@ -577,31 +680,29 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             ("replyTo".to_owned(), address_json(decoded("Reply-To"))),
             ("sentAt".to_owned(), value("Date").and_then(|date| parse_rfc5322_date(&date)).map_or(Json::Null, |seconds| Json::String(utc_date(seconds)))),
             ("preview".to_owned(), Json::String(preview)),
-            ("hasAttachment".to_owned(), Json::Bool(false)),
-            (
-                "textBody".to_owned(),
-                Json::Array(vec![Json::Object(vec![
-                    ("partId".to_owned(), Json::String("1".to_owned())),
-                    ("blobId".to_owned(), Json::String(id.clone())),
-                    ("size".to_owned(), Json::Number(text.len() as f64)),
-                    ("type".to_owned(), Json::String("text/plain".to_owned())),
-                ])]),
-            ),
-            ("htmlBody".to_owned(), Json::Array(Vec::new())),
-            ("attachments".to_owned(), Json::Array(Vec::new())),
+            ("hasAttachment".to_owned(), Json::Bool(!parts.attachments.is_empty())),
+            ("bodyStructure".to_owned(), structure_json(&id, &message.raw, &root, "")),
+            ("textBody".to_owned(), listed(&parts.text)),
+            ("htmlBody".to_owned(), listed(&parts.html)),
+            ("attachments".to_owned(), listed(&parts.attachments)),
         ];
         if body_values {
-            all.push((
-                "bodyValues".to_owned(),
-                Json::Object(vec![(
-                    "1".to_owned(),
+            let mut values: Vec<(String, Json)> = Vec::new();
+            for (number, part) in parts.text.iter().chain(&parts.html) {
+                if values.iter().any(|(known, _)| known == number) {
+                    continue;
+                }
+                let (value, unknown_charset) = mime::text_of(&message.raw, part);
+                values.push((
+                    number.clone(),
                     Json::Object(vec![
-                        ("value".to_owned(), Json::String(text)),
-                        ("isEncodingProblem".to_owned(), Json::Bool(false)),
+                        ("value".to_owned(), Json::String(value)),
+                        ("isEncodingProblem".to_owned(), Json::Bool(unknown_charset)),
                         ("isTruncated".to_owned(), Json::Bool(false)),
                     ]),
-                )]),
-            ));
+                ));
+            }
+            all.push(("bodyValues".to_owned(), Json::Object(values)));
         }
         let wanted: Option<Vec<&str>> = properties.map(|names| names.iter().filter_map(Json::as_str).collect());
         Json::Object(
@@ -841,5 +942,42 @@ mod tests {
         assert!(changed.contains(&format!("\"updated\":{{\"{id}\":null}}")), "{changed}");
         assert!(changed.contains("\"total\":2"), "{changed}");
         assert_eq!(pointer(&parse(r#"{"list":[{"id":"a"},{"id":"b"}]}"#).unwrap(), "/list/*/id"), parse(r#"["a","b"]"#));
+    }
+    #[test]
+    fn emails_list_their_parts_and_parts_download() {
+        let keyspace = MemoryKeyspace::default();
+        keyspace
+            .write(0, &mut |keys| {
+                store::append(
+                    keys,
+                    INBOX,
+                    &[],
+                    100,
+                    b"Subject: Menu\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nCaf=C3=A9 menu\r\n--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=menu.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0x\r\n--b--\r\n",
+                )
+                .map(drop)
+                .map_err(|error| error.0)
+            })
+            .unwrap();
+        let config = ServerConfig {
+            user: "eggdb".to_owned(),
+            password_sha256: eggdb_crypto::sha256(b"secret"),
+            max_connections: 4,
+            max_message_bytes: 1 << 20,
+        };
+        let endpoint = Endpoint::new(&keyspace, config);
+        let id = email_id(INBOX, 1);
+        let answered = call(
+            &endpoint,
+            "POST",
+            "/jmap/api",
+            &format!(r#"{{"using":["urn:ietf:params:jmap:mail"],"methodCalls":[["Email/get",{{"ids":["{id}"],"properties":["hasAttachment","attachments","textBody","preview"],"fetchTextBodyValues":true}},"g"]]}}"#),
+        );
+        assert!(answered.contains("\"hasAttachment\":true"), "{answered}");
+        assert!(answered.contains("\"name\":\"menu.pdf\""), "{answered}");
+        assert!(answered.contains("\"preview\":\"Café menu\""), "{answered}");
+        assert!(answered.contains("\"value\":\"Café menu\""), "{answered}");
+        let pdf = call(&endpoint, "GET", &format!("/jmap/download/{ACCOUNT}/{id}p2/menu.pdf"), "");
+        assert_eq!(pdf, "%PDF-1");
     }
 }

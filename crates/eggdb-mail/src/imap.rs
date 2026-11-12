@@ -5,6 +5,7 @@
 //! and their `UID` forms.
 
 use crate::message::{Address, addresses, body_start, headers, imap_date, parse_rfc5322_date};
+use crate::mime::{self, Part};
 use crate::store::{self, INBOX, MailError, StoredMessage};
 use crate::{ServerConfig, now_seconds};
 use eggdb_keyspace::Keyspace;
@@ -129,38 +130,83 @@ fn envelope(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-fn content_type(raw: &[u8]) -> (String, String, String) {
-    let fields = headers(raw);
-    let value = fields
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("Content-Type"))
-        .map_or_else(|| "text/plain".to_owned(), |(_, value)| value.clone());
-    let (kind, rest) = value.split_once(';').unwrap_or((&value, ""));
-    let (major, minor) = kind.trim().split_once('/').unwrap_or(("text", "plain"));
-    let charset = rest
-        .split(';')
-        .find_map(|parameter| {
-            let (name, value) = parameter.split_once('=')?;
-            name.trim().eq_ignore_ascii_case("charset").then(|| value.trim().trim_matches('"').to_owned())
-        })
-        .unwrap_or_else(|| "us-ascii".to_owned());
-    (major.to_ascii_uppercase(), minor.to_ascii_uppercase(), charset)
+fn text(value: &str) -> String {
+    String::from_utf8_lossy(&quoted(value)).into_owned()
 }
 
-fn body_structure(raw: &[u8]) -> Vec<u8> {
-    let (major, minor, charset) = content_type(raw);
-    let body = &raw[body_start(raw)..];
-    let encoding = headers(raw)
-        .into_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("Content-Transfer-Encoding"))
-        .map_or_else(|| "7BIT".to_owned(), |(_, value)| value.to_ascii_uppercase());
-    let mut out = format!("({} {} (\"CHARSET\" {}) NIL NIL {} {}", String::from_utf8_lossy(&quoted(&major)), String::from_utf8_lossy(&quoted(&minor)), String::from_utf8_lossy(&quoted(&charset)), String::from_utf8_lossy(&quoted(&encoding)), body.len()).into_bytes();
-    if major == "TEXT" {
-        let lines = body.iter().filter(|byte| **byte == b'\n').count();
-        out.extend_from_slice(format!(" {lines}").as_bytes());
+fn nil_text(value: Option<&str>) -> String {
+    value.map_or_else(|| "NIL".to_owned(), text)
+}
+
+fn parameter_list(parameters: &[(String, String)]) -> String {
+    if parameters.is_empty() {
+        return "NIL".to_owned();
     }
-    out.push(b')');
+    let items: Vec<String> = parameters
+        .iter()
+        .map(|(name, value)| format!("{} {}", text(&name.to_ascii_uppercase()), text(value)))
+        .collect();
+    format!("({})", items.join(" "))
+}
+
+fn disposition(part: &Part) -> String {
+    part.disposition.as_ref().map_or_else(
+        || "NIL".to_owned(),
+        |(kind, parameters)| format!("({} {})", text(&kind.to_ascii_uppercase()), parameter_list(parameters)),
+    )
+}
+
+fn part_structure(raw: &[u8], part: &Part, extended: bool) -> String {
+    if part.is_multipart() && !part.children.is_empty() {
+        let mut out = String::from("(");
+        for child in &part.children {
+            out.push_str(&part_structure(raw, child, extended));
+        }
+        out.push(' ');
+        out.push_str(&text(&part.minor.to_ascii_uppercase()));
+        if extended {
+            out.push_str(&format!(" {} {} NIL NIL", parameter_list(&part.parameters), disposition(part)));
+        }
+        out.push(')');
+        return out;
+    }
+    let mut parameters = part.parameters.clone();
+    if part.major == "text" && part.parameter("charset").is_none() {
+        parameters.insert(0, ("charset".to_owned(), "us-ascii".to_owned()));
+    }
+    let body = &raw[part.body.clone()];
+    let lines = body.iter().filter(|byte| **byte == b'\n').count();
+    let mut out = format!(
+        "({} {} {} {} {} {} {}",
+        text(&part.major.to_ascii_uppercase()),
+        text(&part.minor.to_ascii_uppercase()),
+        parameter_list(&parameters),
+        nil_text(part.id.as_deref()),
+        nil_text(part.description.as_deref()),
+        text(&part.encoding.to_ascii_uppercase()),
+        body.len()
+    );
+    if part.is_message()
+        && let Some(inner) = part.children.first()
+    {
+        let inner_raw = &raw[inner.header.start..inner.body.end];
+        out.push_str(&format!(
+            " {} {} {lines}",
+            String::from_utf8_lossy(&envelope(inner_raw)),
+            part_structure(raw, inner, extended)
+        ));
+    } else if part.major == "text" {
+        out.push_str(&format!(" {lines}"));
+    }
+    if extended {
+        out.push_str(&format!(" NIL {} NIL NIL", disposition(part)));
+    }
+    out.push(')');
     out
+}
+
+fn body_structure(raw: &[u8], extended: bool) -> Vec<u8> {
+    part_structure(raw, &mime::parse(raw), extended).into_bytes()
 }
 
 fn header_fields(raw: &[u8], names: &[String], negated: bool) -> Vec<u8> {
@@ -387,18 +433,40 @@ fn fetch_names(item: &Item) -> Fetched {
 }
 
 fn section_data(raw: &[u8], section: &str) -> io::Result<Vec<u8>> {
-    let upper = section.to_ascii_uppercase();
-    let start = body_start(raw);
+    let root = mime::parse(raw);
+    let mut numbers = Vec::new();
+    let mut rest = section;
+    loop {
+        let length = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if length == 0 {
+            break;
+        }
+        numbers.push(rest[..length].parse::<usize>().map_err(|_| bad("a part number is out of range"))?);
+        rest = &rest[length..];
+        match rest.strip_prefix('.') {
+            Some(after) => rest = after,
+            None => break,
+        }
+    }
+    let selected = mime::part_at(&root, &numbers).ok_or_else(|| bad("no such body part"))?;
+    let message = match (numbers.is_empty(), selected.is_message()) {
+        (true, _) => &root,
+        (false, true) => selected.children.first().unwrap_or(selected),
+        (false, false) => selected,
+    };
+    let upper = rest.to_ascii_uppercase();
     Ok(match upper.as_str() {
-        "" => raw.to_vec(),
-        "HEADER" | "0" => raw[..start].to_vec(),
-        "TEXT" | "1" => raw[start..].to_vec(),
+        "" if numbers.is_empty() => raw.to_vec(),
+        "" => raw[selected.body.clone()].to_vec(),
+        "MIME" if !numbers.is_empty() => raw[selected.header.clone()].to_vec(),
+        "HEADER" => raw[message.header.clone()].to_vec(),
+        "TEXT" => raw[message.body.clone()].to_vec(),
         fields if fields.starts_with("HEADER.FIELDS") => {
             let negated = fields.starts_with("HEADER.FIELDS.NOT");
-            let open = section.find('(').ok_or_else(|| bad("HEADER.FIELDS needs a list"))?;
-            let close = section.rfind(')').ok_or_else(|| bad("HEADER.FIELDS needs a list"))?;
-            let names: Vec<String> = section[open + 1..close].split_whitespace().map(|name| name.trim_matches('"').to_owned()).collect();
-            header_fields(raw, &names, negated)
+            let open = rest.find('(').ok_or_else(|| bad("HEADER.FIELDS needs a list"))?;
+            let close = rest.rfind(')').ok_or_else(|| bad("HEADER.FIELDS needs a list"))?;
+            let names: Vec<String> = rest[open + 1..close].split_whitespace().map(|name| name.trim_matches('"').to_owned()).collect();
+            header_fields(&raw[message.header.start..message.body.end], &names, negated)
         }
         _ => return Err(bad("that body section is not served")),
     })
@@ -635,7 +703,7 @@ impl Connection<'_> {
                     "INTERNALDATE" => format!("INTERNALDATE \"{}\"", imap_date(message.internal_date)).into_bytes(),
                     "RFC822.SIZE" => format!("RFC822.SIZE {}", message.raw.len()).into_bytes(),
                     "ENVELOPE" => [b"ENVELOPE ".to_vec(), envelope(&message.raw)].concat(),
-                    "BODY" | "BODYSTRUCTURE" => [format!("{upper} ").into_bytes(), body_structure(&message.raw)].concat(),
+                    "BODY" | "BODYSTRUCTURE" => [format!("{upper} ").into_bytes(), body_structure(&message.raw, upper == "BODYSTRUCTURE")].concat(),
                     "RFC822" => {
                         mark_seen = true;
                         [b"RFC822 ".to_vec(), literal(&message.raw)].concat()
@@ -1142,6 +1210,21 @@ mod tests {
         );
         assert_eq!(section_data(raw, "TEXT").unwrap(), b"Body\r\n");
         assert_eq!(section_data(raw, "HEADER.FIELDS (SUBJECT)").unwrap(), b"Subject: Hi\r\n\r\n");
-        assert!(String::from_utf8_lossy(&body_structure(raw)).starts_with("(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"7BIT\" 6 1"));
+        assert!(String::from_utf8_lossy(&body_structure(raw, true)).starts_with("(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"7BIT\" 6 1"));
+    }
+
+    #[test]
+    fn multipart_messages_have_structures_and_numbered_sections() {
+        let raw = b"Subject: Menu\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=menu.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0x\r\n--b--\r\n";
+        let structure = String::from_utf8_lossy(&body_structure(raw, true)).into_owned();
+        assert_eq!(
+            structure,
+            "((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"7BIT\" 13 0 NIL NIL NIL NIL)(\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 8 NIL (\"ATTACHMENT\" (\"FILENAME\" \"menu.pdf\")) NIL NIL) \"MIXED\" (\"BOUNDARY\" \"b\") NIL NIL NIL)"
+        );
+        assert!(String::from_utf8_lossy(&body_structure(raw, false)).ends_with("\"BASE64\" 8) \"MIXED\")"));
+        assert_eq!(section_data(raw, "1").unwrap(), b"See attached.");
+        assert_eq!(section_data(raw, "2").unwrap(), b"JVBERi0x");
+        assert!(section_data(raw, "2.MIME").unwrap().starts_with(b"Content-Type: application/pdf"));
+        assert!(section_data(raw, "3").is_err());
     }
 }
