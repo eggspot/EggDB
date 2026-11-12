@@ -404,7 +404,7 @@ fn is_web(source: &str) -> bool {
     source.starts_with("http://") || source.starts_with("https://")
 }
 
-fn web_allowed(allowed: &str, source: &str) -> bool {
+pub(super) fn web_allowed(allowed: &str, source: &str) -> bool {
     let (Ok(entry), Ok(wanted)) = (eggdb_http::parse_http_url(allowed), eggdb_http::parse_http_url(source)) else {
         return false;
     };

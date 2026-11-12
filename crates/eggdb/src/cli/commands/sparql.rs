@@ -3,6 +3,37 @@ use crate::cli::args::{CommandName, Format};
 use crate::cli::failure::{Exit, Failure};
 
 const BASE: &str = "http://eggdb.local/";
+const LOAD_VARIABLE: &str = "EGGDB_SPARQL_LOAD";
+const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MOST_LOADED_BYTES: usize = 256 << 20;
+const LOAD_ACCEPT: &str = "text/turtle, application/n-triples, application/n-quads, application/trig;q=0.9, */*;q=0.1";
+
+/// Lets SPARQL's `LOAD` fetch the `http://` and `https://` documents under the
+/// comma-separated URL prefixes in `EGGDB_SPARQL_LOAD`; with none set, `LOAD` is refused.
+pub(super) fn allow_load_from_environment() {
+    let Ok(text) = std::env::var(LOAD_VARIABLE) else {
+        return;
+    };
+    let allowed: Vec<String> = text.split(',').map(str::trim).filter(|entry| !entry.is_empty()).map(str::to_owned).collect();
+    if allowed.is_empty() {
+        return;
+    }
+    eggdb_rdf::set_remote_fetch(Box::new(move |iri| {
+        if !allowed.iter().any(|entry| super::foreign::web_allowed(entry, iri)) {
+            return Err(format!("{iri} is not under a prefix {LOAD_VARIABLE} allows"));
+        }
+        let target = eggdb_http::parse_http_url(iri)?;
+        let headers = vec![("Accept".to_owned(), LOAD_ACCEPT.to_owned())];
+        let response = eggdb_http::request(&target, "GET", &target.path, &headers, &[], LOAD_TIMEOUT, MOST_LOADED_BYTES)
+            .map_err(|error| format!("cannot fetch it: {error}"))?;
+        if response.status != 200 {
+            return Err(format!("the server answered HTTP {}", response.status));
+        }
+        let media_type = response.header("content-type").unwrap_or_default().to_owned();
+        let body = String::from_utf8(response.body).map_err(|_| "the document is not UTF-8".to_owned())?;
+        Ok((media_type, body))
+    }));
+}
 const QUERY_FORMS: [&str; 4] = ["select", "ask", "construct", "describe"];
 
 fn is_query(text: &str) -> bool {

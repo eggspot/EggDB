@@ -184,6 +184,11 @@ pub(crate) enum UpdateOperation {
     },
     Clear(GraphTarget, bool),
     Create(Term, bool),
+    Load {
+        source: String,
+        into: Option<Term>,
+        silent: bool,
+    },
     Transfer {
         kind: TransferKind,
         from: GraphTarget,

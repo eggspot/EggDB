@@ -947,3 +947,4 @@ its full title with its status.
 - [D920](decisions/D920.md) Code-only batch 568 (M18): HTTPS in the shared HTTP client
 - [D921](decisions/D921.md) Code-only batch 569 (M18): multipart uploads of large archives
 - [D922](decisions/D922.md) Code-only batch 570 (M13): SPARQL in the CLI, eggdb sql --sparql
+- [D923](decisions/D923.md) Code-only batch 571 (M13): SPARQL LOAD from allowed URLs

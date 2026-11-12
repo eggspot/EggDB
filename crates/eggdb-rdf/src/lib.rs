@@ -2,7 +2,8 @@
 //! through [`eggdb_keyspace::Keyspace`], read from N-Triples, N-Quads, Turtle and TriG, and
 //! written out as N-Quads, queried and changed with SPARQL 1.1 ([`query`], [`update`]), and
 //! served over HTTP by [`Endpoint`] with the SPARQL 1.1 Protocol and Graph Store HTTP
-//! Protocol. Everything is written from the W3C recommendations (RDF 1.1 Concepts, N-Triples,
+//! Protocol, with `LOAD` fetching documents through the host's [`set_remote_fetch`]. Everything
+//! is written from the W3C recommendations (RDF 1.1 Concepts, N-Triples,
 //! N-Quads, Turtle, TriG, SPARQL 1.1 Query Language, Update, Query Results formats, Protocol
 //! and Graph Store HTTP Protocol); no other RDF store's code is used or read.
 
@@ -19,6 +20,26 @@ mod syntax;
 mod term;
 
 pub use protocol::{Endpoint, MAX_REQUEST_BYTES};
+
+/// What fetches a document for SPARQL's `LOAD`: called with the IRI, it returns the
+/// document's media type and text, or why it could not.
+pub type RemoteFetch = dyn Fn(&str) -> Result<(String, String), String> + Send + Sync;
+
+static REMOTE: std::sync::OnceLock<Box<RemoteFetch>> = std::sync::OnceLock::new();
+
+/// Lets SPARQL's `LOAD` fetch documents through `fetch`, which decides what it may reach; the
+/// first call wins. Without it `LOAD` is refused, so a query never makes the server fetch an
+/// address on its own.
+pub fn set_remote_fetch(fetch: Box<RemoteFetch>) {
+    let _ = REMOTE.set(fetch);
+}
+
+pub(crate) fn fetch_remote(iri: &str) -> RdfResult<(String, String)> {
+    let fetch = REMOTE.get().ok_or_else(|| {
+        RdfError::not_supported("LOAD here: the server fetches no documents unless it was started to (EGGDB_SPARQL_LOAD)")
+    })?;
+    fetch(iri).map_err(|message| RdfError::invalid(format!("LOAD <{iri}>: {message}")))
+}
 pub use sparql_eval::QueryOutcome;
 pub use sparql_update::UpdateSummary;
 pub use sparql_results::{ResultFormat, write_results};

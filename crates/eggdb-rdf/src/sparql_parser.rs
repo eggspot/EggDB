@@ -1345,7 +1345,15 @@ impl Parser {
 
     fn update_operation(&mut self) -> RdfResult<UpdateOperation> {
         if self.take_word("load") {
-            return Err(RdfError::not_supported("LOAD (fetching a document by IRI)"));
+            let silent = self.take_word("silent");
+            let source = self.iri()?;
+            let into = if self.take_word("into") {
+                self.expect_word("graph")?;
+                Some(Term::Iri(self.iri()?))
+            } else {
+                None
+            };
+            return Ok(UpdateOperation::Load { source, into, silent });
         }
         if self.take_word("clear") || self.take_word("drop") {
             let silent = self.take_word("silent");
@@ -1583,6 +1591,9 @@ mod tests {
         assert!(parse_query(&deep, "").is_err());
         let deep_expression = format!("ASK {{ FILTER({}1{}) }}", "(".repeat(200), ")".repeat(200));
         assert!(parse_query(&deep_expression, "").is_err());
-        assert!(parse_update("LOAD <http://x>", "").is_err());
+        assert!(matches!(
+            parse_update("LOAD SILENT <http://x/data.ttl> INTO GRAPH <http://g>", "").unwrap().as_slice(),
+            [UpdateOperation::Load { silent: true, into: Some(_), .. }]
+        ));
     }
 }

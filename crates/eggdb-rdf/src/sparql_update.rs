@@ -140,6 +140,25 @@ fn holds_placeholder(quad: &Quad) -> bool {
 }
 
 /// Runs `operations` in `write`.
+fn load(write: &mut RdfWrite<'_>, source: &str, into: Option<&Term>) -> RdfResult<usize> {
+    let (media_type, text) = crate::fetch_remote(source)?;
+    let extension = source.rsplit('.').next().unwrap_or_default();
+    let format = crate::Format::named(&media_type)
+        .or_else(|| crate::Format::named(extension))
+        .unwrap_or(crate::Format::Turtle);
+    let quads = crate::scoped_blanks(write, crate::parse(&text, format, source)?)?;
+    let mut added = 0;
+    for mut quad in quads {
+        if quad.graph.is_none() {
+            quad.graph = into.cloned();
+        }
+        if write.insert(&quad)? {
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
 pub(crate) fn run(write: &mut RdfWrite<'_>, operations: &[UpdateOperation]) -> RdfResult<UpdateSummary> {
     let mut summary = UpdateSummary::default();
     for operation in operations {
@@ -247,6 +266,11 @@ pub(crate) fn run(write: &mut RdfWrite<'_>, operations: &[UpdateOperation]) -> R
                 }
             }
             UpdateOperation::Transfer { kind, from, to, silent } => transfer(write, *kind, from, to, *silent, &mut summary)?,
+            UpdateOperation::Load { source, into, silent } => match load(write, source, into.as_ref()) {
+                Ok(added) => summary.inserted += added,
+                Err(_) if *silent => {}
+                Err(error) => return Err(error),
+            },
         }
     }
     Ok(summary)
