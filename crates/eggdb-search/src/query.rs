@@ -1,4 +1,4 @@
-use crate::vector::{Config, TsVector, quote, quoted, words};
+use crate::vector::{Config, TsVector, quote, quoted};
 use std::fmt;
 
 const MAX_DEPTH: usize = 64;
@@ -107,14 +107,34 @@ fn tokens(text: &str, config: Option<Config>) -> Option<Vec<Token>> {
                     }
                     None => false,
                 };
-                let lexeme = match config {
-                    Some(config) => config.lexeme(word),
-                    None => Some(word.to_lowercase()),
-                };
-                out.push(Token::Term(lexeme.unwrap_or_default(), prefix));
+                push_word(&mut out, config, word, prefix);
             }
         }
     }
+}
+
+fn push_word(out: &mut Vec<Token>, config: Option<Config>, word: &str, prefix: bool) {
+    let pieces = match config {
+        Some(config) if config.segments() => config.words(word),
+        _ => Vec::new(),
+    };
+    if pieces.len() > 1 {
+        out.push(Token::Open);
+        for (index, piece) in pieces.iter().enumerate() {
+            if index > 0 {
+                out.push(Token::Follows(1));
+            }
+            let lexeme = config.and_then(|config| config.lexeme(piece)).unwrap_or_default();
+            out.push(Token::Term(lexeme, prefix && index + 1 == pieces.len()));
+        }
+        out.push(Token::Close);
+        return;
+    }
+    let lexeme = match config {
+        Some(config) => config.lexeme(word),
+        None => Some(word.to_lowercase()),
+    };
+    out.push(Token::Term(lexeme.unwrap_or_default(), prefix));
 }
 
 struct Parser {
@@ -236,7 +256,8 @@ impl TsQuery {
 
     /// `plainto_tsquery`: every word, all required.
     pub fn plain(config: Config, text: &str) -> Self {
-        words(text)
+        config
+            .words(text)
             .into_iter()
             .filter_map(|word| config.lexeme(word))
             .map(|lexeme| Self::Term {
@@ -250,7 +271,8 @@ impl TsQuery {
 
     /// `phraseto_tsquery`: the words in order, each next to the one before.
     pub fn phrase(config: Config, text: &str) -> Self {
-        words(text)
+        config
+            .words(text)
             .into_iter()
             .filter_map(|word| config.lexeme(word))
             .map(|lexeme| Self::Term {
@@ -425,6 +447,16 @@ impl fmt::Display for TsQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segmented_configurations_match_words_inside_unspaced_text() {
+        let vector = TsVector::from_text(Config::Cjk, "東京都に住んでいます");
+        assert!(TsQuery::parse(Config::Cjk, "東京都").unwrap().matches(&vector));
+        assert!(TsQuery::phrase(Config::Cjk, "京都").matches(&vector));
+        assert!(!TsQuery::parse(Config::Cjk, "大阪").unwrap().matches(&vector));
+        let thai = TsVector::from_text(Config::Thai, "ฉันกินข้าว");
+        assert!(TsQuery::plain(Config::Thai, "กินข้าว").matches(&thai));
+    }
 
     #[test]
     fn queries_parse_print_and_match_as_postgresql_documents() {

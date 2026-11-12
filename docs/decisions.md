@@ -1006,3 +1006,4 @@ its full title with its status.
 - [D979](decisions/D979.md) Code-only batch 627 (M6b): roles with BYPASSRLS
 - [D980](decisions/D980.md) Code-only batch 628 (M6c): a Kubernetes operator in Rust
 - [D981](decisions/D981.md) Code-only batch 629 (M8): the turkish text search configuration with Snowball's Turkish stemmer
+- [D982](decisions/D982.md) Code-only batch 630 (M8): word segmentation for Chinese, Japanese, Korean and Thai

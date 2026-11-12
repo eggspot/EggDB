@@ -16,6 +16,7 @@ thread_local! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tokenizer {
     Standard,
+    Segmented,
     Whitespace,
     Keyword,
 }
@@ -159,7 +160,8 @@ impl Analyzer {
             },
             language => {
                 let config = eggdb_search::Config::named(language)?;
-                Self { tokenizer: Tokenizer::Standard, filters: vec![Filter::Lowercase, Filter::Stemmer(config)] }
+                let tokenizer = if config.segments() { Tokenizer::Segmented } else { Tokenizer::Standard };
+                Self { tokenizer, filters: vec![Filter::Lowercase, Filter::Stemmer(config)] }
             }
         })
     }
@@ -182,6 +184,7 @@ impl Analyzer {
     pub(crate) fn tokens(&self, text: &str) -> Vec<String> {
         let raw: Vec<String> = match self.tokenizer {
             Tokenizer::Standard => eggdb_search::words(text).into_iter().map(str::to_owned).collect(),
+            Tokenizer::Segmented => eggdb_search::segmented_words(text).into_iter().map(str::to_owned).collect(),
             Tokenizer::Whitespace => text.split_whitespace().map(str::to_owned).collect(),
             Tokenizer::Keyword => vec![text.to_owned()],
         };
@@ -194,6 +197,7 @@ impl Analyzer {
         let base = text.as_ptr() as usize;
         let words: Vec<&str> = match self.tokenizer {
             Tokenizer::Standard => eggdb_search::words(text),
+            Tokenizer::Segmented => eggdb_search::segmented_words(text),
             Tokenizer::Whitespace => text.split_whitespace().collect(),
             Tokenizer::Keyword => vec![text],
         };
@@ -212,6 +216,13 @@ impl Analyzer {
     pub(crate) fn refine(&self, terms: Vec<String>) -> Vec<String> {
         match self.tokenizer {
             Tokenizer::Keyword => vec![terms.join(" ")],
+            Tokenizer::Segmented => self.filtered(
+                terms
+                    .iter()
+                    .flat_map(|term| eggdb_search::segmented_words(term))
+                    .map(str::to_owned)
+                    .collect(),
+            ),
             _ => self.filtered(terms),
         }
     }
@@ -239,6 +250,7 @@ impl Analysis {
                 let tokenizer = match member(definition, "tokenizer").and_then(text).unwrap_or("standard") {
                     "whitespace" => Tokenizer::Whitespace,
                     "keyword" => Tokenizer::Keyword,
+                    "cjk" | "thai" | "icu_tokenizer" => Tokenizer::Segmented,
                     _ => Tokenizer::Standard,
                 };
                 let filters = strings(member(definition, "filter")).iter().filter_map(|filter| custom_filter(filter, filters)).collect();

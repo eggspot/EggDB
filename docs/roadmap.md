@@ -1149,7 +1149,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Finnish: **code written, unbuilt** (code-only mode, 2026-11-12, D673); Hungarian: **code written, unbuilt**
   (code-only mode, 2026-11-12, D674); Indonesian: **code written, unbuilt** (code-only mode, 2026-11-12, D687); Romanian: **code
   written, unbuilt** (code-only mode, 2026-11-12, D718); Turkish: **code written, unbuilt** (code-only mode,
-  2026-11-13, D981). Left: the other Snowball languages, and word segmentation.
+  2026-11-13, D981); word segmentation for Chinese, Japanese, Korean and Thai as overlapping pairs: **code
+  written, unbuilt** (code-only mode, 2026-11-13, D982). Left: the other Snowball languages, and dictionary-based
+  segmentation.
 - Synonyms, stop words, and fuzzy and phonetic matching (D30). Fuzzy and phonetic functions:
   **code written, unbuilt** (code-only mode, 2026-11-11, D470); Elasticsearch analyzers with stop words and synonyms:
   **code written, unbuilt** (code-only mode, 2026-11-12, D739). Left: synonyms and stop words in SQL text search

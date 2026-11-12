@@ -1,4 +1,5 @@
 use crate::scandinavian::Language;
+use crate::segment::segmented_words;
 use crate::{dutch, english, finnish, french, german, hungarian, indonesian, italian, portuguese, romanian, russian, spanish, turkish};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -113,11 +114,16 @@ pub enum Config {
     Romanian,
     /// Lower case words, Turkish stop words dropped, Turkish stems.
     Turkish,
+    /// Lower case words, with runs of Chinese, Japanese and Korean characters cut into
+    /// overlapping two-character pieces (Elasticsearch's `cjk` analyzer).
+    Cjk,
+    /// Lower case words, with runs of Thai letters cut into overlapping two-letter pieces.
+    Thai,
 }
 
 impl Config {
     /// The configuration named `name` (`english`, `german`, `spanish`, `swedish`, `norwegian`,
-    /// `danish`, `italian`, `russian`, `dutch`, `portuguese`, `french`, `finnish`, `hungarian`, `indonesian`, `romanian`, `turkish`, `simple`, optionally
+    /// `danish`, `italian`, `russian`, `dutch`, `portuguese`, `french`, `finnish`, `hungarian`, `indonesian`, `romanian`, `turkish`, `cjk`, `thai`, `simple`, optionally
     /// `pg_catalog.`-qualified).
     pub fn named(name: &str) -> Option<Self> {
         match name
@@ -143,7 +149,24 @@ impl Config {
             "indonesian" => Some(Self::Indonesian),
             "romanian" => Some(Self::Romanian),
             "turkish" => Some(Self::Turkish),
+            "cjk" => Some(Self::Cjk),
+            "thai" => Some(Self::Thai),
             _ => None,
+        }
+    }
+
+    /// Whether this configuration cuts text written without spaces into pieces.
+    pub fn segments(self) -> bool {
+        matches!(self, Self::Cjk | Self::Thai)
+    }
+
+    /// The words of `text` this configuration makes lexemes of: [`segmented_words`] for `cjk`
+    /// and `thai`, [`words`] for the others.
+    pub fn words(self, text: &str) -> Vec<&str> {
+        if self.segments() {
+            segmented_words(text)
+        } else {
+            words(text)
         }
     }
 
@@ -151,7 +174,7 @@ impl Config {
     pub fn lexeme(self, word: &str) -> Option<String> {
         let lower = word.to_lowercase();
         match self {
-            Self::Simple => Some(lower),
+            Self::Simple | Self::Cjk | Self::Thai => Some(lower),
             Self::English if english::is_stop_word(&lower) => None,
             Self::English => Some(english::stem(&lower)),
             Self::German if german::is_stop_word(&lower) => None,
@@ -209,7 +232,7 @@ impl TsVector {
     /// The vector of `text` under `config`, as `to_tsvector` makes it.
     pub fn from_text(config: Config, text: &str) -> Self {
         let mut lexemes: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-        for (index, word) in words(text).into_iter().enumerate() {
+        for (index, word) in config.words(text).into_iter().enumerate() {
             let position = (index as u32 + 1).min(MAX_POSITION);
             if let Some(lexeme) = config.lexeme(word) {
                 let positions = lexemes.entry(lexeme).or_default();

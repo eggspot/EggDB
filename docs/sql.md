@@ -2488,7 +2488,9 @@ ORDER BY ts_rank(to_tsvector(body), plainto_tsquery('rat')) DESC;
 `english` (stop words dropped, English stems), `german` (German stop words dropped, Snowball's
 German stems, umlauts folded), `spanish` (Spanish stop words dropped, Snowball's Spanish stems,
 accents dropped), `french`, `finnish`, `hungarian`, `indonesian`, `romanian`, `turkish`, `dutch`, `portuguese`, `italian`, `russian`, `swedish`, `norwegian` and `danish` (each with Snowball's
-stems, and its stop words where PostgreSQL ships a list; `indonesian` and `romanian` have none) or
+stems, and its stop words where PostgreSQL ships a list; `indonesian` and `romanian` have none), `cjk` and `thai`
+(runs of Chinese, Japanese, Korean or Thai text cut into overlapping two-character pieces, so a word inside text
+written without spaces is found) or
 `simple` configuration, and print as PostgreSQL
 prints them; `@@` matches with `&`, `|`, `!`, phrases (`<->`, `<N>`) and prefixes (`:*`).
 `ts_rank` ranks by how often the query's lexemes occur; its values are EggDB's own. There is no
