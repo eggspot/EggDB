@@ -1,5 +1,5 @@
 use super::serve_databases::{ServedDirectory, ServedDirectorySetup};
-use super::serve_tls::{CertificateSource, TlsSetup, tls_setup};
+use super::serve_tls::{CertificateSource, TlsSetup, fips_requested, tls_setup};
 use super::{Access, Session};
 use crate::cli::args::{CommandName, ExportFile, Format};
 use crate::cli::failure::{Exit, Failure};
@@ -685,6 +685,7 @@ impl Session<'_> {
             memory_budget: Arc::clone(&memory_budget),
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.mysql)),
             auth_rules: config.auth_rules.clone(),
+            fips_only: fips_requested(&options),
         });
         let tds_config = tds_credentials.map(|credentials| eggdb_tdswire::ServerConfig {
             user: config.user.clone(),

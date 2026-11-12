@@ -168,6 +168,31 @@ enum Outcome {
     Refused,
 }
 
+fn switch_plugin(wire: &mut Wire<'_>, plugin: &str) -> Option<([u8; NONCE_BYTES], Vec<u8>)> {
+    let Some(switch_nonce) = fresh_nonce() else {
+        refuse(wire, 1105, "HY000", "could not generate a random nonce");
+        return None;
+    };
+    let mut switch = Payload::new();
+    switch
+        .u8(0xFE)
+        .null_terminated(plugin.as_bytes())
+        .null_terminated(&switch_nonce);
+    wire.send(&switch.0);
+    if wire.flush().is_err() {
+        return None;
+    }
+    let expected = wire.sequence;
+    let answer = match wire.read_payload(expected, MAX_AUTHENTICATION_PACKET_BYTES) {
+        Ok(answer) => answer,
+        Err(error) => {
+            report_wire_error(wire, &error);
+            return None;
+        }
+    };
+    Some((switch_nonce, answer))
+}
+
 fn authenticate(
     wire: &mut Wire<'_>,
     shared: &Shared<'_>,
@@ -191,32 +216,33 @@ fn authenticate(
             !response.auth_response.is_empty(),
             true,
         ),
+        _ if config.fips_only => {
+            if response.capabilities & CLIENT_PLUGIN_AUTH == 0 {
+                refuse(
+                    wire,
+                    1045,
+                    "28000",
+                    "this server runs in FIPS mode: mysql_native_password uses SHA-1, so log in with caching_sha2_password",
+                );
+                return Outcome::Refused;
+            }
+            let Some((switch_nonce, answer)) = switch_plugin(wire, CACHING_SHA2_PASSWORD) else {
+                return Outcome::Refused;
+            };
+            (
+                credentials.check_caching_sha2(&switch_nonce, &answer),
+                !answer.is_empty(),
+                true,
+            )
+        }
         Some(MYSQL_NATIVE_PASSWORD) => (
             credentials.check_native(nonce, &response.auth_response),
             !response.auth_response.is_empty(),
             false,
         ),
         _ => {
-            let Some(switch_nonce) = fresh_nonce() else {
-                refuse(wire, 1105, "HY000", "could not generate a random nonce");
+            let Some((switch_nonce, answer)) = switch_plugin(wire, MYSQL_NATIVE_PASSWORD) else {
                 return Outcome::Refused;
-            };
-            let mut switch = Payload::new();
-            switch
-                .u8(0xFE)
-                .null_terminated(MYSQL_NATIVE_PASSWORD.as_bytes())
-                .null_terminated(&switch_nonce);
-            wire.send(&switch.0);
-            if wire.flush().is_err() {
-                return Outcome::Refused;
-            }
-            let expected = wire.sequence;
-            let answer = match wire.read_payload(expected, MAX_AUTHENTICATION_PACKET_BYTES) {
-                Ok(answer) => answer,
-                Err(error) => {
-                    report_wire_error(wire, &error);
-                    return Outcome::Refused;
-                }
             };
             (
                 credentials.check_native(&switch_nonce, &answer),
@@ -225,9 +251,10 @@ fn authenticate(
             )
         }
     };
-    let method = match named_plugin {
-        Some(CACHING_SHA2_PASSWORD) => CACHING_SHA2_PASSWORD,
-        _ => MYSQL_NATIVE_PASSWORD,
+    let method = if fast {
+        CACHING_SHA2_PASSWORD
+    } else {
+        MYSQL_NATIVE_PASSWORD
     };
     eggdb_sql::audit_events::record_login(
         &response.user,

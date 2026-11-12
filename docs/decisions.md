@@ -879,3 +879,4 @@ its full title with its status.
 - [D852](decisions/D852.md) Code-only batch 500 (D57): Blosc bit shuffle in Zarr chunks
 - [D853](decisions/D853.md) Code-only batch 501 (M16): CQL user-type field selection
 - [D854](decisions/D854.md) Code-only batch 502 (M16): CQL updates of one user-type field
+- [D855](decisions/D855.md) Code-only batch 503 (M6b): FIPS mode for MySQL logins and serve --fips

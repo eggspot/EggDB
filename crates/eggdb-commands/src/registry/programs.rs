@@ -168,7 +168,7 @@ pub(super) const SERVE: CommandDefinition = CommandDefinition {
     synopsis: "<file>",
     summary: "serve the file to PostgreSQL, MySQL and SQL Server clients; see --listen",
     description: "Serves the file to PostgreSQL clients, and with options to MySQL and SQL Server (TDS) clients, until stopped: on this machine's loopback address without TLS, and on any address with TLS, which other machines must then use; clients log in with a password and may run any statement. The first line says where it listens.",
-    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--tcp-keepalive <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--socket-dir <directory>] [--mysql-socket <file>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--read-only] [--create]",
+    usage: "eggdb serve <file> [--listen <address>] [--mysql-listen <address>] [--tds-listen <address>] [--log-batches] [--user <name>] [--password-file <file> | -] [--database <name>] [--max-connections <count>] [--max-connection-memory <size>] [--idle-timeout <seconds>] [--tcp-keepalive <seconds>] [--log-slow-statements <milliseconds>] [--statement-statistics <count>] [--socket-dir <directory>] [--mysql-socket <file>] [--tls-certificate <file> --tls-key <file> | --tls-self-signed] [--tls-min-version <1.2|1.3>] [--fips] [--read-only] [--create]",
     help: "\
 Serves the file to PostgreSQL clients: psql and PostgreSQL drivers connect to it unchanged and
 run the SQL of eggdb sql. Clients log in as one user with a password (SCRAM-SHA-256), which
@@ -225,6 +225,8 @@ the running statements, rolls back open transactions and stops with exit 0.
       --tls-self-signed           make a P-256 certificate at start, in memory, for the listen
                                   host and localhost; its fingerprint is printed so clients pin it
       --tls-min-version <1.2|1.3> the oldest TLS version accepted (default 1.2)
+      --fips                      FIPS-approved algorithms only: TLS suites and groups, and MySQL
+                                  logins by caching_sha2_password (also EGGDB_FIPS=1)
       --read-only                 no writes, and it works beside other readers
       --create                    create the database file if it is missing
 
@@ -349,6 +351,10 @@ Examples:
             default: Some("1.2"),
             ..valued("tls-min-version", "1.2|1.3", "the oldest TLS version accepted")
         },
+        flag(
+            "fips",
+            "FIPS-approved algorithms only: TLS suites and groups, and MySQL logins by caching_sha2_password",
+        ),
         flag(
             "read-only",
             "no writes, and it works beside other readers",

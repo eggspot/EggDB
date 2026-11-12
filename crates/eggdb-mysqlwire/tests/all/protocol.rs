@@ -577,10 +577,36 @@ fn the_server_refuses_to_serve_an_empty_password() {
         memory_budget: std::sync::Arc::default(),
         tls: None,
         auth_rules: None,
+        fips_only: false,
     };
     let refused = eggdb_mysqlwire::serve(&store, &listener, &config, &|| false, &|_| {});
     assert_eq!(
         refused.map_err(|error| error.kind()),
         Err(std::io::ErrorKind::InvalidInput)
     );
+}
+
+#[test]
+fn fips_mode_switches_native_password_logins_to_caching_sha2() {
+    let server = TestServer::start_limited(
+        4,
+        common::Limits {
+            fips_only: true,
+            ..common::Limits::default()
+        },
+    );
+    let mut client = Client::connect(server.address);
+    let handshake = client.handshake();
+    let native = eggdb_mysqlwire::native_response(PASSWORD.as_bytes(), &handshake.nonce);
+    client.send(&handshake_response(USER, &native, DATABASE, "mysql_native_password"));
+    let switch = client.read().unwrap();
+    assert_eq!(switch[0], 0xFE);
+    let name_end = switch[1..].iter().position(|&byte| byte == 0).unwrap() + 1;
+    assert_eq!(&switch[1..name_end], b"caching_sha2_password");
+    let mut nonce = [0u8; eggdb_mysqlwire::NONCE_BYTES];
+    nonce.copy_from_slice(&switch[name_end + 1..name_end + 1 + eggdb_mysqlwire::NONCE_BYTES]);
+    client.send(&caching_sha2_response(PASSWORD.as_bytes(), &nonce));
+    assert_eq!(client.read().unwrap(), vec![0x01, 0x03]);
+    let reply = client.read().unwrap();
+    assert!(matches!(client.parse_reply(reply), Reply::Ok { .. }));
 }

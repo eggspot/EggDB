@@ -173,6 +173,13 @@ fn self_signed(hosts: &[IpAddr]) -> Result<(Vec<Certificate>, PrivateKey), Failu
 }
 
 /// The TLS setup `options` ask for, or `None` when they ask for none.
+/// FIPS mode, from `--fips` or `EGGDB_FIPS=1` (D812, D855): TLS keeps to FIPS-approved suites
+/// and groups, and MySQL logins avoid SHA-1.
+pub(super) fn fips_requested(options: &ServeOptions) -> bool {
+    options.fips
+        || std::env::var(FIPS_VARIABLE).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"))
+}
+
 pub(super) fn tls_setup(
     options: &ServeOptions,
     listen_hosts: &[IpAddr],
@@ -248,7 +255,7 @@ pub(super) fn tls_setup(
             .map_err(|error| usage(format!("{CLIENT_CA_VARIABLE}: {error}")))?;
         config.client_authentication = eggdb_tls::ClientAuthentication::Optional { trust };
     }
-    config.fips_only = std::env::var(FIPS_VARIABLE).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
+    config.fips_only = fips_requested(options);
     let with_protocol = |protocol: Option<&[u8]>| {
         let mut config = config.clone();
         config.application_protocols = protocol.map(|name| vec![name.to_vec()]).unwrap_or_default();

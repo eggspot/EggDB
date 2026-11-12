@@ -4086,6 +4086,8 @@ Designed by Claude Fable (D15) and recorded in D161.
       --tls-self-signed           make a P-256 certificate at start, in memory, for the listen
                                   host and localhost; its fingerprint is printed so clients pin it
       --tls-min-version <1.2|1.3> the oldest TLS version accepted (default 1.2)
+      --fips                      FIPS-approved algorithms only: TLS suites and groups, and MySQL
+                                  logins by caching_sha2_password (also EGGDB_FIPS=1)
 ```
 The version option is named like PostgreSQL's `ssl_min_protocol_version`, so operators recognise
 it. Without TLS the help says the server listens only on this machine; with TLS (two PEM files or

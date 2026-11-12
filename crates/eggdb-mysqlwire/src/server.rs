@@ -63,6 +63,9 @@ pub struct ServerConfig {
     /// listener: `scram-sha-256` (the stored password), `ldap`, `jwt`, `apikey`, `cert` or
     /// `reject`; `oauth` is refused, MySQL clients having no `OAUTHBEARER`.
     pub auth_rules: Option<std::sync::Arc<eggdb_auth::AuthRules>>,
+    /// FIPS mode (`eggdb serve --fips`, D812): `mysql_native_password`, which rests on SHA-1, is
+    /// switched to `caching_sha2_password`, and a client that cannot switch plugins is refused.
+    pub fips_only: bool,
 }
 
 /// Why a listener was not opened.

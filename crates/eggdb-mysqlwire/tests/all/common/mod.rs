@@ -206,6 +206,7 @@ impl DatabaseDirectory for MemoryDirectory {
 pub struct Limits {
     pub idle_timeout: Option<Duration>,
     pub memory_budget: Arc<eggdb_platform::connection_limits::MemoryBudget>,
+    pub fips_only: bool,
 }
 
 pub struct TestServer {
@@ -258,6 +259,7 @@ impl TestServer {
             memory_budget: limits.memory_budget,
             tls,
             auth_rules: None,
+            fips_only: limits.fips_only,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);
@@ -291,6 +293,7 @@ impl TestServer {
             memory_budget: Arc::default(),
             tls: None,
             auth_rules: None,
+            fips_only: false,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);

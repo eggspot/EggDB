@@ -286,7 +286,8 @@ impl CommandName {
             | OptionName::AuthRules
             | OptionName::TlsKey
             | OptionName::TlsSelfSigned
-            | OptionName::TlsMinVersion => self == Self::Serve,
+            | OptionName::TlsMinVersion
+            | OptionName::Fips => self == Self::Serve,
             OptionName::PasswordFile => matches!(self, Self::Serve | Self::Follow),
             OptionName::Publication
             | OptionName::Poll
@@ -493,6 +494,7 @@ enum OptionName {
     TlsKey,
     TlsSelfSigned,
     TlsMinVersion,
+    Fips,
     Publication,
     Poll,
     ReconnectFor,
@@ -622,6 +624,7 @@ impl OptionName {
             b"tls-key" => Self::TlsKey,
             b"tls-self-signed" => Self::TlsSelfSigned,
             b"tls-min-version" => Self::TlsMinVersion,
+            b"fips" => Self::Fips,
             b"publication" => Self::Publication,
             b"poll" => Self::Poll,
             b"reconnect-for" => Self::ReconnectFor,
@@ -708,6 +711,7 @@ impl OptionName {
                 | Self::LogBatches
                 | Self::RespCluster
                 | Self::TlsSelfSigned
+                | Self::Fips
                 | Self::IfAbsent
                 | Self::Delete
         )
@@ -950,6 +954,7 @@ pub(crate) struct ServeOptions {
     pub(crate) tls_key: Option<PathBuf>,
     pub(crate) tls_self_signed: bool,
     pub(crate) tls_min_version: Option<eggdb_tls::MinimumVersion>,
+    pub(crate) fips: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1321,6 +1326,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::LogBatches => request.serve.log_batches = true,
             OptionName::RespCluster => request.serve.resp_cluster = true,
             OptionName::TlsSelfSigned => request.serve.tls_self_signed = true,
+            OptionName::Fips => request.serve.fips = true,
             OptionName::OnConflict => {
                 request.on_conflict = parse_on_conflict(value).map_err(usage)?
             }
