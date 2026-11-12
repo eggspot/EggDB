@@ -471,8 +471,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   the .NET driver's (`EggDbKeyValue`): **code written, unbuilt** (code-only mode, 2026-11-13, D933); the C++
   header's (`eggdb::key_value`): **code written, unbuilt** (code-only mode, 2026-11-13, D934); the Ruby driver's
   (`EggDB::KeyValue`): **code written, unbuilt** (code-only mode, 2026-11-13, D935); the PHP driver's
-  (`EggDB\KeyValue`): **code written, unbuilt** (code-only mode, 2026-11-13, D936). Left: Java, Kotlin, Swift and
-  Dart.
+  (`EggDB\KeyValue`): **code written, unbuilt** (code-only mode, 2026-11-13, D936); the Java driver's (`EggDbKeyValue`):
+  **code written, unbuilt** (code-only mode, 2026-11-13, D937). Left: Kotlin, Swift and Dart.
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
   Check: the compare job, gated.
 - On-disk overhead per row and per index entry, measured with a target beside the others (D6,

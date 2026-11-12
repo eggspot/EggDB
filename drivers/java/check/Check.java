@@ -9,6 +9,7 @@ import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public final class Check {
@@ -75,9 +76,45 @@ public final class Check {
                 check(error.getMessage().contains("nowhere"), "the error names the table: " + error.getMessage());
             }
         }
+        checkKeyValue(directory.resolve("kv.db"));
         Files.deleteIfExists(directory.resolve("app.db"));
+        Files.deleteIfExists(directory.resolve("kv.db"));
         Files.deleteIfExists(directory);
         System.out.println("java driver check: passed");
+    }
+
+    private static void checkKeyValue(Path file) throws SQLException {
+        try (EggDbKeyValue store = EggDbKeyValue.open(file, false)) {
+            store.write(txn -> {
+                txn.put(null, EggDbTransaction.bytes("a"), EggDbTransaction.bytes("1"));
+                txn.put(null, EggDbTransaction.bytes("b"), new byte[] {0, 2});
+                check(txn.createCollection("users"), "a collection is created");
+                txn.put("users", EggDbTransaction.bytes("u1"), EggDbTransaction.bytes("Ada"));
+                return null;
+            });
+            store.read(txn -> {
+                check(Arrays.equals(txn.get(null, EggDbTransaction.bytes("a")), EggDbTransaction.bytes("1")), "a stored value");
+                check(txn.get(null, EggDbTransaction.bytes("missing")) == null, "a missing key");
+                List<EggDbTransaction.Entry> all = txn.scan(null, EggDbTransaction.Range.all());
+                check(all.size() == 2 && Arrays.equals(all.get(1).value(), new byte[] {0, 2}), "a scan with binary values");
+                List<EggDbTransaction.Entry> reversed = txn.scan(null, EggDbTransaction.Range.all().reversed());
+                check(Arrays.equals(reversed.get(0).key(), EggDbTransaction.bytes("b")), "a reversed scan");
+                check(txn.collections().equals(List.of("users")), "the collection names");
+                check(txn.collectionStats("users").entries() == 1, "the collection stats");
+                return null;
+            });
+            store.write(txn -> {
+                check(txn.delete(null, EggDbTransaction.bytes("a")), "a key is deleted");
+                txn.renameCollection("users", "people");
+                return null;
+            });
+            store.read(txn -> {
+                check(txn.get(null, EggDbTransaction.bytes("a")) == null, "the deleted key is gone");
+                check(Arrays.equals(txn.get("people", EggDbTransaction.bytes("u1")), EggDbTransaction.bytes("Ada")),
+                        "the renamed collection keeps its keys");
+                return null;
+            });
+        }
     }
 
     private static void check(boolean condition, String what) {

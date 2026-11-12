@@ -2,13 +2,10 @@ package app.eggspot.eggdb;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
-import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,33 +31,17 @@ final class NativeSession implements AutoCloseable {
         static final MethodHandle LAST_SQLSTATE;
 
         static {
-            Linker linker = Linker.nativeLinker();
-            SymbolLookup library = library();
             ValueLayout pointer = ValueLayout.ADDRESS;
             ValueLayout status = ValueLayout.JAVA_INT;
-            OPEN = handle(linker, library, "eggdb_open", FunctionDescriptor.of(status, pointer, pointer, pointer));
-            CLOSE = handle(linker, library, "eggdb_close", FunctionDescriptor.of(status, pointer));
-            SQL_OPEN = handle(linker, library, "eggdb_sql_open", FunctionDescriptor.of(status, pointer, pointer, pointer));
-            SQL_CLOSE = handle(linker, library, "eggdb_sql_close", FunctionDescriptor.of(status, pointer));
-            SQL_CONNECT = handle(linker, library, "eggdb_sql_connect", FunctionDescriptor.of(status, pointer, pointer));
-            EXECUTE = handle(linker, library, "eggdb_sql_execute_with_parameters",
+            OPEN = NativeLibrary.handle("eggdb_open", FunctionDescriptor.of(status, pointer, pointer, pointer));
+            CLOSE = NativeLibrary.handle("eggdb_close", FunctionDescriptor.of(status, pointer));
+            SQL_OPEN = NativeLibrary.handle("eggdb_sql_open", FunctionDescriptor.of(status, pointer, pointer, pointer));
+            SQL_CLOSE = NativeLibrary.handle("eggdb_sql_close", FunctionDescriptor.of(status, pointer));
+            SQL_CONNECT = NativeLibrary.handle("eggdb_sql_connect", FunctionDescriptor.of(status, pointer, pointer));
+            EXECUTE = NativeLibrary.handle("eggdb_sql_execute_with_parameters",
                     FunctionDescriptor.of(status, pointer, pointer, pointer, ValueLayout.JAVA_LONG, pointer, pointer));
-            LAST_ERROR = handle(linker, library, "eggdb_last_error", FunctionDescriptor.of(pointer));
-            LAST_SQLSTATE = handle(linker, library, "eggdb_last_sqlstate", FunctionDescriptor.of(pointer));
-        }
-
-        private static SymbolLookup library() {
-            String given = System.getProperty("eggdb.library", System.getenv("EGGDB_LIBRARY"));
-            if (given != null && !given.isEmpty()) {
-                return SymbolLookup.libraryLookup(Path.of(given), Arena.global());
-            }
-            return SymbolLookup.libraryLookup(System.mapLibraryName("eggdb_capi"), Arena.global());
-        }
-
-        private static MethodHandle handle(Linker linker, SymbolLookup library, String name, FunctionDescriptor descriptor) {
-            MemorySegment symbol = library.find(name)
-                    .orElseThrow(() -> new UnsatisfiedLinkError("the EggDB C library has no " + name));
-            return linker.downcallHandle(symbol, descriptor);
+            LAST_ERROR = NativeLibrary.handle("eggdb_last_error", FunctionDescriptor.of(pointer));
+            LAST_SQLSTATE = NativeLibrary.handle("eggdb_last_sqlstate", FunctionDescriptor.of(pointer));
         }
     }
 
@@ -238,7 +219,7 @@ final class NativeSession implements AutoCloseable {
         return pointer.equals(MemorySegment.NULL) ? "" : pointer.reinterpret(Long.MAX_VALUE).getString(0);
     }
 
-    private static SQLException lastError(int status) {
+    static SQLException lastError(int status) {
         try {
             String message = text((MemorySegment) Api.LAST_ERROR.invokeExact());
             String sqlState = text((MemorySegment) Api.LAST_SQLSTATE.invokeExact());
