@@ -312,6 +312,40 @@ fn conjuncts(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
+/// The pattern with the `WHERE` filter's `start.property = value` conditions copied into its
+/// start node's properties, where `value` reads only what the row already binds, so the start
+/// nodes come from an index; `None` when there are none. The filter still runs afterwards.
+fn with_equalities(pattern: &Pattern, filter: Option<&Expr>, row: &Row) -> Option<Pattern> {
+    let filter = filter?;
+    let variable = pattern.start.variable.as_deref()?;
+    if lookup(row, variable).is_some() {
+        return None;
+    }
+    let bound = |name: &str| lookup(row, name).is_some();
+    let mut added: Vec<(String, Expr)> = Vec::new();
+    for condition in conjuncts(filter) {
+        let Expr::Binary(Operator::Equal, left, right) = condition else {
+            continue;
+        };
+        for (side, other) in [(left, right), (right, left)] {
+            if let Expr::Property(target, property) = side.as_ref()
+                && matches!(target.as_ref(), Expr::Variable(name) if name == variable)
+                && reads_only(other, &bound)
+                && !pattern.start.properties.iter().chain(&added).any(|(known, _)| known == property)
+            {
+                added.push((property.clone(), other.as_ref().clone()));
+                break;
+            }
+        }
+    }
+    if added.is_empty() {
+        return None;
+    }
+    let mut looked_up = pattern.clone();
+    looked_up.start.properties.extend(added);
+    Some(looked_up)
+}
+
 fn step_conditions(filter: Option<&Expr>, pattern: &Pattern, row: &Row) -> Vec<StepCondition> {
     let Some(filter) = filter else {
         return Vec::new();
@@ -2308,7 +2342,8 @@ impl<'g> Executor<'g, '_> {
                         for pattern in patterns {
                             let mut extended = Vec::new();
                             for partial in matched {
-                                extended.extend(self.match_pattern_with(&partial, pattern, filter.as_ref())?);
+                                let looked_up = with_equalities(pattern, filter.as_ref(), &partial);
+                                extended.extend(self.match_pattern_with(&partial, looked_up.as_ref().unwrap_or(pattern), filter.as_ref())?);
                             }
                             matched = extended;
                         }
