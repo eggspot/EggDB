@@ -7,8 +7,9 @@ use crate::types::{Conversion, DefinedKind, DefinedType, SqlType, Value, convert
 
 /// The functions that turn a JSON object (or an array of objects) into rows whose columns the
 /// caller declares in a column definition list: `AS x(a int, b text)`.
-pub(crate) const FUNCTIONS: [&str; 10] = [
+pub(crate) const FUNCTIONS: [&str; 11] = [
     "read_parquet",
+    "read_geotiff",
     "read_netcdf",
     "read_bam",
     "read_vcf",
@@ -106,6 +107,9 @@ pub(crate) fn rows(
     }
     if name == "read_netcdf" {
         return crate::file_readers::netcdf_rows(values, names, types, sink);
+    }
+    if name == "read_geotiff" {
+        return crate::file_readers::geotiff_rows(values, names, types, sink);
     }
     let Some(document) = values.first() else {
         return Err(definition_list_required());

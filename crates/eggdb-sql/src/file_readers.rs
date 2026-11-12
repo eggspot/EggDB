@@ -93,7 +93,66 @@ pub(crate) fn rows(
 
 /// Whether `name` is one of the file-reading functions.
 pub(crate) fn reads_files(name: &str) -> bool {
-    matches!(name, "read_parquet" | "read_arrow" | "read_csv" | "read_vcf" | "read_bam" | "read_netcdf")
+    matches!(name, "read_parquet" | "read_arrow" | "read_csv" | "read_vcf" | "read_bam" | "read_netcdf" | "read_geotiff")
+}
+
+const GEOTIFF_COLUMNS: [(&str, SqlType); 5] = [
+    ("x", SqlType::Integer),
+    ("y", SqlType::Integer),
+    ("values", SqlType::Array(crate::arrays::ArrayElement::Double)),
+    ("map_x", SqlType::Double),
+    ("map_y", SqlType::Double),
+];
+
+/// The rows of `read_geotiff(path)`: one per pixel of a TIFF's first image, with its column
+/// `x` and row `y`, its band `values`, and for a GeoTIFF the map coordinates of the pixel's
+/// centre.
+pub(crate) fn geotiff_rows(
+    values: &[Value],
+    names: &[String],
+    types: &[Option<SqlType>],
+    sink: &mut RecordSink<'_>,
+) -> SqlResult<()> {
+    let Some(path) = values.first().and_then(Value::to_text) else {
+        return Ok(());
+    };
+    let bytes = crate::new_files::read_file(&path, MOST_FILE_BYTES)?;
+    crate::memory::check_value_bytes(bytes.len())?;
+    let raster = crate::geotiff::raster(&bytes)?;
+    let wanted: Vec<Option<usize>> = names
+        .iter()
+        .map(|name| GEOTIFF_COLUMNS.iter().position(|(column, _)| column.eq_ignore_ascii_case(name)))
+        .collect();
+    for y in 0..raster.height {
+        for x in 0..raster.width {
+            let at = (y * raster.width + x) * raster.bands;
+            let bands = crate::arrays::ArrayValue::new(
+                crate::arrays::ArrayElement::Double,
+                raster.values[at..at + raster.bands].iter().map(|value| Value::Double(*value)).collect(),
+            );
+            let (map_x, map_y) = raster.origin.map_or((Value::Null, Value::Null), |(west, north, width, height)| {
+                (Value::Double(west + (x as f64 + 0.5) * width), Value::Double(north - (y as f64 + 0.5) * height))
+            });
+            let record: [Value; 5] = [
+                Value::Integer(i32::try_from(x).unwrap_or(i32::MAX)),
+                Value::Integer(i32::try_from(y).unwrap_or(i32::MAX)),
+                Value::Array(Box::new(bands)),
+                map_x,
+                map_y,
+            ];
+            let mut row = Vec::with_capacity(names.len());
+            for (index, position) in wanted.iter().enumerate() {
+                let value = position.map_or(Value::Null, |position| record[position].clone());
+                let declared = types.get(index + 1).copied().flatten();
+                row.push(match declared {
+                    Some(sql_type) if !value.is_null() && value.sql_type() != Some(sql_type) => convert(value, sql_type, Conversion::Explicit)?,
+                    _ => value,
+                });
+            }
+            sink(row)?;
+        }
+    }
+    Ok(())
 }
 
 const NETCDF_COLUMNS: [(&str, SqlType); 4] = [
@@ -502,6 +561,9 @@ pub(crate) fn discovered_columns(name: &str, path: &str) -> SqlResult<Vec<(Strin
     }
     if name == "read_netcdf" {
         return Ok(NETCDF_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
+    }
+    if name == "read_geotiff" {
+        return Ok(GEOTIFF_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
     }
     if name == "read_csv" {
         let text = text_file(path)?;

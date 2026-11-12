@@ -109,12 +109,7 @@ fn json_number(value: f64) -> String {
     if value.is_finite() { format!("{value}") } else { "null".to_owned() }
 }
 
-/// A TIFF or BigTIFF file's first image as JSON: its size, bands, bits and sample format,
-/// compression, photometric interpretation, tiles or strips, and, for a GeoTIFF, the pixel
-/// scale, the tie point, the EPSG code of its coordinate reference system, whether pixels are
-/// areas or points, the no-data value and the bounding box `[west, south, east, north]` the tie
-/// point and scale give.
-pub(crate) fn info(bytes: &[u8]) -> SqlResult<String> {
+fn directory(bytes: &[u8]) -> SqlResult<(Vec<(u16, Values)>, bool)> {
     let big_endian = match bytes.get(..2) {
         Some(b"II") => false,
         Some(b"MM") => true,
@@ -147,6 +142,16 @@ pub(crate) fn info(bytes: &[u8]) -> SqlResult<String> {
             tags.push((tag, found));
         }
     }
+    Ok((tags, bigtiff))
+}
+
+/// A TIFF or BigTIFF file's first image as JSON: its size, bands, bits and sample format,
+/// compression, photometric interpretation, tiles or strips, and, for a GeoTIFF, the pixel
+/// scale, the tie point, the EPSG code of its coordinate reference system, whether pixels are
+/// areas or points, the no-data value and the bounding box `[west, south, east, north]` the tie
+/// point and scale give.
+pub(crate) fn info(bytes: &[u8]) -> SqlResult<String> {
+    let (tags, bigtiff) = directory(bytes)?;
     let width = first_integer(&tags, 256).ok_or_else(|| invalid("the image has no width"))?;
     let height = first_integer(&tags, 257).ok_or_else(|| invalid("the image has no height"))?;
     let mut members = vec![
@@ -227,6 +232,196 @@ pub(crate) fn info(bytes: &[u8]) -> SqlResult<String> {
     Ok(format!("{{{}}}", members.join(",")))
 }
 
+const MOST_PIXEL_VALUES: usize = 50_000_000;
+
+fn integers(tags: &[(u16, Values)], tag: u16) -> Option<Vec<u64>> {
+    tags.iter().find(|(found, _)| *found == tag).and_then(|(_, values)| match values {
+        Values::Integers(list) => Some(list.clone()),
+        _ => None,
+    })
+}
+
+fn lzw_decode(data: &[u8], most: usize) -> SqlResult<Vec<u8>> {
+    const CLEAR: usize = 256;
+    const END: usize = 257;
+    let mut table: Vec<Vec<u8>> = (0..=255u8).map(|byte| vec![byte]).collect();
+    table.push(Vec::new());
+    table.push(Vec::new());
+    let mut out = Vec::new();
+    let mut width = 9u32;
+    let mut bit = 0usize;
+    let mut previous: Option<usize> = None;
+    let read = |bit: &mut usize, width: u32| -> Option<usize> {
+        let mut code = 0usize;
+        for _ in 0..width {
+            let byte = *data.get(*bit / 8)?;
+            code = code << 1 | usize::from(byte >> (7 - *bit % 8) & 1);
+            *bit += 1;
+        }
+        Some(code)
+    };
+    while let Some(code) = read(&mut bit, width) {
+        if code == END {
+            break;
+        }
+        if code == CLEAR {
+            table.truncate(258);
+            width = 9;
+            previous = None;
+            continue;
+        }
+        let entry = if code < table.len() {
+            table[code].clone()
+        } else if let Some(previous) = previous.filter(|_| code == table.len()) {
+            let mut entry = table[previous].clone();
+            entry.push(table[previous][0]);
+            entry
+        } else {
+            return Err(invalid("an LZW code is out of range"));
+        };
+        out.extend_from_slice(&entry);
+        if out.len() > most {
+            return Err(invalid("a strip decodes past its size"));
+        }
+        if let Some(previous) = previous {
+            let mut added = table[previous].clone();
+            added.push(entry[0]);
+            table.push(added);
+        }
+        previous = Some(code);
+        width = match table.len() + 1 {
+            length if length >= 2048 => 12,
+            length if length >= 1024 => 11,
+            length if length >= 512 => 10,
+            _ => 9,
+        };
+    }
+    Ok(out)
+}
+
+/// A raster read from a TIFF's first image: its size and bands, its values row by row with
+/// the bands of each pixel together, and, for a GeoTIFF, the map position of its top-left
+/// corner and the pixel size.
+pub(crate) struct Raster {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) bands: usize,
+    pub(crate) values: Vec<f64>,
+    pub(crate) origin: Option<(f64, f64, f64, f64)>,
+}
+
+/// The pixel values of a TIFF's first image: strips or tiles, uncompressed, deflate or LZW,
+/// with the horizontal-differencing predictor, 8- to 64-bit integers or 32- and 64-bit floats,
+/// pixels interleaved (planar configuration 1).
+pub(crate) fn raster(bytes: &[u8]) -> SqlResult<Raster> {
+    let (tags, _) = directory(bytes)?;
+    let big_endian = bytes.get(..2) == Some(b"MM");
+    let width = usize::try_from(first_integer(&tags, 256).ok_or_else(|| invalid("the image has no width"))?).map_err(|_| invalid("too wide"))?;
+    let height = usize::try_from(first_integer(&tags, 257).ok_or_else(|| invalid("the image has no height"))?).map_err(|_| invalid("too tall"))?;
+    let bands = usize::try_from(first_integer(&tags, 277).unwrap_or(1)).map_err(|_| invalid("too many bands"))?.max(1);
+    let bits = first_integer(&tags, 258).unwrap_or(8);
+    let format = first_integer(&tags, 339).unwrap_or(1);
+    let compression = first_integer(&tags, 259).unwrap_or(1);
+    let predictor = first_integer(&tags, 317).unwrap_or(1);
+    if first_integer(&tags, 284).unwrap_or(1) != 1 {
+        return Err(invalid("planar (band-separate) images are not supported yet"));
+    }
+    if !matches!(bits, 8 | 16 | 32 | 64) || (format == 3 && !matches!(bits, 32 | 64)) {
+        return Err(invalid(format!("{bits}-bit samples are not supported yet")));
+    }
+    if !matches!(predictor, 1 | 2) {
+        return Err(invalid("the floating-point predictor is not supported yet"));
+    }
+    let total = width.checked_mul(height).and_then(|pixels| pixels.checked_mul(bands)).filter(|total| *total <= MOST_PIXEL_VALUES)
+        .ok_or_else(|| invalid(format!("an image may hold at most {MOST_PIXEL_VALUES} values")))?;
+    let sample_bytes = (bits / 8) as usize;
+    let (block_width, block_height, offsets, counts) = match (first_integer(&tags, 322), first_integer(&tags, 323)) {
+        (Some(tile_width), Some(tile_height)) => (
+            tile_width as usize,
+            tile_height as usize,
+            integers(&tags, 324).ok_or_else(|| invalid("tiles without offsets"))?,
+            integers(&tags, 325).ok_or_else(|| invalid("tiles without byte counts"))?,
+        ),
+        _ => (
+            width,
+            first_integer(&tags, 278).map_or(height, |rows| rows as usize).max(1),
+            integers(&tags, 273).ok_or_else(|| invalid("strips without offsets"))?,
+            integers(&tags, 279).ok_or_else(|| invalid("strips without byte counts"))?,
+        ),
+    };
+    if block_width == 0 || block_height == 0 {
+        return Err(invalid("a tile has no size"));
+    }
+    let across = width.div_ceil(block_width);
+    let mut values = vec![0f64; total];
+    let block_bytes = block_width * block_height * bands * sample_bytes;
+    for (index, (offset, count)) in offsets.iter().zip(&counts).enumerate() {
+        let start = usize::try_from(*offset).map_err(|_| invalid("an offset is too large"))?;
+        let length = usize::try_from(*count).map_err(|_| invalid("a block is too large"))?;
+        let raw = bytes.get(start..start.checked_add(length).ok_or_else(|| invalid("a block is too large"))?).ok_or_else(|| invalid("a block runs past the end"))?;
+        let mut block = match compression {
+            1 => raw.to_vec(),
+            5 => lzw_decode(raw, block_bytes)?,
+            8 | 32_946 => eggdb_content::zlib_inflate(raw, block_bytes).map_err(|error| invalid(error))?,
+            other => return Err(invalid(format!("compression {other} is not supported yet"))),
+        };
+        block.resize(block_bytes, 0);
+        let (block_x, block_y) = (index % across * block_width, index / across * block_height);
+        for row in 0..block_height {
+            let y = block_y + row;
+            if y >= height {
+                break;
+            }
+            let mut previous = vec![0i128; bands];
+            for column in 0..block_width {
+                let x = block_x + column;
+                for band in 0..bands {
+                    let at = ((row * block_width + column) * bands + band) * sample_bytes;
+                    let raw = &block[at..at + sample_bytes];
+                    let unsigned = {
+                        let mut value = 0u64;
+                        if big_endian {
+                            for byte in raw {
+                                value = value << 8 | u64::from(*byte);
+                            }
+                        } else {
+                            for byte in raw.iter().rev() {
+                                value = value << 8 | u64::from(*byte);
+                            }
+                        }
+                        value
+                    };
+                    let mut value = match (format, bits) {
+                        (3, 32) => f64::from(f32::from_bits(unsigned as u32)),
+                        (3, _) => f64::from_bits(unsigned),
+                        (2, 8) => f64::from(unsigned as u8 as i8),
+                        (2, 16) => f64::from(unsigned as u16 as i16),
+                        (2, 32) => f64::from(unsigned as u32 as i32),
+                        (2, _) => unsigned as i64 as f64,
+                        _ => unsigned as f64,
+                    };
+                    if predictor == 2 && format != 3 {
+                        let modulus = 1i128 << bits;
+                        let summed = (previous[band] + value as i128).rem_euclid(modulus);
+                        previous[band] = summed;
+                        value = if format == 2 && summed >= modulus / 2 { (summed - modulus) as f64 } else { summed as f64 };
+                    }
+                    if x < width {
+                        values[(y * width + x) * bands + band] = value;
+                    }
+                }
+            }
+        }
+    }
+    let origin = match (reals(&tags, PIXEL_SCALE), reals(&tags, TIE_POINT)) {
+        (Some(scale), Some(tie)) if scale.len() >= 2 && tie.len() >= 5 => {
+            Some((tie[3] - tie[0] * scale[0], tie[4] + tie[1] * scale[1], scale[0], scale[1]))
+        }
+        _ => None,
+    };
+    Ok(Raster { width, height, bands, values, origin })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +460,11 @@ mod tests {
         assert!(found.contains("\"bbox\":[100,-5,150,20]"), "{found}");
         assert!(crate::json::normalize(&found).is_ok());
         assert!(info(b"XX").is_err());
+    }
+
+    #[test]
+    fn lzw_strips_decode_with_their_growing_codes() {
+        let decoded = lzw_decode(&[0x80, 0x01, 0xC0, 0xF0, 0x10], 16).unwrap();
+        assert_eq!(decoded, vec![7, 7]);
     }
 }
