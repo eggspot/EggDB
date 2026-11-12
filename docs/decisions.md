@@ -774,3 +774,4 @@ its full title with its status.
 - [D747](decisions/D747.md) Code-only batch 395 (M11): reports delivered to `https://` targets and by e-mail through the operator's SMTP server
 - [D748](decisions/D748.md) Code-only batch 396 (M6b): personal-data classification, differential-privacy budgets and masked copies in `eggdb_privacy`
 - [D749](decisions/D749.md) Code-only batch 397 (M6c): data profiling, entity resolution and golden records in `eggdb_catalog`
+- [D750](decisions/D750.md) Code-only batch 398 (M16): `CREATE EXTENSION eggdb_pipelines`, SQL models with `ref()`, tests and lineage, and task pipelines with retries and backfills

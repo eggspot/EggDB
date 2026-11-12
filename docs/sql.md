@@ -3728,6 +3728,31 @@ A view is a query with an entity column and an event-time column; `materialize` 
 `eggdb_features.online` (one primary-key read to serve), `online_features` returns it unless it is older than the
 view's time to live, and `features_at` reads the source as of a past time, so training data has no leakage.
 
+## Transformations and pipelines (eggdb_pipelines)
+
+`CREATE EXTENSION eggdb_pipelines` builds SQL models and runs task pipelines on the pg_cron scheduler (D750):
+
+```sql
+CREATE EXTENSION eggdb_pipelines;
+INSERT INTO eggdb_pipelines.models (model_name, body, materialized, tests) VALUES
+  ('daily_orders', 'SELECT date_trunc(''day'', ordered_at) AS day, count(*) AS orders FROM {{ source(''public'', ''orders'') }} GROUP BY 1', 'table',
+   '[{"test": "unique", "column": "day"}, {"test": "not_null", "column": "day"}]'),
+  ('busy_days', 'SELECT * FROM {{ ref(''daily_orders'') }} WHERE orders > 100', 'view', '[]');
+SELECT * FROM eggdb_pipelines.run_models();
+INSERT INTO eggdb_pipelines.tasks (pipeline, task_name, command, depends_on) VALUES
+  ('nightly', 'load', 'CALL load_orders({{ logical_date }})', '{}'),
+  ('nightly', 'models', 'SELECT eggdb_pipelines.run_models()', '{load}');
+SELECT eggdb_pipelines.start_run('nightly');
+SELECT cron.schedule('pipelines', '* * * * *', 'SELECT eggdb_pipelines.tick()');
+```
+
+`run_models` builds every model after the models it refers to (`{{ ref('name') }}`; `{{ source('schema', 'table') }}`
+names a table), as a view or a table, runs its `not_null`, `unique` and `accepted_values` tests into `test_results`,
+and records lineage (also in `eggdb_catalog.lineage` when that extension is installed); a cycle is an error. A
+pipeline's tasks run once the tasks they depend on succeed; a failing task is retried up to `max_retries` times,
+waiting `retry_delay` doubled at each attempt, and the tasks after a failed one are marked `upstream_failed`.
+`tick()` advances every open run, and `backfill(pipeline, from, to, step)` starts a run per logical date.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

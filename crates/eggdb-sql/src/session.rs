@@ -2705,6 +2705,7 @@ impl<'s> Session<'s> {
             "timescaledb" => ("_timescaledb_catalog", crate::timescale::TIMESCALE_SCRIPT),
             "eggdb_ai" => ("eggdb_ai", crate::ai_memory::AI_SCRIPT),
             "eggdb_features" => ("eggdb_features", crate::features::FEATURES_SCRIPT),
+            "eggdb_pipelines" => ("eggdb_pipelines", crate::pipelines::PIPELINES_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;
