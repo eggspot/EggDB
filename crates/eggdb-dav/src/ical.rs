@@ -214,8 +214,205 @@ impl Component {
     }
 }
 
-/// Every component of a calendar object, nested ones included, in order of their `BEGIN`.
+const TIME_PROPERTIES: [&str; 6] = ["DTSTART", "DTEND", "DUE", "RDATE", "EXDATE", "RECURRENCE-ID"];
+const ZONE_PARTS: [&str; 3] = ["VTIMEZONE", "STANDARD", "DAYLIGHT"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Onset {
+    local: i64,
+    offset_to: i64,
+    yearly: Option<(i64, i64, i64)>,
+}
+
+/// The time zones a calendar object defines in its `VTIMEZONE` components, by `TZID`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Zones(Vec<(String, Vec<Onset>)>);
+
+fn parse_offset(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (sign, number) = match text.as_bytes().first()? {
+        b'+' => (1, &text[1..]),
+        b'-' => (-1, &text[1..]),
+        _ => return None,
+    };
+    if !(number.len() == 4 || number.len() == 6) {
+        return None;
+    }
+    let hours = digits(&number[..2])?;
+    let minutes = digits(&number[2..4])?;
+    let seconds = if number.len() == 6 { digits(&number[4..])? } else { 0 };
+    Some(sign * (hours * 3600 + minutes * 60 + seconds))
+}
+
+fn yearly_rule(text: &str) -> Option<(i64, i64, i64)> {
+    let mut month = None;
+    let mut day = None;
+    for part in text.split(';') {
+        let (key, value) = part.split_once('=')?;
+        match key.trim().to_ascii_uppercase().as_str() {
+            "FREQ" if value.trim().eq_ignore_ascii_case("YEARLY") => {}
+            "FREQ" => return None,
+            "BYMONTH" => month = digits(value.trim()).filter(|month| (1..=12).contains(month)),
+            "BYDAY" => {
+                let value = value.trim().to_ascii_uppercase();
+                let split = value.len().checked_sub(2)?;
+                let ordinal: i64 = value[..split].parse().ok()?;
+                day = Some((weekday_number(&value[split..])?, ordinal));
+            }
+            "UNTIL" | "WKST" | "INTERVAL" => {}
+            _ => return None,
+        }
+    }
+    let (weekday, ordinal) = day?;
+    (ordinal != 0).then_some((month?, weekday, ordinal))
+}
+
+fn nth_weekday(year: i64, month: i64, weekday: i64, ordinal: i64) -> i64 {
+    if ordinal > 0 {
+        let first = days_from_civil(year, month, 1);
+        first + (weekday - weekday_of(first)).rem_euclid(7) + (ordinal - 1) * 7
+    } else {
+        let last = days_from_civil(year, month, days_in_month(year, month));
+        last - (weekday_of(last) - weekday).rem_euclid(7) + (ordinal + 1) * 7
+    }
+}
+
+impl Zones {
+    /// The UTC time of `local`, a wall-clock time in zone `tzid`, as its `VTIMEZONE` gives the
+    /// offset; `local` unchanged when the zone is not defined.
+    pub fn to_utc(&self, tzid: &str, local: i64) -> i64 {
+        let Some((_, onsets)) = self.0.iter().find(|(name, _)| name == tzid) else {
+            return local;
+        };
+        let year = civil_from_days(local.div_euclid(SECONDS_PER_DAY)).0;
+        let mut best: Option<(i64, i64)> = None;
+        for onset in onsets {
+            let candidates: Vec<i64> = match onset.yearly {
+                Some((month, weekday, ordinal)) => (year - 1..=year)
+                    .map(|year| nth_weekday(year, month, weekday, ordinal) * SECONDS_PER_DAY + onset.local.rem_euclid(SECONDS_PER_DAY))
+                    .filter(|at| *at >= onset.local)
+                    .collect(),
+                None => vec![onset.local],
+            };
+            for at in candidates.into_iter().filter(|at| *at <= local) {
+                if best.is_none_or(|(known, _)| at > known) {
+                    best = Some((at, onset.offset_to));
+                }
+            }
+        }
+        local - best.map_or(0, |(_, offset)| offset)
+    }
+}
+
+/// The time zones `text` defines in its `VTIMEZONE` components.
+pub fn zones(text: &str) -> Zones {
+    let mut zones: Vec<(String, Vec<Onset>)> = Vec::new();
+    let mut zone: Option<(String, Vec<Onset>)> = None;
+    let mut onset: Option<(Option<i64>, Option<i64>, Option<(i64, i64, i64)>)> = None;
+    for line in unfolded(text) {
+        let Some(property) = property_of(&line) else {
+            continue;
+        };
+        let value = property.value.trim().to_owned();
+        match (property.name.as_str(), value.to_ascii_uppercase().as_str()) {
+            ("BEGIN", "VTIMEZONE") => zone = Some((String::new(), Vec::new())),
+            ("END", "VTIMEZONE") => zones.extend(zone.take()),
+            ("BEGIN", "STANDARD" | "DAYLIGHT") if zone.is_some() => onset = Some((None, None, None)),
+            ("END", "STANDARD" | "DAYLIGHT") => {
+                if let (Some((Some(local), Some(offset_to), yearly)), Some((_, onsets))) = (onset.take(), zone.as_mut()) {
+                    onsets.push(Onset { local, offset_to, yearly });
+                }
+            }
+            ("TZID", _) => {
+                if let Some((name, _)) = zone.as_mut() {
+                    name.clone_from(&value);
+                }
+            }
+            ("DTSTART", _) => {
+                if let Some(found) = onset.as_mut() {
+                    found.0 = parse_moment(&value).map(|moment| moment.seconds);
+                }
+            }
+            ("TZOFFSETTO", _) => {
+                if let Some(found) = onset.as_mut() {
+                    found.1 = parse_offset(&value);
+                }
+            }
+            ("RRULE", _) => {
+                if let Some(found) = onset.as_mut() {
+                    found.2 = yearly_rule(&value);
+                }
+            }
+            _ => {}
+        }
+    }
+    Zones(zones)
+}
+
+fn in_utc(property: &mut Property, zones: &Zones) {
+    let Some(at) = property.parameters.iter().position(|(name, _)| name == "TZID") else {
+        return;
+    };
+    let tzid = property.parameters[at].1.clone();
+    let mut converted = Vec::new();
+    for value in property.value.split(',') {
+        match parse_moment(value) {
+            Some(moment) if !moment.date_only && !value.trim().ends_with('Z') => {
+                converted.push(written_time(zones.to_utc(&tzid, moment.seconds), false));
+            }
+            _ => converted.push(value.trim().to_owned()),
+        }
+    }
+    property.value = converted.join(",");
+    property.parameters.remove(at);
+}
+
+/// Every component of a calendar object, nested ones included, in order of their `BEGIN`;
+/// times given with a `TZID` the object's `VTIMEZONE` defines are turned into UTC.
 pub fn components(text: &str) -> Vec<Component> {
+    let zones = zones(text);
+    let mut found = raw_components(text);
+    for component in &mut found {
+        normalize(component, &zones);
+    }
+    found
+}
+
+fn normalize(component: &mut Component, zones: &Zones) {
+    if ZONE_PARTS.contains(&component.name.as_str()) {
+        return;
+    }
+    for property in &mut component.properties {
+        if TIME_PROPERTIES.contains(&property.name.as_str()) {
+            in_utc(property, zones);
+        }
+    }
+}
+
+fn utc_lines(lines: &[String], zones: &Zones) -> Vec<String> {
+    let mut depth = 0usize;
+    lines
+        .iter()
+        .map(|line| {
+            let Some(mut property) = property_of(line) else {
+                return line.clone();
+            };
+            match property.name.as_str() {
+                "BEGIN" => depth += 1,
+                "END" => depth = depth.saturating_sub(1),
+                name if depth == 1 && TIME_PROPERTIES.contains(&name) && property.parameters.iter().any(|(key, _)| key == "TZID") => {
+                    in_utc(&mut property, zones);
+                    let parameters: String = property.parameters.iter().map(|(key, value)| format!(";{key}={value}")).collect();
+                    return format!("{}{parameters}:{}", property.name, property.value);
+                }
+                _ => {}
+            }
+            line.clone()
+        })
+        .collect()
+}
+
+fn raw_components(text: &str) -> Vec<Component> {
     let mut open: Vec<Component> = Vec::new();
     let mut done = Vec::new();
     for line in unfolded(text) {
@@ -515,6 +712,7 @@ fn own_component(lines: &[String]) -> Component {
 }
 
 fn segments(text: &str) -> Vec<Segment> {
+    let zones = zones(text);
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut block: Option<Vec<String>> = None;
@@ -548,8 +746,9 @@ fn segments(text: &str) -> Vec<Segment> {
         if name == "END" && depth == 1 {
             skipping = false;
             if let Some(lines) = block.take() {
-                let component = own_component(&lines);
-                out.push(Segment::Block(lines, component));
+                let mut component = own_component(&lines);
+                normalize(&mut component, &zones);
+                out.push(Segment::Block(utc_lines(&lines, &zones), component));
             }
         }
     }
@@ -687,6 +886,19 @@ mod tests {
             end: None,
         };
         assert!(overlaps(&event("DTSTART:20260112T090000Z\r\nDURATION:PT15M"), open));
+    }
+
+    #[test]
+    fn times_in_a_defined_zone_turn_into_utc() {
+        let zone = "BEGIN:VTIMEZONE\r\nTZID:Europe/Berlin\r\nBEGIN:DAYLIGHT\r\nDTSTART:19700329T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\r\nEND:DAYLIGHT\r\nBEGIN:STANDARD\r\nDTSTART:19701025T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n";
+        let text = format!("BEGIN:VCALENDAR\r\n{zone}BEGIN:VEVENT\r\nUID:w\r\nDTSTART;TZID=Europe/Berlin:20260112T090000\r\nDTEND;TZID=Europe/Berlin:20260712T100000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+        let event = components(&text).into_iter().find(|component| component.name == "VEVENT").unwrap();
+        assert_eq!(event.first("DTSTART").unwrap().value, "20260112T080000Z");
+        assert_eq!(event.first("DTEND").unwrap().value, "20260712T080000Z");
+        assert!(event.first("DTSTART").unwrap().parameters.is_empty());
+        assert_eq!(nth_weekday(2026, 3, 6, -1), days_from_civil(2026, 3, 29));
+        assert_eq!(nth_weekday(2026, 11, 3, 2), days_from_civil(2026, 11, 12));
+        assert_eq!(parse_offset("-0530"), Some(-19_800));
     }
 
     #[test]

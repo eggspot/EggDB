@@ -950,3 +950,4 @@ its full title with its status.
 - [D923](decisions/D923.md) Code-only batch 571 (M13): SPARQL LOAD from allowed URLs
 - [D924](decisions/D924.md) Code-only batch 572 (M13): SPARQL SERVICE to allowed endpoints
 - [D925](decisions/D925.md) Code-only batch 573 (M16): CalDAV expand in calendar-data
+- [D926](decisions/D926.md) Code-only batch 574 (M16): CalDAV times in the object's own time zones
