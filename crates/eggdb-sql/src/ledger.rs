@@ -25,15 +25,30 @@ BEGIN
     RAISE EXCEPTION 'table %.% is a ledger: rows can be added, never changed or removed', TG_TABLE_SCHEMA, TG_TABLE_NAME USING ERRCODE = '55000';
 END
 $$;
-CREATE FUNCTION eggdb_ledger.protect(schema_name text, table_name text) RETURNS void LANGUAGE plpgsql AS $$
+CREATE FUNCTION eggdb_ledger.protect(schema_name text, table_name text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    previous text := '0000000000000000000000000000000000000000000000000000000000000000';
+    adopted bigint := 0;
+    found_row record;
+    hash text;
 BEGIN
     EXECUTE format('ALTER TABLE %I.%I ADD COLUMN ledger_seq bigint', schema_name, table_name);
     EXECUTE format('ALTER TABLE %I.%I ADD COLUMN ledger_previous text', schema_name, table_name);
     EXECUTE format('ALTER TABLE %I.%I ADD COLUMN ledger_hash text', schema_name, table_name);
+    EXECUTE 'CREATE SEQUENCE eggdb_ledger.adoption_order';
+    EXECUTE format('UPDATE %I.%I SET ledger_seq = nextval(%L)', schema_name, table_name, 'eggdb_ledger.adoption_order');
+    EXECUTE 'DROP SEQUENCE eggdb_ledger.adoption_order';
+    FOR found_row IN EXECUTE format('SELECT t.ledger_seq AS seq, ((to_jsonb(t) - %L) - %L)::text AS body FROM %I.%I t ORDER BY t.ledger_seq', 'ledger_hash', 'ledger_previous', schema_name, table_name) LOOP
+        hash := encode(sha256(previous || found_row.body), 'hex');
+        EXECUTE format('UPDATE %I.%I SET ledger_previous = %L, ledger_hash = %L WHERE ledger_seq = %s', schema_name, table_name, previous, hash, found_row.seq);
+        previous := hash;
+        adopted := found_row.seq;
+    END LOOP;
     EXECUTE format('CREATE TRIGGER eggdb_ledger_append BEFORE INSERT ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_ledger.append()', schema_name, table_name);
     EXECUTE format('CREATE TRIGGER eggdb_ledger_refuse BEFORE UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_ledger.refuse()', schema_name, table_name);
     EXECUTE format('CREATE TRIGGER eggdb_ledger_truncate BEFORE TRUNCATE ON %I.%I FOR EACH STATEMENT EXECUTE FUNCTION eggdb_ledger.refuse()', schema_name, table_name);
-    INSERT INTO eggdb_ledger.chains (table_schema, table_name, last_hash) VALUES (schema_name, table_name, '0000000000000000000000000000000000000000000000000000000000000000');
+    INSERT INTO eggdb_ledger.chains (table_schema, table_name, last_hash, last_seq) VALUES (schema_name, table_name, previous, adopted);
+    RETURN adopted;
 END
 $$;
 CREATE FUNCTION eggdb_ledger.verify(schema_name text, table_name text) RETURNS bigint LANGUAGE plpgsql AS $$
@@ -180,5 +195,25 @@ mod tests {
             run(&mut session, "SELECT count(*) AS n FROM receipts").unwrap(),
             "n\n1\nSELECT 1"
         );
+    }
+
+    #[test]
+    fn protecting_a_table_with_rows_chains_them_first() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_ledger",
+            "CREATE TABLE payments (id integer, amount numeric NOT NULL)",
+            "INSERT INTO payments (id, amount) VALUES (1, 10), (2, 25.5), (2, 25.5)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(run(&mut session, "SELECT eggdb_ledger.protect('public', 'payments') AS adopted").unwrap(), "adopted\n3\nSELECT 1");
+        run(&mut session, "INSERT INTO payments (id, amount) VALUES (4, 7)").unwrap();
+        assert_eq!(
+            run(&mut session, "SELECT eggdb_ledger.verify('public', 'payments') AS broken, max(ledger_seq) AS last FROM payments").unwrap(),
+            "broken|last\n0|4\nSELECT 1"
+        );
+        assert_eq!(run(&mut session, "UPDATE payments SET amount = 0 WHERE id = 1").unwrap_err().state().code(), "55000");
     }
 }

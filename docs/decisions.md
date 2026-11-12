@@ -778,3 +778,4 @@ its full title with its status.
 - [D751](decisions/D751.md) Code-only batch 399 (M6b): `CREATE EXTENSION eggdb_secrets`, AES-GCM sealed secrets and dynamic credentials, with `eggdb_seal` and `gen_random_bytes`
 - [D752](decisions/D752.md) Code-only batch 400 (M6b): `eggdb_blind_index`, HMAC blind indexes for searching sealed columns
 - [D753](decisions/D753.md) Code-only batch 401 (M6c): a schema registry with compatibility modes and data contracts in `eggdb_catalog`
+- [D754](decisions/D754.md) Code-only batch 402 (M6b): `eggdb_ledger.protect` on a table that already has rows
