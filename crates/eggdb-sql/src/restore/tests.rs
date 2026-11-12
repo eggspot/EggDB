@@ -1300,3 +1300,22 @@ ALTER TABLE public.t DISABLE TRIGGER t_off;
         .unwrap();
     assert_eq!(found, [Some("1".to_owned())]);
 }
+
+#[test]
+fn roles_and_grants_run_when_asked_and_are_passed_over_otherwise() {
+    let script = "CREATE ROLE reader;\nCREATE TABLE t (id integer);\nGRANT SELECT ON t TO reader;\n";
+    let store = crate::memory_store::MemoryStore::default();
+    let mut session = crate::Session::new(&store);
+    let mut input = script.as_bytes();
+    restore_dump(&mut session, &mut input, RestoreOptions { roles: true, ..RestoreOptions::default() }, &mut |_| {});
+    let mut roles = Vec::new();
+    session
+        .execute("SELECT has_table_privilege('reader', 't', 'SELECT')", &mut |result| roles.push(crate::tests::render(&result)))
+        .unwrap();
+    assert!(roles[0].contains("\nt\n"), "{roles:?}");
+    let plain = crate::memory_store::MemoryStore::default();
+    let mut other = crate::Session::new(&plain);
+    let mut input = script.as_bytes();
+    restore_dump(&mut other, &mut input, RestoreOptions::default(), &mut |_| {});
+    assert!(other.execute("SELECT has_table_privilege('reader', 't', 'SELECT')", &mut |_| {}).is_err());
+}

@@ -96,6 +96,18 @@ pub struct RestoreOptions<'a> {
     /// Substitution variables an Oracle script starts with, as `DEFINE name = value` would set
     /// them.
     pub defines: &'a [(String, String)],
+    /// Run the script's roles and privileges (`CREATE`, `ALTER` and `DROP ROLE`, `USER` and
+    /// `GROUP`, `GRANT` and `REVOKE`, as `pg_dumpall` writes them) instead of passing over them.
+    pub roles: bool,
+}
+
+fn role_statement(text: &str) -> bool {
+    let mut words = text.split_whitespace().map(str::to_ascii_lowercase);
+    match words.next().as_deref() {
+        Some("grant" | "revoke") => true,
+        Some("create" | "alter" | "drop") => matches!(words.next().as_deref(), Some("role" | "user" | "group")),
+        _ => false,
+    }
 }
 
 impl std::fmt::Debug for RestoreOptions<'_> {
@@ -105,6 +117,7 @@ impl std::fmt::Debug for RestoreOptions<'_> {
             .field("keep_going", &self.keep_going)
             .field("includes", &self.includes.is_some())
             .field("defines", &self.defines.len())
+            .field("roles", &self.roles)
             .finish()
     }
 }
@@ -759,8 +772,11 @@ impl<'a, 's> Restore<'a, 's> {
             return self.failed(&statement, &Effect::Other, error);
         }
         let session = &*self.session;
-        let action =
-            (self.rules.classify)(&statement.text, &|name| session.parameter(name).is_ok());
+        let action = if self.options.roles && role_statement(&statement.text) {
+            Action::Run(Effect::OtherDdl)
+        } else {
+            (self.rules.classify)(&statement.text, &|name| session.parameter(name).is_ok())
+        };
         match action {
             Action::Ignore(kind) => {
                 self.ignore(kind);

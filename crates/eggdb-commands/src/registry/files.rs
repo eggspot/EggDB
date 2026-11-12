@@ -381,6 +381,8 @@ everything skipped, ignored and failed, and is one JSON object in a pipe.
       --create            create the file if it is missing (built as <file>.restoring, renamed
                           when the restore succeeded, so a failed restore leaves no file)
       --keep-going        report an error and go on; exit 3 at the end if there was one
+      --roles             run the dump's roles and privileges (CREATE, ALTER and DROP ROLE, GRANT,
+                          REVOKE, as pg_dumpall writes them) instead of passing over them
       --dry-run           run the restore on a copy of the file (a scratch file with --create) and
                           remove it; the report says what a real run would do. Takes the file's
                           size in disk space and time
@@ -407,6 +409,10 @@ Examples:
         flag(
             "keep-going",
             "report an error and go on; exit 3 at the end if there was one",
+        ),
+        flag(
+            "roles",
+            "run the dump's roles and privileges (CREATE, ALTER and DROP ROLE, GRANT, REVOKE) instead of passing over them",
         ),
         flag(
             "dry-run",

@@ -680,7 +680,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   citext part's security-only second review (D35, D288); citext's regexp and string functions
   are built (D302).
 - `pg_dump --clean`, `pg_dumpall`'s roles and several databases, large objects and dumps in
-  encodings other than UTF-8 (D118).
+  encodings other than UTF-8 (D118). `pg_dumpall`'s roles and privileges with
+  `eggdb restore --roles`: **code written, unbuilt** (code-only mode, 2026-11-12, D848).
 - Composite and range columns in `COPY`'s binary format, and `LOG_VERBOSITY verbose` notices sent
   before a `REJECT_LIMIT` error (D154, D324). Ranges and composites written in binary, built-in ranges read: **code written,
   unbuilt** (code-only mode, 2026-11-12, D828); the `LOG_VERBOSITY` notices before the error: **code written,

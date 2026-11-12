@@ -313,6 +313,7 @@ impl Session<'_> {
             keep_going: self.request.restore.keep_going,
             includes: Some(&includes),
             defines: &defines,
+            roles: self.request.restore.roles,
         };
         let mut report = run_restore(
             &db,

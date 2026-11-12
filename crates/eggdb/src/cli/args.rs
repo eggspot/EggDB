@@ -300,6 +300,7 @@ impl CommandName {
             ),
             OptionName::Define => matches!(self, Self::Restore | Self::Sql),
             OptionName::KeepGoing => matches!(self, Self::Shell | Self::Restore),
+            OptionName::Roles => self == Self::Restore,
             OptionName::Report => self == Self::Restore,
             OptionName::At => matches!(self, Self::Restore | Self::Sql),
             OptionName::Mode => self == Self::Shell,
@@ -498,6 +499,7 @@ enum OptionName {
     Until,
     Changes,
     KeepGoing,
+    Roles,
     Mode,
     Csv,
     Parquet,
@@ -626,6 +628,7 @@ impl OptionName {
             b"until" => Self::Until,
             b"changes" => Self::Changes,
             b"keep-going" => Self::KeepGoing,
+            b"roles" => Self::Roles,
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
             b"parquet" => Self::Parquet,
@@ -696,6 +699,7 @@ impl OptionName {
                 | Self::Kql
                 | Self::DryRun
                 | Self::KeepGoing
+                | Self::Roles
                 | Self::Header
                 | Self::KeepNulls
                 | Self::Unicode
@@ -809,6 +813,7 @@ pub(crate) struct RestoreOptions {
     pub(crate) dump: Option<ExportFile>,
     pub(crate) report: Option<PathBuf>,
     pub(crate) keep_going: bool,
+    pub(crate) roles: bool,
     pub(crate) defines: Vec<(String, String)>,
     pub(crate) at: Option<String>,
 }
@@ -1330,6 +1335,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.restore.keep_going = true;
             }
             OptionName::KeepGoing => request.shell.keep_going = true,
+            OptionName::Roles => request.restore.roles = true,
             OptionName::Report => request.restore.report = Some(PathBuf::from(value)),
             OptionName::At => request.restore.at = Some(value.to_string_lossy().into_owned()),
             OptionName::Dialect if command == CommandName::Restore => {
