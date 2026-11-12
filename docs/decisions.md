@@ -852,3 +852,4 @@ its full title with its status.
 - [D825](decisions/D825.md) Code-only batch 473 (M6b): the authentication rule file on the MySQL listener
 - [D826](decisions/D826.md) Code-only batch 474 (M6b): the authentication rule file on the TDS listener
 - [D827](decisions/D827.md) Code-only batch 475 (M6b): SET ROLE and RESET ROLE
+- [D828](decisions/D828.md) Code-only batch 476 (M6a): ranges and composites in the binary format

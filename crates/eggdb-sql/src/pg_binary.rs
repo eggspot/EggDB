@@ -28,6 +28,11 @@ const NUMERIC_OID: u32 = 1700;
 const UUID_OID: u32 = 2950;
 const JSONB_OID: u32 = 3802;
 const CITEXT_OID: u32 = crate::citext::CITEXT_OID;
+const RANGE_EMPTY: u8 = 0x01;
+const RANGE_LOWER_INCLUSIVE: u8 = 0x02;
+const RANGE_UPPER_INCLUSIVE: u8 = 0x04;
+const RANGE_LOWER_INFINITE: u8 = 0x08;
+const RANGE_UPPER_INFINITE: u8 = 0x10;
 const HSTORE_OID: u32 = crate::hstore::HSTORE_OID;
 const VECTOR_OID: u32 = crate::vector_type::VECTOR_OID;
 
@@ -95,6 +100,13 @@ fn no_binary_form(oid: u32) -> SqlError {
 /// `DataRow` in binary format and `COPY ... (FORMAT binary)` carry it, with a type that has
 /// no binary form of its own sent as its text in `zone`; `None` for NULL.
 pub fn encode_pg_binary(value: &Value, oid: u32, zone: TimeZone) -> SqlResult<Option<Vec<u8>>> {
+    if let Value::Defined(defined) = value {
+        match defined.as_ref() {
+            crate::types::DefinedValue::Record(record) => return record_binary(record, zone).map(Some),
+            crate::types::DefinedValue::Range(range) => return range_binary(range, zone).map(Some),
+            _ => {}
+        }
+    }
     if ARRAY_OIDS.contains(&oid) || matches!(value, Value::Array(_)) {
         return match value {
             Value::Null => Ok(None),
@@ -206,6 +218,91 @@ pub fn encode_pg_binary(value: &Value, oid: u32, zone: TimeZone) -> SqlResult<Op
         _ => text.into_bytes(),
     };
     Ok(Some(bytes))
+}
+
+fn field_oid(value: &Value) -> u32 {
+    value.sql_type().map_or(TEXT_OID, crate::pg_catalog::type_oid)
+}
+
+fn put_field(out: &mut Vec<u8>, bytes: Option<Vec<u8>>) -> SqlResult<()> {
+    match bytes {
+        Some(bytes) => {
+            let length = i32::try_from(bytes.len()).map_err(|_| incorrect_binary())?;
+            out.extend_from_slice(&length.to_be_bytes());
+            out.extend_from_slice(&bytes);
+        }
+        None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+    }
+    Ok(())
+}
+
+fn record_binary(record: &crate::records::RecordValue, zone: TimeZone) -> SqlResult<Vec<u8>> {
+    let count = i32::try_from(record.fields.len()).map_err(|_| incorrect_binary())?;
+    let mut out = count.to_be_bytes().to_vec();
+    for field in &record.fields {
+        let oid = field_oid(field);
+        out.extend_from_slice(&oid.to_be_bytes());
+        put_field(&mut out, encode_pg_binary(field, oid, zone)?)?;
+    }
+    Ok(out)
+}
+
+fn range_binary(range: &crate::ranges::RangeValue, zone: TimeZone) -> SqlResult<Vec<u8>> {
+    use crate::ranges::RangeBound;
+    let Some(bounds) = &range.bounds else {
+        return Ok(vec![RANGE_EMPTY]);
+    };
+    let subtype = crate::ranges::builtin(range.type_oid).map(|builtin| crate::pg_catalog::type_oid(builtin.subtype));
+    let mut flags = 0u8;
+    let mut out = vec![0u8];
+    for (bound, inclusive, infinite) in [
+        (&bounds.lower, RANGE_LOWER_INCLUSIVE, RANGE_LOWER_INFINITE),
+        (&bounds.upper, RANGE_UPPER_INCLUSIVE, RANGE_UPPER_INFINITE),
+    ] {
+        let value = match bound {
+            RangeBound::Unbounded => {
+                flags |= infinite;
+                continue;
+            }
+            RangeBound::Inclusive(value) => {
+                flags |= inclusive;
+                value
+            }
+            RangeBound::Exclusive(value) => value,
+        };
+        let oid = subtype.unwrap_or_else(|| field_oid(value));
+        put_field(&mut out, encode_pg_binary(value, oid, zone)?)?;
+    }
+    out[0] = flags;
+    Ok(out)
+}
+
+fn range_text(bytes: &[u8], subtype: u32) -> SqlResult<String> {
+    let (&flags, mut rest) = bytes.split_first().ok_or_else(incorrect_binary)?;
+    if flags & RANGE_EMPTY != 0 {
+        return if rest.is_empty() { Ok("empty".to_owned()) } else { Err(incorrect_binary()) };
+    }
+    let mut bound = |infinite: u8| -> SqlResult<String> {
+        if flags & infinite != 0 {
+            return Ok(String::new());
+        }
+        let length = rest.get(..4).map(|word| i32::from_be_bytes(four(word))).ok_or_else(incorrect_binary)?;
+        let length = usize::try_from(length).map_err(|_| incorrect_binary())?;
+        let value = rest.get(4..4 + length).ok_or_else(incorrect_binary)?;
+        rest = &rest[4 + length..];
+        let text = decode_pg_binary_text(value, subtype)?;
+        Ok(format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"")))
+    };
+    let lower = bound(RANGE_LOWER_INFINITE)?;
+    let upper = bound(RANGE_UPPER_INFINITE)?;
+    if !rest.is_empty() {
+        return Err(incorrect_binary());
+    }
+    Ok(format!(
+        "{}{lower},{upper}{}",
+        if flags & RANGE_LOWER_INCLUSIVE != 0 { '[' } else { '(' },
+        if flags & RANGE_UPPER_INCLUSIVE != 0 { ']' } else { ')' }
+    ))
 }
 
 fn put_length(out: &mut Vec<u8>, length: usize) -> Option<()> {
@@ -558,6 +655,10 @@ pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
                 .map(|values| crate::vector_type::to_text(&values));
         }
         oid if TEXT_INPUT_OIDS.contains(&oid) => return text_of(bytes),
+        oid if crate::ranges::builtin(oid).is_some() => {
+            let subtype = crate::ranges::builtin(oid).map_or(TEXT_OID, |builtin| crate::pg_catalog::type_oid(builtin.subtype));
+            return range_text(bytes, subtype);
+        }
         oid => match ArrayElement::of_array_oid(oid) {
             Some(element) => Value::Array(Box::new(decode_array(bytes, element)?)),
             None => return Err(no_binary_form(oid)),
@@ -568,7 +669,10 @@ pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
 
 pub(crate) fn writes_binary(sql_type: SqlType) -> bool {
     match sql_type {
-        SqlType::Defined(defined) => matches!(defined.kind, DefinedKind::Enum | DefinedKind::Base),
+        SqlType::Defined(defined) => matches!(
+            defined.kind,
+            DefinedKind::Enum | DefinedKind::Base | DefinedKind::Composite | DefinedKind::Range
+        ),
         SqlType::Catalog(kind) => !matches!(
             kind,
             CatalogType::NodeTree
@@ -583,6 +687,7 @@ pub(crate) fn writes_binary(sql_type: SqlType) -> bool {
 
 pub(crate) fn reads_binary(sql_type: SqlType) -> bool {
     match sql_type {
+        SqlType::Defined(defined) if defined.kind == DefinedKind::Range => crate::ranges::builtin(defined.oid).is_some(),
         SqlType::Defined(defined) => matches!(defined.kind, DefinedKind::Enum | DefinedKind::Base),
         SqlType::Array(element) => {
             !matches!(element.sql_type(), SqlType::Array(_)) && reads_binary(element.sql_type())
@@ -801,6 +906,43 @@ mod tests {
         assert!(reads_binary(SqlType::Defined(
             crate::types::DefinedType::CITEXT
         )));
+    }
+
+    #[test]
+    fn ranges_and_records_have_their_binary_forms() {
+        use crate::ranges::{RangeBound, RangeBounds, RangeValue};
+        let range = Value::Defined(Box::new(crate::types::DefinedValue::Range(RangeValue {
+            type_oid: 3904,
+            bounds: Some(RangeBounds {
+                lower: RangeBound::Inclusive(Value::Integer(1)),
+                upper: RangeBound::Exclusive(Value::Integer(5)),
+            }),
+        })));
+        let bytes = encode_pg_binary(&range, 3904, TimeZone::UTC).unwrap().unwrap();
+        let expected = [
+            &[RANGE_LOWER_INCLUSIVE][..],
+            &4i32.to_be_bytes(),
+            &1i32.to_be_bytes(),
+            &4i32.to_be_bytes(),
+            &5i32.to_be_bytes(),
+        ]
+        .concat();
+        assert_eq!(bytes, expected);
+        assert_eq!(decode_pg_binary_text(&bytes, 3904).unwrap(), "[\"1\",\"5\")");
+        assert_eq!(decode_pg_binary_text(&[RANGE_EMPTY], 3904).unwrap(), "empty");
+        assert!(decode_pg_binary_text(&bytes[..6], 3904).is_err());
+        let record = crate::records::record_value(2249, vec![Value::Integer(7), Value::Null], vec![]);
+        let bytes = encode_pg_binary(&record, 2249, TimeZone::UTC).unwrap().unwrap();
+        let expected = [
+            &2i32.to_be_bytes()[..],
+            &INT4_OID.to_be_bytes(),
+            &4i32.to_be_bytes(),
+            &7i32.to_be_bytes(),
+            &TEXT_OID.to_be_bytes(),
+            &(-1i32).to_be_bytes(),
+        ]
+        .concat();
+        assert_eq!(bytes, expected);
     }
 
     #[test]
