@@ -809,7 +809,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-11, D489); `performance_schema.events_statements_summary_by_digest`:
   **code written, unbuilt** (code-only mode, 2026-11-12, D813).
 - SQLite's `.scanstats on|off` in `eggdb sql`'s shell: after each `SELECT` the shell prints its
-  `QUERY PLAN` with `--SCAN t (loops=1 rows=3)` lines (D327).
+  `QUERY PLAN` with `--SCAN t (loops=1 rows=3)` lines (D327). **Code written, unbuilt** (code-only mode, 2026-11-12, D814), as a second
+  result in `QUERY PLAN`'s table form.
 - MySQL's `EXPLAIN FORMAT=JSON`: `key_length` (**code written, unbuilt**, code-only mode, 2026-11-12, D663),
   `used_columns`, `data_read_per_join`, subqueries
   (`attached_subqueries`), conditions in MySQL's `` `db`.`t`.`c` `` spelling, format version 2;

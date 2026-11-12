@@ -838,3 +838,4 @@ its full title with its status.
 - [D811](decisions/D811.md) Code-only batch 459 (M16): JetStream mirrors and sources
 - [D812](decisions/D812.md) Code-only batch 460 (M6b): a FIPS-only mode in TLS
 - [D813](decisions/D813.md) Code-only batch 461 (M6c): MySQL `performance_schema.events_statements_summary_by_digest`
+- [D814](decisions/D814.md) Code-only batch 462 (M6c): SQLite `.scanstats` in the shell

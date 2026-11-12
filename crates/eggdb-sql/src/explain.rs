@@ -947,6 +947,26 @@ fn sqlite_detail(source: &ExplainedSource) -> String {
     }
 }
 
+/// SQLite's `.scanstats on` output for a `SELECT` that ran: its `QUERY PLAN` rows, each scan's
+/// detail followed by `(loops=1 rows=n)` with the rows the executor read from it.
+pub(crate) fn render_scan_stats(query: &ExplainedQuery, selects: &[MeasuredSelect]) -> QueryResult {
+    let mut rows = sqlite_rows(query);
+    for (position, row) in rows.iter_mut().take(query.sources.len()).enumerate() {
+        let measured = if query.appended {
+            selects.get(position)
+        } else if position == 0 {
+            selects.first()
+        } else {
+            None
+        };
+        if let (Some(source), Some(Value::Text(detail))) = (measured.and_then(|select| select.source), row.get_mut(3)) {
+            detail.push_str(&format!(" (loops=1 rows={})", source.rows));
+        }
+    }
+    let tag = format!("SELECT {}", rows.len());
+    QueryResult::rows(tag, columns(ExplainStyle::QueryPlan, Dialect::Sqlite), rows)
+}
+
 fn sqlite_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
     let mut details: Vec<String> = query.sources.iter().map(sqlite_detail).collect();
     if query.sorted {

@@ -543,6 +543,7 @@ pub struct Session<'s> {
     statement_start: usize,
     shown_statement: Option<String>,
     explain_plan_displays: bool,
+    scan_stats: bool,
     creating_plan_table: bool,
     table_variables: crate::table_variables::TableVariables,
     extra_results: Vec<QueryResult>,
@@ -632,6 +633,7 @@ impl<'s> Session<'s> {
             statement_start: 0,
             shown_statement: None,
             explain_plan_displays: false,
+            scan_stats: false,
             creating_plan_table: false,
             table_variables: crate::table_variables::TableVariables::default(),
             extra_results: Vec::new(),
@@ -723,6 +725,34 @@ impl<'s> Session<'s> {
     /// statement's text. `false` is the default.
     pub fn set_explain_plan_displays(&mut self, displays: bool) {
         self.explain_plan_displays = displays;
+    }
+
+    /// SQLite's `.scanstats on`: in the SQLite dialect, each `SELECT` is followed by a second
+    /// result, its `QUERY PLAN` with `(loops=1 rows=n)` on each scan the executor measured.
+    /// `false` is the default.
+    pub fn set_scan_stats(&mut self, on: bool) {
+        self.scan_stats = on;
+    }
+
+    fn scan_stats_plan(&mut self, statement: &Statement) -> Option<crate::explain::Planned> {
+        if !(self.scan_stats && self.sqlite())
+            || crate::explain::PlannedStatement::of(statement) != Some(crate::explain::PlannedStatement::Select)
+        {
+            return None;
+        }
+        let settings = Arc::clone(&self.settings);
+        let binding = Binding {
+            settings: &settings,
+            walk_expressions: true,
+            target_privilege: Some(crate::roles::target_privilege(statement)),
+        };
+        let mut planned = statement.clone();
+        let dialect = self.dialect;
+        self.read(|reader, tables| {
+            binding.statement(reader, tables, &mut planned)?;
+            crate::explain::plan(reader, tables, &planned, crate::ast::ExplainStyle::QueryPlan, dialect)
+        })
+        .ok()
     }
 
     /// The dialect this session reads: the one it was opened in, or the one a client chose
@@ -2191,7 +2221,18 @@ impl<'s> Session<'s> {
                     .map(|shown| shown.trim().trim_end_matches(';').trim_end().to_owned());
             }
             let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
-            let result = with_raised_notices(self.run(&mut statement, &mut io));
+            let scan_plan = self.scan_stats_plan(&statement);
+            let result = match &scan_plan {
+                Some(plan) => {
+                    let (result, selects, _) =
+                        crate::step_times::record_with_subplans(|| with_raised_notices(self.run(&mut statement, &mut io)));
+                    if result.is_ok() {
+                        self.extra_results.push(crate::explain::render_scan_stats(&plan.query, &selects));
+                    }
+                    result
+                }
+                None => with_raised_notices(self.run(&mut statement, &mut io)),
+            };
             let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
             self.record_statement(statement_tokens, text, started, &result);
             self.portals = crate::portals::take();

@@ -48,13 +48,14 @@ const KEY_VALUE_COMMANDS: [&str; 14] = [
     "cas",
     "collection",
 ];
-const META_COMMANDS: [&str; 8] = [
+const META_COMMANDS: [&str; 9] = [
     ".help",
     ".tables",
     ".schema",
     ".collection",
     ".mode",
     ".timer",
+    ".scanstats",
     ".quit",
     ".exit",
 ];
@@ -225,6 +226,7 @@ struct Shell<'s, 'db: 's> {
     entry: String,
     mode: ResultMode,
     timer: bool,
+    scan_stats: bool,
     width: Option<usize>,
     color_out: bool,
     color_err: bool,
@@ -284,6 +286,7 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
             buffer: String::new(),
             entry: String::new(),
             timer: false,
+            scan_stats: false,
             width: None,
             history_path,
             history_notice,
@@ -1093,6 +1096,25 @@ impl<'s, 'db: 's> Shell<'s, 'db> {
                 &format!(".timer takes on or off, not '{other}'"),
                 Exit::Usage,
             ),
+            (".scanstats", None) => {
+                let text = format!("scanstats: {}\n", if self.scan_stats { "on" } else { "off" });
+                self.print(console, &text);
+                Step::Continue(Exit::Done)
+            }
+            (".scanstats", Some(state @ ("on" | "off"))) => {
+                self.scan_stats = state == "on";
+                self.sql.set_scan_stats(self.scan_stats);
+                if self.scan_stats && self.sql.dialect() != Dialect::Sqlite {
+                    self.print_err_styled(console, Style::Dim, "scanstats applies to the SQLite dialect (--dialect sqlite)\n");
+                }
+                self.print(console, &format!("scanstats: {state}\n"));
+                Step::Continue(Exit::Done)
+            }
+            (".scanstats", Some(other)) => self.fail(
+                console,
+                &format!(".scanstats takes on or off, not '{other}'"),
+                Exit::Usage,
+            ),
             (known, Some(_)) if META_COMMANDS.contains(&known) => self.fail(
                 console,
                 &format!("{known} takes no argument. Type .help for the list."),
@@ -1288,6 +1310,7 @@ Shell commands:
                                a name chooses one, - returns to the default key space
   .mode [table|expanded|csv]   how results print; no argument shows the current mode
   .timer [on|off]              print each command's time
+  .scanstats [on|off]          after each SELECT, its QUERY PLAN with rows read (SQLite dialect)
   \\copy t from 'file' [options]  load a file into a table, read here (also: from stdin)
   \\copy t to 'file' [options]    unload a table or a (query) into a file here (or: to stdout)
   .help                        this text
@@ -1538,7 +1561,7 @@ Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L t
                         .filter(|mode| mode.starts_with(word))
                         .map(|mode| (*mode).to_owned())
                         .collect(),
-                    (".timer", 1) => ["on", "off"]
+                    (".timer" | ".scanstats", 1) => ["on", "off"]
                         .iter()
                         .filter(|state| state.starts_with(word))
                         .map(|state| (*state).to_owned())

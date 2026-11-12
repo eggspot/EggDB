@@ -478,6 +478,12 @@ fn sqlite_indexes_follow_sqlite() {
         ),
         "id|parent|notused|detail\n2|0|0|SCAN t\n3|0|0|USE TEMP B-TREE FOR ORDER BY\nSELECT 2"
     );
+    session.set_scan_stats(true);
+    assert_eq!(
+        last(&mut session, "SELECT * FROM t ORDER BY a"),
+        "id|parent|notused|detail\n2|0|0|SCAN t (loops=1 rows=2)\n3|0|0|USE TEMP B-TREE FOR ORDER BY\nSELECT 2"
+    );
+    session.set_scan_stats(false);
     let missing = fails(&mut session, "DROP INDEX nope");
     assert_eq!(missing.to_string(), "Error: no such index: nope");
     let twice = fails(&mut session, "CREATE INDEX t_b ON t (a)");

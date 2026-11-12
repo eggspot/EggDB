@@ -649,6 +649,7 @@ Shell commands:
   .schema [table]              CREATE TABLE statements, all or one
   .mode [table|expanded|csv]   how results print; no argument shows the current mode
   .timer [on|off]              print each command's time
+  .scanstats [on|off]          after each SELECT, its QUERY PLAN with rows read (SQLite dialect)
   .help                        this text
   .quit  .exit                 leave (so does Ctrl-D on an empty line)
 Keys: Tab completes, Up/Down and Ctrl-R recall, Ctrl-C clears the line, Ctrl-L the screen.
