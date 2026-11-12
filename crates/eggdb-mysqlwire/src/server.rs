@@ -59,6 +59,10 @@ pub struct ServerConfig {
     /// The TLS setup, when the server offers TLS (D161): `CLIENT_SSL` is then advertised, and
     /// connections from other machines must use it.
     pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
+    /// The rule file that picks how stored roles log in (`--auth-rules`), as on the PostgreSQL
+    /// listener: `scram-sha-256` (the stored password), `ldap`, `jwt`, `apikey`, `cert` or
+    /// `reject`; `oauth` is refused, MySQL clients having no `OAUTHBEARER`.
+    pub auth_rules: Option<std::sync::Arc<eggdb_auth::AuthRules>>,
 }
 
 /// Why a listener was not opened.

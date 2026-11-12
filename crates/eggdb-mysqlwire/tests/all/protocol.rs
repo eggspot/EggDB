@@ -576,6 +576,7 @@ fn the_server_refuses_to_serve_an_empty_password() {
         idle_timeout: None,
         memory_budget: std::sync::Arc::default(),
         tls: None,
+        auth_rules: None,
     };
     let refused = eggdb_mysqlwire::serve(&store, &listener, &config, &|| false, &|_| {});
     assert_eq!(

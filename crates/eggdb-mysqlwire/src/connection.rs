@@ -332,11 +332,132 @@ fn stored_role_verifier<D: DatabaseDirectory>(
     eggdb_auth::scram::ScramVerifier::from_stored(&text)
 }
 
+fn may_log_in<D: DatabaseDirectory>(directory: &D, database: &str, user: &str) -> bool {
+    directory
+        .matching_name(database)
+        .and_then(|name| directory.attach(&name))
+        .and_then(|attached| {
+            let reader = attached.begin_read().ok()?;
+            eggdb_sql::stored_role(&reader, user).ok().flatten()
+        })
+        .is_some_and(|role| role.login)
+}
+
+fn ruled_password_check(
+    method: &eggdb_auth::AuthMethod,
+    user: &str,
+    password: &[u8],
+    api_key_ok: &dyn Fn(&str) -> bool,
+) -> Result<(), String> {
+    let text = std::str::from_utf8(password).map_err(|_| "the password is not UTF-8".to_owned())?;
+    match method {
+        eggdb_auth::AuthMethod::Ldap(config) => match config.authenticate(user, text) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("the LDAP server refused the password".to_owned()),
+            Err(error) => Err(error.to_string()),
+        },
+        eggdb_auth::AuthMethod::Jwt { keys, policy } => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+            match eggdb_auth::jwt::verify(text, keys, policy, now) {
+                Ok(named) if named == user => Ok(()),
+                Ok(_) => Err("the token names another user".to_owned()),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        eggdb_auth::AuthMethod::ApiKey => {
+            if api_key_ok(text) {
+                Ok(())
+            } else {
+                Err("the API key is not a live key of this role".to_owned())
+            }
+        }
+        _ => Err("no password method".to_owned()),
+    }
+}
+
+fn authenticate_by_rule<D: DatabaseDirectory>(
+    wire: &mut Wire<'_>,
+    shared: &Shared<'_>,
+    response: &crate::packets::HandshakeResponse,
+    directory: &D,
+    database: &str,
+) -> Outcome {
+    let method = shared
+        .config
+        .auth_rules
+        .as_ref()
+        .map_or(eggdb_auth::AuthMethod::ScramSha256, |rules| {
+            rules
+                .method_for_connection(&response.user, Some(database), wire.peer_ip())
+                .clone()
+        });
+    let deny = |wire: &mut Wire<'_>, why: &str| {
+        (shared.log)(&format!(
+            "{}  login refused for user \"{}\": {why}",
+            wire.peer(),
+            printable(&response.user)
+        ));
+        eggdb_sql::audit_events::record_login(
+            &response.user,
+            database,
+            "mysql",
+            &wire.peer(),
+            "rule",
+            false,
+        );
+        refuse(
+            wire,
+            1045,
+            "28000",
+            &format!("Access denied for user '{}'@'localhost'", response.user),
+        );
+        Outcome::Refused
+    };
+    match &method {
+        eggdb_auth::AuthMethod::ScramSha256 => {
+            let verifier = stored_role_verifier(directory, database, &response.user);
+            authenticate_stored_role(wire, shared, response, verifier.as_ref(), None)
+        }
+        eggdb_auth::AuthMethod::Reject => deny(wire, "the rule file rejects the user"),
+        eggdb_auth::AuthMethod::OAuthBearer { .. } => deny(wire, "oauth needs OAUTHBEARER, which MySQL clients do not have"),
+        eggdb_auth::AuthMethod::Certificate => {
+            let named = wire
+                .tls()
+                .and_then(|info| info.peer_certificates.first())
+                .is_some_and(|leaf| leaf.subject().common_names().iter().any(|name| name == &response.user));
+            if !named {
+                return deny(wire, "no TLS client certificate names the user");
+            }
+            if !may_log_in(directory, database, &response.user) {
+                return deny(wire, "no stored role with LOGIN has this name");
+            }
+            eggdb_sql::audit_events::record_login(&response.user, database, "mysql", &wire.peer(), "cert", true);
+            Outcome::Accepted
+        }
+        external => {
+            let api_key_ok = |key: &str| {
+                directory
+                    .matching_name(database)
+                    .and_then(|name| directory.attach(&name))
+                    .is_some_and(|attached| eggdb_sql::api_keys::check_api_key(&attached, &response.user, key))
+            };
+            let check = |password: &[u8]| {
+                ruled_password_check(external, &response.user, password, &api_key_ok).is_ok()
+                    && may_log_in(directory, database, &response.user)
+            };
+            authenticate_stored_role(wire, shared, response, None, Some(&check))
+        }
+    }
+}
+
 fn authenticate_stored_role(
     wire: &mut Wire<'_>,
     shared: &Shared<'_>,
     response: &crate::packets::HandshakeResponse,
     verifier: Option<&eggdb_auth::scram::ScramVerifier>,
+    external: Option<&dyn Fn(&[u8]) -> bool>,
 ) -> Outcome {
     if wire.tls().is_none() && !wire.is_local() && !wire.peer_is_loopback() {
         refuse(
@@ -368,7 +489,10 @@ fn authenticate_stored_role(
         }
     };
     let password = answer.strip_suffix(&[0]).unwrap_or(&answer);
-    let accepted = verifier.is_some_and(|verifier| verifier.matches_password(password));
+    let accepted = match external {
+        Some(check) => check(password),
+        None => verifier.is_some_and(|verifier| verifier.matches_password(password)),
+    };
     eggdb_sql::audit_events::record_login(
         &response.user,
         response.database.as_deref().unwrap_or_default(),
@@ -475,8 +599,8 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
             .as_deref()
             .filter(|database| !database.is_empty())
             .unwrap_or(&shared.config.database);
-        let verifier = stored_role_verifier(directory, wanted, &response.user);
-        authenticate_stored_role(&mut wire, shared, &response, verifier.as_ref())
+        let wanted = wanted.to_owned();
+        authenticate_by_rule(&mut wire, shared, &response, directory, &wanted)
     };
     if let Outcome::Refused = outcome {
         return;

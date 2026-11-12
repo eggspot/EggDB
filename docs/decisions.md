@@ -849,3 +849,4 @@ its full title with its status.
 - [D822](decisions/D822.md) Code-only batch 470 (M6b): SQL Server security policies with filter predicates
 - [D823](decisions/D823.md) Code-only batch 471 (M6b): MySQL logins for stored roles
 - [D824](decisions/D824.md) Code-only batch 472 (M6b): TDS logins for stored roles
+- [D825](decisions/D825.md) Code-only batch 473 (M6b): the authentication rule file on the MySQL listener

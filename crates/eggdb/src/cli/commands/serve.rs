@@ -684,6 +684,7 @@ impl Session<'_> {
             idle_timeout,
             memory_budget: Arc::clone(&memory_budget),
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.mysql)),
+            auth_rules: config.auth_rules.clone(),
         });
         let tds_config = tds_credentials.map(|credentials| eggdb_tdswire::ServerConfig {
             user: config.user.clone(),

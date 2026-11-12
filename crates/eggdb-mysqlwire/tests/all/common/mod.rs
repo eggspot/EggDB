@@ -257,6 +257,7 @@ impl TestServer {
             idle_timeout: limits.idle_timeout,
             memory_budget: limits.memory_budget,
             tls,
+            auth_rules: None,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);
@@ -289,6 +290,7 @@ impl TestServer {
             idle_timeout: None,
             memory_budget: Arc::default(),
             tls: None,
+            auth_rules: None,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);

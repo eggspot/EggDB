@@ -237,6 +237,10 @@ impl<'a> Wire<'a> {
         self.stream.peer_is_loopback()
     }
 
+    pub(crate) fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        self.stream.peer_ip()
+    }
+
     pub(crate) fn tls(&self) -> Option<&SessionInfo> {
         self.stream.tls()
     }
