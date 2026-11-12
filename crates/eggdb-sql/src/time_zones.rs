@@ -195,7 +195,9 @@ impl TimeZone {
         }
     }
 
-    pub(crate) fn offset_at(self, utc_micros: i64) -> i32 {
+    /// The zone's offset east of UTC, in seconds, at the instant `utc_micros` (microseconds since
+    /// 2000-01-01 UTC, as `Value::TimestampTz` holds instants).
+    pub fn offset_at(self, utc_micros: i64) -> i32 {
         match self.0 {
             Zone::Fixed(offset) => offset,
             Zone::Region(found) => found.offset_at(utc_micros.div_euclid(MICROS_PER_SECOND)),

@@ -1,7 +1,7 @@
 use crate::api::json_string;
 use crate::store::{SCHEMA, identifier, literal, run};
 use crate::line_protocol::{FieldValue, Point};
-use eggdb_sql::{QueryResult, Session, Value};
+use eggdb_sql::{QueryResult, Session, TimeZone, Value};
 
 const UNIX_EPOCH_FROM_2000_MICROS: i64 = 946_684_800_000_000;
 const MICROS_PER_DAY: i64 = 86_400_000_000;
@@ -325,6 +325,7 @@ enum Target {
 #[derive(Debug, Default, Clone, PartialEq)]
 struct Select {
     items: Vec<Item>,
+    zone: Option<(String, TimeZone)>,
     into: Option<Target>,
     sources: Vec<Source>,
     group_all: bool,
@@ -681,6 +682,14 @@ impl Reader {
                 &mut select.limit
             } else if token.keyword("offset") {
                 &mut select.offset
+            } else if token.keyword("tz") {
+                self.at += 1;
+                let (Some(Token::Open), Some(Token::Text(name)), Some(Token::Close)) = (self.next(), self.next(), self.next()) else {
+                    return Err("tz() needs one quoted time zone name".to_owned());
+                };
+                let zone = TimeZone::named(&name).ok_or_else(|| format!("unable to find time zone {name}"))?;
+                select.zone = Some((name, zone));
+                continue;
             } else if token.keyword("slimit") || token.keyword("soffset") {
                 self.at += 1;
                 let count = match self.next() {
@@ -792,11 +801,20 @@ fn plan(select: &Select, from: &str, columns: &[(String, String)]) -> Result<Pla
         outputs.push(format!("{} AS {}", column(tag), column(tag)));
     }
     outputs.push(match (&select.bucket, aggregate) {
-        (Some(bucket), _) => format!(
-            "time_bucket({}, \"time\", '1970-01-01T00:00:00Z'::timestamptz{}) AS \"time\"",
-            bucket.interval,
-            bucket.offset_sql.as_deref().map_or(String::new(), |offset| format!(" {offset}"))
-        ),
+        (Some(bucket), _) => {
+            let offset = bucket.offset_sql.as_deref().map_or(String::new(), |offset| format!(" {offset}"));
+            match &select.zone {
+                Some((name, _)) => format!(
+                    "time_bucket({}, \"time\" AT TIME ZONE {zone}, '1970-01-01T00:00:00'::timestamp{offset}) AT TIME ZONE {zone} AS \"time\"",
+                    bucket.interval,
+                    zone = literal(name)
+                ),
+                None => format!(
+                    "time_bucket({}, \"time\", '1970-01-01T00:00:00Z'::timestamptz{offset}) AS \"time\"",
+                    bucket.interval
+                ),
+            }
+        }
         (None, true) => "'1970-01-01T00:00:00Z'::timestamptz AS \"time\"".to_owned(),
         (None, false) => "\"time\"".to_owned(),
     });
@@ -919,7 +937,11 @@ fn filled(select: &Select, rows: Vec<Vec<Value>>, range: Option<(i64, i64)>) -> 
         return Ok(Vec::new());
     };
     let width = bucket.micros;
-    let origin = bucket.offset_micros - UNIX_EPOCH_FROM_2000_MICROS;
+    let zone_shift = select
+        .zone
+        .as_ref()
+        .map_or(0, |(_, zone)| i64::from(zone.offset_at(first_known)) * 1_000_000);
+    let origin = bucket.offset_micros - UNIX_EPOCH_FROM_2000_MICROS - zone_shift;
     let floor = |at: i64| origin + (at - origin).div_euclid(width) * width;
     let (first, last) = range.map_or((first_known, last_known), |(lower, upper)| (floor(lower), floor(upper)));
     if (last - first) / width > MOST_FILLED_BUCKETS {
@@ -983,7 +1005,19 @@ fn civil(days: i64) -> (i64, i64, i64) {
     (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
-fn time_json(micros_since_2000: i64, epoch: Option<&str>) -> String {
+fn zone_suffix(zone: Option<TimeZone>, offset_seconds: i32) -> String {
+    match zone {
+        None => "Z".to_owned(),
+        Some(zone) if zone == TimeZone::UTC => "Z".to_owned(),
+        Some(_) => {
+            let sign = if offset_seconds < 0 { '-' } else { '+' };
+            let minutes = offset_seconds.unsigned_abs() / 60;
+            format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+        }
+    }
+}
+
+fn time_json(micros_since_2000: i64, epoch: Option<&str>, zone: Option<TimeZone>) -> String {
     let unix_micros = micros_since_2000.saturating_add(UNIX_EPOCH_FROM_2000_MICROS);
     match epoch {
         Some("ns") => (i128::from(unix_micros) * 1000).to_string(),
@@ -993,6 +1027,9 @@ fn time_json(micros_since_2000: i64, epoch: Option<&str>) -> String {
         Some("m") => unix_micros.div_euclid(60_000_000).to_string(),
         Some("h") => unix_micros.div_euclid(3_600_000_000).to_string(),
         _ => {
+            let offset_seconds = zone.map_or(0, |zone| zone.offset_at(micros_since_2000));
+            let suffix = zone_suffix(zone, offset_seconds);
+            let unix_micros = unix_micros.saturating_add(i64::from(offset_seconds) * 1_000_000);
             let (year, month, day) = civil(unix_micros.div_euclid(MICROS_PER_DAY));
             let of_day = unix_micros.rem_euclid(MICROS_PER_DAY);
             let seconds = of_day / 1_000_000;
@@ -1003,7 +1040,7 @@ fn time_json(micros_since_2000: i64, epoch: Option<&str>) -> String {
                 format!(".{fraction:06}").trim_end_matches('0').to_owned()
             };
             format!(
-                "\"{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}{fraction}Z\"",
+                "\"{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}{fraction}{suffix}\"",
                 seconds / 3600,
                 seconds / 60 % 60,
                 seconds % 60
@@ -1012,11 +1049,11 @@ fn time_json(micros_since_2000: i64, epoch: Option<&str>) -> String {
     }
 }
 
-fn value_json(value: &Value, epoch: Option<&str>) -> String {
+fn value_json(value: &Value, epoch: Option<&str>, zone: Option<TimeZone>) -> String {
     match value {
         Value::Null => "null".to_owned(),
         Value::Boolean(flag) => flag.to_string(),
-        Value::TimestampTz(micros) | Value::Timestamp(micros) => time_json(*micros, epoch),
+        Value::TimestampTz(micros) | Value::Timestamp(micros) => time_json(*micros, epoch, zone),
         Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Numeric(_) => value.to_text().unwrap_or_default(),
         Value::Double(number) if number.is_finite() => number.to_string(),
         Value::Real(number) if number.is_finite() => number.to_string(),
@@ -1125,7 +1162,7 @@ fn measurement_series(
         .map(|(tags, rows)| {
             let rows: Vec<Vec<String>> = rows
                 .iter()
-                .map(|row| row.iter().map(|value| value_json(value, epoch)).collect())
+                .map(|row| row.iter().map(|value| value_json(value, epoch, select.zone.as_ref().map(|(_, zone)| *zone))).collect())
                 .collect();
             series_json(measurement, (tag_count > 0).then_some(tags.as_slice()), &shown, &rows)
         })
@@ -1260,7 +1297,7 @@ fn select_into(session: &mut Session<'_>, select: &Select, target: &Target, epoc
         "result",
         None,
         &["time".to_owned(), "written".to_owned()],
-        &[vec![time_json(-UNIX_EPOCH_FROM_2000_MICROS, epoch), written.to_string()]],
+        &[vec![time_json(-UNIX_EPOCH_FROM_2000_MICROS, epoch, None), written.to_string()]],
     )])
 }
 
@@ -1452,8 +1489,12 @@ mod tests {
             planned("SELECT * FROM cpu ORDER BY time DESC LIMIT 2", &[("time", "x"), ("host", "text"), ("usage", "double precision")]),
             "SELECT \"time\", \"host\", \"usage\" FROM metrics.\"cpu\" ORDER BY 1 DESC LIMIT 2"
         );
-        assert_eq!(time_json(0, None), "\"2000-01-01T00:00:00Z\"");
-        assert_eq!(time_json(0, Some("s")), "946684800");
+        assert_eq!(time_json(0, None, None), "\"2000-01-01T00:00:00Z\"");
+        assert_eq!(time_json(0, Some("s"), None), "946684800");
+        assert_eq!(
+            time_json(0, None, TimeZone::named("America/Chicago")),
+            "\"1999-12-31T18:00:00-06:00\""
+        );
         assert_eq!(statements("SHOW DATABASES; SELECT 'a;b' FROM x").len(), 2);
         assert_eq!(
             planned(
