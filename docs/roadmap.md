@@ -740,7 +740,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   against backups, Merkle proofs, SQL Server's `WITH (LEDGER = ON)` (D38, D236).
 - A ledger on a table that already has rows (D236). **Code written, unbuilt** (code-only mode, 2026-11-12, D754).
 - Retention: holds over some rows, engine-level WORM, records schedules and eDiscovery export in
-  the EDRM style (D53, D246).
+  the EDRM style (D53, D246). Holds over some rows, records schedules and the EDRM export: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D762). Left: engine-level WORM.
 - Sovereignty: customer-held keys kept in-country, limits on operator access and logs of
   cross-border transfers (D53, D246).
 - Delta Sharing server and client after D58's legal check, and zero-copy shares between

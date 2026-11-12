@@ -786,3 +786,4 @@ its full title with its status.
 - [D759](decisions/D759.md) Code-only batch 407 (M6b): clean rooms with approved analyses, group-size thresholds and private set intersection
 - [D760](decisions/D760.md) Code-only batch 408 (M6c): a metering API with chargeback and showback, `CREATE EXTENSION eggdb_metering`
 - [D761](decisions/D761.md) Code-only batch 409 (M6b): evidence reports for SOC 2, HIPAA and PCI DSS, `CREATE EXTENSION eggdb_compliance`
+- [D762](decisions/D762.md) Code-only batch 410 (M6b): row-level legal holds, records schedules and EDRM eDiscovery export in `eggdb_retention`

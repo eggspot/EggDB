@@ -3715,6 +3715,27 @@ SELECT eggdb_retention.process_erasures();
 Refused changes fail with SQLSTATE `55000`. These are rules enforced by triggers, so a role that
 may drop triggers or tables can still go around them; grant those rights only to administrators.
 
+Holds over some rows, records schedules and eDiscovery exports (D762):
+
+```sql
+SELECT eggdb_retention.place_hold('case-7', 'public', 'trades', 'litigation', 'client = ''bob''');
+INSERT INTO eggdb_retention.record_classes (record_class, retain, citation) VALUES ('trade records', interval '7 years', 'SEC 17a-4');
+SELECT eggdb_retention.schedule('public', 'trades', 'booked_at', 'trade records');
+SELECT * FROM eggdb_retention.due_for_disposition();
+SELECT eggdb_retention.dispose('public', 'trades');
+SELECT eggdb_retention.export_ediscovery('case-7', 'public', 'trades', 'client = ''bob''', 'id');
+```
+
+- `place_hold`'s optional last argument is a row condition: the hold then stops changes and deletes only of the rows
+  it matches. Erasure requests and disposals skip those rows; a request whose rows are held waits.
+- `record_classes` is the records schedule: a retention period, a disposition (`delete`, or `review`, which needs
+  `dispose(schema, table, reviewed => true)`) and the rule it cites. `schedule(schema, table, time_column, class)`
+  applies a class to a table as a retention rule. `due_for_disposition()` counts each scheduled table's rows past
+  retention and not held, and `dispose(schema, table)` deletes them and logs it in `eggdb_retention.disposals`.
+- `export_ediscovery(matter, schema, table [, condition, key_column])` returns the matching rows as an EDRM XML load
+  file (one `Document` per row, each column a `Tag`, `DocID` from the key column), and logs the export with its
+  SHA-256 in `eggdb_retention.ediscovery_exports` for the chain of custody.
+
 ## Leases, leader election and feature flags (eggdb_coordination)
 
 `CREATE EXTENSION eggdb_coordination` gives services locks with fencing tokens, leader election
