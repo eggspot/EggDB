@@ -69,6 +69,7 @@ mod hash_index;
 mod hierarchy;
 mod hstore;
 mod vector_type;
+mod sqlserver_hierarchy;
 mod hstore_functions;
 mod hyperloglog;
 mod hypothetical_set;

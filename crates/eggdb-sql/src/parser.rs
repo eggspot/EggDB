@@ -5013,6 +5013,19 @@ impl<'t> Parser<'t> {
             let name = self.name()?;
             return self.function(name);
         }
+        if self.sqlserver()
+            && first.text.eq_ignore_ascii_case("hierarchyid")
+            && self.take(&TokenKind::DoubleColon)
+        {
+            let method = self.name()?;
+            let Some(function) = crate::sqlserver_hierarchy::static_function(&method.text) else {
+                return Err(self.not_supported(&format!("hierarchyid::{}", method.text)));
+            };
+            return self.function(Name {
+                text: function.to_owned(),
+                position: method.position,
+            });
+        }
         if self.oracle()
             && self.peek_kind() == &TokenKind::Dot
             && (self.is_word_at(1, "nextval") || self.is_word_at(1, "currval"))
@@ -5050,6 +5063,20 @@ impl<'t> Parser<'t> {
                 return Err(self.not_supported("a qualified * outside the select list"));
             }
             let column = self.name()?;
+            if self.sqlserver()
+                && self.peek_kind() == &TokenKind::LeftParen
+                && !first.text.eq_ignore_ascii_case("dbo")
+                && let Some(function) = crate::sqlserver_hierarchy::method_function(&column.text)
+            {
+                let target = Expr {
+                    kind: ExprKind::Column {
+                        qualifier: None,
+                        name: first.text,
+                    },
+                    position: first.position,
+                };
+                return self.hierarchy_method(target, function, column.position);
+            }
             if self.sqlserver()
                 && self.peek_kind() == &TokenKind::LeftParen
                 && !first.text.eq_ignore_ascii_case("dbo")
@@ -5147,6 +5174,22 @@ impl<'t> Parser<'t> {
                     },
                     position: first.position,
                 });
+            }
+            if self.sqlserver()
+                && self.peek_kind() == &TokenKind::Dot
+                && self.peek_kind_at(2) == &TokenKind::LeftParen
+                && let TokenKind::Word(word) = self.peek_kind_at(1)
+                && let Some(function) = crate::sqlserver_hierarchy::method_function(word.as_ref())
+            {
+                self.at += 2;
+                let target = Expr {
+                    kind: ExprKind::Column {
+                        qualifier: Some(first.text),
+                        name: column.text,
+                    },
+                    position: first.position,
+                };
+                return self.hierarchy_method(target, function, column.position);
             }
             if self.sqlserver() && self.peek_kind() == &TokenKind::Dot && self.at_xml_method(1) {
                 self.at += 1;

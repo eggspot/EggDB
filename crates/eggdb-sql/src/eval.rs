@@ -1619,6 +1619,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::temporal::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::sqlserver_hierarchy::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::bytea::function(name, &values) {
             return result;
         }

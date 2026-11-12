@@ -139,3 +139,27 @@ impl Parser<'_> {
         })
     }
 }
+
+impl Parser<'_> {
+    /// A `hierarchyid` instance method call on `target` (`node.GetLevel()`,
+    /// `node.IsDescendantOf(@root)`), with the method's `(` next.
+    pub(super) fn hierarchy_method(
+        &mut self,
+        target: Expr,
+        function: &str,
+        position: usize,
+    ) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut arguments = vec![target];
+        if !self.take(&TokenKind::RightParen) {
+            loop {
+                arguments.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RightParen)?;
+        }
+        Ok(call(function, arguments, position))
+    }
+}

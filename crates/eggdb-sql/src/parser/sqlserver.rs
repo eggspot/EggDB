@@ -24,6 +24,7 @@ use crate::types::Value;
 /// read it from `@@VERSION` and the TDS login acknowledgement.
 pub const SQLSERVER_COMPATIBLE_VERSION: &str = "16.0.1000";
 
+const HIERARCHYID_BYTES: u32 = 892;
 const RESERVED: [&str; 184] = [
     "add",
     "all",
@@ -1322,8 +1323,8 @@ impl<'t> Parser<'t> {
             },
             "xml" if self.peek_kind() != &TokenKind::LeftParen => SqlServerType::Xml,
             "xml" => return Err(not_supported("Typed xml (an XML schema collection)").at(position)),
-            "rowversion" | "timestamp" | "sql_variant" | "hierarchyid" | "geography"
-            | "geometry" => {
+            "hierarchyid" => SqlServerType::VarBinary(Length::Given(HIERARCHYID_BYTES)),
+            "rowversion" | "timestamp" | "sql_variant" | "geography" | "geometry" => {
                 return Err(not_supported(&format!("The data type {word}")).at(position));
             }
             _ => return Err(unknown_type(&word, position)),

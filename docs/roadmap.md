@@ -1195,7 +1195,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-12, D600).
 - SQL Server's `rowversion`, `sql_variant`, `xml` and `hierarchyid` (D19). Untyped `xml` with `value()`, `query()`
   and `exist()`: **code written, unbuilt** (code-only mode, 2026-11-12, D695); `nodes()` in `APPLY`: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D696).
+  unbuilt** (code-only mode, 2026-11-12, D696); `hierarchyid` with its methods: **code written, unbuilt** (code-only
+  mode, 2026-11-12, D797). Left: `rowversion`, `sql_variant`, and `hierarchyid` as its own type in the catalogs
+  and casts from strings.
 - `datetimeoffset` keeping its offset, and the declared `varchar` or `nvarchar` kept (D19, D133).
 - `deleted.` in a Transact-SQL `UPDATE`'s `OUTPUT`, `TOP ... PERCENT` in `UPDATE`, `DELETE` and
   `INSERT`, and global `##temp` tables; `TOP ... PERCENT`, `WITH TIES`, `OUTPUT ... INTO` and

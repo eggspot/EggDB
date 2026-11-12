@@ -63,7 +63,10 @@ impl<'t> Lexer<'t> {
             b'$' if self.peek(1).is_some_and(|next| next.is_ascii_alphabetic()) => {
                 self.sqlserver_word()
             }
-            b':' if self.peek(1) == Some(b':') => Err(incorrect_syntax("::", self.at)),
+            b':' if self.peek(1) == Some(b':') => {
+                self.at += 2;
+                Ok(TokenKind::DoubleColon)
+            }
             b':' => {
                 self.at += 1;
                 Ok(TokenKind::Colon)
