@@ -516,7 +516,7 @@ impl Session<'_> {
             None => None,
         };
         let syslog_sockets = match options.syslog_listen {
-            Some(address) => Some(bind_syslog(address)?),
+            Some(address) => Some(bind_syslog(address, tls.is_some())?),
             None => None,
         };
         let nats_config = eggdb_nats::ServerConfig {
@@ -781,6 +781,10 @@ impl Session<'_> {
             max_connections,
             idle_timeout,
         );
+        let syslog_collector = match &tls {
+            Some(setup) => syslog_collector.with_tls(Arc::clone(&setup.postgresql)),
+            None => syslog_collector,
+        };
         if syslog_sockets.is_some() {
             syslog_collector.prepare().map_err(|error| {
                 Failure::database(
@@ -1139,7 +1143,7 @@ impl Session<'_> {
                         let _ = syslog_events.send(stamped(&format!("syslog {line}")));
                     };
                     syslog_collector.serve(
-                        Some(datagrams),
+                        datagrams.as_ref(),
                         Some(listener),
                         &stop_signals::requested,
                         &log,
@@ -1719,11 +1723,12 @@ impl Session<'_> {
 
 fn bind_syslog(
     address: SocketAddr,
-) -> Result<(eggdb_platform::OsDatagramSocket, std::net::TcpListener), Failure> {
-    if !address.ip().is_loopback() {
+    secured: bool,
+) -> Result<(Option<eggdb_platform::OsDatagramSocket>, std::net::TcpListener), Failure> {
+    if !address.ip().is_loopback() && !secured {
         return Err(Failure::usage(
             format!(
-                "--syslog-listen {address}: syslog has no authentication or TLS, so it listens only on a loopback address"
+                "--syslog-listen {address}: syslog without TLS has no authentication, so it listens only on a loopback address; give --tls-certificate and --tls-key for syslog over TLS"
             ),
             Some(CommandName::Serve),
         ));
@@ -1742,6 +1747,11 @@ fn bind_syslog(
             Exit::DatabaseError,
         )
     };
+    if !address.ip().is_loopback() {
+        let listener =
+            std::net::TcpListener::bind(address).map_err(|error| cannot_listen(error.to_string()))?;
+        return Ok((None, listener));
+    }
     let datagrams = OsNetwork::new()
         .bind_datagram(address)
         .map_err(|error| cannot_listen(error.to_string()))?;
@@ -1750,7 +1760,7 @@ fn bind_syslog(
         .map_err(|error| cannot_listen(error.to_string()))?;
     let listener =
         std::net::TcpListener::bind(bound).map_err(|error| cannot_listen(error.to_string()))?;
-    Ok((datagrams, listener))
+    Ok((Some(datagrams), listener))
 }
 
 fn client_host(address: IpAddr, tls: Option<&TlsSetup>) -> String {

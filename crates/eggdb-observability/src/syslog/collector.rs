@@ -4,7 +4,7 @@ use crate::store::{literal, run, timestamp_literal};
 use eggdb_platform::{DatagramSocket, ErrorKind};
 use eggdb_sql::{Dialect, KeyValueStore, Session};
 use std::io::{self, Read};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -45,6 +45,7 @@ pub struct SyslogCollector<'s, S: KeyValueStore> {
     max_connections: usize,
     idle_timeout: Option<Duration>,
     messages_dropped: AtomicU64,
+    tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
 }
 
 impl<S: KeyValueStore> std::fmt::Debug for SyslogCollector<'_, S> {
@@ -155,7 +156,16 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
             max_connections,
             idle_timeout,
             messages_dropped: AtomicU64::new(0),
+            tls: None,
         }
+    }
+
+    /// Takes TCP connections over TLS only (RFC 5425, syslog over TLS), with `config`'s
+    /// certificate; a connection whose handshake fails is closed and counted as dropped.
+    #[must_use]
+    pub fn with_tls(mut self, config: std::sync::Arc<eggdb_tls::ServerConfig>) -> Self {
+        self.tls = Some(config);
+        self
     }
 
     /// The messages this collector has dropped: datagrams longer than
@@ -296,7 +306,14 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
                 let spawned = std::thread::Builder::new()
                     .name("eggdb-syslog".to_owned())
                     .spawn_scoped(connections, move || {
-                        self.serve_stream(stream, stop, log);
+                        let sender = stream.peer_addr().ok().map(|address| address.ip().to_string());
+                        match &self.tls {
+                            None => self.serve_stream(stream, sender, stop, log),
+                            Some(config) => match eggdb_tls::TlsStream::accept(stream, config) {
+                                Ok(secured) => self.serve_stream(secured, sender, stop, log),
+                                Err(_) => self.count_dropped(1),
+                            },
+                        }
                         active.fetch_sub(1, Ordering::AcqRel);
                     });
                 if spawned.is_err() {
@@ -313,12 +330,12 @@ impl<'s, S: KeyValueStore + Sync> SyslogCollector<'s, S> {
 
     fn serve_stream(
         &self,
-        mut stream: TcpStream,
+        mut stream: impl Read,
+        sender: Option<String>,
         stop: &(dyn Fn() -> bool + Sync),
         log: &(dyn Fn(&str) + Sync),
     ) {
         let mut session = self.session();
-        let sender = stream.peer_addr().ok().map(|address| address.ip().to_string());
         let mut framer = Framer::new(MAX_SYSLOG_MESSAGE_BYTES);
         let mut chunk = vec![0; READ_CHUNK_BYTES];
         let mut batch: Vec<Received> = Vec::new();

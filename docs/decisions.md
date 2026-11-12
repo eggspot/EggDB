@@ -807,3 +807,4 @@ its full title with its status.
 - [D780](decisions/D780.md) Code-only batch 428 (M6c): an index advisor from statement statistics, `eggdb_advisor`
 - [D781](decisions/D781.md) Code-only batch 429 (M12): OGC API - Features on the REST listener
 - [D782](decisions/D782.md) Code-only batch 430 (M12): routing at pgRouting's level, `CREATE EXTENSION pgrouting`
+- [D783](decisions/D783.md) Code-only batch 431 (M16): syslog over TLS (RFC 5425) and beyond loopback
