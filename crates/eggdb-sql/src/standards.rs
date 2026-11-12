@@ -1,9 +1,10 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 14] = [
+pub(crate) const FUNCTIONS: [&str; 15] = [
     "eggdb_pdf_table",
     "spreadsheet_recalculate",
+    "row_pattern_matches",
     "geotiff_info",
     "image_metadata",
     "icalendar_parse",
@@ -411,6 +412,12 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             [Value::Bytea(file)] if name == "geotiff_info" => crate::geotiff::info(file).and_then(jsonb),
             [Value::Bytea(payload)] => crate::sparkplug::decode(payload).and_then(jsonb),
             _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes bytea"))),
+        });
+    }
+    if name == "row_pattern_matches" {
+        return Some(match values {
+            [Value::Jsonb(rows) | Value::Json(rows) | Value::Text(rows), Value::Text(pattern)] => crate::row_pattern::matches(rows, pattern).and_then(jsonb),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "row_pattern_matches takes the rows as jsonb and the pattern as text")),
         });
     }
     if name == "spreadsheet_recalculate" {

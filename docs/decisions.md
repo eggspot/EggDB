@@ -792,3 +792,4 @@ its full title with its status.
 - [D765](decisions/D765.md) Code-only batch 413 (M11): spreadsheet-style tables with formula columns, `spreadsheet_recalculate` and `eggdb_sheets`
 - [D766](decisions/D766.md) Code-only batch 414 (M16): streaming SQL with event time, watermarks and tumbling, hopping and session windows, `eggdb_streams`
 - [D767](decisions/D767.md) Code-only batch 415 (M16): stream-stream interval joins and replayed late data in `eggdb_streams`
+- [D768](decisions/D768.md) Code-only batch 416 (M16): row pattern matching for complex event processing, `row_pattern_matches` and `eggdb_streams.match_recognize`

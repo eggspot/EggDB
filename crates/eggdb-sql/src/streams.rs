@@ -187,6 +187,53 @@ BEGIN
     RETURN emitted;
 END
 $$;
+CREATE FUNCTION eggdb_streams.match_recognize(query text, partition_by text, order_by text, pattern text, definitions jsonb) RETURNS TABLE (partition_key text, match_number bigint, first_row jsonb, last_row jsonb, matched_rows bigint, classifiers text[]) LANGUAGE plpgsql AS $$
+DECLARE
+    flag_list text;
+    found_row record;
+    current_key text;
+    bodies jsonb := '[]'::jsonb;
+    flags jsonb := '[]'::jsonb;
+    found jsonb;
+    counted bigint := 0;
+    started boolean := false;
+BEGIN
+    SELECT string_agg(format('%L, coalesce((%s), false)', upper(d.key), d.value), ', ') INTO flag_list FROM jsonb_each_text(definitions) d;
+    FOR found_row IN EXECUTE format('SELECT coalesce((%s)::text, %L) AS part, to_jsonb(q) AS body, jsonb_build_object(%s) AS flags FROM (%s) q ORDER BY 1, %s',
+            coalesce(nullif(partition_by, ''), 'NULL'), '', coalesce(flag_list, ''), query, order_by) LOOP
+        IF started AND found_row.part IS DISTINCT FROM current_key THEN
+            FOR found IN SELECT m.value AS matched FROM jsonb_array_elements(row_pattern_matches(flags, pattern)) m LOOP
+                counted := counted + 1;
+                partition_key := current_key;
+                match_number := counted;
+                first_row := bodies -> ((found.matched ->> 'start')::integer);
+                last_row := bodies -> ((found.matched ->> 'end')::integer);
+                matched_rows := (found.matched ->> 'end')::bigint - (found.matched ->> 'start')::bigint + 1;
+                classifiers := ARRAY(SELECT c.value FROM jsonb_array_elements_text(found.matched -> 'classifiers') c);
+                RETURN NEXT;
+            END LOOP;
+            bodies := '[]'::jsonb;
+            flags := '[]'::jsonb;
+        END IF;
+        started := true;
+        current_key := found_row.part;
+        bodies := bodies || jsonb_build_array(found_row.body);
+        flags := flags || jsonb_build_array(found_row.flags);
+    END LOOP;
+    IF started THEN
+        FOR found IN SELECT m.value AS matched FROM jsonb_array_elements(row_pattern_matches(flags, pattern)) m LOOP
+            counted := counted + 1;
+            partition_key := current_key;
+            match_number := counted;
+            first_row := bodies -> ((found.matched ->> 'start')::integer);
+            last_row := bodies -> ((found.matched ->> 'end')::integer);
+            matched_rows := (found.matched ->> 'end')::bigint - (found.matched ->> 'start')::bigint + 1;
+            classifiers := ARRAY(SELECT c.value FROM jsonb_array_elements_text(found.matched -> 'classifiers') c);
+            RETURN NEXT;
+        END LOOP;
+    END IF;
+END
+$$;
 CREATE FUNCTION eggdb_streams.replay_late(stream_name text) RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE
     source record;
@@ -285,5 +332,22 @@ mod tests {
         assert_eq!(run(&mut session, "SELECT payments FROM payments_hourly ORDER BY window_start").unwrap(), "payments\n2\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT eggdb_streams.replay_late('payments') AS replayed").unwrap(), "replayed\n1\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT payments FROM payments_hourly ORDER BY window_start").unwrap(), "payments\n3\nSELECT 1");
+    }
+
+    #[test]
+    fn match_recognize_finds_v_shapes_per_partition() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_streams",
+            "CREATE TABLE ticks (symbol text, at integer, price integer)",
+            "INSERT INTO ticks VALUES ('EGG', 1, 10), ('EGG', 2, 8), ('EGG', 3, 7), ('EGG', 4, 9), ('EGG', 5, 12), ('HEN', 1, 5), ('HEN', 2, 6)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut session, "SELECT partition_key, first_row ->> 'at' AS starts, last_row ->> 'at' AS ends, classifiers FROM eggdb_streams.match_recognize('SELECT symbol, at, price, lag(price) OVER (PARTITION BY symbol ORDER BY at) AS previous FROM ticks', 'symbol', 'at', 'strt down+ up+', '{\"down\": \"price < previous\", \"up\": \"price > previous\"}')").unwrap(),
+            "partition_key|starts|ends|classifiers\nEGG|1|5|{STRT,DOWN,DOWN,UP,UP}\nSELECT 1"
+        );
     }
 }

@@ -116,6 +116,7 @@ mod marketplace;
 mod spreadsheet;
 mod sheets;
 mod streams;
+mod row_pattern;
 mod report_pdf;
 mod zarr;
 mod new_files;

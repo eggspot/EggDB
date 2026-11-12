@@ -4041,6 +4041,12 @@ SELECT cron.schedule('* * * * *', 'SELECT eggdb_streams.advance(''clicks'')');
   interval '10 minutes', 'l.order_id, r.amount', 'paid_orders')`.
 - `replay_late(stream)` takes the stream's late events in after all and recomputes the tumbling and hopping windows
   they fall in, replacing those windows' rows in the targets.
+- `match_recognize(query, partition_by, order_by, pattern, definitions)` finds row patterns, as SQL's
+  `MATCH_RECOGNIZE` does (D768): `definitions` maps each pattern variable to a condition on the query's row, and each
+  match returns its partition, first and last row and the variable each row matched. For a V shape in prices:
+  `SELECT * FROM eggdb_streams.match_recognize('SELECT symbol, at, price, lag(price) OVER (PARTITION BY symbol ORDER
+  BY at) AS previous FROM ticks', 'symbol', 'at', 'strt down+ up+', '{"down": "price < previous", "up": "price >
+  previous"}')`. `row_pattern_matches(rows, pattern)` is the matcher on its own.
 
 ## Resumable copies with verified differences (eggdb_migration)
 
