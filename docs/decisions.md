@@ -791,3 +791,4 @@ its full title with its status.
 - [D764](decisions/D764.md) Code-only batch 412 (M6b): tenants isolated by schema, copied from a template and upgraded with it
 - [D765](decisions/D765.md) Code-only batch 413 (M11): spreadsheet-style tables with formula columns, `spreadsheet_recalculate` and `eggdb_sheets`
 - [D766](decisions/D766.md) Code-only batch 414 (M16): streaming SQL with event time, watermarks and tumbling, hopping and session windows, `eggdb_streams`
+- [D767](decisions/D767.md) Code-only batch 415 (M16): stream-stream interval joins and replayed late data in `eggdb_streams`

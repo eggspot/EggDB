@@ -1612,7 +1612,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus (D220).
 - Streaming SQL: event time, watermarks, and tumbling, hopping and session windows (D55). **Code written, unbuilt**
   (code-only mode, 2026-11-12, D766), in `eggdb_streams`.
-- Stream-stream joins and late data (D55).
+- Stream-stream joins and late data (D55). **Code written, unbuilt** (code-only mode, 2026-11-12, D767), in
+  `eggdb_streams`.
 - `MATCH_RECOGNIZE` for complex event processing (D55).
 - ETL connectors, first scheduled copies from PostgreSQL, MySQL and SQL Server and from CSV and
   Parquet in object storage (D46, D229). Check: a CI copy from PostgreSQL 17, compared by row.

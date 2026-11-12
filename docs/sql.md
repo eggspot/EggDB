@@ -4035,6 +4035,12 @@ SELECT cron.schedule('* * * * *', 'SELECT eggdb_streams.advance(''clicks'')');
   creates the target table with `window_start`, `window_end`, the group columns and the aggregates.
 - `advance(stream)` moves the watermark and appends to each target the windows that closed: windows whose end the
   watermark has passed, each emitted once. Run it from pg_cron or after each batch of inserts.
+- `create_join(name, left_stream, right_stream, condition, within, select_list, target)` joins two streams on
+  `condition` (over `l` and `r`) for events at most `within` apart, emitting each pair once both watermarks pass it
+  (D767): `SELECT eggdb_streams.create_join('paid orders', 'orders', 'payments', 'l.order_id = r.order_id',
+  interval '10 minutes', 'l.order_id, r.amount', 'paid_orders')`.
+- `replay_late(stream)` takes the stream's late events in after all and recomputes the tumbling and hopping windows
+  they fall in, replacing those windows' rows in the targets.
 
 ## Resumable copies with verified differences (eggdb_migration)
 

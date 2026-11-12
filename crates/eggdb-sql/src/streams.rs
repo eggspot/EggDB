@@ -5,13 +5,17 @@
 pub(crate) const STREAMS_SCRIPT: &str = r#"
 CREATE SCHEMA eggdb_streams;
 CREATE TABLE eggdb_streams.streams (stream text PRIMARY KEY, schema_name text NOT NULL, table_name text NOT NULL, time_column text NOT NULL, allowed_lateness interval NOT NULL DEFAULT interval '0' CHECK (allowed_lateness >= interval '0'), watermark timestamptz NOT NULL DEFAULT '-infinity', UNIQUE (schema_name, table_name));
-CREATE TABLE eggdb_streams.late_events (stream text NOT NULL REFERENCES eggdb_streams.streams (stream), event_time timestamptz, arrived_at timestamptz NOT NULL DEFAULT now(), event jsonb NOT NULL);
+CREATE TABLE eggdb_streams.late_events (late_id bigserial PRIMARY KEY, stream text NOT NULL REFERENCES eggdb_streams.streams (stream), event_time timestamptz, arrived_at timestamptz NOT NULL DEFAULT now(), event jsonb NOT NULL);
+CREATE TABLE eggdb_streams.joins (join_name text PRIMARY KEY, left_stream text NOT NULL REFERENCES eggdb_streams.streams (stream), right_stream text NOT NULL REFERENCES eggdb_streams.streams (stream), within interval NOT NULL CHECK (within >= interval '0'), join_condition text NOT NULL, select_list text NOT NULL, target_table text NOT NULL, emitted_until timestamptz NOT NULL DEFAULT '-infinity');
 CREATE TABLE eggdb_streams.windows (window_name text PRIMARY KEY, stream text NOT NULL REFERENCES eggdb_streams.streams (stream), kind text NOT NULL CHECK (kind IN ('tumbling', 'hopping', 'session')), size interval, slide interval, gap interval, group_columns text[] NOT NULL DEFAULT '{}', aggregates text NOT NULL, target_table text NOT NULL, emitted_until timestamptz, open_from timestamptz NOT NULL DEFAULT '-infinity');
 CREATE FUNCTION eggdb_streams.divert_late() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     found_stream record;
     event_time timestamptz;
 BEGIN
+    IF current_setting('eggdb_streams.replaying', true) = 'on' THEN
+        RETURN NEW;
+    END IF;
     SELECT s.stream, s.time_column, s.watermark INTO found_stream FROM eggdb_streams.streams s WHERE s.schema_name = TG_TABLE_SCHEMA AND s.table_name = TG_TABLE_NAME;
     event_time := (to_jsonb(NEW) ->> found_stream.time_column)::timestamptz;
     IF event_time IS NULL OR event_time < found_stream.watermark THEN
@@ -137,7 +141,80 @@ BEGIN
     FOR job IN SELECT w.window_name FROM eggdb_streams.windows w WHERE w.stream = stream_name ORDER BY w.window_name LOOP
         emitted := emitted + eggdb_streams.emit(job.window_name, mark);
     END LOOP;
+    FOR job IN SELECT j.join_name FROM eggdb_streams.joins j WHERE j.left_stream = stream_name OR j.right_stream = stream_name ORDER BY j.join_name LOOP
+        emitted := emitted + eggdb_streams.emit_join(job.join_name);
+    END LOOP;
     RETURN emitted;
+END
+$$;
+CREATE FUNCTION eggdb_streams.join_sql(wanted_join text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    joined record;
+    left_source record;
+    right_source record;
+BEGIN
+    SELECT * INTO joined FROM eggdb_streams.joins j WHERE j.join_name = wanted_join;
+    SELECT * INTO left_source FROM eggdb_streams.streams s WHERE s.stream = joined.left_stream;
+    SELECT * INTO right_source FROM eggdb_streams.streams s WHERE s.stream = joined.right_stream;
+    RETURN format('SELECT %1$s FROM %2$I.%3$I l JOIN %4$I.%5$I r ON (%6$s) AND r.%8$I >= l.%7$I - %9$L::interval AND r.%8$I <= l.%7$I + %9$L::interval WHERE greatest(l.%7$I, r.%8$I) > $from AND greatest(l.%7$I, r.%8$I) <= $until',
+        joined.select_list, left_source.schema_name, left_source.table_name, right_source.schema_name, right_source.table_name, joined.join_condition,
+        left_source.time_column, right_source.time_column, joined.within);
+END
+$$;
+CREATE FUNCTION eggdb_streams.create_join(join_name text, left_stream text, right_stream text, join_condition text, within interval, select_list text, target_table text) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO eggdb_streams.joins (join_name, left_stream, right_stream, within, join_condition, select_list, target_table)
+        VALUES (create_join.join_name, create_join.left_stream, create_join.right_stream, create_join.within, create_join.join_condition, create_join.select_list, create_join.target_table);
+    EXECUTE format('CREATE TABLE %s AS %s', create_join.target_table,
+        replace(replace(eggdb_streams.join_sql(create_join.join_name), '$from', quote_literal('infinity') || '::timestamptz'), '$until', quote_literal('-infinity') || '::timestamptz'));
+END
+$$;
+CREATE FUNCTION eggdb_streams.emit_join(wanted_join text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    joined record;
+    mark timestamptz;
+    emitted bigint;
+BEGIN
+    SELECT * INTO joined FROM eggdb_streams.joins j WHERE j.join_name = wanted_join;
+    SELECT min(s.watermark) INTO mark FROM eggdb_streams.streams s WHERE s.stream IN (joined.left_stream, joined.right_stream);
+    IF mark IS NULL OR mark <= joined.emitted_until THEN
+        RETURN 0;
+    END IF;
+    EXECUTE format('INSERT INTO %s %s', joined.target_table,
+        replace(replace(eggdb_streams.join_sql(wanted_join), '$from', quote_literal(joined.emitted_until::text) || '::timestamptz'), '$until', quote_literal(mark::text) || '::timestamptz'));
+    GET DIAGNOSTICS emitted = ROW_COUNT;
+    UPDATE eggdb_streams.joins SET emitted_until = mark WHERE join_name = wanted_join;
+    RETURN emitted;
+END
+$$;
+CREATE FUNCTION eggdb_streams.replay_late(stream_name text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    source record;
+    late record;
+    job record;
+    first_start timestamptz;
+    last_start timestamptz;
+    replayed bigint := 0;
+BEGIN
+    SELECT * INTO source FROM eggdb_streams.streams s WHERE s.stream = stream_name;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'there is no stream %', stream_name USING ERRCODE = '42704';
+    END IF;
+    PERFORM set_config('eggdb_streams.replaying', 'on', true);
+    FOR late IN SELECT l.late_id, l.event_time, l.event FROM eggdb_streams.late_events l WHERE l.stream = stream_name AND l.event_time IS NOT NULL ORDER BY l.late_id LOOP
+        EXECUTE format('INSERT INTO %I.%I SELECT * FROM jsonb_populate_record(NULL::%I.%I, %L::jsonb)', source.schema_name, source.table_name, source.schema_name, source.table_name, late.event::text);
+        FOR job IN SELECT w.window_name, w.size, w.slide, w.target_table FROM eggdb_streams.windows w
+                WHERE w.stream = stream_name AND w.kind IN ('tumbling', 'hopping') AND w.emitted_until IS NOT NULL AND late.event_time < w.emitted_until ORDER BY w.window_name LOOP
+            first_start := time_bucket(job.slide, late.event_time) - job.size + job.slide;
+            last_start := least(time_bucket(job.slide, late.event_time), job.emitted_until - job.size);
+            EXECUTE format('DELETE FROM %s WHERE window_start >= %L::timestamptz AND window_start <= %L::timestamptz', job.target_table, first_start, last_start);
+            EXECUTE format('INSERT INTO %s %s', job.target_table, eggdb_streams.window_sql(job.window_name, first_start, last_start));
+        END LOOP;
+        DELETE FROM eggdb_streams.late_events l WHERE l.late_id = late.late_id;
+        replayed := replayed + 1;
+    END LOOP;
+    PERFORM set_config('eggdb_streams.replaying', 'off', true);
+    RETURN replayed;
 END
 $$;
 "#;
@@ -181,5 +258,32 @@ mod tests {
         run(&mut session, "INSERT INTO clicks VALUES ('u3', '2026-11-12 11:30+00', 16)").unwrap();
         assert_eq!(run(&mut session, "SELECT count(*) AS late FROM eggdb_streams.late_events").unwrap(), "late\n1\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT count(*) AS kept FROM clicks").unwrap(), "kept\n4\nSELECT 1");
+    }
+
+    #[test]
+    fn interval_joins_pair_events_and_late_events_correct_closed_windows() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "SET TimeZone = 'UTC'",
+            "CREATE EXTENSION eggdb_streams",
+            "CREATE TABLE orders (order_id integer, at timestamptz NOT NULL)",
+            "CREATE TABLE payments (order_id integer, at timestamptz NOT NULL, amount integer)",
+            "SELECT eggdb_streams.create_stream('orders', 'public', 'orders', 'at')",
+            "SELECT eggdb_streams.create_stream('payments', 'public', 'payments', 'at')",
+            "SELECT eggdb_streams.create_join('paid orders', 'orders', 'payments', 'l.order_id = r.order_id', interval '10 minutes', 'l.order_id, r.amount', 'paid_orders')",
+            "SELECT eggdb_streams.create_window('payments per hour', 'payments', 'tumbling', 'count(*) AS payments', 'payments_hourly', interval '1 hour')",
+            "INSERT INTO orders VALUES (1, '2026-11-12 10:00+00'), (2, '2026-11-12 10:05+00'), (3, '2026-11-12 12:00+00')",
+            "INSERT INTO payments VALUES (1, '2026-11-12 10:04+00', 30), (2, '2026-11-12 10:40+00', 20), (3, '2026-11-12 12:01+00', 10)",
+            "SELECT eggdb_streams.advance('orders')",
+            "SELECT eggdb_streams.advance('payments')",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(run(&mut session, "SELECT order_id, amount FROM paid_orders ORDER BY order_id").unwrap(), "order_id|amount\n1|30\nSELECT 1");
+        run(&mut session, "INSERT INTO payments VALUES (9, '2026-11-12 10:50+00', 5)").unwrap();
+        assert_eq!(run(&mut session, "SELECT payments FROM payments_hourly ORDER BY window_start").unwrap(), "payments\n2\nSELECT 1");
+        assert_eq!(run(&mut session, "SELECT eggdb_streams.replay_late('payments') AS replayed").unwrap(), "replayed\n1\nSELECT 1");
+        assert_eq!(run(&mut session, "SELECT payments FROM payments_hourly ORDER BY window_start").unwrap(), "payments\n3\nSELECT 1");
     }
 }
