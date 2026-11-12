@@ -870,3 +870,4 @@ its full title with its status.
 - [D843](decisions/D843.md) Code-only batch 491 (M16): CQL ALTER TYPE
 - [D844](decisions/D844.md) Code-only batch 492 (M16): CQL system_schema.types
 - [D845](decisions/D845.md) Code-only batch 493 (M12): a stored geometry type
+- [D846](decisions/D846.md) Code-only batch 494 (M12): geometry typmods as checks

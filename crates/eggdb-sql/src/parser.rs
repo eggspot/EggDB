@@ -444,6 +444,7 @@ pub(crate) struct Parser<'t> {
     system_period: Option<(String, String)>,
     system_versioning_on: Option<Option<crate::ast::Name>>,
     vector_dimensions: Option<u32>,
+    geometry_typmod: Option<(String, Option<i64>)>,
     rowversion_column: Option<String>,
 }
 
@@ -577,6 +578,7 @@ impl<'t> Parser<'t> {
             system_period: None,
             system_versioning_on: None,
             vector_dimensions: None,
+            geometry_typmod: None,
             rowversion_column: None,
         }
     }
@@ -2257,6 +2259,7 @@ impl<'t> Parser<'t> {
         };
         let implicit_check = if serial.is_none() && !untyped { self.mysql_column_check.take() } else { None };
         let vector_dimensions = self.vector_dimensions.take();
+        let geometry_typmod = self.geometry_typmod.take();
         let mut column = ColumnDefinition {
             name,
             sql_type,
@@ -2281,6 +2284,11 @@ impl<'t> Parser<'t> {
             column
                 .constraints
                 .push(crate::vector_type::dimensions_check(&column.name, dimensions));
+        }
+        if let Some((subtype, srid)) = geometry_typmod
+            && let Some(check) = crate::geometry_type::typmod_check(&column.name, &subtype, srid)?
+        {
+            column.constraints.push(check);
         }
         if untyped && self.sqlserver() {
             self.sqlserver_computed_column(&mut column)?;
@@ -2788,7 +2796,26 @@ impl<'t> Parser<'t> {
             "time" | "timetz" => self.timestamp_type(word, token.start)?,
             "interval" => self.interval_type(token.start)?,
             "uuid" => SqlType::Uuid,
-            "geometry" | "geography" if self.postgresql() => {
+            "geometry" if self.postgresql() => {
+                if self.take(&TokenKind::LeftParen) {
+                    let subtype = self.name()?.text;
+                    let srid = if self.take(&TokenKind::Comma) {
+                        let negative = self.take_operator("-");
+                        let TokenKind::Integer(digits) = self.peek_kind() else {
+                            return Err(self.unexpected());
+                        };
+                        let value = digits.parse::<i64>().map_err(|_| self.unexpected())?;
+                        self.at += 1;
+                        Some(if negative { -value } else { value })
+                    } else {
+                        None
+                    };
+                    self.expect(&TokenKind::RightParen)?;
+                    self.geometry_typmod = Some((subtype, srid));
+                }
+                SqlType::Defined(crate::types::DefinedType::GEOMETRY)
+            }
+            "geography" if self.postgresql() => {
                 if self.take(&TokenKind::LeftParen) {
                     let mut depth = 1usize;
                     while depth > 0 {
