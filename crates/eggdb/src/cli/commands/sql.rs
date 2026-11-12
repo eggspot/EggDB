@@ -53,6 +53,15 @@ impl Session<'_> {
                 Some(CommandName::Sql),
             ));
         }
+        if self.request.sparql {
+            if self.request.kql || self.request.dialect != eggdb_sql::Dialect::PostgreSql {
+                return Err(Failure::usage(
+                    "--sparql runs SPARQL on the file's RDF store: give it without --kql or --dialect".to_owned(),
+                    Some(CommandName::Sql),
+                ));
+            }
+            return self.sql_as_sparql(&text);
+        }
         if self.request.kql {
             text = eggdb_kql::translate(&text).map_err(|error| {
                 Failure::usage(

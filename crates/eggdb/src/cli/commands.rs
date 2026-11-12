@@ -53,6 +53,7 @@ mod shell_copy;
 mod shell_columns;
 mod shell_sqlplus;
 pub(super) mod sql;
+mod sparql;
 mod table;
 mod transfer;
 mod whole_dump;

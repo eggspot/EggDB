@@ -886,6 +886,20 @@ same tables. A pipeline starts with a table and passes it through `where` (or `f
 $ eggdb sql logs.db --kql -c "Requests | where Status >= 500 | summarize count() by bin(At, 1h) | order by At"
 ```
 
+### `sql --sparql`
+
+`--sparql` reads the text as SPARQL 1.1 and runs it on the file's RDF store, the collection `rdf0` that
+`eggdb serve --sparql-listen` serves (D922). A query (`SELECT`, `ASK`, `CONSTRUCT`, `DESCRIBE`, after any `PREFIX`
+and `BASE` lines) opens the file read-only and prints its results as SPARQL's tab-separated values, or as SPARQL
+1.1 Query Results JSON with `--format json`; `CONSTRUCT` and `DESCRIBE` print N-Triples. An update (`INSERT
+DATA`, `DELETE WHERE`, `CLEAR` and the rest) runs in one transaction and prints how many quads it inserted and
+deleted. Relative IRIs resolve against `http://eggdb.local/`.
+
+```
+$ eggdb sql kb.db --sparql -c "PREFIX ex: <http://ex.org/> INSERT DATA { ex:ada ex:wrote ex:notes }"
+$ eggdb sql kb.db --sparql -c "SELECT ?who WHERE { ?who <http://ex.org/wrote> ?what }"
+```
+
 ### `sql --read-only`
 
 `--read-only` opens the file read-only, beside other readers, as `get` and `scan` do: the

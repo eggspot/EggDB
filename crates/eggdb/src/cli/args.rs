@@ -208,7 +208,7 @@ impl CommandName {
                 matches!(self, Self::Ui | Self::Gui | Self::Serve | Self::Shell | Self::Sql)
             }
             OptionName::Verify => self == Self::Audit,
-            OptionName::Kql => self == Self::Sql,
+            OptionName::Kql | OptionName::Sparql => self == Self::Sql,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
             OptionName::LockDays => self == Self::Backup,
             OptionName::Compress => matches!(
@@ -441,6 +441,7 @@ enum OptionName {
     ReadOnly,
     Verify,
     Kql,
+    Sparql,
     OnConflict,
     DryRun,
     Command,
@@ -579,6 +580,7 @@ impl OptionName {
             b"read-only" => Self::ReadOnly,
             b"verify" => Self::Verify,
             b"kql" => Self::Kql,
+            b"sparql" => Self::Sparql,
             b"on-conflict" => Self::OnConflict,
             b"dry-run" => Self::DryRun,
             b"command" => Self::Command,
@@ -721,6 +723,7 @@ impl OptionName {
                 | Self::ReadOnly
                 | Self::Verify
                 | Self::Kql
+                | Self::Sparql
                 | Self::DryRun
                 | Self::KeepGoing
                 | Self::Roles
@@ -799,6 +802,7 @@ pub(crate) struct Request {
     pub(crate) read_only: bool,
     pub(crate) verify: bool,
     pub(crate) kql: bool,
+    pub(crate) sparql: bool,
     pub(crate) export_file: Option<ExportFile>,
     pub(crate) on_conflict: ConflictPolicy,
     pub(crate) dry_run: bool,
@@ -1260,6 +1264,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         read_only: false,
         verify: false,
         kql: false,
+        sparql: false,
         export_file: None,
         on_conflict: ConflictPolicy::Error,
         dry_run: false,
@@ -1366,6 +1371,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::ReadOnly => request.read_only = true,
             OptionName::Verify => request.verify = true,
             OptionName::Kql => request.kql = true,
+            OptionName::Sparql => request.sparql = true,
             OptionName::AllowWrite => request.allow_write = true,
             OptionName::LogBatches => request.serve.log_batches = true,
             OptionName::RespCluster => request.serve.resp_cluster = true,
