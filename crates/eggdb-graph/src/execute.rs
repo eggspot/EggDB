@@ -1163,7 +1163,60 @@ impl<'g> Executor<'g, '_> {
             }
             walks = longer;
         }
-        Ok(walks)
+        self.meeting_group_condition(walks, relationship_pattern, group, from, row)
+    }
+
+    fn meeting_group_condition(
+        &self,
+        walks: Vec<(u64, Vec<Relationship>)>,
+        relationship_pattern: &RelationshipPattern,
+        group: &crate::cypher::QuantifiedGroup,
+        from: u64,
+        row: &Row,
+    ) -> GraphResult<Vec<(u64, Vec<Relationship>)>> {
+        let Some(condition) = &group.condition else {
+            return Ok(walks);
+        };
+        let mut kept = Vec::with_capacity(walks.len());
+        for (end, walked) in walks {
+            let mut scope = row.clone();
+            self.bind_repetition(&mut scope, relationship_pattern, group, from, &walked)?;
+            if self.evaluate(condition, &scope)?.is_true() {
+                kept.push((end, walked));
+            }
+        }
+        Ok(kept)
+    }
+
+    /// Binds a quantified group's variables to one repetition's nodes and relationships, as its
+    /// `WHERE` sees them.
+    fn bind_repetition(
+        &self,
+        scope: &mut Row,
+        relationship_pattern: &RelationshipPattern,
+        group: &crate::cypher::QuantifiedGroup,
+        start: u64,
+        walked: &[Relationship],
+    ) -> GraphResult<()> {
+        let mut relationship_patterns = vec![relationship_pattern];
+        relationship_patterns.extend(group.rest.iter().map(|(inner, _)| inner));
+        let mut node_patterns = vec![&group.right];
+        node_patterns.extend(group.rest.iter().map(|(_, node)| node));
+        let mut current = start;
+        if let Some(name) = &group.left.variable {
+            bind(scope, name, Value::Node(Box::new(self.existing_node(current)?)));
+        }
+        for ((relationship, relationship_pattern), node_pattern) in walked.iter().zip(relationship_patterns).zip(node_patterns) {
+            let next = if relationship.start == current { relationship.end } else { relationship.start };
+            if let Some(name) = &relationship_pattern.variable {
+                bind(scope, name, Value::Relationship(Box::new(relationship.clone())));
+            }
+            if let Some(name) = &node_pattern.variable {
+                bind(scope, name, Value::Node(Box::new(self.existing_node(next)?)));
+            }
+            current = next;
+        }
+        Ok(())
     }
 
     /// Binds a quantified group's variables as GQL's group variables: each node and each

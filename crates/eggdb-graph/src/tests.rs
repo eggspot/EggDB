@@ -1487,6 +1487,28 @@ fn quantified_groups_walk_several_relationships_per_repetition() {
 }
 
 #[test]
+fn a_where_inside_a_quantified_group_holds_at_every_repetition() {
+    let keyspace = MemoryKeyspace::default();
+    query(
+        &keyspace,
+        "CREATE (a:Stop {name: 'a'}), (b:Platform {name: 'b', open: true}), (c:Stop {name: 'c'}), (d:Platform {name: 'd', open: false}), (e:Stop {name: 'e'})
+         CREATE (a)-[:WALK {minutes: 3}]->(b), (b)-[:RIDE]->(c), (c)-[:WALK {minutes: 4}]->(d), (d)-[:RIDE]->(e)",
+    );
+    let open = query(
+        &keyspace,
+        "MATCH (s:Stop {name: 'a'})((x:Stop)-[w:WALK]->(p:Platform)-[r:RIDE]->(y:Stop) WHERE p.open){1,2}(t)
+         RETURN t.name AS reached ORDER BY reached",
+    );
+    assert_eq!(open.rows, vec![vec![text("c")]]);
+    let short = query(
+        &keyspace,
+        "MATCH (s:Stop {name: 'a'})((x:Stop)-[w:WALK]->(p:Platform)-[r:RIDE]->(y:Stop) WHERE w.minutes < 5 AND x.name <> y.name){1,2}(t)
+         RETURN t.name AS reached ORDER BY reached",
+    );
+    assert_eq!(short.rows, vec![vec![text("c")], vec![text("e")]]);
+}
+
+#[test]
 fn range_conditions_read_property_indexes() {
     let keyspace = MemoryKeyspace::default();
     query(&keyspace, "CREATE INDEX person_age FOR (p:Person) ON (p.age)");

@@ -922,3 +922,4 @@ its full title with its status.
 - [D895](decisions/D895.md) Code-only batch 543 (M16): WebDAV, CalDAV and CardDAV
 - [D896](decisions/D896.md) Code-only batch 544 (M11): ORC union columns
 - [D897](decisions/D897.md) Code-only batch 545 (M11): dictionary-encoded values inside nested Arrow columns
+- [D898](decisions/D898.md) Code-only batch 546 (M13): WHERE inside a GQL quantified group

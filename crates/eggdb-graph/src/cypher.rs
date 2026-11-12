@@ -380,13 +380,16 @@ pub(crate) struct RelationshipPattern {
     pub(crate) group: Option<Box<QuantifiedGroup>>,
 }
 
-/// The node patterns of a GQL quantified path pattern around its first relationship, and the
-/// relationships and nodes that follow it inside the group: every repetition walks them all.
+/// The node patterns of a GQL quantified path pattern around its first relationship, the
+/// relationships and nodes that follow it inside the group, and the group's own `WHERE`: every
+/// repetition walks them all and must meet the condition, its variables bound to that
+/// repetition's nodes and relationships.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct QuantifiedGroup {
     pub(crate) left: NodePattern,
     pub(crate) right: NodePattern,
     pub(crate) rest: Vec<(RelationshipPattern, NodePattern)>,
+    pub(crate) condition: Option<Expr>,
 }
 
 /// Which shortest paths a `shortestPath()` or `allShortestPaths()` pattern asks for.
@@ -1084,9 +1087,9 @@ impl Parser<'_> {
         self.is_symbol("(") && matches!(self.peek_at(1), Some(Token::Symbol("(")))
     }
 
-    /// A GQL quantified path pattern, `((a)-[r:R]->(b)-[s:S]->(c)){m,n}`: its relationships
-    /// walked in order `m` to `n` times, with the group's node patterns holding at every
-    /// repetition.
+    /// A GQL quantified path pattern, `((a)-[r:R]->(b)-[s:S]->(c) WHERE ...){m,n}`: its
+    /// relationships walked in order `m` to `n` times, with the group's node patterns and its
+    /// condition holding at every repetition.
     fn quantified_group(&mut self) -> GraphResult<RelationshipPattern> {
         self.expect_symbol("(")?;
         let left = self.node_pattern()?;
@@ -1104,18 +1107,13 @@ impl Parser<'_> {
             }
             rest.push((next, self.node_pattern()?));
         }
-        if self.is_keyword("where") {
-            return Err(GraphError::new(
-                "Neo.ClientError.Statement.FeatureNotSupported",
-                "WHERE inside a quantified path pattern is not supported yet",
-            ));
-        }
+        let condition = if self.take_keyword("where") { Some(self.expression()?) } else { None };
         self.expect_symbol(")")?;
         let Some(bounds) = self.gql_quantifier()? else {
             return Err(syntax("a parenthesized path pattern needs a quantifier such as {1,3} or +"));
         };
         relationship.hops = Some(bounds);
-        relationship.group = Some(Box::new(QuantifiedGroup { left, right, rest }));
+        relationship.group = Some(Box::new(QuantifiedGroup { left, right, rest, condition }));
         Ok(relationship)
     }
 
