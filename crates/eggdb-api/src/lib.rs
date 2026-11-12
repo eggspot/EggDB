@@ -20,6 +20,7 @@ mod graphql_schema;
 mod live;
 mod odata;
 mod ogc;
+mod ogc_tiles;
 mod request;
 
 use eggdb_http::{Reply, Request, Response, StreamedResponse};

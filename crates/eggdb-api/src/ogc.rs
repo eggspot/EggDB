@@ -60,11 +60,11 @@ fn listed_crs() -> String {
     listed.join(",")
 }
 
-struct Collection {
-    table: String,
-    geometry: String,
+pub(crate) struct Collection {
+    pub(crate) table: String,
+    pub(crate) geometry: String,
     id: Option<String>,
-    columns: Vec<(String, String)>,
+    pub(crate) columns: Vec<(String, String)>,
 }
 
 fn decoded_parameter(request: &Request, name: &str) -> Option<String> {
@@ -102,7 +102,7 @@ fn parameter(request: &Request, name: &str) -> Option<String> {
     })
 }
 
-fn link(href: &str, rel: &str, kind: &str) -> String {
+pub(crate) fn link(href: &str, rel: &str, kind: &str) -> String {
     format!("{{\"href\":{},\"rel\":{},\"type\":{}}}", json_string(href), json_string(rel), json_string(kind))
 }
 
@@ -336,15 +336,26 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
         if parts.is_empty() {
             return json(200, format!(
-                "{{\"title\":\"EggDB\",\"links\":[{},{},{}]}}",
+                "{{\"title\":\"EggDB\",\"links\":[{},{},{},{}]}}",
                 link("/ogc", "self", "application/json"),
                 link("/ogc/conformance", "conformance", "application/json"),
-                link("/ogc/collections", "data", "application/json")
+                link("/ogc/collections", "data", "application/json"),
+                link("/ogc/tileMatrixSets", "http://www.opengis.net/def/rel/ogc/1.0/tiling-schemes", "application/json")
             ));
         }
         if parts == ["conformance"] {
-            let classes: Vec<String> = CONFORMANCE.iter().map(|class| json_string(class)).collect();
+            let classes: Vec<String> = CONFORMANCE
+                .iter()
+                .chain(crate::ogc_tiles::CONFORMANCE.iter())
+                .map(|class| json_string(class))
+                .collect();
             return json(200, format!("{{\"conformsTo\":[{}]}}", classes.join(",")));
+        }
+        if parts == ["tileMatrixSets"] {
+            return json(200, crate::ogc_tiles::matrix_sets_json());
+        }
+        if parts == ["tileMatrixSets", crate::ogc_tiles::MATRIX_SET] {
+            return json(200, crate::ogc_tiles::matrix_set_json());
         }
         let collections = match self.collections() {
             Ok(collections) => collections,
@@ -363,6 +374,9 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                     [] => json(200, self.collection_json(collection)),
                     ["items"] => self.items(collection, request, None),
                     ["queryables"] => self.queryables(collection),
+                    ["tiles"] => self.tilesets(collection),
+                    ["tiles", crate::ogc_tiles::MATRIX_SET] => self.tileset(collection),
+                    ["tiles", crate::ogc_tiles::MATRIX_SET, zoom, row, column] => self.tile(collection, zoom, row, column),
                     ["items", id] => self.items(collection, request, Some(id)),
                     _ => failure(404, "OGC404", "no such resource"),
                 }

@@ -905,3 +905,4 @@ its full title with its status.
 - [D878](decisions/D878.md) Code-only batch 526 (M6a): live queries and GraphQL subscriptions over Server-Sent Events
 - [D879](decisions/D879.md) Code-only batch 527 (M12): CQL2 filters and queryables in OGC API - Features
 - [D880](decisions/D880.md) Code-only batch 528 (M12): coordinate reference systems in OGC API - Features
+- [D881](decisions/D881.md) Code-only batch 529 (M12): OGC API - Tiles with vector tiles
