@@ -48,6 +48,7 @@ mod database_file;
 pub mod dbus;
 mod error;
 pub mod fonts;
+mod file_identity;
 mod fs;
 mod io;
 pub mod local_socket;
@@ -155,6 +156,7 @@ pub use net::{
 };
 pub use os_cpus::OsCpus;
 pub use os_datagram::OsDatagramSocket;
+pub use file_identity::{FileIdentity, file_identity_at};
 pub use os_fs::{OsFile, OsFileSystem};
 pub use os_io::OsIoQueue;
 pub use os_keep_alive::{accept_tcp, set_tcp_keep_alive, set_tcp_keep_alive_stream};

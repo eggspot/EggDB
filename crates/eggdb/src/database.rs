@@ -888,6 +888,8 @@ fn open_waiting_while_busy(
     }
 }
 
+const REOPENS_AFTER_REPLACEMENT: usize = 8;
+
 fn open_or_create(
     path: &Path,
     options: &Options,
@@ -904,7 +906,19 @@ fn open_or_create(
             Access::ReadOnly => OpenMode::Read,
             Access::ReadWrite => OpenMode::ReadWrite,
         };
-        PageFile::open_in(DatabaseFile::Os(fs.open(path, mode)?), access)
+        for _ in 0..REOPENS_AFTER_REPLACEMENT {
+            let file = fs.open(path, mode)?;
+            let opened = file.identity().ok();
+            let page_file = PageFile::open_in(DatabaseFile::Os(file), access)?;
+            let still_there = match opened {
+                Some(opened) => eggdb_platform::file_identity_at(path).ok() == Some(opened),
+                None => true,
+            };
+            if still_there {
+                return Ok(page_file);
+            }
+        }
+        Err(StorageError::Locked)
     };
     let opened = open();
     if !(options.creates_if_missing() && is_kind(&opened, eggdb_platform::ErrorKind::NotFound)) {

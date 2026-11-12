@@ -227,6 +227,12 @@ impl std::os::fd::AsRawFd for OsFile {
 }
 
 impl OsFile {
+    /// Which file this handle has open, to compare with
+    /// [`file_identity_at`](crate::file_identity_at) the path's file after taking a lock.
+    pub fn identity(&self) -> Result<crate::FileIdentity> {
+        crate::file_identity::of_file(&self.file)
+    }
+
     pub(crate) fn is_writable(&self) -> bool {
         self.writable
     }
