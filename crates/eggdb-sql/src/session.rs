@@ -2882,6 +2882,9 @@ impl<'s> Session<'s> {
             }
             Block::Reading(_) | Block::Failed | Block::None => {}
         }
+        if self.dialect == Dialect::Oracle {
+            self.fire_logoff_triggers();
+        }
         self.drop_global_temporary_tables();
         self.settle_sequences()?;
         Ok(was_open)

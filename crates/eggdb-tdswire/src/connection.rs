@@ -40,6 +40,7 @@ const DELETE_COMMAND: u16 = 0xC4;
 const UPDATE_COMMAND: u16 = 0xC5;
 const MERGE_COMMAND: u16 = 0x117;
 const LOGIN_FAILED: u32 = 18_456;
+const LOGON_TRIGGER_FAILED: u32 = 17_892;
 const CANNOT_OPEN_DATABASE: u32 = 4060;
 const TOO_MANY_CONNECTIONS: u32 = 17_809;
 pub(crate) const NOT_SUPPORTED: u32 = 40_517;
@@ -166,6 +167,10 @@ fn refuse(wire: &mut Wire<'_>, errors: &[(u32, u8, &str)]) {
 
 fn login_failed(user: &str) -> String {
     format!("Login failed for user '{user}'.")
+}
+
+fn logon_trigger_failed(user: &str, reason: &str) -> String {
+    format!("Logon failed for login '{user}' due to trigger execution. {reason}")
 }
 
 pub(crate) fn report_wire_error(shared: &Shared<'_>, wire: &mut Wire<'_>, error: &WireError) {
@@ -739,6 +744,13 @@ fn serve_databases<'a, 'd, D: DatabaseDirectory>(
                     return;
                 }
                 session.set_connection_id(connection_id);
+                if let Err(error) = session.fire_login_event_triggers() {
+                    if let Some(mut wire) = wire.take() {
+                        refuse(&mut wire, &[(LOGON_TRIGGER_FAILED, 14, &logon_trigger_failed(&user, error.message()))]);
+                    }
+                    let _ = session.close();
+                    return;
+                }
                 session
             }
         };

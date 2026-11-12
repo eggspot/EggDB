@@ -931,3 +931,4 @@ its full title with its status.
 - [D904](decisions/D904.md) Code-only batch 552 (M16): JMAP uploads and Email/import
 - [D905](decisions/D905.md) Code-only batch 553 (M12): pgRouting spanning trees and maximum flows
 - [D906](decisions/D906.md) Code-only batch 554 (M12): OGC API Tiles on WorldCRS84Quad
+- [D907](decisions/D907.md) Code-only batch 555 (M5): SQL Server logon triggers and Oracle BEFORE LOGOFF

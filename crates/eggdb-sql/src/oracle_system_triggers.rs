@@ -10,11 +10,10 @@ pub(crate) const DDL_EVENTS: [&str; 9] =
     ["create", "alter", "drop", "truncate", "rename", "grant", "revoke", "comment", "ddl"];
 
 /// The database events EggDB fires.
-pub(crate) const DATABASE_EVENTS: [&str; 2] = ["logon", "servererror"];
+pub(crate) const DATABASE_EVENTS: [&str; 3] = ["logon", "servererror", "logoff"];
 
 /// Database events Oracle has that EggDB does not fire yet.
-pub(crate) const UNSUPPORTED_EVENTS: [&str; 10] = [
-    "logoff",
+pub(crate) const UNSUPPORTED_EVENTS: [&str; 9] = [
     "startup",
     "shutdown",
     "suspend",
@@ -251,5 +250,18 @@ mod tests {
         run(&mut session, "DROP TRIGGER log_ddl");
         let unsupported = session.execute("CREATE TRIGGER at_start AFTER STARTUP ON DATABASE BEGIN NULL; END;", &mut |_| {});
         assert!(unsupported.is_err());
+    }
+
+    #[test]
+    fn logoff_triggers_run_as_a_session_ends() {
+        let store = crate::memory_store::MemoryStore::default();
+        let mut session = crate::Session::with_dialect(&store, crate::Dialect::Oracle);
+        run(&mut session, "CREATE TABLE sign_outs (event VARCHAR2(30))");
+        run(&mut session, "CREATE TRIGGER note_logoff BEFORE LOGOFF ON DATABASE BEGIN INSERT INTO sign_outs VALUES (ora_sysevent); END;");
+        assert!(session.execute("CREATE TRIGGER late AFTER LOGOFF ON DATABASE BEGIN NULL; END;", &mut |_| {}).is_err());
+        session.close().unwrap();
+        let mut next = crate::Session::with_dialect(&store, crate::Dialect::Oracle);
+        let logged = run(&mut next, "SELECT event FROM sign_outs");
+        assert!(logged.contains("LOGOFF"), "{logged}");
     }
 }

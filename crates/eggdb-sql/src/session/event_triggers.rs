@@ -229,11 +229,15 @@ impl Session<'_> {
 
     /// Fires PostgreSQL's `login` event triggers once a connection has authenticated, as
     /// PostgreSQL 17 does: in name order, in one transaction. An error from one of them fails
-    /// the login; a listener reports it and closes the connection. Only a PostgreSQL-dialect
-    /// session fires them.
+    /// the login; a listener reports it and closes the connection. An Oracle-dialect session
+    /// fires its `AFTER LOGON` triggers instead, and a SQL Server-dialect one its logon
+    /// triggers.
     pub fn fire_login_event_triggers(&mut self) -> SqlResult<()> {
         if self.dialect == Dialect::Oracle {
             return self.fire_logon_triggers();
+        }
+        if self.dialect == Dialect::SqlServer {
+            return self.fire_sqlserver_logon_triggers();
         }
         if self.dialect != Dialect::PostgreSql {
             return Ok(());

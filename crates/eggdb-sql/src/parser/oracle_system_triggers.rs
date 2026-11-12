@@ -42,9 +42,12 @@ impl Parser<'_> {
             events.push(self.system_event()?);
         }
         if timing == SystemTiming::Before
-            && events.iter().any(|event| DATABASE_EVENTS.contains(&event.as_str()))
+            && events.iter().any(|event| matches!(event.as_str(), "logon" | "servererror"))
         {
             return Err(self.not_supported("BEFORE LOGON and BEFORE SERVERERROR"));
+        }
+        if timing == SystemTiming::After && events.iter().any(|event| event == "logoff") {
+            return Err(self.not_supported("AFTER LOGOFF"));
         }
         self.expect_word("on")?;
         let scope = if self.take_word("database") {

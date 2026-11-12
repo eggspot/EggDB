@@ -266,6 +266,26 @@ impl Session<'_> {
         let _ = self.run_system_trigger_bodies(&triggers, event);
     }
 
+    /// Fires `BEFORE LOGOFF` triggers as an Oracle-dialect session ends, after its open
+    /// transaction is rolled back; their errors are ignored, as the session ends anyway.
+    pub(super) fn fire_logoff_triggers(&mut self) {
+        if !self.system_triggers_stored() {
+            return;
+        }
+        let Ok(triggers) = self.triggers_for("BEFORE", "logoff") else {
+            return;
+        };
+        if triggers.is_empty() {
+            return;
+        }
+        let event = SystemEvent {
+            sysevent: "LOGOFF".to_owned(),
+            login_user: self.oracle_login_user(),
+            ..SystemEvent::default()
+        };
+        let _ = self.run_system_trigger_bodies(&triggers, event);
+    }
+
     /// Fires `AFTER LOGON` triggers once an Oracle-dialect connection has authenticated; an
     /// error from one fails the login, as Oracle's do for users without `ADMINISTER DATABASE
     /// TRIGGER`.

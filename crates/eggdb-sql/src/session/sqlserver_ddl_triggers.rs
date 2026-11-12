@@ -3,8 +3,8 @@ use crate::ast::Statement;
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::sqlserver_ddl_triggers::{
-    CREATE_TRIGGERS_TABLE, DdlTriggerCommand, EventData, TRIGGERS_TABLE, event_matches, event_type,
-    is_known_event, object_type,
+    CREATE_TRIGGERS_TABLE, DdlTriggerCommand, DdlTriggerScope, EventData, LOGON_EVENT, TRIGGERS_TABLE,
+    event_matches, event_type, is_known_event, object_type,
 };
 use crate::sqlserver_security::literal;
 use crate::types::Value;
@@ -98,6 +98,14 @@ impl Session<'_> {
                     )
                     .with_sqlserver_code(1084)
                     .at(unknown.position));
+                }
+                let logon = events.iter().any(|event| event.text.eq_ignore_ascii_case(LOGON_EVENT));
+                if logon && (*scope != DdlTriggerScope::Server || events.len() > 1) {
+                    return Err(SqlError::new(
+                        SqlState::FEATURE_NOT_SUPPORTED,
+                        "The specified event type(s) is/are not valid on the specified target object.",
+                    )
+                    .with_sqlserver_code(1098));
                 }
                 let exists = self.stored_ddl_triggers()?.iter().any(|stored| stored.name == name.text);
                 if exists && !*replace && !*alter {
@@ -197,6 +205,67 @@ impl Session<'_> {
             object,
             object_type: kind,
             command_text: self.ddl_command_text.take().unwrap_or_default(),
+        }
+    }
+
+    /// Runs every enabled logon trigger (`ON ALL SERVER FOR LOGON`) once a SQL Server-dialect
+    /// connection has signed in, in creation order, in one transaction: an error from one, or a
+    /// `ROLLBACK` in one, refuses the login, as SQL Server's do.
+    pub(super) fn fire_sqlserver_logon_triggers(&mut self) -> SqlResult<()> {
+        if !self.ddl_triggers_stored()? {
+            return Ok(());
+        }
+        let triggers: Vec<StoredDdlTrigger> = self
+            .stored_ddl_triggers()?
+            .into_iter()
+            .filter(|trigger| trigger.enabled && trigger.events.iter().any(|event| event.eq_ignore_ascii_case(LOGON_EVENT)))
+            .collect();
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let post_time = Value::Timestamp(crate::datetime::statement_now())
+            .to_text()
+            .unwrap_or_default()
+            .replacen(' ', "T", 1);
+        let data = EventData {
+            event_type: LOGON_EVENT,
+            post_time,
+            spid: self.settings.sqlserver.connection_id,
+            login: self.settings.get("session_authorization").unwrap_or_default(),
+            database: self.settings.sqlserver.database.clone(),
+            schema: None,
+            object: None,
+            object_type: None,
+            command_text: String::new(),
+        };
+        let opened = self.autocommit() && matches!(self.block, Block::None);
+        if opened {
+            self.run_quietly("BEGIN TRANSACTION")?;
+        }
+        let outcome = {
+            let _firing = crate::sqlserver_ddl_triggers::enter(&data);
+            triggers.iter().try_for_each(|trigger| {
+                self.run_ddl_trigger_body(&trigger.body)?;
+                if self.in_block() {
+                    Ok(())
+                } else {
+                    Err(transaction_ended_in_trigger())
+                }
+            })
+        };
+        match outcome {
+            Ok(()) => {
+                if opened && self.in_block() {
+                    self.run_quietly("COMMIT TRANSACTION")?;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if self.in_block() {
+                    let _ = self.run_quietly("ROLLBACK TRANSACTION");
+                }
+                Err(error)
+            }
         }
     }
 

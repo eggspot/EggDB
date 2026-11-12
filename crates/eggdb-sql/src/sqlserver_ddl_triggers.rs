@@ -1,6 +1,6 @@
 //! SQL Server's DDL triggers: `CREATE TRIGGER ... ON DATABASE | ALL SERVER FOR <events> AS
 //! <batch>`, fired after the DDL statements they name, with `EVENTDATA()` describing the
-//! statement.
+//! statement; and logon triggers, `ON ALL SERVER FOR LOGON`, fired when a connection signs in.
 
 use crate::ast::Name;
 use crate::types::Value;
@@ -97,10 +97,14 @@ const EVENT_GROUPS: [(&str, &[&str]); 30] = [
 
 const LEVEL_GROUPS: [&str; 2] = ["DDL_DATABASE_LEVEL_EVENTS", "DDL_EVENTS"];
 
+/// The event of a logon trigger, which only a server-scoped trigger may name, alone.
+pub(crate) const LOGON_EVENT: &str = "LOGON";
+
 /// Whether `name` is an event type or event group a DDL trigger may name.
 pub(crate) fn is_known_event(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
-    LEVEL_GROUPS.contains(&name.as_str())
+    name == LOGON_EVENT
+        || LEVEL_GROUPS.contains(&name.as_str())
         || name == "REVOKE_DATABASE"
         || name == "DENY_DATABASE"
         || EVENT_GROUPS
@@ -111,7 +115,13 @@ pub(crate) fn is_known_event(name: &str) -> bool {
 /// Whether a trigger naming `wanted` (an event type or group) fires on `event`.
 pub(crate) fn event_matches(wanted: &str, event: &str) -> bool {
     let wanted = wanted.to_ascii_uppercase();
-    if wanted == event || LEVEL_GROUPS.contains(&wanted.as_str()) {
+    if wanted == event {
+        return true;
+    }
+    if wanted == LOGON_EVENT || event == LOGON_EVENT {
+        return false;
+    }
+    if LEVEL_GROUPS.contains(&wanted.as_str()) {
         return true;
     }
     if wanted == "DDL_GDR_DATABASE_EVENTS" {
@@ -329,5 +339,28 @@ mod tests {
         rows(&mut session, "DROP TABLE orders");
         let unknown = session.execute("CREATE TRIGGER bad ON DATABASE FOR CREATE_UNICORN AS PRINT 'x'", &mut |_| {});
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn logon_triggers_log_and_can_refuse_sign_ins() {
+        let store = crate::memory_store::MemoryStore::default();
+        let mut session = crate::Session::with_dialect(&store, crate::Dialect::SqlServer);
+        rows(&mut session, "CREATE TABLE logons (event_type nvarchar(100))");
+        let misplaced = session.execute("CREATE TRIGGER wrong ON DATABASE FOR LOGON AS PRINT 'x'", &mut |_| {});
+        assert_eq!(misplaced.unwrap_err().vendor_code(), Some(1098));
+        rows(
+            &mut session,
+            "CREATE TRIGGER log_logons ON ALL SERVER FOR LOGON AS \
+             INSERT INTO logons VALUES (EVENTDATA().value('(/EVENT_INSTANCE/EventType)[1]', 'nvarchar(100)'))",
+        );
+        rows(&mut session, "CREATE TABLE plain (id int)");
+        let mut arriving = crate::Session::with_dialect(&store, crate::Dialect::SqlServer);
+        arriving.fire_login_event_triggers().expect("the logon triggers run");
+        let logged = rows(&mut arriving, "SELECT event_type FROM logons");
+        assert!(logged.contains("LOGON"), "{logged}");
+        assert!(logged.matches("LOGON").count() == 1, "the CREATE TABLE fired no logon trigger: {logged}");
+        rows(&mut arriving, "CREATE TRIGGER no_logons ON ALL SERVER FOR LOGON AS ROLLBACK");
+        let mut refused = crate::Session::with_dialect(&store, crate::Dialect::SqlServer);
+        assert!(refused.fire_login_event_triggers().is_err());
     }
 }

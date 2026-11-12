@@ -578,9 +578,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D787); `login`: **code written, unbuilt** (code-only mode, 2026-11-12, D863).
   `table_rewrite` firing: **code written, unbuilt** (code-only mode, 2026-11-12, D864). SQL Server's DDL triggers
   with `EVENTDATA()`: **code written, unbuilt** (code-only mode, 2026-11-12, D872). Oracle's DDL triggers and `AFTER
-  LOGON` and `AFTER SERVERERROR` triggers: **code written, unbuilt** (code-only mode, 2026-11-12, D873). Left: SQL
-  Server's server-level events and `LOGON` triggers, and Oracle's `LOGOFF`, `STARTUP`, `SHUTDOWN` and other database
-  events.
+  LOGON` and `AFTER SERVERERROR` triggers: **code written, unbuilt** (code-only mode, 2026-11-12, D873). SQL Server's
+  `LOGON` triggers and Oracle's `BEFORE LOGOFF`: **code written, unbuilt** (code-only mode, 2026-11-12, D907). Left:
+  SQL Server's server-level DDL events (logins, endpoints, databases), and Oracle's `STARTUP`, `SHUTDOWN` and other
+  database events.
 - Users can write SQLite files: the B-tree writer, the rollback journal and the WAL (D180).
   Check: files EggDB writes pass `PRAGMA integrity_check`. The b-tree writer for whole new files
   and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631). Left: editing a
