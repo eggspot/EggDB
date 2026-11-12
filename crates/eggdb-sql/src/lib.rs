@@ -189,6 +189,7 @@ mod plpgsql;
 mod plsql;
 mod portals;
 mod privacy;
+mod property_graphs;
 mod pushdown;
 mod random;
 mod ranges;

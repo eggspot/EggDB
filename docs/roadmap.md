@@ -1599,7 +1599,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - An end-to-end retrieval benchmark (D205). **Code written, unbuilt** (code-only mode, 2026-11-13, D1006).
 
 ### M13 Graphs
-- SQL/PGQ and GQL, and graph views over tables (D10, D206).
+- SQL/PGQ and GQL, and graph views over tables (D10, D206). `CREATE PROPERTY GRAPH` and `GRAPH_TABLE` with fixed-length
+  patterns: **code written, unbuilt** (code-only mode, 2026-11-13, D1007). Left: several path patterns and quantified
+  paths in `GRAPH_TABLE`.
 - Cypher path predicates pushed into the shortest-path search (D333). **Code written, unbuilt** (code-only mode, 2026-11-11,
   D534), with the list predicates `all`, `any`, `none` and `single`.
 - GQL quantified paths and `SHORTEST k` (D333). `SHORTEST k`, `ANY` and `ALL SHORTEST`, and quantifiers on one

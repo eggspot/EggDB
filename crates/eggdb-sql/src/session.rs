@@ -26,6 +26,7 @@ mod sqlserver_security;
 mod sqlserver_ddl_triggers;
 mod sqlserver_partitions;
 mod oracle_system_triggers;
+mod property_graphs;
 mod transaction_settings;
 mod triggers;
 mod tsql;
@@ -1997,6 +1998,12 @@ impl<'s> Session<'s> {
     ) -> SqlResult<()> {
         self.prepare_writer_snapshot(text)?;
         self.prepare_database_links(text)?;
+        let rewritten = match self.prepare_property_graphs(text, on_result)? {
+            property_graphs::GraphText::Done => return Ok(()),
+            property_graphs::GraphText::Rewritten(rewritten) => Some(rewritten),
+            property_graphs::GraphText::Unchanged => None,
+        };
+        let text = rewritten.as_deref().unwrap_or(text);
         let reader = self.file_reader;
         crate::new_files::with_reader(reader, || self.run_text_with_reader(text, parameters, on_result, client))
     }

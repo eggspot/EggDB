@@ -1031,3 +1031,4 @@ its full title with its status.
 - [D1004](decisions/D1004.md) Code-only batch 652 (M12): SQL Server's geometry and geography types with their methods
 - [D1005](decisions/D1005.md) Code-only batch 653 (M12): agent memory as MCP tools and eggdb memory
 - [D1006](decisions/D1006.md) Code-only batch 654 (M12): an end-to-end retrieval benchmark
+- [D1007](decisions/D1007.md) Code-only batch 655 (M13): SQL/PGQ property graphs and GRAPH_TABLE over tables
