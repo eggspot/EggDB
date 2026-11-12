@@ -53,6 +53,34 @@ using (var connection = new EggDbConnection($"Data Source={path};Dialect=sqlite"
     }
 }
 File.Delete(path);
+var keyValuePath = Path.Combine(Path.GetTempPath(), $"eggdb-kv-{Guid.NewGuid():N}.db");
+using (var store = new EggDbKeyValue(keyValuePath))
+{
+    using (var write = store.BeginWrite())
+    {
+        Check(write.CreateCollection("sessions"), "the collection is made");
+        write.Put("s:1", "ada", "sessions");
+        write.Put("plain", "default");
+        write.Commit();
+    }
+    using (var read = store.BeginRead())
+    {
+        Check(System.Text.Encoding.UTF8.GetString(read.Get("s:1", "sessions") ?? []) == "ada", "the collection holds its key");
+        Check(read.Get("s:1") is null, "the default key space does not");
+        Check(read.Scan(new EggDbScanOptions { Prefix = "s:"u8.ToArray() }, "sessions").Count == 1, "the prefix scan finds one key");
+        Check(read.CollectionStats("sessions").Entries == 1, "the collection counts one entry");
+    }
+    using (var rename = store.BeginWrite())
+    {
+        rename.RenameCollection("sessions", "logins");
+        rename.Commit();
+    }
+    using (var read = store.BeginRead())
+    {
+        Check(read.Collections().SequenceEqual(["logins"]), "the collection was renamed");
+    }
+}
+File.Delete(keyValuePath);
 Console.WriteLine("dotnet driver check: passed");
 
 static void Check(bool condition, string what)

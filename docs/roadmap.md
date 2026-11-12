@@ -467,8 +467,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (`eggdb_rename_collection`, `eggdb_collection_stats`): **code written, unbuilt** (code-only mode, 2026-11-13, D929).
   The Python driver's key-value API with collections (`eggdb.open_key_value`): **code written, unbuilt** (code-only
   mode, 2026-11-13, D930); the Go driver's (`eggdb.OpenKeyValue`): **code written, unbuilt** (code-only mode,
-  2026-11-13, D931); the Node.js driver's (`KeyValue`): **code written, unbuilt** (code-only mode, 2026-11-13, D932).
-  Left: the other language drivers.
+  2026-11-13, D931); the Node.js driver's (`KeyValue`): **code written, unbuilt** (code-only mode, 2026-11-13, D932);
+  the .NET driver's (`EggDbKeyValue`): **code written, unbuilt** (code-only mode, 2026-11-13, D933). Left: Java,
+  Kotlin, PHP, Ruby, Swift, Dart and C++.
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
   Check: the compare job, gated.
 - On-disk overhead per row and per index entry, measured with a target beside the others (D6,
