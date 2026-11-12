@@ -5,6 +5,7 @@ mod event_triggers;
 mod system_versioning;
 mod foreign_tables;
 mod rowversion;
+mod mysql_set_order;
 mod mysql;
 pub(crate) mod mysql_events;
 mod mysql_load;
@@ -3661,12 +3662,17 @@ impl<'s> Session<'s> {
                         .map(|()| answer),
                     (outcome, _) => outcome,
                 };
-                match (created, create.rowversion_column.clone()) {
+                let created = match (created, create.rowversion_column.clone()) {
                     (Ok(answer), Some(column)) => {
                         self.enable_rowversion(&table, &column).map(|()| answer)
                     }
                     (outcome, _) => outcome,
-                }
+                };
+                let constraints = create
+                    .constraints
+                    .iter()
+                    .chain(create.columns.iter().flat_map(|column| column.constraints.iter()));
+                created.and_then(|answer| self.keep_set_member_order(&table, constraints).map(|()| answer))
             }
             Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
