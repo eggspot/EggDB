@@ -955,6 +955,7 @@ pub(crate) struct AlterTable {
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AlterAction {
+    SystemVersioning(Option<SystemVersioning>),
     AddColumn {
         column: ColumnDefinition,
         if_not_exists: bool,
@@ -1384,6 +1385,7 @@ pub(crate) struct CreateTable {
     pub(crate) partition_by: Option<PartitionBy>,
     pub(crate) partition_of: Option<PartitionOf>,
     pub(crate) sqlite_text: Option<String>,
+    pub(crate) system_versioning: Option<SystemVersioning>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1502,6 +1504,13 @@ pub(crate) struct TableReference {
     pub(crate) generated: Option<Box<GeneratedTable>>,
     pub(crate) partition_selection: Option<Box<PartitionSelection>>,
     pub(crate) system_time: Option<Box<SystemTime>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SystemVersioning {
+    pub(crate) start: String,
+    pub(crate) end: String,
+    pub(crate) history: Option<Name>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

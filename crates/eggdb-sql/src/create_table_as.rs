@@ -268,6 +268,7 @@ struct TableShape<'a> {
 
 fn empty_table(create: &CreateTableAs) -> CreateTable {
     CreateTable {
+        system_versioning: None,
         name: create.name.clone(),
         temporary: create
             .temporary

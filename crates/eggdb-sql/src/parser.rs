@@ -5,6 +5,7 @@ mod create_table_as;
 mod cursors;
 mod event_triggers;
 mod system_time;
+mod system_versioning;
 mod databases;
 mod generated;
 mod group_concat;
@@ -439,6 +440,8 @@ pub(crate) struct Parser<'t> {
     routine_setting_spans: Option<Vec<routines::SettingSpan>>,
     oracle_unaliased_expressions: Vec<usize>,
     mysql_column_check: Option<mysql::MysqlColumnCheck>,
+    system_period: Option<(String, String)>,
+    system_versioning_on: Option<Option<crate::ast::Name>>,
 }
 
 #[derive(Clone, Copy)]
@@ -568,6 +571,8 @@ impl<'t> Parser<'t> {
             routine_setting_spans: None,
             oracle_unaliased_expressions: Vec::new(),
             mysql_column_check: None,
+            system_period: None,
+            system_versioning_on: None,
         }
     }
 
@@ -2044,6 +2049,7 @@ impl<'t> Parser<'t> {
                 indexes.push(index);
             } else if self.is_word("exclude") || self.is_word("like") {
                 return Err(self.table_constraint_not_supported());
+            } else if (self.sqlserver() || self.mysql()) && self.system_time_period()? {
             } else if self.sqlserver()
                 && let Some(refused) = self.sqlserver_table_element_refused()
             {
@@ -2061,12 +2067,18 @@ impl<'t> Parser<'t> {
         }
         self.expect(&TokenKind::RightParen)?;
         let comment = if self.mysql() {
-            self.mysql_table_options()?
+            let comment = self.mysql_table_options()?;
+            if self.mysql_with_system_versioning() {
+                self.mysql_table_options()?.or(comment)
+            } else {
+                comment
+            }
         } else {
             None
         };
         if self.mysql() && self.at_mysql_table_query() {
             let declared = CreateTable {
+                system_versioning: None,
                 name: name.clone(),
                 temporary,
                 if_not_exists,
@@ -2114,6 +2126,7 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("table options"));
         }
         Ok(Statement::CreateTable(CreateTable {
+            system_versioning: self.take_system_versioning()?,
             name,
             temporary,
             if_not_exists,
@@ -2236,6 +2249,9 @@ impl<'t> Parser<'t> {
             self.sqlserver_computed_column(&mut column)?;
         }
         loop {
+            if self.mysql() && self.generated_row_period_column() {
+                continue;
+            }
             if (self.mysql() || self.oracle()) && self.starts_generation() {
                 self.generation_clause(&mut column, !untyped)?;
                 continue;

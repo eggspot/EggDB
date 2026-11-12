@@ -896,7 +896,7 @@ impl<'a> Resolver<'a> {
         Ok(item)
     }
 
-    fn versions_view_of(&mut self, table: &str) -> SqlResult<Option<String>> {
+    fn versions_view_of(&mut self, table: &str) -> SqlResult<Option<(String, String, String)>> {
         let registry_name = schemas::qualified(
             crate::temporal_tables::REGISTRY_SCHEMA,
             crate::temporal_tables::REGISTRY_TABLE,
@@ -910,7 +910,15 @@ impl<'a> Resolver<'a> {
         for (_, row) in crate::execute::every_row(self.reader, &registry)? {
             let text = |at: usize| row.get(at).and_then(crate::types::Value::character_text);
             if text(0) == Some(schema) && text(1) == Some(name) {
-                return Ok(text(4).map(|view| schemas::qualified(schema, view)));
+                let start = text(6).unwrap_or(crate::temporal_tables::SYSTEM_START);
+                let end = text(7).unwrap_or(crate::temporal_tables::SYSTEM_END);
+                return Ok(text(4).map(|view| {
+                    (
+                        schemas::qualified(schema, view),
+                        start.to_owned(),
+                        end.to_owned(),
+                    )
+                }));
             }
         }
         Ok(None)
@@ -924,7 +932,7 @@ impl<'a> Resolver<'a> {
     ) -> SqlResult<()> {
         use crate::ast::{BinaryOperator, SystemTime};
         let position = reference.name.position;
-        let Some(view) = self.versions_view_of(&table.name)? else {
+        let Some((view, start_column, end_column)) = self.versions_view_of(&table.name)? else {
             return Err(not_system_versioned(&reference.name));
         };
         let column = |name: &str| Expr {
@@ -938,8 +946,8 @@ impl<'a> Resolver<'a> {
             kind: ExprKind::Binary(operator, Box::new(left), Box::new(right)),
             position,
         };
-        let start = || column(crate::temporal_tables::SYSTEM_START);
-        let end = || column(crate::temporal_tables::SYSTEM_END);
+        let start = || column(&start_column);
+        let end = || column(&end_column);
         let conditions = match clause {
             SystemTime::All => Vec::new(),
             SystemTime::AsOf(at) => vec![

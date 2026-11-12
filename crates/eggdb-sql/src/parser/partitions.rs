@@ -31,6 +31,7 @@ impl Parser<'_> {
             None
         };
         Ok(Statement::CreateTable(CreateTable {
+            system_versioning: None,
             name,
             temporary,
             if_not_exists,

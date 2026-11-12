@@ -2,6 +2,7 @@ mod classifier_catalog;
 mod cursors;
 pub(crate) mod database_switch;
 mod event_triggers;
+mod system_versioning;
 mod mysql;
 pub(crate) mod mysql_events;
 mod mysql_load;
@@ -3367,15 +3368,30 @@ impl<'s> Session<'s> {
                 binding.names(writer, tables, names)?;
                 sequences::drop_sequences(writer, tables, names, *if_exists, *cascade, dialect)
             }),
-            Statement::AlterTable(alter) => self.write("ALTER TABLE", |writer, tables| {
-                if let Some(mut renamed_view) = view_renamed_by(writer, tables, alter, dialect)? {
-                    binding.names(writer, tables, std::slice::from_mut(&mut renamed_view.name))?;
-                    return crate::views::alter_view(writer, tables, &renamed_view, dialect)
-                        .map(|_| QueryResult::command("ALTER TABLE"));
+            Statement::AlterTable(alter) => {
+                let altered = self.write("ALTER TABLE", |writer, tables| {
+                    if let Some(mut renamed_view) = view_renamed_by(writer, tables, alter, dialect)? {
+                        binding.names(writer, tables, std::slice::from_mut(&mut renamed_view.name))?;
+                        return crate::views::alter_view(writer, tables, &renamed_view, dialect)
+                            .map(|_| QueryResult::command("ALTER TABLE"));
+                    }
+                    binding.alter_table(writer, tables, alter)?;
+                    crate::alter::alter_table(writer, tables, alter, dialect)
+                });
+                match altered {
+                    Ok(answer)
+                        if alter
+                            .actions
+                            .iter()
+                            .any(|action| matches!(action, crate::ast::AlterAction::SystemVersioning(_))) =>
+                    {
+                        let table = alter.name.text.clone();
+                        self.apply_system_versioning_actions(&table, &alter.actions)
+                            .map(|()| answer)
+                    }
+                    other => other,
                 }
-                binding.alter_table(writer, tables, alter)?;
-                crate::alter::alter_table(writer, tables, alter, dialect)
-            }),
+            }
             Statement::CreateSchema {
                 name,
                 if_not_exists,
@@ -3436,10 +3452,20 @@ impl<'s> Session<'s> {
             Statement::Discard(target) => self.discard(target.clone()),
             Statement::Cursor(command) => self.cursor_command(command, io),
             Statement::Show { name } => self.show(name.as_deref()),
-            Statement::CreateTable(create) => self.write("CREATE TABLE", |writer, tables| {
-                binding.create_table(writer, tables, create)?;
-                crate::sqlite_schema_text::create_table(writer, tables, create, dialect)
-            }),
+            Statement::CreateTable(create) => {
+                let created = self.write("CREATE TABLE", |writer, tables| {
+                    binding.create_table(writer, tables, create)?;
+                    crate::sqlite_schema_text::create_table(writer, tables, create, dialect)
+                });
+                match (created, create.system_versioning.clone()) {
+                    (Ok(answer), Some(versioning)) => {
+                        let table = create.name.text.clone();
+                        self.enable_system_versioning(&table, &versioning)
+                            .map(|()| answer)
+                    }
+                    (outcome, _) => outcome,
+                }
+            }
             Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
                 crate::sqlite_schema_text::create_index(writer, tables, create, dialect)

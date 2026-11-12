@@ -102,6 +102,7 @@ fn shell_table(
         .map(|(column, comment)| commented_column(source, column, comment, position))
         .collect();
     Ok(CreateTable {
+        system_versioning: None,
         name,
         temporary: None,
         if_not_exists: false,

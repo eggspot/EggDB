@@ -819,3 +819,4 @@ its full title with its status.
 - [D792](decisions/D792.md) Code-only batch 440 (M5): floating point, tables, `call_indirect` and start functions in the WebAssembly interpreter
 - [D793](decisions/D793.md) Code-only batch 441 (M5): `CREATE FUNCTION ... LANGUAGE wasm` on EggDB's interpreter
 - [D794](decisions/D794.md) Code-only batch 442 (M14): `FOR SYSTEM_TIME` queries over the history `eggdb_temporal` keeps
+- [D795](decisions/D795.md) Code-only batch 443 (M14): SQL Server's and MariaDB's system-versioning syntax on `eggdb_temporal`

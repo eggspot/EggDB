@@ -614,8 +614,10 @@ impl Parser<'_> {
         }
         let name = self.table_name()?;
         let mut actions = Vec::new();
-        if self.sqlserver() {
+        if self.sqlserver() && self.sqlserver_alter_system_versioning(&mut actions)? {
+        } else if self.sqlserver() {
             self.sqlserver_alter_actions(&mut actions)?;
+        } else if self.mysql() && self.alter_system_versioning(&mut actions) {
         } else {
             loop {
                 check_action_count(&actions)?;

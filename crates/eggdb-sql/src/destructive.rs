@@ -1145,6 +1145,7 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::MoveColumn { .. }
             | AlterAction::AddIndex(_)
             | AlterAction::RenameIndex { .. }
+            | AlterAction::SystemVersioning(_)
             | AlterAction::Accepted => continue,
         };
         match &mut found {

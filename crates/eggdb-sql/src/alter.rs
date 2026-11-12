@@ -151,7 +151,7 @@ fn apply(
     dialect: Dialect,
 ) -> SqlResult<Option<String>> {
     match action {
-        AlterAction::Accepted => Ok(None),
+        AlterAction::Accepted | AlterAction::SystemVersioning(_) => Ok(None),
         AlterAction::AddColumn {
             column,
             if_not_exists,

@@ -1688,8 +1688,10 @@ impl<'t> Parser<'t> {
             "MASKED WITH (dynamic data masking)"
         } else if self.is_word("encrypted") {
             "ENCRYPTED WITH (Always Encrypted)"
+        } else if self.generated_row_period_column() {
+            return Ok(true);
         } else if self.is_word("generated") {
-            "GENERATED ALWAYS AS ROW (system-versioned temporal tables)"
+            "GENERATED ALWAYS AS ROW other than START or END"
         } else {
             return Ok(false);
         };
@@ -1785,7 +1787,9 @@ impl<'t> Parser<'t> {
             } else if self.is_word("with") && self.peek_kind_at(1) == &TokenKind::LeftParen {
                 self.at += 2;
                 loop {
-                    self.sqlserver_option("table", table_option_accepted)?;
+                    if !self.sqlserver_system_versioning_option()? {
+                        self.sqlserver_option("table", table_option_accepted)?;
+                    }
                     if !self.take(&TokenKind::Comma) {
                         break;
                     }
@@ -1799,7 +1803,7 @@ impl<'t> Parser<'t> {
 
     pub(super) fn sqlserver_table_element_refused(&self) -> Option<SqlError> {
         let refused = if self.is_word("period") && self.is_word_at(1, "for") {
-            "PERIOD FOR SYSTEM_TIME (system-versioned temporal tables)"
+            "PERIOD FOR an application-time period"
         } else if self.is_word("index") {
             "An INDEX inside CREATE TABLE"
         } else {

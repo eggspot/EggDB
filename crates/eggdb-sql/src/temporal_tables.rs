@@ -8,7 +8,7 @@ pub(crate) const SYSTEM_END: &str = "recorded_to";
 /// was true at any time and as it was known at any time (D50).
 pub(crate) const TEMPORAL_SCRIPT: &str = r#"
 CREATE SCHEMA eggdb_temporal;
-CREATE TABLE eggdb_temporal.tables (schema_name text NOT NULL, table_name text NOT NULL, key_columns text[] NOT NULL, history_table text NOT NULL, versions_view text NOT NULL, enabled_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (schema_name, table_name));
+CREATE TABLE eggdb_temporal.tables (schema_name text NOT NULL, table_name text NOT NULL, key_columns text[] NOT NULL, history_table text NOT NULL, versions_view text NOT NULL, enabled_at timestamptz NOT NULL DEFAULT now(), system_start text NOT NULL DEFAULT 'recorded_from', system_end text NOT NULL DEFAULT 'recorded_to', PRIMARY KEY (schema_name, table_name));
 CREATE FUNCTION eggdb_temporal.enable(schema_name text, table_name text, key_columns text[]) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
     history_name text := table_name || '_history';
@@ -62,6 +62,60 @@ $body$, schema_name, table_name, key_match, self_match, history_name, column_lis
     EXECUTE format('CREATE TRIGGER eggdb_temporal_track BEFORE INSERT OR UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_temporal.%I()', schema_name, table_name, function_name);
     EXECUTE format('CREATE VIEW %I.%I AS SELECT * FROM %I.%I UNION ALL SELECT * FROM %I.%I', schema_name, versions_name, schema_name, table_name, schema_name, history_name);
     INSERT INTO eggdb_temporal.tables (schema_name, table_name, key_columns, history_table, versions_view) VALUES (enable.schema_name, enable.table_name, enable.key_columns, history_name, versions_name);
+END
+$$;
+CREATE FUNCTION eggdb_temporal.enable_system_versioning(schema_name text, table_name text, start_column text, end_column text, history_table text DEFAULT NULL, open_end text DEFAULT 'infinity') RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    history_name text := coalesce(enable_system_versioning.history_table, enable_system_versioning.table_name || '_history');
+    versions_name text := enable_system_versioning.table_name || '_versions';
+    function_name text := 'version_' || enable_system_versioning.schema_name || '_' || enable_system_versioning.table_name;
+    column_list text;
+    old_values text;
+    body text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM eggdb_temporal.tables t WHERE t.schema_name = enable_system_versioning.schema_name AND t.table_name = enable_system_versioning.table_name) THEN
+        RAISE EXCEPTION 'table %.% is already versioned', enable_system_versioning.schema_name, enable_system_versioning.table_name USING ERRCODE = '42710';
+    END IF;
+    EXECUTE format('ALTER TABLE %I.%I ADD COLUMN IF NOT EXISTS %I timestamptz NOT NULL DEFAULT now()', enable_system_versioning.schema_name, enable_system_versioning.table_name, start_column);
+    EXECUTE format('ALTER TABLE %I.%I ADD COLUMN IF NOT EXISTS %I timestamptz NOT NULL DEFAULT %L', enable_system_versioning.schema_name, enable_system_versioning.table_name, end_column, open_end);
+    IF NOT EXISTS (SELECT 1 FROM information_schema.tables t WHERE t.table_schema = enable_system_versioning.schema_name AND t.table_name = history_name) THEN
+        EXECUTE format('CREATE TABLE %I.%I AS SELECT * FROM %I.%I WHERE false', enable_system_versioning.schema_name, history_name, enable_system_versioning.schema_name, enable_system_versioning.table_name);
+    END IF;
+    SELECT string_agg(format('%I', c.column_name), ', ' ORDER BY c.ordinal_position),
+           string_agg(CASE WHEN c.column_name = end_column THEN 'now()' ELSE format('OLD.%I', c.column_name) END, ', ' ORDER BY c.ordinal_position)
+        INTO column_list, old_values
+        FROM information_schema.columns c WHERE c.table_schema = enable_system_versioning.schema_name AND c.table_name = enable_system_versioning.table_name;
+    body := format($body$
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        INSERT INTO %1$I.%2$I (%3$s) VALUES (%4$s);
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    NEW.%5$I := now();
+    NEW.%6$I := %7$L;
+    RETURN NEW;
+END
+$body$, enable_system_versioning.schema_name, history_name, column_list, old_values, start_column, end_column, open_end);
+    EXECUTE format('CREATE FUNCTION eggdb_temporal.%I() RETURNS trigger LANGUAGE plpgsql AS %L', function_name, body);
+    EXECUTE format('CREATE TRIGGER eggdb_temporal_version BEFORE INSERT OR UPDATE OR DELETE ON %I.%I FOR EACH ROW EXECUTE FUNCTION eggdb_temporal.%I()', enable_system_versioning.schema_name, enable_system_versioning.table_name, function_name);
+    EXECUTE format('CREATE VIEW %I.%I AS SELECT * FROM %I.%I UNION ALL SELECT * FROM %I.%I', enable_system_versioning.schema_name, versions_name, enable_system_versioning.schema_name, enable_system_versioning.table_name, enable_system_versioning.schema_name, history_name);
+    INSERT INTO eggdb_temporal.tables (schema_name, table_name, key_columns, history_table, versions_view, system_start, system_end) VALUES (enable_system_versioning.schema_name, enable_system_versioning.table_name, ARRAY[]::text[], history_name, versions_name, start_column, end_column);
+END
+$$;
+CREATE FUNCTION eggdb_temporal.disable_system_versioning(schema_name text, table_name text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    versions_name text;
+BEGIN
+    SELECT t.versions_view INTO versions_name FROM eggdb_temporal.tables t WHERE t.schema_name = disable_system_versioning.schema_name AND t.table_name = disable_system_versioning.table_name AND t.system_start <> 'recorded_from';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'table %.% is not system-versioned', disable_system_versioning.schema_name, disable_system_versioning.table_name USING ERRCODE = '42809';
+    END IF;
+    EXECUTE format('DROP VIEW %I.%I', disable_system_versioning.schema_name, versions_name);
+    EXECUTE format('DROP TRIGGER eggdb_temporal_version ON %I.%I', disable_system_versioning.schema_name, disable_system_versioning.table_name);
+    EXECUTE format('DROP FUNCTION eggdb_temporal.%I()', 'version_' || disable_system_versioning.schema_name || '_' || disable_system_versioning.table_name);
+    DELETE FROM eggdb_temporal.tables t WHERE t.schema_name = disable_system_versioning.schema_name AND t.table_name = disable_system_versioning.table_name;
 END
 $$;
 CREATE FUNCTION eggdb_temporal.split_period(schema_name text, table_name text, key jsonb, period_start timestamptz, period_end timestamptz) RETURNS text LANGUAGE plpgsql AS $$
@@ -230,4 +284,43 @@ mod tests {
             "42809"
         );
     }
+
+    #[test]
+    fn mariadb_and_sql_server_syntax_make_tables_system_versioned() {
+        let store = MemoryStore::default();
+        let mut mariadb = Session::with_dialect(&store, crate::Dialect::MySql);
+        for sql in [
+            "CREATE TABLE stock (sku VARCHAR(10) PRIMARY KEY, amount INT) WITH SYSTEM VERSIONING",
+            "INSERT INTO stock (sku, amount) VALUES ('egg', 5)",
+            "UPDATE stock SET amount = 6 WHERE sku = 'egg'",
+        ] {
+            run(&mut mariadb, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut mariadb, "SELECT COUNT(*) AS versions FROM stock FOR SYSTEM_TIME ALL").unwrap(),
+            "versions\n2\nSELECT 1"
+        );
+        run(&mut mariadb, "ALTER TABLE stock DROP SYSTEM VERSIONING").unwrap();
+        assert!(run(&mut mariadb, "SELECT * FROM stock FOR SYSTEM_TIME ALL").is_err());
+        let mut sqlserver = Session::with_dialect(&store, crate::Dialect::SqlServer);
+        run(
+            &mut sqlserver,
+            "CREATE TABLE prices (id INT PRIMARY KEY, price INT, \
+             ValidFrom DATETIME2 GENERATED ALWAYS AS ROW START HIDDEN NOT NULL, \
+             ValidTo DATETIME2 GENERATED ALWAYS AS ROW END HIDDEN NOT NULL, \
+             PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo)) \
+             WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.PricesHistory))",
+        )
+        .unwrap_or_else(|error| panic!("create: {error}"));
+        run(&mut sqlserver, "INSERT INTO prices (id, price) VALUES (1, 10)").unwrap();
+        run(&mut sqlserver, "UPDATE prices SET price = 11 WHERE id = 1").unwrap();
+        assert!(run(&mut sqlserver, "SELECT COUNT(*) AS kept FROM PricesHistory").unwrap().contains('1'));
+        let refused = run(
+            &mut sqlserver,
+            "CREATE TABLE plain (id INT PRIMARY KEY) WITH (SYSTEM_VERSIONING = ON)",
+        )
+        .unwrap_err();
+        assert_eq!(refused.vendor_code(), Some(13510));
+    }
 }
+

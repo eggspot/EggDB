@@ -578,6 +578,7 @@ impl<'s> Session<'s> {
         let mut scratch = Scratch::default();
         let mut cache = TableCache::default();
         let create = CreateTable {
+            system_versioning: None,
             comment: None,
             partition_by: None,
             partition_of: None,
