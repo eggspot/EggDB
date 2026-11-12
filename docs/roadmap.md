@@ -733,7 +733,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Server events (logins, privilege and schema changes, chosen tables' reads) in the hash-chained
   audit log, with anchored digests and retention (D26, D231).
 - Crypto-shredding: per-subject keys whose deletion makes data unreadable in the file, history
-  and every backup, with holds that override it (D26, D53, D231, D246).
+  and every backup, with holds that override it (D26, D53, D231, D246). **Code written, unbuilt** (code-only mode,
+  2026-11-12, D773), in `eggdb_shredding`, for values sealed with it.
 - Classification and tagging of personal data (D26). **Code written, unbuilt** (code-only mode, 2026-11-12, D748).
 - Evidence reports for SOC 2, HIPAA and PCI DSS audits (D26). **Code written, unbuilt** (code-only mode, 2026-11-12,
   D761), for what SQL can read; the audit log's server events and encryption settings are left.

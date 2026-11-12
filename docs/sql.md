@@ -4087,6 +4087,28 @@ CREATE POLICY own_notes ON notes USING (owner_id = eggdb_app_auth.current_user_i
 - `eggdb_password_hash(text)`, `eggdb_password_verify(text, text)`, `eggdb_jwt_sign(claims, key)`,
   `eggdb_jwt_public_jwk(key)` and `eggdb_jwt_verify(token, jwks, issuer, audience)` are available on their own.
 
+## Crypto-shredding (eggdb_shredding)
+
+`CREATE EXTENSION eggdb_shredding` seals each data subject's values under a key of its own, so destroying that key
+erases the subject everywhere its sealed values were copied (D773):
+
+```sql
+CREATE EXTENSION eggdb_shredding;
+SET eggdb_shredding.wrapping_key = '<64 hex digits, from the operator's KMS or secret store>';
+INSERT INTO profiles (subject, name) VALUES ('user-1', eggdb_shredding.seal('user-1', 'Ada'));
+SELECT eggdb_shredding.unseal(subject, name) FROM profiles;
+SELECT eggdb_shredding.shred('user-1');
+```
+
+- `seal(subject, text)` makes the subject's key on first use and returns the value sealed with AES-GCM;
+  `unseal(subject, sealed)` returns it, or NULL once the subject was shredded.
+- Subject keys are stored wrapped by the key-encryption key in the session setting `eggdb_shredding.wrapping_key`,
+  which the application supplies from outside the database. A copy of the file or a backup therefore holds only
+  wrapped keys; after `shred(subject)` replaces the wrapped key with NULL, no copy made later can be read for that
+  subject, and copies made earlier stay unreadable as long as the wrapping key is never stored with them.
+- `place_hold(name, subject, reason)` keeps a subject from being shredded until `lift_hold(name, subject)`;
+  `shred` then returns false, and every request is logged in `eggdb_shredding.shred_log`.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

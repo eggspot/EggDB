@@ -121,6 +121,7 @@ mod etl;
 mod app_tokens;
 mod app_auth;
 mod webauthn;
+mod shredding;
 mod report_pdf;
 mod zarr;
 mod new_files;
