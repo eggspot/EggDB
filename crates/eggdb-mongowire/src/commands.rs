@@ -119,7 +119,7 @@ fn projection_of(body: &Document, name: &str) -> Result<Option<Projection>, Docu
     }
 }
 
-fn collation_of(body: &Document) -> Result<Option<eggdb_documents::Collation>, DocumentError> {
+pub(crate) fn collation_of(body: &Document) -> Result<Option<eggdb_documents::Collation>, DocumentError> {
     match body.get("collation") {
         None | Some(Bson::Null) => Ok(None),
         Some(Bson::Document(given)) => eggdb_documents::Collation::parse(given),
@@ -132,6 +132,29 @@ fn raw_filter(body: &Document, name: &str) -> Document {
         Some(Bson::Document(filter)) => eggdb_documents::filter_with_time(filter, now_ms()),
         _ => Document::new(),
     }
+}
+
+fn collated_write_filter(
+    shared: &Shared<'_>,
+    database: &str,
+    collection: &str,
+    statement: &Document,
+    filter_field: &str,
+    sort: Option<&SortSpec>,
+    only_one: bool,
+) -> Result<Option<eggdb_documents::Filter>, DocumentError> {
+    let Some(collation) = collation_of(statement)? else {
+        return Ok(None);
+    };
+    let unsorted = SortSpec::default();
+    collation.matched_ids_filter(
+        shared.store,
+        database,
+        collection,
+        &raw_filter(statement, filter_field),
+        sort.unwrap_or(&unsorted),
+        only_one,
+    )
 }
 
 fn found_with(
@@ -1015,6 +1038,7 @@ fn update_statement(
         multi: statement.get_bool("multi") == Some(true),
         upsert: statement.get_bool("upsert") == Some(true),
     };
+    let filter = collated_write_filter(shared, database, collection, statement, "q", None, !options.multi)?.unwrap_or(filter);
     shared
         .store
         .update(database, collection, &filter, &update, options)
@@ -1080,7 +1104,13 @@ fn delete(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Docume
                     ));
                 }
             };
-            shared.store.delete(database, collection, &filter, only_one)
+            match collation_of(statement)? {
+                Some(_) => match collated_write_filter(shared, database, collection, statement, "q", None, only_one)? {
+                    Some(filter) => shared.store.delete(database, collection, &filter, only_one),
+                    None => Ok(0),
+                },
+                None => shared.store.delete(database, collection, &filter, only_one),
+            }
         });
         match outcome {
             Ok(count) => deleted += count,
@@ -1129,6 +1159,7 @@ fn find_and_modify(
             ));
         }
     };
+    let filter = collated_write_filter(shared, database, collection, body, "query", Some(&sort), true)?.unwrap_or(filter);
     let (found, outcome) =
         shared
             .store

@@ -1013,3 +1013,4 @@ its full title with its status.
 - [D986](decisions/D986.md) Code-only batch 634 (M8): search that respects each user's permissions
 - [D987](decisions/D987.md) Code-only batch 635 (M9): a benchmark against MongoDB
 - [D988](decisions/D988.md) Code-only batch 636 (M9): eggdb follow for MongoDB through its change streams
+- [D989](decisions/D989.md) Code-only batch 637 (M9): MongoDB collations in writes and aggregate

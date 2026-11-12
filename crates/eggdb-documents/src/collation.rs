@@ -1,5 +1,5 @@
 use crate::error::{DocumentError, DocumentResult};
-use crate::filter::{matches, parse_filter};
+use crate::filter::{Filter, matches, parse_filter};
 use crate::sort::{SortSpec, compare_by};
 use crate::store::Store;
 use eggdb_bson::{Bson, Document};
@@ -227,6 +227,36 @@ impl Collation {
 
     /// The documents of `database.collection` matching `filter` under the collation, in `sort`
     /// order under it.
+    /// A filter on `_id` naming the documents `filter` matches under this collation (the first
+    /// in `sort` order only, with `only_one`), for a write to use instead of `filter`; `None`
+    /// when none matches, so an upsert builds its document from the original filter.
+    pub fn matched_ids_filter(
+        &self,
+        store: &Store<'_>,
+        database: &str,
+        collection: &str,
+        filter: &Document,
+        sort: &SortSpec,
+        only_one: bool,
+    ) -> DocumentResult<Option<Filter>> {
+        let found = self.find(store, database, collection, filter, sort)?;
+        let ids: Vec<Bson> = found
+            .into_iter()
+            .filter_map(|document| document.get("_id").cloned())
+            .take(if only_one { 1 } else { usize::MAX })
+            .collect();
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let mut within = Document::new();
+        within.insert("$in", Bson::Array(ids));
+        let mut by_id = Document::new();
+        by_id.insert("_id", Bson::Document(within));
+        parse_filter(&by_id).map(Some)
+    }
+
+    /// Finds the documents `filter` matches under this collation, in `sort` order compared
+    /// by collation keys.
     pub fn find(&self, store: &Store<'_>, database: &str, collection: &str, filter: &Document, sort: &SortSpec) -> DocumentResult<Vec<Document>> {
         let everything = parse_filter(&Document::new())?;
         let collated_filter = parse_filter(&self.collated_filter(filter))?;

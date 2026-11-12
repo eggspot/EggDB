@@ -48,9 +48,23 @@ pub(crate) fn aggregate(
         Some(filter) => (filter.clone(), &stages[1..]),
         None => (parse_filter(&Document::new())?, &stages[..]),
     };
-    let input = shared
-        .store
-        .find(database, &collection, &first_filter, &SortSpec::default())?;
+    let input = match crate::commands::collation_of(body)? {
+        Some(collation) => {
+            let first_match = match stages.first().and_then(Stage::as_match) {
+                Some(_) => bound
+                    .first()
+                    .and_then(Bson::as_document)
+                    .and_then(|stage| stage.get_document("$match"))
+                    .cloned()
+                    .unwrap_or_default(),
+                None => Document::new(),
+            };
+            collation.find(shared.store, database, &collection, &first_match, &SortSpec::default())?
+        }
+        None => shared
+            .store
+            .find(database, &collection, &first_filter, &SortSpec::default())?,
+    };
     let everything = parse_filter(&Document::new())?;
     let load = |name: &str| {
         check_collection_name(name)?;
