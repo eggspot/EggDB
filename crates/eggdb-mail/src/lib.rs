@@ -1,0 +1,155 @@
+//! EggDB's email store (D56, D892): mailboxes and messages kept on EggDB's key-value
+//! transactions through [`eggdb_keyspace::Keyspace`] (database 0 of the keyspace the caller
+//! gives, which the `eggdb` binary keeps in the collection `mail0`), mail received over SMTP
+//! ([`serve_smtp`]). Everything is written from the IETF RFCs (RFC 5321, RFC 5322, RFC 2047);
+//! no other mail server's code is used or read.
+
+pub mod message;
+mod smtp;
+pub mod store;
+
+use eggdb_keyspace::Keyspace;
+use std::io;
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+const ACCEPT_POLL: Duration = Duration::from_millis(100);
+const READ_POLL: Duration = Duration::from_secs(1);
+const WRITE_LIMIT: Duration = Duration::from_secs(60);
+
+/// What a mail listener needs.
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// The account's user name, for IMAP and JMAP sign-in.
+    pub user: String,
+    /// The SHA-256 of the account's password.
+    pub password_sha256: [u8; 32],
+    /// The most connections served at once.
+    pub max_connections: usize,
+    /// The largest message accepted, in bytes.
+    pub max_message_bytes: usize,
+}
+
+pub(crate) fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// Accepts connections on `listener` until `stop`, serving each on its own thread with
+/// `serve`, at most `config.max_connections` at once.
+pub(crate) fn accept_loop(
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+    name: &str,
+    serve: &(dyn Fn(TcpStream) -> io::Result<()> + Sync),
+) -> io::Result<()> {
+    listener.set_nonblocking(true)?;
+    let active = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        while !stop() {
+            let stream = match eggdb_platform::accept_tcp(listener) {
+                Ok((stream, _)) => stream,
+                Err(_) => {
+                    std::thread::sleep(ACCEPT_POLL);
+                    continue;
+                }
+            };
+            if stream.set_nonblocking(false).is_err()
+                || stream.set_read_timeout(Some(READ_POLL)).is_err()
+                || stream.set_write_timeout(Some(WRITE_LIMIT)).is_err()
+            {
+                continue;
+            }
+            if active.fetch_add(1, Ordering::AcqRel) >= config.max_connections {
+                active.fetch_sub(1, Ordering::AcqRel);
+                continue;
+            }
+            let active = &active;
+            let spawned = std::thread::Builder::new().name(name.to_owned()).spawn_scoped(scope, move || {
+                let _ = serve(stream);
+                active.fetch_sub(1, Ordering::AcqRel);
+            });
+            if spawned.is_err() {
+                active.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Receives mail over SMTP on `listener` until `stop`, storing every accepted message in the
+/// `INBOX` of `keyspace`'s database 0. It relays nothing.
+pub fn serve_smtp(
+    keyspace: &(dyn Keyspace + Sync),
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
+    accept_loop(listener, config, stop, "eggdb-smtp", &|stream| smtp::serve_connection(keyspace, config, stream, stop))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eggdb_keyspace::MemoryKeyspace;
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn mail_received_over_smtp_lands_in_the_inbox() {
+        let keyspace = MemoryKeyspace::default();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = ServerConfig {
+            user: "eggdb".to_owned(),
+            password_sha256: eggdb_crypto::sha256(b"secret"),
+            max_connections: 4,
+            max_message_bytes: 1 << 20,
+        };
+        let stopped = AtomicBool::new(false);
+        let stop = || stopped.load(Ordering::Acquire);
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_smtp(&keyspace, &listener, &config, &stop));
+            let stream = TcpStream::connect(address).unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            let mut expect = |reader: &mut BufReader<TcpStream>, code: &str| loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with(code), "{line}");
+                if line.as_bytes().get(3) == Some(&b' ') {
+                    break;
+                }
+            };
+            expect(&mut reader, "220");
+            for (command, code) in [
+                ("EHLO client.example", "250"),
+                ("MAIL FROM:<ann@example.org>", "250"),
+                ("RCPT TO:<eggdb@localhost>", "250"),
+                ("DATA", "354"),
+                ("Subject: hello\r\n\r\n..dotted\r\n.", "250"),
+                ("QUIT", "221"),
+            ] {
+                writer.write_all(format!("{command}\r\n").as_bytes()).unwrap();
+                expect(&mut reader, code);
+            }
+            stopped.store(true, Ordering::Release);
+        });
+        let mut stored = Vec::new();
+        keyspace
+            .read(0, &mut |keys| {
+                stored = store::messages(keys, store::INBOX).map_err(|error| error.0)?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        let raw = String::from_utf8_lossy(&stored[0].raw).into_owned();
+        assert!(raw.starts_with("Received: from client.example"), "{raw}");
+        assert!(raw.contains("Delivered-To: eggdb@localhost\r\n"), "{raw}");
+        assert!(raw.ends_with("Subject: hello\r\n\r\n.dotted\r\n"), "{raw}");
+    }
+}

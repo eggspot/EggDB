@@ -23,6 +23,8 @@ pub const MONGO_COLLECTIONS: &str = "mongo";
 pub const GRAPH_COLLECTIONS: &str = "graph";
 /// The RDF quads.
 pub const RDF_COLLECTIONS: &str = "rdf";
+/// The mailboxes and messages.
+pub const MAIL_COLLECTIONS: &str = "mail";
 /// The Kafka-compatible topics.
 pub const KAFKA_COLLECTIONS: &str = "kafka";
 /// The message queues (AMQP, STOMP, SQS and the in-process inbox).

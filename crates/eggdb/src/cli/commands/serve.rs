@@ -424,6 +424,27 @@ impl Session<'_> {
             }
             None => None,
         };
+        let smtp_listener = match options.smtp_listen {
+            Some(address) => {
+                if self.request.read_only {
+                    return Err(usage(format!(
+                        "--smtp-listen {address}: a read-only server cannot store the mail it receives"
+                    )));
+                }
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--smtp-listen {address}: the SMTP receiver has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for SMTP on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let sparql_listener = match options.sparql_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -750,6 +771,7 @@ impl Session<'_> {
                 clickhouse_listener.as_ref(),
                 trino_listener.as_ref(),
                 sparql_listener.as_ref(),
+                smtp_listener.as_ref(),
                 cql_listener.as_ref(),
                 stomp_listener.as_ref(),
                 nats_listener.as_ref(),
@@ -894,6 +916,16 @@ impl Session<'_> {
         let rdf_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::RDF_COLLECTIONS,
+        };
+        let mail_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::MAIL_COLLECTIONS,
+        };
+        let mail_config = eggdb_mail::ServerConfig {
+            user: config.user.clone(),
+            password_sha256: server_password_sha256,
+            max_connections,
+            max_message_bytes: 25 << 20,
         };
         let sparql_endpoint = eggdb_rdf::Endpoint::new(
             &rdf_database,
@@ -1040,6 +1072,10 @@ impl Session<'_> {
                         .with_rate_limit(rate_limiter.as_ref())
                         .decoding_content_encoding(),
                 ),
+                None => Ok(()),
+            });
+            let smtp_server = scope.spawn(|| match &smtp_listener {
+                Some(listener) => eggdb_mail::serve_smtp(&mail_database, listener, &mail_config, &stop_signals::requested),
                 None => Ok(()),
             });
             let sparql_server = scope.spawn(|| match &sparql_listener {
@@ -1345,6 +1381,7 @@ impl Session<'_> {
             let _ = clickhouse_server.join();
             let _ = trino_server.join();
             let _ = sparql_server.join();
+            let _ = smtp_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = cdc_topic_delivery.join();
             let _ = sqs_server.join();
