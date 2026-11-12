@@ -704,3 +704,4 @@ its full title with its status.
 - [D677](decisions/D677.md) Code-only batch 325 (M16): InfluxQL arithmetic between fields and aggregates in the select list
 - [D678](decisions/D678.md) Code-only batch 326 (M16): metrics points deduplicated by series and time; tag keys recorded so tags and string fields differ
 - [D679](decisions/D679.md) Code-only batch 327 (M16): InfluxQL `SELECT ... INTO`, written back through the metrics store
+- [D680](decisions/D680.md) Code-only batch 328 (M16): InfluxQL subqueries as derived tables

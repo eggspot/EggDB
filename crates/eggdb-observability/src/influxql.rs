@@ -301,7 +301,7 @@ enum Fill {
     Number(f64),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct Bucket {
     interval: String,
     micros: i64,
@@ -313,6 +313,7 @@ struct Bucket {
 enum Source {
     Name(String),
     Pattern(String),
+    Subquery(Box<Select>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -321,7 +322,7 @@ enum Target {
     SameAsSource,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct Select {
     items: Vec<Item>,
     into: Option<Target>,
@@ -555,6 +556,28 @@ impl Reader {
                     Source::Name(text.rsplit('.').next().unwrap_or_default().to_owned())
                 }
                 Some(Token::Regex(pattern)) => Source::Pattern(pattern),
+                Some(Token::Open) => {
+                    let start = self.at;
+                    let mut depth = 1usize;
+                    while depth > 0 {
+                        match self.next() {
+                            Some(Token::Open) => depth += 1,
+                            Some(Token::Close) => depth -= 1,
+                            Some(_) => {}
+                            None => return Err("a subquery is not closed".to_owned()),
+                        }
+                    }
+                    let mut inner = Reader {
+                        tokens: self.tokens[start..self.at - 1].to_vec(),
+                        at: 0,
+                    };
+                    inner.expect_keyword("select")?;
+                    let subquery = inner.select()?;
+                    if subquery.into.is_some() {
+                        return Err("a subquery cannot have INTO".to_owned());
+                    }
+                    Source::Subquery(Box::new(subquery))
+                }
                 other => return Err(format!("found {other:?}, expected a measurement")),
             });
             if self.peek() == Some(&Token::Comma) {
@@ -739,7 +762,7 @@ fn distinct_field(select: &Select) -> Option<(&str, Option<&str>)> {
     })
 }
 
-fn plan(select: &Select, measurement: &str, columns: &[(String, String)]) -> Result<Planned, String> {
+fn plan(select: &Select, from: &str, columns: &[(String, String)]) -> Result<Planned, String> {
     let group_tags: Vec<String> = if select.group_all {
         columns
             .iter()
@@ -816,11 +839,7 @@ fn plan(select: &Select, measurement: &str, columns: &[(String, String)]) -> Res
             }
         }
     }
-    let mut sql = format!(
-        "SELECT {} FROM {SCHEMA}.{}",
-        outputs.join(", "),
-        identifier(measurement)
-    );
+    let mut sql = format!("SELECT {} FROM {from}", outputs.join(", "));
     if let Some(condition) = &select.condition {
         sql.push_str(&format!(" WHERE {condition}"));
     }
@@ -1048,12 +1067,9 @@ fn select_series(session: &mut Session<'_>, select: &Select, epoch: Option<&str>
         return select_into(session, select, target, epoch);
     }
     let catalog = crate::store::catalog(session)?;
-    let measurements = measurements_of(session, select, &catalog)?;
     let mut out = Vec::new();
-    for measurement in &measurements {
-        if let Some(columns) = catalog.get(measurement) {
-            out.extend(measurement_series(session, select, measurement, columns, epoch)?);
-        }
+    for source in resolve(session, select, &catalog)? {
+        out.extend(measurement_series(session, select, &source, epoch)?);
     }
     let skip = select.series_offset.unwrap_or(0);
     let take = select.series_limit.unwrap_or(usize::MAX);
@@ -1065,10 +1081,9 @@ type TaggedRows = Vec<(Vec<(String, String)>, Vec<Vec<Value>>)>;
 fn measurement_rows(
     session: &mut Session<'_>,
     select: &Select,
-    measurement: &str,
-    columns: &[(String, String)],
+    source: &Resolved,
 ) -> Result<(Vec<String>, usize, TaggedRows), String> {
-    let planned = plan(select, measurement, columns)?;
+    let planned = plan(select, &source.from, &source.columns)?;
     let result: QueryResult = run(session, &planned.sql)?
         .into_iter()
         .rev()
@@ -1100,11 +1115,11 @@ fn measurement_rows(
 fn measurement_series(
     session: &mut Session<'_>,
     select: &Select,
-    measurement: &str,
-    columns: &[(String, String)],
+    source: &Resolved,
     epoch: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let (shown, tag_count, series) = measurement_rows(session, select, measurement, columns)?;
+    let measurement = source.name.as_str();
+    let (shown, tag_count, series) = measurement_rows(session, select, source)?;
     Ok(series
         .iter()
         .map(|(tags, rows)| {
@@ -1130,33 +1145,90 @@ fn field_value(value: &Value) -> Option<FieldValue> {
     })
 }
 
-fn measurements_of(session: &mut Session<'_>, select: &Select, catalog: &Catalog) -> Result<Vec<String>, String> {
-    let mut measurements: Vec<String> = Vec::new();
+struct Resolved {
+    name: String,
+    from: String,
+    columns: Vec<(String, String)>,
+}
+
+fn probe_columns(session: &mut Session<'_>, from: &str, tag_count: usize) -> Result<Vec<(String, String)>, String> {
+    let result = run(session, &format!("SELECT * FROM {from} LIMIT 0"))?
+        .into_iter()
+        .rev()
+        .find(|result| result.columns.is_some())
+        .ok_or("the subquery returned no columns")?;
+    Ok(result
+        .columns
+        .iter()
+        .flatten()
+        .enumerate()
+        .map(|(at, column)| {
+            let kind = if at < tag_count {
+                "text"
+            } else if column.name == "time" {
+                "timestamp with time zone"
+            } else {
+                "double precision"
+            };
+            (column.name.clone(), kind.to_owned())
+        })
+        .collect())
+}
+
+fn resolve(session: &mut Session<'_>, select: &Select, catalog: &Catalog) -> Result<Vec<Resolved>, String> {
+    let mut found: Vec<Resolved> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut add_table = |name: String, found: &mut Vec<Resolved>| {
+        if seen.contains(&name) {
+            return;
+        }
+        if let Some(columns) = catalog.get(&name) {
+            found.push(Resolved {
+                from: format!("{SCHEMA}.{}", identifier(&name)),
+                columns: columns.clone(),
+                name: name.clone(),
+            });
+            seen.push(name);
+        }
+    };
     for source in &select.sources {
-        let found = match source {
-            Source::Name(name) => vec![name.clone()],
-            Source::Pattern(pattern) => matching_measurements(session, catalog, pattern)?,
-        };
-        for name in found {
-            if !measurements.contains(&name) {
-                measurements.push(name);
+        match source {
+            Source::Name(name) => add_table(name.clone(), &mut found),
+            Source::Pattern(pattern) => {
+                for name in matching_measurements(session, catalog, pattern)? {
+                    add_table(name, &mut found);
+                }
+            }
+            Source::Subquery(inner) => {
+                let inner_sources = resolve(session, inner, catalog)?;
+                if inner_sources.len() > 1 {
+                    return Err("a subquery must read one measurement".to_owned());
+                }
+                let Some(inner_source) = inner_sources.into_iter().next() else {
+                    continue;
+                };
+                let planned = plan(inner, &inner_source.from, &inner_source.columns)?;
+                let from = format!("({}) AS \"subquery\"", planned.sql);
+                let columns = probe_columns(session, &from, planned.tag_count)?;
+                found.push(Resolved {
+                    name: inner_source.name,
+                    from,
+                    columns,
+                });
             }
         }
     }
-    Ok(measurements)
+    Ok(found)
 }
 
 fn select_into(session: &mut Session<'_>, select: &Select, target: &Target, epoch: Option<&str>) -> Result<Vec<String>, String> {
     let catalog = crate::store::catalog(session)?;
     let mut points = Vec::new();
-    for measurement in measurements_of(session, select, &catalog)? {
-        let Some(columns) = catalog.get(&measurement) else {
-            continue;
-        };
-        let (shown, _, series) = measurement_rows(session, select, &measurement, columns)?;
+    for source in resolve(session, select, &catalog)? {
+        let (shown, _, series) = measurement_rows(session, select, &source)?;
         let destination = match target {
             Target::Measurement(name) => name.clone(),
-            Target::SameAsSource => measurement.clone(),
+            Target::SameAsSource => source.name.clone(),
         };
         for (tags, rows) in series {
             for row in rows {
@@ -1357,7 +1429,7 @@ mod tests {
         let Some(Source::Name(measurement)) = select.sources.first() else {
             panic!("one measurement");
         };
-        plan(&select, measurement, &columns).unwrap().sql
+        plan(&select, &format!("{SCHEMA}.{}", identifier(measurement)), &columns).unwrap().sql
     }
 
     #[test]
