@@ -1,6 +1,8 @@
 use crate::protocol::{
     Frame, MAX_PAYLOAD, message, next_frame, pending_frame_bytes, subject_matches, valid_subject,
 };
+use crate::jetstream::{JetStream, Outgoing};
+use eggdb_keyspace::Keyspace;
 use eggdb_platform::connection_limits::MemoryBudget;
 use eggdb_sql::json::{Json, Node, parse_document};
 use std::collections::BTreeMap;
@@ -63,11 +65,14 @@ struct Client {
 
 const NO_RESPONDERS_HEADER: &[u8] = b"NATS/1.0 503\r\n\r\n";
 
-/// What every connection shares: who subscribes to what.
-pub(crate) struct Broker {
+/// What every connection shares: who subscribes to what, and JetStream when it is on.
+pub(crate) struct Broker<'k> {
     clients: Mutex<BTreeMap<u64, Client>>,
     turn: AtomicUsize,
+    jetstream: Option<JetStream<'k>>,
 }
+
+const SERVER_CLIENT: u64 = 0;
 
 struct Published<'p> {
     from: u64,
@@ -75,13 +80,38 @@ struct Published<'p> {
     reply: Option<&'p str>,
     headers: &'p [u8],
     payload: &'p [u8],
+    answered: bool,
 }
 
-impl Broker {
+impl<'k> Broker<'k> {
     pub(crate) fn new() -> Self {
         Self {
             clients: Mutex::new(BTreeMap::new()),
             turn: AtomicUsize::new(0),
+            jetstream: None,
+        }
+    }
+
+    pub(crate) fn with_jetstream(keyspace: &'k (dyn Keyspace + Sync)) -> Self {
+        Self {
+            jetstream: Some(JetStream::new(keyspace)),
+            ..Self::new()
+        }
+    }
+
+    fn send_all(&self, outgoing: Vec<Outgoing>, budget: &MemoryBudget) {
+        for message in outgoing {
+            self.publish(
+                &Published {
+                    from: SERVER_CLIENT,
+                    subject: &message.subject,
+                    reply: message.reply.as_deref(),
+                    headers: &message.headers,
+                    payload: &message.payload,
+                    answered: true,
+                },
+                budget,
+            );
         }
     }
 
@@ -115,6 +145,7 @@ impl Broker {
             targets.push(members[turn % members.len()].clone());
         }
         if targets.is_empty()
+            && !published.answered
             && let Some(reply) = published.reply
             && let Some(publisher) = clients.get(&published.from)
             && publisher.no_responders
@@ -184,7 +215,7 @@ impl Broker {
 }
 
 struct Session<'b> {
-    broker: &'b Broker,
+    broker: &'b Broker<'b>,
     config: &'b ServerConfig,
     id: u64,
     writer: SharedWriter,
@@ -333,7 +364,19 @@ impl Session<'_> {
                     .is_none_or(|reply| valid_subject(reply, false));
                 if !valid_subject(&subject, false) || !reply_valid {
                     self.error("Invalid Subject")?;
+                } else if let Some(jetstream) = self
+                    .broker
+                    .jetstream
+                    .as_ref()
+                    .filter(|_| JetStream::handles(&subject))
+                {
+                    let answers = jetstream.request(&subject, reply.as_deref(), &payload);
+                    self.broker.send_all(answers, &self.config.memory_budget);
+                    self.ok()?;
                 } else {
+                    let stored = self.broker.jetstream.as_ref().map_or_else(Vec::new, |jetstream| {
+                        jetstream.store(&subject, reply.as_deref(), &headers, &payload)
+                    });
                     self.broker.publish(
                         &Published {
                             from: self.id,
@@ -341,9 +384,11 @@ impl Session<'_> {
                             reply: reply.as_deref(),
                             headers: &headers,
                             payload: &payload,
+                            answered: !stored.is_empty(),
                         },
                         &self.config.memory_budget,
                     );
+                    self.broker.send_all(stored, &self.config.memory_budget);
                     self.ok()?;
                 }
             }
@@ -448,16 +493,16 @@ impl Session<'_> {
     }
 }
 
-fn info(address: SocketAddr, client_id: u64, nonce: &str) -> String {
+fn info(address: SocketAddr, client_id: u64, nonce: &str, jetstream: bool) -> String {
     format!(
-        "INFO {{\"server_id\":\"EGGDB\",\"server_name\":\"eggdb\",\"version\":\"2.10.0\",\"proto\":1,\"go\":\"eggdb\",\"host\":\"{}\",\"port\":{},\"headers\":true,\"auth_required\":true,\"max_payload\":{MAX_PAYLOAD},\"client_id\":{client_id},\"nonce\":\"{nonce}\"}}\r\n",
+        "INFO {{\"server_id\":\"EGGDB\",\"server_name\":\"eggdb\",\"version\":\"2.10.0\",\"proto\":1,\"go\":\"eggdb\",\"host\":\"{}\",\"port\":{},\"headers\":true,\"auth_required\":true,\"jetstream\":{jetstream},\"max_payload\":{MAX_PAYLOAD},\"client_id\":{client_id},\"nonce\":\"{nonce}\"}}\r\n",
         address.ip(),
         address.port()
     )
 }
 
 pub(crate) fn serve_stream(
-    broker: &Broker,
+    broker: &Broker<'_>,
     config: &ServerConfig,
     id: u64,
     address: SocketAddr,
@@ -475,21 +520,40 @@ pub(crate) fn serve_stream(
         nonce: fresh_nonce(id),
     };
     let result = session
-        .send(info(address, id, &session.nonce).as_bytes())
+        .send(info(address, id, &session.nonce, broker.jetstream.is_some()).as_bytes())
         .and_then(|()| session.run(reader, stop));
     broker.clients().remove(&id);
     result
 }
 
-/// Serves NATS clients on `listener` until `stop` turns true.
+/// Serves NATS clients on `listener` until `stop` turns true, with core NATS only.
 pub fn serve(
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
+    serve_broker(Broker::new(), listener, config, stop)
+}
+
+/// Serves NATS clients on `listener` until `stop` turns true, with JetStream's streams and
+/// consumers kept in `keyspace`.
+pub fn serve_with_jetstream(
+    keyspace: &(dyn Keyspace + Sync),
+    listener: &TcpListener,
+    config: &ServerConfig,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> io::Result<()> {
+    serve_broker(Broker::with_jetstream(keyspace), listener, config, stop)
+}
+
+fn serve_broker(
+    broker: Broker<'_>,
     listener: &TcpListener,
     config: &ServerConfig,
     stop: &(dyn Fn() -> bool + Sync),
 ) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
-    let broker = Broker::new();
     let active = AtomicUsize::new(0);
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {

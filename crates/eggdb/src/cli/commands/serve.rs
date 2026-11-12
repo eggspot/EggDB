@@ -849,6 +849,10 @@ impl Session<'_> {
             db: &db,
             prefix: super::serve_resp::MQTT_COLLECTIONS,
         };
+        let nats_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::NATS_COLLECTIONS,
+        };
         let sqs_endpoint = match (&sqs_listener, &sqs_secret) {
             (Some(listener), Some(secret)) => {
                 let base_url = listener.local_addr().map_or_else(
@@ -1114,7 +1118,7 @@ impl Session<'_> {
             });
             let nats_server = scope.spawn(|| match &nats_listener {
                 Some(listener) => {
-                    eggdb_nats::serve(listener, &nats_config, &stop_signals::requested)
+                    eggdb_nats::serve_with_jetstream(&nats_database, listener, &nats_config, &stop_signals::requested)
                 }
                 None => Ok(()),
             });

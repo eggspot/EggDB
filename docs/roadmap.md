@@ -1503,7 +1503,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A benchmark against Mosquitto and EMQX (D33, D215).
 - SQS, after D58's legal check: FIFO queues, attributes, batches, long polling, dead-letter
   queues and a non-zero `ChangeMessageVisibility` (D33, D216).
-- NATS JetStream: durable streams and consumers (D33, D216).
+- NATS JetStream: durable streams and consumers (D33, D216). **Code written, unbuilt** (code-only mode, 2026-11-12,
+  D722). Left: key-value and object stores, mirrors and sources, and flow control.
 - NATS no-responders, token and NKey authentication, clusters and leaf nodes (D216). No-responders and
   token authentication: **code written, unbuilt** (code-only mode, 2026-11-11, D476); NKeys: **code written,
   unbuilt** (code-only mode, 2026-11-12, D617).

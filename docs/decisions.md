@@ -746,3 +746,4 @@ its full title with its status.
 - [D719](decisions/D719.md) Code-only batch 367 (M9): MongoDB's `$where` on a JavaScript expression interpreter of our own
 - [D720](decisions/D720.md) Code-only batch 368 (M13): Cypher temporal and spatial values, and Bolt's structures for them
 - [D721](decisions/D721.md) Code-only batch 369 (M13): Cypher temporal arithmetic, `duration.between` and `point.distance`
+- [D722](decisions/D722.md) Code-only batch 370 (M16): NATS JetStream streams and durable consumers kept in the database
