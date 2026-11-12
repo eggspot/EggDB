@@ -93,7 +93,56 @@ pub(crate) fn rows(
 
 /// Whether `name` is one of the file-reading functions.
 pub(crate) fn reads_files(name: &str) -> bool {
-    matches!(name, "read_parquet" | "read_arrow" | "read_csv" | "read_vcf" | "read_bam")
+    matches!(name, "read_parquet" | "read_arrow" | "read_csv" | "read_vcf" | "read_bam" | "read_netcdf")
+}
+
+const NETCDF_COLUMNS: [(&str, SqlType); 4] = [
+    ("variable", SqlType::Text),
+    ("coordinates", SqlType::Array(crate::arrays::ArrayElement::BigInt)),
+    ("value", SqlType::Double),
+    ("text", SqlType::Text),
+];
+
+/// The rows of `read_netcdf(path)`: one per element of every variable of a NetCDF classic file,
+/// with the `variable`'s name, the element's `coordinates`, and its `value` (numbers) or `text`
+/// (one string of a character variable).
+pub(crate) fn netcdf_rows(
+    values: &[Value],
+    names: &[String],
+    types: &[Option<SqlType>],
+    sink: &mut RecordSink<'_>,
+) -> SqlResult<()> {
+    let Some(path) = values.first().and_then(Value::to_text) else {
+        return Ok(());
+    };
+    let bytes = crate::new_files::read_file(&path, MOST_FILE_BYTES)?;
+    crate::memory::check_value_bytes(bytes.len())?;
+    let wanted: Vec<Option<usize>> = names
+        .iter()
+        .map(|name| NETCDF_COLUMNS.iter().position(|(column, _)| column.eq_ignore_ascii_case(name)))
+        .collect();
+    for (variable, coordinates, element) in crate::netcdf::elements(&bytes)? {
+        let coordinates = crate::arrays::ArrayValue::new(
+            crate::arrays::ArrayElement::BigInt,
+            coordinates.into_iter().map(Value::BigInt).collect(),
+        );
+        let (number, text) = match element {
+            crate::netcdf::Element::Number(number) => (Value::Double(number), Value::Null),
+            crate::netcdf::Element::Text(text) => (Value::Null, Value::Text(text)),
+        };
+        let record: [Value; 4] = [Value::Text(variable), Value::Array(Box::new(coordinates)), number, text];
+        let mut row = Vec::with_capacity(names.len());
+        for (at, position) in wanted.iter().enumerate() {
+            let value = position.map_or(Value::Null, |position| record[position].clone());
+            let declared = types.get(at + 1).copied().flatten();
+            row.push(match declared {
+                Some(sql_type) if !value.is_null() && value.sql_type() != Some(sql_type) => convert(value, sql_type, Conversion::Explicit)?,
+                _ => value,
+            });
+        }
+        sink(row)?;
+    }
+    Ok(())
 }
 
 const BAM_MAGIC: &[u8] = b"BAM\x01";
@@ -450,6 +499,9 @@ pub(crate) fn discovered_columns(name: &str, path: &str) -> SqlResult<Vec<(Strin
     }
     if name == "read_bam" {
         return Ok(BAM_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
+    }
+    if name == "read_netcdf" {
+        return Ok(NETCDF_COLUMNS.iter().map(|(column, sql_type)| ((*column).to_owned(), *sql_type)).collect());
     }
     if name == "read_csv" {
         let text = text_file(path)?;

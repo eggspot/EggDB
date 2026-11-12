@@ -1317,7 +1317,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Reports sent to `https://` targets and by email through the operator's mail server, shared and
   embedded in other applications (D46, D238).
 - Spreadsheet-style tables with formula columns, and a grid view of them in the client (D38).
-- Arrays: SQL/MDA, Zarr, HDF5 and NetCDF (D57).
+- Arrays: SQL/MDA, Zarr, HDF5 and NetCDF (D57). NetCDF classic files (`read_netcdf`): **code written, unbuilt**
+  (code-only mode, 2026-11-12, D709). Left: SQL/MDA, Zarr, HDF5 and NetCDF-4.
 - Genomics: VCF, BAM and CRAM, and htsget (D57). VCF files in SQL (`read_vcf`, gzip and BGZF read): **code written,
   unbuilt** (code-only mode, 2026-11-12, D707); BAM (`read_bam`): **code written, unbuilt** (code-only mode,
   2026-11-12, D708). Left: CRAM and htsget.
