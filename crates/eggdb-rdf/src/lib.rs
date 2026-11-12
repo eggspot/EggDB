@@ -3,6 +3,8 @@
 //! written out as N-Quads. Everything is written from the W3C recommendations (RDF 1.1
 //! Concepts, N-Triples, N-Quads, Turtle, TriG); no other RDF store's code is used or read.
 
+mod sparql_ast;
+mod sparql_parser;
 mod store;
 mod syntax;
 mod term;
