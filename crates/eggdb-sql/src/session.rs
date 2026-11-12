@@ -2702,6 +2702,7 @@ impl<'s> Session<'s> {
                 crate::coordination::COORDINATION_SCRIPT,
             ),
             "eggdb_migration" => ("eggdb_migration", crate::migration::MIGRATION_SCRIPT),
+            "timescaledb" => ("_timescaledb_catalog", crate::timescale::TIMESCALE_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

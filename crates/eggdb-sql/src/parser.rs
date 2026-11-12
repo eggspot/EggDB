@@ -2812,6 +2812,19 @@ impl<'t> Parser<'t> {
         if self.peek_kind() == &TokenKind::LeftParen {
             return Err(self.not_supported("column names in CREATE MATERIALIZED VIEW"));
         }
+        if self.is_word("with") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+            self.at += 2;
+            let mut depth = 1usize;
+            while depth > 0 {
+                match self.peek_kind() {
+                    TokenKind::LeftParen => depth += 1,
+                    TokenKind::RightParen => depth -= 1,
+                    TokenKind::End => return Err(self.unexpected()),
+                    _ => {}
+                }
+                self.at += 1;
+            }
+        }
         self.expect_word("as")?;
         let start = self.peek().start;
         self.query_statement()?;

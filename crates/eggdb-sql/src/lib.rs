@@ -102,6 +102,7 @@ mod name_resolution;
 mod image_metadata;
 mod netcdf;
 mod orc;
+mod timescale;
 mod zarr;
 mod new_files;
 mod file_readers;
