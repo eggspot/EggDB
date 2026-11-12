@@ -716,12 +716,14 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-11, D459).
 - A GraphQL API generated from the schema, in Hasura's style (D37). Queries, aggregates, relationships from
   foreign keys and mutations over `POST /graphql`: **code written, unbuilt** (code-only mode, 2026-11-12, D875).
-  Introspection (`__schema`, `__type`): **code written, unbuilt** (code-only mode, 2026-11-12, D876). Left:
-  subscriptions and nested inserts.
+  Introspection (`__schema`, `__type`): **code written, unbuilt** (code-only mode, 2026-11-12, D876); subscriptions
+  over Server-Sent Events (D878). Left: nested inserts.
 - gRPC and OData APIs generated from the schema, OData for Excel, Power BI and SAP (D37). The OData v4 service
   (`$metadata`, entity sets with `$filter`/`$select`/`$orderby`/`$top`/`$skip`/`$count`, keys, writes): **code
   written, unbuilt** (code-only mode, 2026-11-12, D877). Left: gRPC, and OData's `$expand` and batches.
-- Realtime subscriptions over WebSocket and Server-Sent Events on live queries (D37).
+- Realtime subscriptions over WebSocket and Server-Sent Events on live queries (D37). Live queries over
+  Server-Sent Events for REST reads and GraphQL subscriptions: **code written, unbuilt** (code-only mode,
+  2026-11-12, D878). Left: WebSocket transports and change-driven invalidation.
 - End-user sign-in for apps: sign-up, password, magic link, social login and OpenID Connect, with
   JWT sessions mapped onto row-level security (D37). **Code written, unbuilt** (code-only mode, 2026-11-12, D771), in
   `eggdb_app_auth`; the OAuth redirect flow and fetching providers' key sets are left.

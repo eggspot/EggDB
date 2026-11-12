@@ -8,9 +8,10 @@
 //! its owners; EggDB is compatible with its query conventions.
 
 use crate::graphql::{self, Directive, Field, Fragment, GqlValue, OperationKind, Selection};
+use crate::live::Polled;
 use crate::request::{identifier, literal};
 use crate::{Endpoint, json, json_string, value_json};
-use eggdb_http::{Request, Response};
+use eggdb_http::{Reply, Request, Response};
 use eggdb_sql::json::{Json, Node, parse_document};
 use eggdb_sql::{KeyValueStore, QueryResult, Value};
 use std::collections::HashMap;
@@ -43,15 +44,39 @@ enum Relationship {
     Array(ForeignKey),
 }
 
-fn graphql_errors(message: &str, code: &str) -> Response {
-    json(
-        200,
-        format!(
-            "{{\"errors\":[{{\"message\":{},\"extensions\":{{\"code\":{},\"path\":\"$\"}}}}]}}",
-            json_string(message),
-            json_string(code)
-        ),
+fn errors_json(message: &str, code: &str) -> String {
+    format!(
+        "{{\"errors\":[{{\"message\":{},\"extensions\":{{\"code\":{},\"path\":\"$\"}}}}]}}",
+        json_string(message),
+        json_string(code)
     )
+}
+
+fn graphql_errors(message: &str, code: &str) -> Response {
+    json(200, errors_json(message, code))
+}
+
+/// A request read and checked, with what its operations run against.
+struct Prepared {
+    document: graphql::Document,
+    operation: usize,
+    variables: HashMap<String, GqlValue>,
+    schema: String,
+    tables: Vec<String>,
+    foreign_keys: Vec<ForeignKey>,
+}
+
+impl Prepared {
+    fn context(&self) -> Context<'_> {
+        Context {
+            variables: self.variables.clone(),
+            fragments: &self.document.fragments,
+            schema: self.schema.clone(),
+            tables: self.tables.clone(),
+            foreign_keys: self.foreign_keys.clone(),
+            aliases: 0,
+        }
+    }
 }
 
 fn request_error(message: &str) -> Response {
@@ -844,7 +869,7 @@ impl Context<'_> {
     }
 }
 
-impl<S: KeyValueStore> Endpoint<'_, S> {
+impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     fn schema_tables(&self) -> Result<Vec<String>, eggdb_sql::SqlError> {
         let results = self.run(&format!(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = {} ORDER BY table_name",
@@ -891,23 +916,70 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
     }
 
     /// Answers `POST /graphql` (or `/v1/graphql`): a JSON body with `query`, and optionally
-    /// `variables` and `operationName`, or the document itself as `application/graphql`.
-    pub(crate) fn graphql(&self, request: &Request) -> Response {
+    /// `variables` and `operationName`, or the document itself as `application/graphql`. A
+    /// subscription asked for with `Accept: text/event-stream` runs as a live query and sends
+    /// graphql-sse's `next` events, then `complete`.
+    pub(crate) fn graphql(&self, request: &Request) -> Reply<'s> {
+        let prepared = match self.prepare_graphql(request) {
+            Ok(prepared) => prepared,
+            Err(response) => return response.into(),
+        };
+        let Some(operation) = prepared.document.operations.get(prepared.operation) else {
+            return graphql_errors("the operation is missing", "validation-failed").into();
+        };
+        if operation.kind == OperationKind::Subscription {
+            if !crate::live::wanted(request) {
+                return graphql_errors(
+                    "subscriptions are served as Server-Sent Events: send Accept: text/event-stream",
+                    "not-supported",
+                )
+                .into();
+            }
+            let endpoint = self.copy();
+            return crate::live::live_reply(
+                crate::live::LiveOptions::of(request),
+                "next",
+                "next",
+                Some("complete"),
+                move || {
+                    let Some(operation) = prepared.document.operations.get(prepared.operation) else {
+                        return Polled::Failed(errors_json("the operation is missing", "validation-failed"));
+                    };
+                    let mut context = prepared.context();
+                    match endpoint.run_query(&mut context, &operation.selections) {
+                        Ok(data) => Polled::Result(format!("{{\"data\":{data}}}")),
+                        Err((message, code)) => Polled::Failed(errors_json(&message, &code)),
+                    }
+                },
+            );
+        }
+        let mut context = prepared.context();
+        let outcome = match operation.kind {
+            OperationKind::Mutation => self.run_mutation(&mut context, &operation.selections),
+            _ => self.run_query(&mut context, &operation.selections),
+        };
+        match outcome {
+            Ok(data) => json(200, format!("{{\"data\":{data}}}")).into(),
+            Err((message, code)) => graphql_errors(&message, &code).into(),
+        }
+    }
+
+    fn prepare_graphql(&self, request: &Request) -> Result<Prepared, Response> {
         if request.method != "POST" {
-            return request_error("use POST with a JSON body holding the query");
+            return Err(request_error("use POST with a JSON body holding the query"));
         }
         let Ok(body) = std::str::from_utf8(&request.body) else {
-            return request_error("the body is not UTF-8");
+            return Err(request_error("the body is not UTF-8"));
         };
         let content_type = request.header("content-type").unwrap_or_default().to_ascii_lowercase();
         let (query, variables, operation_name) = if content_type.starts_with("application/graphql") {
             (body.to_owned(), HashMap::new(), None)
         } else {
             let Ok(document) = parse_document(body) else {
-                return request_error("the body is not a JSON object");
+                return Err(request_error("the body is not a JSON object"));
             };
             let Json::Object(members) = &document.value else {
-                return request_error("the body is not a JSON object");
+                return Err(request_error("the body is not a JSON object"));
             };
             let member = |name: &str| members.iter().find(|(key, _)| key == name).map(|(_, value)| value);
             let Some(Node {
@@ -915,7 +987,7 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                 ..
             }) = member("query")
             else {
-                return request_error("the body has no 'query' string");
+                return Err(request_error("the body has no 'query' string"));
             };
             let mut variables = HashMap::new();
             if let Some(Node {
@@ -936,29 +1008,23 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             };
             (query.clone(), variables, operation_name)
         };
-        let document = match graphql::parse(&query) {
-            Ok(document) => document,
-            Err(message) => return graphql_errors(&message, "validation-failed"),
-        };
+        let document = graphql::parse(&query).map_err(|message| graphql_errors(&message, "validation-failed"))?;
         let operation = match &operation_name {
             Some(name) => document
                 .operations
                 .iter()
-                .find(|operation| operation.name.as_deref() == Some(name.as_str())),
-            None if document.operations.len() == 1 => document.operations.first(),
+                .position(|operation| operation.name.as_deref() == Some(name.as_str())),
+            None if document.operations.len() == 1 => Some(0),
             None => None,
         };
         let Some(operation) = operation else {
-            return graphql_errors(
+            return Err(graphql_errors(
                 "exactly one operation has to be present in the document when operationName is not specified",
                 "validation-failed",
-            );
+            ));
         };
-        if operation.kind == OperationKind::Subscription {
-            return graphql_errors("subscriptions are not served over HTTP yet", "not-supported");
-        }
         let mut resolved = HashMap::new();
-        for definition in &operation.variables {
+        for definition in document.operations.get(operation).map(|found| found.variables.as_slice()).unwrap_or_default() {
             let value = variables
                 .get(&definition.name)
                 .cloned()
@@ -966,30 +1032,20 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                 .unwrap_or(GqlValue::Null);
             resolved.insert(definition.name.clone(), value);
         }
-        let tables = match self.schema_tables() {
-            Ok(tables) => tables,
-            Err(error) => return graphql_errors(error.message(), error.state().code()),
-        };
-        let foreign_keys = match self.schema_foreign_keys() {
-            Ok(keys) => keys,
-            Err(error) => return graphql_errors(error.message(), error.state().code()),
-        };
-        let mut context = Context {
+        let tables = self
+            .schema_tables()
+            .map_err(|error| graphql_errors(error.message(), error.state().code()))?;
+        let foreign_keys = self
+            .schema_foreign_keys()
+            .map_err(|error| graphql_errors(error.message(), error.state().code()))?;
+        Ok(Prepared {
+            document,
+            operation,
             variables: resolved,
-            fragments: &document.fragments,
             schema: identifier(&self.schema).unwrap_or_else(|| "\"public\"".to_owned()),
             tables,
             foreign_keys,
-            aliases: 0,
-        };
-        let outcome = match operation.kind {
-            OperationKind::Mutation => self.run_mutation(&mut context, &operation.selections),
-            _ => self.run_query(&mut context, &operation.selections),
-        };
-        match outcome {
-            Ok(data) => json(200, format!("{{\"data\":{data}}}")),
-            Err((message, code)) => graphql_errors(&message, &code),
-        }
+        })
     }
 
     fn run_query(&self, context: &mut Context<'_>, selections: &[Selection]) -> Result<String, (String, String)> {

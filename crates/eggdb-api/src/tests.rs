@@ -470,3 +470,50 @@ fn odata_serves_metadata_sets_keys_and_writes() {
     let refused = call(&endpoint, "GET", "/odata/products?$filter=nope%20eq%201", "", None);
     assert_eq!(refused.status, 400);
 }
+
+fn live(endpoint: &Endpoint<'_, MemoryStore>, method: &str, path: &str, query: Option<&str>, body: &str) -> String {
+    let headers = vec![
+        (
+            "authorization".to_owned(),
+            format!("Basic {}", eggdb_crypto::base64_encode(b"eggdb:secret")),
+        ),
+        ("accept".to_owned(), "text/event-stream".to_owned()),
+        ("x-eggdb-live-events".to_owned(), "1".to_owned()),
+    ];
+    let answered = endpoint.answer(&Request {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        query: query.map(str::to_owned),
+        headers,
+        body: body.as_bytes().to_vec(),
+    });
+    assert_eq!(answered.status, 200, "{}", text(&answered));
+    assert!(answered.content_type.starts_with("text/event-stream"));
+    text(&answered)
+}
+
+#[test]
+fn live_queries_send_server_sent_events() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE readings (id integer PRIMARY KEY, celsius integer)",
+        "INSERT INTO readings VALUES (1, 20), (2, 25)",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let rows = live(&endpoint, "GET", "/readings", Some("celsius=gt.21"), "");
+    assert_eq!(rows, "event: rows\ndata: [{\"id\":2,\"celsius\":25}]\n\n");
+    let subscribed = live(
+        &endpoint,
+        "POST",
+        "/graphql",
+        None,
+        "{\"query\":\"subscription { readings(order_by: {id: asc}) { id } }\"}",
+    );
+    assert_eq!(
+        subscribed,
+        "event: next\ndata: {\"data\":{\"readings\":[{\"id\":1},{\"id\":2}]}}\n\nevent: complete\ndata: \n\n"
+    );
+}

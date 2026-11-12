@@ -7,13 +7,16 @@
 //! signed-in user, so roles and row security apply unchanged. Rows read with `GET` are sent as
 //! they are written out, in HTTP/1.1 chunks, so a large result never sits in memory twice.
 //! `POST /graphql` (or `/v1/graphql`) answers GraphQL queries and mutations over the same
-//! tables in Hasura's style, and `/odata` serves them as an OData v4 service.
+//! tables in Hasura's style, and `/odata` serves them as an OData v4 service. A `GET` of a
+//! table with `Accept: text/event-stream`, and a GraphQL subscription, stay open as a live
+//! query that sends Server-Sent Events whenever its result changes.
 //! PostgREST and Hasura are trademarks of their owners; EggDB is compatible with their
 //! conventions.
 
 mod graphql;
 mod graphql_execute;
 mod graphql_schema;
+mod live;
 mod odata;
 mod ogc;
 mod request;
@@ -272,6 +275,18 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         Caller::Refused(why)
     }
 
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            store: self.store,
+            user: self.user.clone(),
+            password_sha256: self.password_sha256,
+            database: self.database.clone(),
+            schema: self.schema.clone(),
+            auth_rules: self.auth_rules.clone(),
+            claims: self.claims.clone(),
+        }
+    }
+
     fn acting_as(&self, role: String, claims: Option<String>) -> Self {
         Self {
             store: self.store,
@@ -323,7 +338,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
 
     /// Answers one HTTP request; the rows of a `GET` are a [`StreamedResponse`], written as
     /// they are sent.
-    pub fn reply(&self, request: &Request) -> Reply<'static> {
+    pub fn reply(&self, request: &Request) -> Reply<'s> {
         match self.caller(request) {
             Caller::Server => self.serve(request),
             Caller::Role(role, claims) => self.acting_as(role, claims).serve(request),
@@ -342,7 +357,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
     }
 
-    fn serve(&self, request: &Request) -> Reply<'static> {
+    fn serve(&self, request: &Request) -> Reply<'s> {
         let path = request.path.trim_matches('/');
         if path.is_empty() {
             let wants_openapi = request
@@ -360,7 +375,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             return self.odata(path["odata".len()..].trim_start_matches('/'), request).into();
         }
         if path == "graphql" || path == "v1/graphql" {
-            return self.graphql(request).into();
+            return self.graphql(request);
         }
         if path == "ogc" || path.starts_with("ogc/") {
             return self.ogc(&path[3..], request).into();
@@ -399,6 +414,10 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             None
         };
         match request.method.as_str() {
+            "GET" if live::wanted(request) => match self.read_sql(&target, path, &query) {
+                Ok(sql) => self.live_rows(sql, live::LiveOptions::of(request)),
+                Err(response) => response.into(),
+            },
             "GET" | "HEAD" => self.read(&target, path, &query, prefer.contains("count=exact")),
             "POST" => self
                 .insert(&target, &request.body, representation, &query, resolution)
@@ -560,8 +579,8 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         })
     }
 
-    fn read(&self, target: &str, table: &str, query: &Query, count: bool) -> Reply<'static> {
-        let sql = if query.embeds.is_empty() {
+    fn read_sql(&self, target: &str, table: &str, query: &Query) -> Result<String, Response> {
+        Ok(if query.embeds.is_empty() {
             format!(
                 "SELECT {} FROM {target}{}{}{}",
                 query.projection(),
@@ -572,10 +591,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         } else {
             let mut items = query.parent_columns();
             for embed in &query.embeds {
-                match self.relationship(table, embed) {
-                    Ok(item) => items.push(item),
-                    Err(response) => return response.into(),
-                }
+                items.push(self.relationship(table, embed)?);
             }
             format!(
                 "SELECT {} FROM {target} AS eggdb_parent{}{}{}",
@@ -584,6 +600,13 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 query.order_clause(),
                 query.page_clause()
             )
+        })
+    }
+
+    fn read(&self, target: &str, table: &str, query: &Query, count: bool) -> Reply<'static> {
+        let sql = match self.read_sql(target, table, query) {
+            Ok(sql) => sql,
+            Err(response) => return response.into(),
         };
         let rows = match self.run(&sql) {
             Ok(results) => results

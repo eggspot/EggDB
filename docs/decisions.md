@@ -902,3 +902,4 @@ its full title with its status.
 - [D875](decisions/D875.md) Code-only batch 523 (M6a): a GraphQL API generated from the schema
 - [D876](decisions/D876.md) Code-only batch 524 (M6a): GraphQL introspection
 - [D877](decisions/D877.md) Code-only batch 525 (M6a): an OData v4 service over the schema
+- [D878](decisions/D878.md) Code-only batch 526 (M6a): live queries and GraphQL subscriptions over Server-Sent Events
