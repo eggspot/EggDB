@@ -734,3 +734,4 @@ its full title with its status.
 - [D707](decisions/D707.md) Code-only batch 355 (M11): `read_vcf`, and gzip and BGZF for the text file readers
 - [D708](decisions/D708.md) Code-only batch 356 (M11): `read_bam` for BAM alignment files
 - [D709](decisions/D709.md) Code-only batch 357 (M11): `read_netcdf` for NetCDF classic files
+- [D710](decisions/D710.md) Code-only batch 358 (M12): `geotiff_info`, TIFF and GeoTIFF headers as JSON
