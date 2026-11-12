@@ -960,3 +960,4 @@ its full title with its status.
 - [D933](decisions/D933.md) Code-only batch 581 (M4): key-value transactions and collections in the .NET driver
 - [D934](decisions/D934.md) Code-only batch 582 (M4): key-value transactions and collections in the C++ header
 - [D935](decisions/D935.md) Code-only batch 583 (M4): key-value transactions and collections in the Ruby driver
+- [D936](decisions/D936.md) Code-only batch 584 (M4): key-value transactions and collections in the PHP driver
