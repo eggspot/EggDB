@@ -1369,8 +1369,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Cypher path predicates pushed into the shortest-path search (D333). **Code written, unbuilt** (code-only mode, 2026-11-11,
   D534), with the list predicates `all`, `any`, `none` and `single`.
 - GQL quantified paths and `SHORTEST k` (D333). `SHORTEST k`, `ANY` and `ALL SHORTEST`, and quantifiers on one
-  relationship: **code written, unbuilt** (code-only mode, 2026-11-11, D535). Left: quantified path
-  patterns over several elements and path modes.
+  relationship: **code written, unbuilt** (code-only mode, 2026-11-11, D535); path modes: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D726). Left: quantified path patterns over several elements.
 - Cypher's `CALL (a, b) { ... }` scope form, `CALL { ... } IN TRANSACTIONS`, and the label-expression
   operators `&`, `!` and `%` (D351). The label-expression operators: **code
   written, unbuilt** (code-only mode, 2026-11-11, D478); the scope form and `IN TRANSACTIONS` (in one

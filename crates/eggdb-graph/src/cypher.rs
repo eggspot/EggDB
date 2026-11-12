@@ -374,9 +374,25 @@ pub(crate) enum Shortest {
     Count(u32),
 }
 
+/// GQL's path mode: which repeats a matched path may hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathMode {
+    Walk,
+    Trail,
+    Acyclic,
+    Simple,
+}
+
+impl PathMode {
+    pub(crate) fn checks_nodes(self) -> bool {
+        matches!(self, Self::Acyclic | Self::Simple)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Pattern {
     pub(crate) path: Option<String>,
+    pub(crate) mode: PathMode,
     pub(crate) shortest: Option<Shortest>,
     pub(crate) start: NodePattern,
     pub(crate) steps: Vec<(RelationshipPattern, NodePattern)>,
@@ -979,7 +995,11 @@ impl Parser<'_> {
         } else {
             None
         };
+        let mut mode = self.path_mode();
         let gql_shortest = self.gql_shortest()?;
+        if mode.is_none() {
+            mode = self.path_mode();
+        }
         let shortest = match (gql_shortest, self.peek()) {
             (Some(shortest), _) => Some(shortest),
             (None, Some(Token::Word(word))) if matches!(self.peek_at(1), Some(Token::Symbol("("))) => {
@@ -1019,10 +1039,33 @@ impl Parser<'_> {
         }
         Ok(Pattern {
             path,
+            mode: mode.unwrap_or(PathMode::Trail),
             shortest,
             start,
             steps,
         })
+    }
+
+    /// A GQL path mode before a path pattern: `WALK`, `TRAIL`, `ACYCLIC` or `SIMPLE`, with an
+    /// optional `PATH` or `PATHS`.
+    fn path_mode(&mut self) -> Option<PathMode> {
+        let Some(Token::Word(word)) = self.peek() else {
+            return None;
+        };
+        let mode = match word.to_ascii_lowercase().as_str() {
+            "walk" => PathMode::Walk,
+            "trail" => PathMode::Trail,
+            "acyclic" => PathMode::Acyclic,
+            "simple" => PathMode::Simple,
+            _ => return None,
+        };
+        let noun = matches!(self.peek_at(1), Some(Token::Word(next)) if next.eq_ignore_ascii_case("path") || next.eq_ignore_ascii_case("paths"));
+        let opens = usize::from(noun) + 1;
+        if !matches!(self.peek_at(opens), Some(Token::Symbol("("))) {
+            return None;
+        }
+        self.at += opens;
+        Some(mode)
     }
 
     fn quantified(&mut self, name: &str) -> GraphResult<Expr> {

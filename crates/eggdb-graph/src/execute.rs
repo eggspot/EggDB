@@ -110,6 +110,28 @@ fn bind(row: &mut Row, name: &str, value: Value) {
 }
 
 #[derive(Clone)]
+fn mode_allows(mode: crate::cypher::PathMode, origin: u64, relationships: &[Relationship]) -> bool {
+    if !mode.checks_nodes() {
+        return true;
+    }
+    let mut nodes = vec![origin];
+    let mut at = origin;
+    for relationship in relationships {
+        at = if relationship.start == at { relationship.end } else { relationship.start };
+        nodes.push(at);
+    }
+    let distinct = |slice: &[u64]| {
+        let mut seen = std::collections::HashSet::new();
+        slice.iter().all(|node| seen.insert(*node))
+    };
+    match mode {
+        crate::cypher::PathMode::Simple => {
+            distinct(&nodes[..nodes.len() - 1]) && distinct(&nodes[1..])
+        }
+        _ => distinct(&nodes),
+    }
+}
+
 struct Walk {
     origin: u64,
     used: Vec<u64>,
@@ -1050,6 +1072,9 @@ impl<'g> Executor<'g, '_> {
             return Err(out_of_memory("the query matches too many rows"));
         }
         let Some((relationship_pattern, node_pattern)) = pattern.steps.get(step) else {
+            if !mode_allows(pattern.mode, walk.origin, &walk.relationships) {
+                return Ok(());
+            }
             let mut row = row;
             if let Some(name) = &pattern.path {
                 let path = self.path_value(walk.origin, &walk.relationships)?;
@@ -1072,8 +1097,11 @@ impl<'g> Executor<'g, '_> {
         for hop in 1..=max {
             let mut next_frontier = Vec::new();
             for (node, path) in &frontier {
-                let mut taken = walk.used.clone();
-                taken.extend(path.iter().map(|relationship| relationship.id));
+                let mut taken = Vec::new();
+                if pattern.mode != crate::cypher::PathMode::Walk {
+                    taken.extend_from_slice(&walk.used);
+                    taken.extend(path.iter().map(|relationship| relationship.id));
+                }
                 for (relationship, next) in
                     self.steps_from(*node, relationship_pattern, &row, &taken)?
                 {
@@ -1138,7 +1166,7 @@ impl<'g> Executor<'g, '_> {
             next_walk
                 .used
                 .extend(path.iter().map(|relationship| relationship.id));
-            if pattern.path.is_some() {
+            if pattern.path.is_some() || pattern.mode.checks_nodes() {
                 next_walk.relationships.extend(path);
             }
             self.extend(next_row, pattern, step + 1, node.id, next_walk, out)?;
