@@ -27,6 +27,7 @@ public final class EggDbConnection implements Connection {
     private final NativeSession session;
     private final String url;
     private final boolean readOnly;
+    private NativeSession catalog;
     private boolean autoCommit = true;
     private boolean inTransaction;
     private int savepoints;
@@ -51,6 +52,29 @@ public final class EggDbConnection implements Connection {
 
     String url() {
         return url;
+    }
+
+    NativeSession session() {
+        return session;
+    }
+
+    boolean isReadOnlyConnection() {
+        return readOnly;
+    }
+
+    List<NativeSession.StatementResult> catalogQuery(String sql, List<Object> parameters) throws SQLException {
+        checkOpen();
+        if (catalog == null) {
+            catalog = session.catalogSession();
+        }
+        return catalog.execute(sql, parameters);
+    }
+
+    private void closeCatalog() {
+        if (catalog != null && catalog != session) {
+            catalog.close();
+        }
+        catalog = null;
     }
 
     private void checkOpen() throws SQLException {
@@ -122,6 +146,7 @@ public final class EggDbConnection implements Connection {
         if (session.isClosed()) {
             return;
         }
+        closeCatalog();
         if (inTransaction) {
             try {
                 session.execute("ROLLBACK", List.of());
@@ -141,7 +166,8 @@ public final class EggDbConnection implements Connection {
 
     @Override
     public DatabaseMetaData getMetaData() throws SQLException {
-        throw unsupported("getMetaData");
+        checkOpen();
+        return new EggDbDatabaseMetaData(this);
     }
 
     @Override

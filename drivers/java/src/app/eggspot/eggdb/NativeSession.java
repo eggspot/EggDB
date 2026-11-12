@@ -85,6 +85,7 @@ final class NativeSession implements AutoCloseable {
     private final String dialect;
     private MemorySegment database;
     private MemorySegment session;
+    private boolean ownsDatabase = true;
 
     static boolean isServerUrl(String path) {
         return path.startsWith("postgresql://") || path.startsWith("postgres://");
@@ -120,8 +121,37 @@ final class NativeSession implements AutoCloseable {
         }
     }
 
+    private NativeSession(String dialect, MemorySegment database, MemorySegment session) {
+        this.dialect = dialect;
+        this.database = database;
+        this.session = session;
+        this.ownsDatabase = false;
+    }
+
     String dialect() {
         return dialect;
+    }
+
+    boolean speaksPostgresql() {
+        return dialect.equals("postgresql");
+    }
+
+    NativeSession catalogSession() throws SQLException {
+        if (session == null) {
+            throw new SQLException("the connection is closed", "08003");
+        }
+        if (speaksPostgresql() || database == null) {
+            return this;
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ValueLayout.ADDRESS);
+            check((int) Api.SQL_OPEN.invokeExact(database, arena.allocateFrom("postgresql"), out));
+            return new NativeSession("postgresql", database, out.get(ValueLayout.ADDRESS, 0));
+        } catch (SQLException error) {
+            throw error;
+        } catch (Throwable error) {
+            throw new SQLException("EggDB's C library could not be called: " + error, "58000", error);
+        }
     }
 
     boolean isClosed() {
@@ -226,7 +256,7 @@ final class NativeSession implements AutoCloseable {
         }
         try {
             int sessionClosed = (int) Api.SQL_CLOSE.invokeExact(session);
-            if (database != null) {
+            if (database != null && ownsDatabase) {
                 int databaseClosed = (int) Api.CLOSE.invokeExact(database);
             }
         } catch (Throwable ignored) {

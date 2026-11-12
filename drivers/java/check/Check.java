@@ -1,6 +1,7 @@
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -47,6 +48,25 @@ public final class Check {
                     }
                 }
                 check(String.join(";", rows).equals("1 Ada 3.5 2;2 Grace 5.5 2"), "rows read back: " + rows);
+            }
+            DatabaseMetaData metadata = connection.getMetaData();
+            List<String> tables = new ArrayList<>();
+            try (ResultSet found = metadata.getTables(null, null, "peo%", new String[] {"TABLE"})) {
+                while (found.next()) {
+                    tables.add(found.getString("TABLE_NAME") + " " + found.getString("TABLE_TYPE"));
+                }
+            }
+            check(tables.equals(List.of("people TABLE")), "getTables found the table: " + tables);
+            List<String> columns = new ArrayList<>();
+            try (ResultSet found = metadata.getColumns(null, null, "people", "%")) {
+                while (found.next()) {
+                    columns.add(found.getString("COLUMN_NAME") + ":" + found.getInt("ORDINAL_POSITION"));
+                }
+            }
+            check(columns.equals(List.of("id:1", "name:2", "score:3", "photo:4")), "getColumns in order: " + columns);
+            try (ResultSet keys = metadata.getPrimaryKeys(null, null, "people")) {
+                check(keys.next() && keys.getString("COLUMN_NAME").equals("id") && keys.getInt("KEY_SEQ") == 1,
+                        "getPrimaryKeys names id");
             }
             try (Statement missing = connection.createStatement()) {
                 missing.executeQuery("SELECT * FROM nowhere");

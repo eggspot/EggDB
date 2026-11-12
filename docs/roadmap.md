@@ -613,7 +613,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Every language driver using the new C API calls (prepared handles, stepping, `COPY`) (D293).
 - Each driver benchmarked in embedded mode against SQLite's binding in its language, as D17 lists
   them (D17, D182). Check: gated in CI.
-- JDBC's `DatabaseMetaData`, and a JNI binding for Java before 22 (D16, D182).
+- JDBC's `DatabaseMetaData`, and a JNI binding for Java before 22 (D16, D182). `DatabaseMetaData`: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D791). Left: the JNI binding.
 - The Python driver through the CPython C API with buffer-protocol batches (D16, D17).
 - SQL*Plus commands in `eggdb shell`, and `DESCRIBE`, `VARIABLE`/`PRINT`, `SPOOL` and `COLUMN`
   formatting (D150). `DESCRIBE`, `PROMPT` and `SPOOL`: **code written, unbuilt** (code-only mode,

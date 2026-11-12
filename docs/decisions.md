@@ -815,3 +815,4 @@ its full title with its status.
 - [D788](decisions/D788.md) Code-only batch 436 (M5): reading `WITHOUT ROWID` tables and UTF-16 databases in SQLite files
 - [D789](decisions/D789.md) Code-only batch 437 (M5): writing `WITHOUT ROWID` tables into SQLite files, in `VACUUM INTO`
 - [D790](decisions/D790.md) Code-only batch 438 (M5): `sqlite3_create_function`, program-defined SQL functions, and more of SQLite's C interface
+- [D791](decisions/D791.md) Code-only batch 439 (M5): JDBC `DatabaseMetaData` in the embedded Java driver
