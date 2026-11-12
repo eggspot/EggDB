@@ -3883,6 +3883,27 @@ SELECT * FROM eggdb_cleanroom.run('retail', 'spend by country');
   tags (the first column) whose values both hold, if there are at least `minimum_group` of them. Keys are never
   stored.
 
+## Metering, chargeback and showback (eggdb_metering)
+
+`CREATE EXTENSION eggdb_metering` measures usage per tenant from the statement statistics (D760):
+
+```sql
+CREATE EXTENSION eggdb_metering;
+INSERT INTO eggdb_metering.tenants VALUES ('acme_app', 'acme');
+INSERT INTO eggdb_metering.rates (metric, unit_price) VALUES ('calls', 0.001), ('exec_ms', 0.0001);
+SELECT cron.schedule('*/5 * * * *', 'SELECT eggdb_metering.snapshot()');
+SELECT * FROM eggdb_metering.chargeback('2026-11-01', '2026-12-01');
+```
+
+- `snapshot()` reads `pg_stat_statements` and adds to `eggdb_metering.usage` what each role ran in each database
+  since the last snapshot (calls, execution milliseconds and rows, per statement shape), under the tenant
+  `eggdb_metering.tenants` maps the role to (the role's own name otherwise). A reset of the statistics starts the
+  counts again. Each snapshot sends one `pg_notify('eggdb_metering', ...)` per tenant with that snapshot's totals as
+  JSON, the hook a billing system listens on.
+- `chargeback(start, end)` prices each tenant's usage per database with `eggdb_metering.rates` (per call, per
+  execution millisecond and per row); `showback(start, end)` shows each tenant's usage and share of execution time;
+  `top_statements(tenant, start, end [, n])` lists a tenant's costliest statement shapes.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

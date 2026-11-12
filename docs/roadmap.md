@@ -804,7 +804,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A Kubernetes operator in Rust (D25, D45).
 - A Terraform provider in Rust on Terraform's published plugin protocol (D25, D46).
 - A metering API (usage per tenant, database and query) with hooks for billing, and chargeback
-  and showback reports on it (D44, D58).
+  and showback reports on it (D44, D58). **Code written, unbuilt** (code-only mode, 2026-11-12, D760), for SQL
+  statements; storage and the other protocols are left.
 - Column-level lineage captured from queries (D51, D244).
 - The Apache Atlas and OpenMetadata APIs (D51).
 - A schema registry and data contracts (D51). **Code written, unbuilt** (code-only mode, 2026-11-12, D753).
