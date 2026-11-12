@@ -452,7 +452,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   with `FROM` or on a view (D338). `UPDATE OR ...` with `FROM` and on a view: **code written,
   unbuilt** (code-only mode, 2026-11-10, D373).
 - A benchmark of a bulk write inside a transaction in MySQL's, SQLite's, Oracle's and SQL
-  Server's dialects, measuring statement-level rollback's extra read per key (D317).
+  Server's dialects, measuring statement-level rollback's extra read per key (D317). **Code written,
+  unbuilt** (code-only mode, 2026-11-13, D949).
 - PostgreSQL's exported snapshots: `pg_export_snapshot()` and `SET TRANSACTION SNAPSHOT` (D318).
   **Code written, unbuilt** (code-only mode, 2026-11-10, D369). Left: exporting from a read-write
   block.

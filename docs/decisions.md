@@ -973,3 +973,4 @@ its full title with its status.
 - [D946](decisions/D946.md) Code-only batch 594 (M1): packet faults and acknowledgement latency in the simulated network
 - [D947](decisions/D947.md) Code-only batch 595 (M1): the engine's hot threads asked onto performance cores
 - [D948](decisions/D948.md) Code-only batch 596 (M1): the page cache placed on a NUMA node
+- [D949](decisions/D949.md) Code-only batch 597 (M3): a benchmark of bulk writes inside a transaction per dialect
