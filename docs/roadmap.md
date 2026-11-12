@@ -1377,8 +1377,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-11, D478); the scope form and `IN TRANSACTIONS` (in one
   transaction, `ON ERROR FAIL` only): **code written, unbuilt** (code-only mode, 2026-11-11, D479).
 - Indexes on labels and properties, and uniqueness constraints (D206). Schema commands, uniqueness and
-  existence constraints: **code written, unbuilt** (code-only mode, 2026-11-11, D503); indexes are recorded
-  but not used for lookups yet.
+  existence constraints: **code written, unbuilt** (code-only mode, 2026-11-11, D503); label and property indexes
+  used by `MATCH`: **code written, unbuilt** (code-only mode, 2026-11-12, D728). Left: `WHERE` conditions using them.
 - Bolt: open transactions across messages, `LOGON` (5.1 and later), routing tables and bookmarks
   (D207). `LOGON`, routing tables and bookmarks: **code written, unbuilt** (code-only mode, 2026-11-11, D504);
   open transactions across messages: **code written, unbuilt** (code-only mode, 2026-11-12, D606).

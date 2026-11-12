@@ -9,6 +9,9 @@ const RELATIONSHIP: u8 = 2;
 const OUTGOING: u8 = 3;
 const INCOMING: u8 = 4;
 const SCHEMA_RULE: u8 = 5;
+const LABEL_INDEX: u8 = 6;
+const PROPERTY_INDEX: u8 = 7;
+const INDEXES_BUILT: &[u8] = b"\x00indexed";
 
 /// What a schema rule asks of nodes with its label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,90 @@ pub(crate) struct SchemaRule {
     pub(crate) kind: SchemaKind,
     pub(crate) label: String,
     pub(crate) properties: Vec<String>,
+}
+
+impl SchemaRule {
+    /// Whether the rule keeps index entries: indexes and uniqueness constraints do.
+    pub(crate) fn indexes(&self) -> bool {
+        matches!(self.kind, SchemaKind::Index | SchemaKind::Unique)
+    }
+}
+
+fn label_prefix(label: &str) -> Vec<u8> {
+    let mut key = vec![LABEL_INDEX];
+    key.extend_from_slice(label.as_bytes());
+    key.push(0);
+    key
+}
+
+fn index_bytes(value: &Value) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    match value {
+        Value::Integer(number) => {
+            out.push(b'i');
+            out.extend_from_slice(&number.to_be_bytes());
+        }
+        Value::Float(number) if number.fract() == 0.0 && (-9.2e18..9.2e18).contains(number) => {
+            out.push(b'i');
+            out.extend_from_slice(&(*number as i64).to_be_bytes());
+        }
+        Value::Float(number) if !number.is_nan() => {
+            out.push(b'f');
+            out.extend_from_slice(&number.to_bits().to_be_bytes());
+        }
+        Value::String(text) => {
+            out.push(b's');
+            out.extend_from_slice(text.as_bytes());
+        }
+        Value::Boolean(flag) => out.extend_from_slice(&[b'b', u8::from(*flag)]),
+        _ => return None,
+    }
+    Some(out)
+}
+
+fn index_prefix(rule: &str, values: &[&Value]) -> Option<Vec<u8>> {
+    let mut key = vec![PROPERTY_INDEX];
+    key.extend_from_slice(rule.as_bytes());
+    key.push(0);
+    for value in values {
+        let bytes = index_bytes(value)?;
+        key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        key.extend_from_slice(&bytes);
+    }
+    Some(key)
+}
+
+fn rule_prefix(rule: &str) -> Vec<u8> {
+    let mut key = vec![PROPERTY_INDEX];
+    key.extend_from_slice(rule.as_bytes());
+    key.push(0);
+    key
+}
+
+fn with_id(mut key: Vec<u8>, id: u64) -> Vec<u8> {
+    key.extend_from_slice(&id.to_be_bytes());
+    key
+}
+
+fn ids_under(keys: &dyn KeysRead, prefix: &[u8]) -> GraphResult<Vec<u64>> {
+    Ok(keys
+        .scan(prefix)
+        .map_err(storage)?
+        .into_iter()
+        .filter(|(key, _)| key.len() == prefix.len() + 8)
+        .filter_map(|(key, _)| Some(u64::from_be_bytes(key.get(prefix.len()..)?.try_into().ok()?)))
+        .collect())
+}
+
+fn index_entries(node: &Node, rules: &[SchemaRule]) -> Vec<Vec<u8>> {
+    let mut entries: Vec<Vec<u8>> = node.labels.iter().map(|label| with_id(label_prefix(label), node.id)).collect();
+    for rule in rules.iter().filter(|rule| rule.indexes() && node.labels.contains(&rule.label)) {
+        let values: Option<Vec<&Value>> = rule.properties.iter().map(|property| property_of(node, property)).collect();
+        if let Some(prefix) = values.and_then(|values| index_prefix(&rule.name, &values)) {
+            entries.push(with_id(prefix, node.id));
+        }
+    }
+    entries
 }
 
 fn rule_key(name: &str) -> Vec<u8> {
@@ -208,7 +295,11 @@ impl GraphRead<'_> {
                 else {
                     return Ok(false);
                 };
-                for other in self.node_ids()? {
+                let candidates = match self.nodes_by_index(rule, &values)? {
+                    Some(found) => found,
+                    None => self.node_ids()?,
+                };
+                for other in candidates {
                     if other == node.id {
                         continue;
                     }
@@ -229,6 +320,32 @@ impl GraphRead<'_> {
                 Ok(false)
             }
         }
+    }
+
+    /// Whether the label and property indexes hold every node; until the first write after
+    /// they came in, lookups scan instead.
+    pub(crate) fn indexed(&self) -> GraphResult<bool> {
+        Ok(self.keys.get(INDEXES_BUILT).map_err(storage)?.is_some())
+    }
+
+    /// The nodes with `label`, from the label index, or `None` while it is not built.
+    pub(crate) fn nodes_with_label(&self, label: &str) -> GraphResult<Option<Vec<u64>>> {
+        if !self.indexed()? {
+            return Ok(None);
+        }
+        ids_under(self.keys, &label_prefix(label)).map(Some)
+    }
+
+    /// The nodes whose properties under `rule` equal `values`, from its index, or `None` when
+    /// the index is not built or a value cannot be indexed.
+    pub(crate) fn nodes_by_index(&self, rule: &SchemaRule, values: &[&Value]) -> GraphResult<Option<Vec<u64>>> {
+        if !rule.indexes() || !self.indexed()? || self.keys.get(&rule_key(&rule.name)).map_err(storage)?.is_none() {
+            return Ok(None);
+        }
+        let Some(prefix) = index_prefix(&rule.name, values) else {
+            return Ok(None);
+        };
+        ids_under(self.keys, &prefix).map(Some)
     }
 
     pub(crate) fn node_ids(&self) -> GraphResult<Vec<u64>> {
@@ -264,6 +381,36 @@ impl GraphWrite<'_> {
         GraphRead { keys: &*self.keys }
     }
 
+    fn ensure_indexed(&mut self) -> GraphResult<()> {
+        if self.read().indexed()? {
+            return Ok(());
+        }
+        let rules = self.read().schema_rules()?;
+        for id in self.read().node_ids()? {
+            if let Some(node) = self.read().node(id)? {
+                for entry in index_entries(&node, &rules) {
+                    self.keys.put(&entry, &[]).map_err(storage)?;
+                }
+            }
+        }
+        self.keys.put(INDEXES_BUILT, &[1]).map_err(storage)
+    }
+
+    fn fill_rule_index(&mut self, rule: &SchemaRule) -> GraphResult<()> {
+        if !rule.indexes() {
+            return Ok(());
+        }
+        let ids = self.read().nodes_with_label(&rule.label)?.unwrap_or_default();
+        for id in ids {
+            if let Some(node) = self.read().node(id)? {
+                for entry in index_entries(&node, std::slice::from_ref(rule)).into_iter().filter(|entry| entry.first() == Some(&PROPERTY_INDEX)) {
+                    self.keys.put(&entry, &[]).map_err(storage)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn next_id(&mut self) -> GraphResult<u64> {
         let current = self
             .keys
@@ -283,6 +430,7 @@ impl GraphWrite<'_> {
         labels: &[String],
         properties: &[(String, Value)],
     ) -> GraphResult<u64> {
+        self.ensure_indexed()?;
         let id = match id {
             Some(id) => id,
             None => self.next_id()?,
@@ -297,26 +445,32 @@ impl GraphWrite<'_> {
         );
         document.insert("p", Bson::Document(properties_document(properties)?));
         let rules = self.read().schema_rules()?;
-        if !rules.is_empty() {
-            let mut kept = labels.to_vec();
-            kept.sort();
-            kept.dedup();
-            let mut shown = properties.to_vec();
-            shown.sort_by(|a, b| a.0.cmp(&b.0));
-            let candidate = Node {
-                id,
-                labels: kept,
-                properties: shown,
-            };
-            for rule in &rules {
-                if self.read().violated(rule, &candidate)? {
-                    return Err(violation(rule, id));
-                }
+        let mut kept = labels.to_vec();
+        kept.sort();
+        kept.dedup();
+        let mut shown = properties.to_vec();
+        shown.sort_by(|a, b| a.0.cmp(&b.0));
+        let candidate = Node {
+            id,
+            labels: kept,
+            properties: shown,
+        };
+        for rule in &rules {
+            if self.read().violated(rule, &candidate)? {
+                return Err(violation(rule, id));
+            }
+        }
+        if let Some(previous) = self.read().node(id)? {
+            for entry in index_entries(&previous, &rules) {
+                self.keys.delete(&entry).map_err(storage)?;
             }
         }
         self.keys
             .put(&key(NODE, id), &document.to_bytes())
             .map_err(storage)?;
+        for entry in index_entries(&candidate, &rules) {
+            self.keys.put(&entry, &[]).map_err(storage)?;
+        }
         Ok(id)
     }
 
@@ -340,6 +494,7 @@ impl GraphWrite<'_> {
     }
 
     pub(crate) fn put_schema_rule(&mut self, rule: &SchemaRule) -> GraphResult<()> {
+        self.ensure_indexed()?;
         let mut document = Document::new();
         document.insert(
             "k",
@@ -359,7 +514,8 @@ impl GraphWrite<'_> {
         );
         self.keys
             .put(&rule_key(&rule.name), &document.to_bytes())
-            .map_err(storage)
+            .map_err(storage)?;
+        self.fill_rule_index(rule)
     }
 
     pub(crate) fn delete_schema_rule(&mut self, name: &str, index: bool) -> GraphResult<bool> {
@@ -375,6 +531,9 @@ impl GraphWrite<'_> {
             return Ok(false);
         }
         self.keys.delete(&rule_key(name)).map_err(storage)?;
+        for (entry, _) in self.keys.scan(&rule_prefix(name)).map_err(storage)? {
+            self.keys.delete(&entry).map_err(storage)?;
+        }
         Ok(true)
     }
 
@@ -437,6 +596,13 @@ impl GraphWrite<'_> {
         }
         for relationship in touching {
             self.delete_relationship(relationship)?;
+        }
+        self.ensure_indexed()?;
+        if let Some(node) = self.read().node(id)? {
+            let rules = self.read().schema_rules()?;
+            for entry in index_entries(&node, &rules) {
+                self.keys.delete(&entry).map_err(storage)?;
+            }
         }
         self.keys.delete(&key(NODE, id)).map_err(storage)
     }

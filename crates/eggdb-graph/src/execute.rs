@@ -1201,14 +1201,43 @@ impl<'g> Executor<'g, '_> {
         Ok(())
     }
 
+    fn indexed_candidates(&self, pattern: &NodePattern, row: &Row) -> GraphResult<Option<Vec<u64>>> {
+        let crate::cypher::LabelExpression::AllOf(labels) = &pattern.labels else {
+            return Ok(None);
+        };
+        let Some(first) = labels.first() else {
+            return Ok(None);
+        };
+        let read = self.read();
+        for rule in read.schema_rules()? {
+            if !rule.indexes() || !labels.contains(&rule.label) {
+                continue;
+            }
+            let mut values = Vec::with_capacity(rule.properties.len());
+            for property in &rule.properties {
+                match pattern.properties.iter().find(|(name, _)| name == property) {
+                    Some((_, expr)) => values.push(self.evaluate(expr, row)?),
+                    None => break,
+                }
+            }
+            if values.len() == rule.properties.len()
+                && let Some(found) = read.nodes_by_index(&rule, &values.iter().collect::<Vec<_>>())?
+            {
+                return Ok(Some(found));
+            }
+        }
+        read.nodes_with_label(first)
+    }
+
     fn start_nodes(&self, pattern: &NodePattern, row: &Row) -> GraphResult<Vec<Node>> {
         Ok(match self.bound_node(pattern, row)? {
             Some(Some(node)) => vec![node],
             Some(None) => Vec::new(),
             None => {
+                let candidates = self.indexed_candidates(pattern, row)?;
                 let read = self.read();
                 let mut nodes = Vec::new();
-                for id in read.node_ids()? {
+                for id in candidates.map_or_else(|| read.node_ids(), Ok)? {
                     if let Some(node) = read.node(id)? {
                         nodes.push(node);
                     }
