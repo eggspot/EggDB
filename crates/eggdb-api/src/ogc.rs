@@ -7,7 +7,8 @@ const DEFAULT_LIMIT: u64 = 10;
 const MOST_LIMIT: u64 = 10_000;
 const GEOJSON: &str = "application/geo+json";
 const GEOMETRY_NAMES: [&str; 3] = ["geom", "geometry", "the_geom"];
-const CONFORMANCE: [&str; 13] = [
+const CONFORMANCE: [&str; 14] = [
+    "http://www.opengis.net/spec/ogcapi-features-2/1.0/conf/crs",
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core",
     "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/geojson",
     "http://www.opengis.net/spec/ogcapi-features-3/1.0/conf/filter",
@@ -22,10 +23,42 @@ const CONFORMANCE: [&str; 13] = [
     "http://www.opengis.net/spec/cql2/1.0/conf/cql2-text",
     "http://www.opengis.net/spec/cql2/1.0/conf/cql2-json",
 ];
-const CRS84: [&str; 2] = [
-    "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
-    "https://www.opengis.net/def/crs/OGC/1.3/CRS84",
-];
+const CRS84_URI: &str = "http://www.opengis.net/def/crs/OGC/1.3/CRS84";
+const EPSG_PREFIX: &str = "http://www.opengis.net/def/crs/EPSG/0/";
+const LISTED_EPSG: [u32; 3] = [4326, 3857, 3395];
+
+/// A CRS URI as EggDB's SRID and axis order: `CRS84` is longitude first, EPSG's geographic
+/// systems latitude first, and projected systems easting first. Only the systems
+/// `ST_Transform` knows are accepted.
+fn crs_of(uri: &str) -> Option<crate::cql2::LiteralCrs> {
+    let uri = uri.trim().trim_start_matches('[').trim_end_matches(']');
+    let uri = uri.strip_prefix("https://").map_or_else(|| uri.to_owned(), |rest| format!("http://{rest}"));
+    if uri == CRS84_URI {
+        return Some(crate::cql2::LiteralCrs::CRS84);
+    }
+    let code: u32 = uri.strip_prefix(EPSG_PREFIX)?.parse().ok()?;
+    let geographic = matches!(code, 4326 | 4258 | 4269);
+    let known = geographic
+        || matches!(code, 3857 | 3395 | 32601..=32660 | 32701..=32760 | 25828..=25838 | 26901..=26923);
+    known.then_some(crate::cql2::LiteralCrs {
+        srid: code,
+        flipped: geographic,
+    })
+}
+
+fn crs_uri(crs: crate::cql2::LiteralCrs) -> String {
+    if crs == crate::cql2::LiteralCrs::CRS84 {
+        CRS84_URI.to_owned()
+    } else {
+        format!("{EPSG_PREFIX}{}", crs.srid)
+    }
+}
+
+fn listed_crs() -> String {
+    let mut listed = vec![json_string(CRS84_URI)];
+    listed.extend(LISTED_EPSG.iter().map(|code| json_string(&format!("{EPSG_PREFIX}{code}"))));
+    listed.join(",")
+}
 
 struct Collection {
     table: String,
@@ -110,9 +143,11 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
     fn collection_json(&self, collection: &Collection) -> String {
         let base = format!("/ogc/collections/{}", collection.table);
         format!(
-            "{{\"id\":{},\"title\":{},\"itemType\":\"feature\",\"links\":[{},{}]}}",
+            "{{\"id\":{},\"title\":{},\"itemType\":\"feature\",\"crs\":[{}],\"storageCrs\":{},\"links\":[{},{}]}}",
             json_string(&collection.table),
             json_string(&collection.table),
+            listed_crs(),
+            json_string(CRS84_URI),
             link(&base, "self", "application/json"),
             link(&format!("{base}/items"), "items", GEOJSON)
         )
@@ -125,27 +160,50 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         let limit = parameter(request, "limit").and_then(|text| text.parse::<u64>().ok()).unwrap_or(DEFAULT_LIMIT).clamp(1, MOST_LIMIT);
         let offset = parameter(request, "offset").and_then(|text| text.parse::<u64>().ok()).unwrap_or(0);
         let mut conditions = vec![format!("t.{geometry} IS NOT NULL")];
+        let output_crs = match decoded_parameter(request, "crs") {
+            None => crate::cql2::LiteralCrs::CRS84,
+            Some(uri) => match crs_of(&uri) {
+                Some(crs) => crs,
+                None => return failure(400, "OGC400", &format!("crs {uri} is not supported")),
+            },
+        };
         if let Some(bbox) = parameter(request, "bbox") {
+            let bbox_crs = match decoded_parameter(request, "bbox-crs") {
+                None => crate::cql2::LiteralCrs::CRS84,
+                Some(uri) => match crs_of(&uri) {
+                    Some(crs) => crs,
+                    None => return failure(400, "OGC400", &format!("bbox-crs {uri} is not supported")),
+                },
+            };
             let corners: Vec<f64> = bbox.split(',').filter_map(|part| part.trim().parse().ok()).collect();
-            let [west, south, east, north] = corners.as_slice() else {
+            let [first_low, second_low, first_high, second_high] = corners.as_slice() else {
                 return failure(400, "OGC400", "bbox is four numbers: west,south,east,north");
             };
-            if [west, south, east, north].iter().any(|value| !value.is_finite()) {
+            if [first_low, second_low, first_high, second_high].iter().any(|value| !value.is_finite()) {
                 return failure(400, "OGC400", "bbox holds a number that is not finite");
             }
-            conditions.push(format!("ST_Intersects(t.{geometry}, ST_MakeEnvelope({west}, {south}, {east}, {north}, ST_SRID(t.{geometry})))"));
+            let (west, south, east, north) = if bbox_crs.flipped {
+                (second_low, first_low, second_high, first_high)
+            } else {
+                (first_low, second_low, first_high, second_high)
+            };
+            let envelope = format!("ST_MakeEnvelope({west}, {south}, {east}, {north}, {})", bbox_crs.srid);
+            let envelope = if bbox_crs == crate::cql2::LiteralCrs::CRS84 {
+                format!("ST_MakeEnvelope({west}, {south}, {east}, {north}, ST_SRID(t.{geometry}))")
+            } else {
+                format!("ST_Transform({envelope}, ST_SRID(t.{geometry}))")
+            };
+            conditions.push(format!("ST_Intersects(t.{geometry}, {envelope})"));
         }
         let filter = match self.filter_condition(collection, request) {
             Ok(filter) => filter,
             Err(message) => return failure(400, "OGC400", &message),
         };
+        conditions.extend(filter);
         let mut kept = String::new();
-        if let Some(text) = filter {
-            conditions.push(text);
-            for name in ["filter", "filter-lang", "filter-crs"] {
-                if let Some(value) = decoded_parameter(request, name) {
-                    kept.push_str(&format!("&{name}={}", percent_encoded(&value)));
-                }
+        for name in ["bbox", "bbox-crs", "crs", "filter", "filter-lang", "filter-crs"] {
+            if let Some(value) = decoded_parameter(request, name) {
+                kept.push_str(&format!("&{name}={}", percent_encoded(&value)));
             }
         }
         let id_column = collection.id.as_deref().and_then(identifier);
@@ -156,9 +214,15 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             conditions.push(format!("t.{id}::text = {}", literal(wanted)));
         }
         let id_expression = id_column.as_ref().map_or_else(|| "NULL".to_owned(), |id| format!("t.{id}::text"));
+        let output = if output_crs == crate::cql2::LiteralCrs::CRS84 {
+            format!("t.{geometry}")
+        } else {
+            let transformed = format!("ST_Transform(t.{geometry}, {})", output_crs.srid);
+            if output_crs.flipped { format!("ST_FlipCoordinates({transformed})") } else { transformed }
+        };
         let order = id_column.as_ref().map_or_else(String::new, |id| format!(" ORDER BY t.{id}"));
         let sql = format!(
-            "SELECT ST_AsGeoJSON(t.{geometry}) AS geometry, (to_jsonb(t) - {}) AS properties, {id_expression} AS id FROM \"{}\".{table} t WHERE {}{order} LIMIT {} OFFSET {offset}",
+            "SELECT ST_AsGeoJSON({output}) AS geometry, (to_jsonb(t) - {}) AS properties, {id_expression} AS id FROM \"{}\".{table} t WHERE {}{order} LIMIT {} OFFSET {offset}",
             literal(&collection.geometry),
             self.schema.replace('"', "\"\""),
             conditions.join(" AND "),
@@ -202,6 +266,7 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             )
         };
         response.content_type = GEOJSON.to_owned();
+        response.headers.push(("Content-Crs".to_owned(), format!("<{}>", crs_uri(output_crs))));
         response
     }
 
@@ -209,11 +274,10 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         let Some(text) = decoded_parameter(request, "filter") else {
             return Ok(None);
         };
-        if let Some(crs) = decoded_parameter(request, "filter-crs")
-            && !CRS84.contains(&crs.as_str())
-        {
-            return Err(format!("filter-crs {crs} is not supported; use CRS84"));
-        }
+        let crs = match decoded_parameter(request, "filter-crs") {
+            None => crate::cql2::LiteralCrs::CRS84,
+            Some(uri) => crs_of(&uri).ok_or_else(|| format!("filter-crs {uri} is not supported"))?,
+        };
         let columns = |name: &str| -> Result<String, String> {
             let column = if (name == "geometry" || name == "geom")
                 && !collection.columns.iter().any(|(column, _)| column == name)
@@ -233,10 +297,10 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         };
         let language = decoded_parameter(request, "filter-lang").unwrap_or_else(|| "cql2-text".to_owned());
         match language.as_str() {
-            "cql2-text" => crate::cql2::text_filter(&text, &columns).map(Some),
+            "cql2-text" => crate::cql2::text_filter(&text, &columns, crs).map(Some),
             "cql2-json" => {
                 let document = eggdb_sql::json::parse_document(&text).map_err(|_| "the filter is not JSON".to_owned())?;
-                crate::cql2::json_filter(&document, &columns).map(Some)
+                crate::cql2::json_filter(&document, &columns, crs).map(Some)
             }
             other => Err(format!("filter-lang {other} is not supported; use cql2-text or cql2-json")),
         }

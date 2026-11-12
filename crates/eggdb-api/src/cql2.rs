@@ -12,6 +12,30 @@ const MAX_DEPTH: usize = 64;
 const MAX_FILTER_BYTES: usize = 64 << 10;
 const CRS84_SRID: u32 = 4326;
 
+/// The coordinate reference system a filter's geometry literals are written in: its SRID, and
+/// whether its axes come latitude first (EPSG's geographic systems).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LiteralCrs {
+    pub(crate) srid: u32,
+    pub(crate) flipped: bool,
+}
+
+impl LiteralCrs {
+    pub(crate) const CRS84: Self = Self {
+        srid: CRS84_SRID,
+        flipped: false,
+    };
+
+    fn placed(self, geometry: String) -> String {
+        let geometry = if self.flipped { format!("ST_FlipCoordinates({geometry})") } else { geometry };
+        if self.srid == CRS84_SRID {
+            geometry
+        } else {
+            format!("ST_Transform({geometry}, {CRS84_SRID})")
+        }
+    }
+}
+
 const SPATIAL: [(&str, &str); 8] = [
     ("s_intersects", "ST_Intersects"),
     ("s_equals", "ST_Equals"),
@@ -139,17 +163,17 @@ fn interval_end(text: &str) -> Result<Option<String>, String> {
     time_literal(kind, text).map(Some)
 }
 
-fn geometry_sql(wkt: &str) -> Result<String, String> {
+fn geometry_sql(wkt: &str, crs: LiteralCrs) -> Result<String, String> {
     if !wkt
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'(' | b')' | b',' | b'.' | b'-' | b'+'))
     {
         return Err("the geometry is not well-known text".to_owned());
     }
-    Ok(format!("ST_GeomFromText({}, {CRS84_SRID})", literal(wkt)))
+    Ok(crs.placed(format!("ST_GeomFromText({}, {})", literal(wkt), crs.srid)))
 }
 
-fn bbox_sql(numbers: &[String]) -> Result<String, String> {
+fn bbox_sql(numbers: &[String], crs: LiteralCrs) -> Result<String, String> {
     let parsed: Vec<f64> = numbers
         .iter()
         .filter_map(|number| number.trim_matches(['(', ')']).parse::<f64>().ok())
@@ -157,12 +181,19 @@ fn bbox_sql(numbers: &[String]) -> Result<String, String> {
     if parsed.len() != numbers.len() || parsed.iter().any(|value| !value.is_finite()) {
         return Err("BBOX takes numbers".to_owned());
     }
-    match parsed.as_slice() {
-        [west, south, east, north] | [west, south, _, east, north, _] => {
-            Ok(format!("ST_MakeEnvelope({west}, {south}, {east}, {north}, {CRS84_SRID})"))
+    let (first_low, second_low, first_high, second_high) = match parsed.as_slice() {
+        [first_low, second_low, first_high, second_high] | [first_low, second_low, _, first_high, second_high, _] => {
+            (*first_low, *second_low, *first_high, *second_high)
         }
-        _ => Err("BBOX takes four or six numbers".to_owned()),
-    }
+        _ => return Err("BBOX takes four or six numbers".to_owned()),
+    };
+    let (west, south, east, north) = if crs.flipped {
+        (second_low, first_low, second_high, first_high)
+    } else {
+        (first_low, second_low, first_high, second_high)
+    };
+    let envelope = format!("ST_MakeEnvelope({west}, {south}, {east}, {north}, {})", crs.srid);
+    Ok(LiteralCrs { flipped: false, ..crs }.placed(envelope))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -277,6 +308,7 @@ struct TextParser<'t, 'c> {
     at: usize,
     depth: usize,
     columns: Columns<'c>,
+    crs: LiteralCrs,
 }
 
 impl TextParser<'_, '_> {
@@ -512,7 +544,7 @@ impl TextParser<'_, '_> {
                         let end = *end;
                         self.at += 1;
                         let wkt = self.text.get(start..end).unwrap_or_default();
-                        return geometry_sql(wkt).map(Operand::Sql);
+                        return geometry_sql(wkt, self.crs).map(Operand::Sql);
                     }
                 }
                 Some((Token::End, _, _)) | None => return Err("an unterminated geometry".to_owned()),
@@ -585,7 +617,7 @@ impl TextParser<'_, '_> {
             }
             "bbox" => {
                 let numbers: Result<Vec<String>, String> = self.arguments()?.into_iter().map(Operand::sql).collect();
-                bbox_sql(&numbers?).map(Operand::Sql)
+                bbox_sql(&numbers?, self.crs).map(Operand::Sql)
             }
             _ => {
                 let arguments = self.arguments()?;
@@ -620,19 +652,20 @@ fn call_sql(name: &str, arguments: Vec<Operand>) -> Result<String, String> {
     }
 }
 
-/// A `cql2-text` filter as an SQL condition.
-pub(crate) fn text_filter(text: &str, columns: Columns<'_>) -> Result<String, String> {
+/// A `cql2-text` filter whose geometry literals are in `crs`, as an SQL condition.
+pub(crate) fn text_filter(text: &str, columns: Columns<'_>, crs: LiteralCrs) -> Result<String, String> {
     let mut parser = TextParser {
         text,
         tokens: tokens(text)?,
         at: 0,
         depth: 0,
         columns,
+        crs,
     };
     parser.whole()
 }
 
-fn json_operand(node: &Node, columns: Columns<'_>, depth: usize) -> Result<Operand, String> {
+fn json_operand(node: &Node, columns: Columns<'_>, crs: LiteralCrs, depth: usize) -> Result<Operand, String> {
     if depth > MAX_DEPTH {
         return Err("the filter nests too deeply".to_owned());
     }
@@ -649,7 +682,7 @@ fn json_operand(node: &Node, columns: Columns<'_>, depth: usize) -> Result<Opera
         Json::Array(items) => {
             let listed: Result<Vec<String>, String> = items
                 .iter()
-                .map(|item| json_operand(item, columns, depth + 1).and_then(Operand::sql))
+                .map(|item| json_operand(item, columns, crs, depth + 1).and_then(Operand::sql))
                 .collect();
             Ok(Operand::Sql(format!("({})", listed?.join(", "))))
         }
@@ -685,7 +718,7 @@ fn json_operand(node: &Node, columns: Columns<'_>, depth: usize) -> Result<Opera
                     match node.map(|node| &node.value) {
                         Some(Json::String(text)) => interval_end(text),
                         Some(Json::Object(_)) => node.map_or(Ok(None), |node| {
-                            json_operand(node, columns, depth + 1).and_then(Operand::sql).map(Some)
+                            json_operand(node, columns, crs, depth + 1).and_then(Operand::sql).map(Some)
                         }),
                         _ => Err("an interval holds two times".to_owned()),
                     }
@@ -704,7 +737,7 @@ fn json_operand(node: &Node, columns: Columns<'_>, depth: usize) -> Result<Opera
                         _ => String::new(),
                     })
                     .collect();
-                return bbox_sql(&numbers).map(Operand::Sql);
+                return bbox_sql(&numbers, crs).map(Operand::Sql);
             }
             if (member("type").is_some() && member("coordinates").is_some()) || member("geometries").is_some() {
                 return Ok(Operand::Sql(format!(
@@ -712,7 +745,7 @@ fn json_operand(node: &Node, columns: Columns<'_>, depth: usize) -> Result<Opera
                     literal(&geojson_text(node))
                 )));
             }
-            json_condition(node, columns, depth + 1).map(Operand::Sql)
+            json_condition(node, columns, crs, depth + 1).map(Operand::Sql)
         }
     }
 }
@@ -735,7 +768,7 @@ fn geojson_text(node: &Node) -> String {
     }
 }
 
-fn json_condition(node: &Node, columns: Columns<'_>, depth: usize) -> Result<String, String> {
+fn json_condition(node: &Node, columns: Columns<'_>, crs: LiteralCrs, depth: usize) -> Result<String, String> {
     if depth > MAX_DEPTH {
         return Err("the filter nests too deeply".to_owned());
     }
@@ -764,13 +797,13 @@ fn json_condition(node: &Node, columns: Columns<'_>, depth: usize) -> Result<Str
     let op = op.to_ascii_lowercase();
     let operand = |at: usize| -> Result<Operand, String> {
         let node = arguments.get(at).ok_or_else(|| format!("{op} needs more arguments"))?;
-        json_operand(node, columns, depth + 1)
+        json_operand(node, columns, crs, depth + 1)
     };
     Ok(match op.as_str() {
         "and" | "or" => {
             let mut parts = Vec::new();
             for argument in &arguments {
-                parts.push(json_condition(argument, columns, depth + 1)?);
+                parts.push(json_condition(argument, columns, crs, depth + 1)?);
             }
             if parts.is_empty() {
                 return Err(format!("{op} needs arguments"));
@@ -779,7 +812,7 @@ fn json_condition(node: &Node, columns: Columns<'_>, depth: usize) -> Result<Str
         }
         "not" => {
             let inner = arguments.first().ok_or_else(|| "not needs an argument".to_owned())?;
-            format!("(NOT {})", json_condition(inner, columns, depth + 1)?)
+            format!("(NOT {})", json_condition(inner, columns, crs, depth + 1)?)
         }
         "=" | "<>" | "<" | ">" | "<=" | ">=" => format!("({} {op} {})", operand(0)?.sql()?, operand(1)?.sql()?),
         "like" => format!("({} LIKE {})", operand(0)?.sql()?, operand(1)?.sql()?),
@@ -805,9 +838,10 @@ fn json_condition(node: &Node, columns: Columns<'_>, depth: usize) -> Result<Str
     })
 }
 
-/// A `cql2-json` filter as an SQL condition.
-pub(crate) fn json_filter(node: &Node, columns: Columns<'_>) -> Result<String, String> {
-    json_condition(node, columns, 0)
+/// A `cql2-json` filter whose `BBOX` literals are in `crs` (GeoJSON is always CRS84), as an
+/// SQL condition.
+pub(crate) fn json_filter(node: &Node, columns: Columns<'_>, crs: LiteralCrs) -> Result<String, String> {
+    json_condition(node, columns, crs, 0)
 }
 
 #[cfg(test)]
@@ -824,24 +858,38 @@ mod tests {
     #[test]
     fn text_filters_become_quoted_sql() {
         assert_eq!(
-            text_filter("population > 1000 AND (name LIKE 'Ber%' OR name IN ('Paris', 'O''Hare'))", &columns).unwrap(),
+            text_filter("population > 1000 AND (name LIKE 'Ber%' OR name IN ('Paris', 'O''Hare'))", &columns, LiteralCrs::CRS84).unwrap(),
             "((t.\"population\" > 1000) AND ((t.\"name\" LIKE 'Ber%') OR (t.\"name\" IN ('Paris', 'O''Hare'))))"
         );
         assert_eq!(
-            text_filter("S_INTERSECTS(geometry, POLYGON((0 0, 1 0, 1 1, 0 0))) AND NOT name IS NULL", &columns).unwrap(),
+            text_filter("S_INTERSECTS(geometry, POLYGON((0 0, 1 0, 1 1, 0 0))) AND NOT name IS NULL", &columns, LiteralCrs::CRS84).unwrap(),
             "(ST_Intersects(t.\"geometry\", ST_GeomFromText('POLYGON((0 0, 1 0, 1 1, 0 0))', 4326)) AND (NOT (t.\"name\" IS NULL)))"
         );
         assert_eq!(
-            text_filter("T_DURING(updated, INTERVAL('2020-01-01', '..'))", &columns).unwrap(),
+            text_filter("T_DURING(updated, INTERVAL('2020-01-01', '..'))", &columns, LiteralCrs::CRS84).unwrap(),
             "((t.\"updated\" > CAST('2020-01-01' AS date)) AND TRUE)"
         );
         assert_eq!(
-            text_filter("population BETWEEN 10 AND 20 * 2 AND CASEI(name) = casei('berlin')", &columns).unwrap(),
+            text_filter("population BETWEEN 10 AND 20 * 2 AND CASEI(name) = casei('berlin')", &columns, LiteralCrs::CRS84).unwrap(),
             "((t.\"population\" BETWEEN 10 AND (20 * 2)) AND (lower(t.\"name\") = lower('berlin')))"
         );
         assert_eq!(
-            text_filter("S_WITHIN(geometry, BBOX(-10, 40, 10, 50))", &columns).unwrap(),
+            text_filter("S_WITHIN(geometry, BBOX(-10, 40, 10, 50))", &columns, LiteralCrs::CRS84).unwrap(),
             "ST_Within(t.\"geometry\", ST_MakeEnvelope(-10, 40, 10, 50, 4326))"
+        );
+    }
+
+    #[test]
+    fn literals_in_epsg_4326_swap_axes_and_projected_ones_transform() {
+        let lat_first = LiteralCrs { srid: 4326, flipped: true };
+        assert_eq!(
+            text_filter("S_WITHIN(geometry, BBOX(40, -10, 50, 10))", &columns, lat_first).unwrap(),
+            "ST_Within(t.\"geometry\", ST_MakeEnvelope(-10, 40, 10, 50, 4326))"
+        );
+        let mercator = LiteralCrs { srid: 3857, flipped: false };
+        assert_eq!(
+            text_filter("S_INTERSECTS(geometry, POINT(1000 2000))", &columns, mercator).unwrap(),
+            "ST_Intersects(t.\"geometry\", ST_Transform(ST_GeomFromText('POINT(1000 2000)', 3857), 4326))"
         );
     }
 
@@ -857,10 +905,10 @@ mod tests {
             "population IN 1",
             "UNKNOWNFN(name)",
         ] {
-            assert!(text_filter(bad, &columns).is_err(), "{bad}");
+            assert!(text_filter(bad, &columns, LiteralCrs::CRS84).is_err(), "{bad}");
         }
         let deep = format!("{}name = 'a'{}", "(".repeat(200), ")".repeat(200));
-        assert!(text_filter(&deep, &columns).is_err());
+        assert!(text_filter(&deep, &columns, LiteralCrs::CRS84).is_err());
     }
 
     #[test]
@@ -870,7 +918,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            json_filter(&document, &columns).unwrap(),
+            json_filter(&document, &columns, LiteralCrs::CRS84).unwrap(),
             "((t.\"population\" > 1000) AND ST_Intersects(t.\"geometry\", ST_MakeEnvelope(0, 0, 1, 1, 4326)))"
         );
     }
