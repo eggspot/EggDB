@@ -3524,10 +3524,15 @@ SELECT cron.schedule('low-stock', '*/5 * * * *', $$SELECT eggdb_bi.run_report('l
 
 `run_report` queues `{"report", "rows", "count", "text"}` for the target; with `only_when_rows` it
 queues nothing when the query finds no rows, which makes the report an alert. `eggdb serve` posts
-the queue at least once, oldest first, to `http://` targets allowed by
+the queue at least once, oldest first, to `http://` and `https://` targets allowed by
 `EGGDB_REPORT_TARGETS` (comma-separated URLs: the same host and port, and a path that starts with
 the entry's). It sends nothing when that is unset, and drops a
-message whose target is not allowed.
+message whose target is not allowed. `https://` targets must present a certificate that chains to
+`EGGDB_REPORT_CA_FILE` (PEM) or the system's trusted roots and names the host (D747). A `mailto:<address>` target
+is e-mailed through the operator's mail server, `EGGDB_SMTP_SERVER` (`host:port`, port 25 unless given), from
+`EGGDB_SMTP_FROM`, with STARTTLS when the server offers it and AUTH PLAIN when `EGGDB_SMTP_USER` and
+`EGGDB_SMTP_PASSWORD_FILE` are set (sent only over TLS); allow it in `EGGDB_REPORT_TARGETS` as `mailto:<address>`
+or a whole domain as `mailto:@example.com`.
 
 `eggdb_bi.render_report(name, format [, filters])` renders a report's rows as `csv` (RFC 4180, a heading row), an
 HTML `<table>` or a `pdf` of A4 pages (`eggdb_pdf_table(title, rows)`, Helvetica, Latin-1 text), as `bytea`, after

@@ -134,6 +134,25 @@ pub(super) fn deliver_reports(
         std::thread::sleep(DELIVER_EVERY);
         let _ =
             eggdb_sql::reports::deliver_reports(store, EVENTS_PER_ROUND, &mut |target, body| {
+                if let Some(address) = target.strip_prefix("mailto:") {
+                    if !prefixes.iter().any(|allowed| mail_target_allowed(allowed, address)) {
+                        return true;
+                    }
+                    let (subject, text) = mail_of(body);
+                    return super::report_delivery::send_mail(address, &subject, &text, WEBHOOK_TIMEOUT).is_ok();
+                }
+                if let Some(secure) = super::report_delivery::parse_https_url(target) {
+                    let allowed = prefixes.iter().any(|allowed| {
+                        super::report_delivery::parse_https_url(allowed).is_some_and(|entry| {
+                            entry.host.eq_ignore_ascii_case(&secure.host) && entry.port == secure.port && path_within(&entry.path, &secure.path)
+                        })
+                    });
+                    if !allowed {
+                        return true;
+                    }
+                    return super::report_delivery::post_https(&secure, "application/json", body.as_bytes(), WEBHOOK_TIMEOUT)
+                        .is_ok_and(|status| (200..300).contains(&status));
+                }
                 let Ok(url) = eggdb_http::parse_http_url(target) else {
                     return true;
                 };
@@ -147,6 +166,33 @@ pub(super) fn deliver_reports(
                     .is_ok_and(|status| (200..300).contains(&status))
             });
     }
+}
+
+fn mail_target_allowed(allowed: &str, address: &str) -> bool {
+    let Some(entry) = allowed.strip_prefix("mailto:") else {
+        return false;
+    };
+    if let Some(domain) = entry.strip_prefix('@') {
+        return address.rsplit_once('@').is_some_and(|(_, host)| host.eq_ignore_ascii_case(domain));
+    }
+    entry.eq_ignore_ascii_case(address)
+}
+
+fn mail_of(body: &str) -> (String, String) {
+    let Ok(parsed) = eggdb_sql::json::parse_document(body) else {
+        return ("EggDB report".to_owned(), body.to_owned());
+    };
+    let field = |name: &str| match &parsed.value {
+        eggdb_sql::json::Json::Object(members) => members.iter().find(|(key, _)| key == name).map(|(_, node)| node),
+        _ => None,
+    };
+    let text_of = |name: &str| match field(name).map(|node| &node.value) {
+        Some(eggdb_sql::json::Json::String(text)) => Some(text.clone()),
+        _ => None,
+    };
+    let subject = text_of("report").map_or_else(|| "EggDB report".to_owned(), |name| format!("EggDB report: {name}"));
+    let rows = field("rows").and_then(|node| body.get(node.start..node.end)).unwrap_or("[]");
+    (subject, format!("{}\n\n{rows}\n", text_of("text").unwrap_or_default()))
 }
 
 fn report_target_allowed(allowed: &str, target: &eggdb_http::HttpTarget) -> bool {
