@@ -757,11 +757,6 @@ fn every_kind_eggdb_cannot_create_yet_is_reported_with_its_name() {
             "c on public.t",
         ),
         (
-            "CREATE EVENT TRIGGER e ON ddl_command_start EXECUTE FUNCTION f();",
-            "event trigger",
-            "e",
-        ),
-        (
             "CREATE RULE r AS ON INSERT TO public.t DO INSTEAD NOTHING;",
             "rule",
             "r on public.t",

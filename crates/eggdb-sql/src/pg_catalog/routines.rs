@@ -16,6 +16,7 @@ const TSQL_LANGUAGE: u32 = 13577;
 const PLSQL_LANGUAGE: u32 = 13578;
 const VOID_TYPE: u32 = 2278;
 const TRIGGER_TYPE: u32 = 2279;
+const EVENT_TRIGGER_TYPE: u32 = 3838;
 pub(crate) const ROUTINE_COST: f32 = 100.0;
 const SET_RETURNING_ROWS: f32 = 1000.0;
 
@@ -107,6 +108,7 @@ fn return_type_oid(snapshot: &CatalogSnapshot, returned: &ReturnType) -> u32 {
     match returned {
         ReturnType::Void => VOID_TYPE,
         ReturnType::Trigger => TRIGGER_TYPE,
+        ReturnType::EventTrigger => EVENT_TRIGGER_TYPE,
         ReturnType::Record => RECORD_OID,
         ReturnType::Type(sql_type) => oids::type_oid(*sql_type),
         ReturnType::Relation(name) => snapshot
@@ -141,6 +143,7 @@ fn return_type_name(returned: &ReturnType) -> String {
     match returned {
         ReturnType::Void => "void".to_owned(),
         ReturnType::Trigger => "trigger".to_owned(),
+        ReturnType::EventTrigger => "event_trigger".to_owned(),
         ReturnType::Record => "record".to_owned(),
         ReturnType::Type(sql_type) => type_shown(*sql_type),
         ReturnType::Relation(name) => crate::schemas::display(name),

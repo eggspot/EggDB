@@ -52,6 +52,7 @@ mod dump;
 mod encoding;
 mod enums;
 mod error;
+mod event_triggers;
 mod eval;
 mod execute;
 mod explain;

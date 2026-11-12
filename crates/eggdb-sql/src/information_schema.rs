@@ -1655,6 +1655,7 @@ fn pseudo_type_name(returned: &ReturnType) -> Option<&'static str> {
     match returned {
         ReturnType::Void => Some("void"),
         ReturnType::Trigger => Some("trigger"),
+        ReturnType::EventTrigger => Some("event_trigger"),
         ReturnType::Record => Some("record"),
         ReturnType::Type(_) | ReturnType::Relation(_) => None,
     }

@@ -1,6 +1,7 @@
 mod classifier_catalog;
 mod cursors;
 pub(crate) mod database_switch;
+mod event_triggers;
 mod mysql;
 pub(crate) mod mysql_events;
 mod mysql_load;
@@ -2985,7 +2986,7 @@ impl<'s> Session<'s> {
         if matches!(self.block, Block::None) {
             self.transaction_mode.forget_transaction();
         }
-        let result = self.run_statement(statement, io);
+        let result = self.run_with_event_triggers(statement, io);
         self.sync_transaction_read_only();
         result
     }
@@ -3085,6 +3086,7 @@ impl<'s> Session<'s> {
                 if_not_exists,
             } => return self.install_extension(name, *if_not_exists),
             Statement::MaterializedView(command) => return self.materialized_view(command),
+            Statement::EventTrigger(command) => return self.event_trigger(command),
             Statement::Begin {
                 read_only,
                 isolation,
@@ -3707,6 +3709,7 @@ impl<'s> Session<'s> {
             | Statement::Savepoint(_)
             | Statement::InstallExtension { .. }
             | Statement::MaterializedView(_)
+            | Statement::EventTrigger(_)
             | Statement::Prepared(_)
             | Statement::SqlServer(_) => {
                 return Err(SqlError::new(

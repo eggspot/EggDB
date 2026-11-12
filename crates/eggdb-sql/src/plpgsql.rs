@@ -734,6 +734,10 @@ pub(crate) fn is_trigger_function(definition: &RoutineDefinition) -> bool {
     definition.returns == RoutineReturns::One(ReturnType::Trigger)
 }
 
+pub(crate) fn is_event_trigger_function(definition: &RoutineDefinition) -> bool {
+    definition.returns == RoutineReturns::One(ReturnType::EventTrigger)
+}
+
 pub(crate) fn compile(definition: &RoutineDefinition) -> SqlResult<Program> {
     let tokens = tokenize_in(&definition.body, Dialect::PostgreSql)?;
     crate::parser::plpgsql_program(&definition.body, &tokens, definition)

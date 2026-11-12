@@ -399,7 +399,12 @@ pub(crate) fn classify(
         | Statement::CreateTrigger(_)
         | Statement::EnableTrigger(_)
         | Statement::AlterTrigger(_)
-        | Statement::AlterPackage(_) => None,
+        | Statement::AlterPackage(_)
+        | Statement::EventTrigger(crate::ast::EventTriggerCommand::Create { .. })
+        | Statement::EventTrigger(crate::ast::EventTriggerCommand::Alter { .. }) => None,
+        Statement::EventTrigger(crate::ast::EventTriggerCommand::Drop { name, .. }) => Some(
+            DestructiveStatement::new(DestructiveKind::DropTrigger, vec![shown(name)], false),
+        ),
         Statement::Call(call) => Some(DestructiveStatement::new(
             DestructiveKind::RunCode,
             vec![shown(&call.name)],

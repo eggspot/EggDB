@@ -441,12 +441,7 @@ fn create(tokens: &[Token]) -> Action {
             on_table(tokens, at + 1, "trigger", "on", "triggers come later")
         }
         "event" if tokens.get(at).is_some_and(|token| token.is_word("trigger")) => {
-            at += 1;
-            skip(
-                "event trigger",
-                name_at(tokens, &mut at),
-                "event triggers come later",
-            )
+            Action::Run(Effect::OtherDdl)
         }
         "rule" => on_table(tokens, at, "rule", "to", "rules come later"),
         "policy" => on_table(

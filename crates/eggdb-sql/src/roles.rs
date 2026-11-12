@@ -964,6 +964,7 @@ pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> Sql
             | Statement::CreatePackage(_)
             | Statement::AlterPackage(_)
             | Statement::DropPackage(_)
+            | Statement::EventTrigger(_)
             | Statement::Analyze(_)
     );
     if defines {

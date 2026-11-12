@@ -121,6 +121,7 @@ pub(crate) struct RoutineParameter {
 pub(crate) enum ReturnType {
     Void,
     Trigger,
+    EventTrigger,
     Record,
     Type(SqlType),
     Relation(String),
@@ -433,6 +434,29 @@ pub(crate) fn resolve_trigger_function(
         .cloned())
 }
 
+pub(crate) fn resolve_event_trigger_function(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    written: &str,
+) -> SqlResult<Option<Arc<RoutineDefinition>>> {
+    let named = match written.split_once('.') {
+        Some((schema, name)) => of_name(reader, tables, &qualified(schema, name))?,
+        None => resolve(reader, tables, written)?,
+    };
+    let Some(named) = named else {
+        return Ok(None);
+    };
+    Ok(named
+        .routines
+        .iter()
+        .find(|routine| {
+            routine.kind == RoutineKind::Function
+                && routine.input_types().is_empty()
+                && routine.returns == RoutineReturns::One(ReturnType::EventTrigger)
+        })
+        .cloned())
+}
+
 pub(crate) fn every_routine(reader: &dyn KeyValueRead) -> SqlResult<Vec<NamedRoutines>> {
     let prefix = routines_prefix();
     let mut found = Vec::new();
@@ -558,6 +582,20 @@ fn check_returns(
             return Err(SqlError::new(
                 SqlState::INVALID_FUNCTION_DEFINITION,
                 "SQL functions cannot return type trigger",
+            ));
+        }
+        RoutineReturns::One(ReturnType::EventTrigger) if !definition.input_types().is_empty() => {
+            return Err(SqlError::new(
+                SqlState::INVALID_FUNCTION_DEFINITION,
+                "event trigger functions cannot have declared arguments",
+            ));
+        }
+        RoutineReturns::One(ReturnType::EventTrigger)
+            if definition.language != RoutineLanguage::PlPgSql =>
+        {
+            return Err(SqlError::new(
+                SqlState::INVALID_FUNCTION_DEFINITION,
+                "SQL functions cannot return type event_trigger",
             ));
         }
         _ => return Ok(()),

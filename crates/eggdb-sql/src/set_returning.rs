@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 49] = [
+const FUNCTIONS: [SetReturningFunction; 51] = [
     to_records("read_parquet"),
     to_records("read_orc"),
     to_records("read_zarr"),
@@ -200,7 +200,35 @@ const FUNCTIONS: [SetReturningFunction; 49] = [
         rows: crate::pg_catalog::partition_tree_rows,
         fields: true,
     },
+    SetReturningFunction {
+        name: crate::event_triggers::DDL_COMMANDS,
+        result_type: ddl_commands_type,
+        rows: ddl_commands_rows,
+        fields: true,
+    },
+    SetReturningFunction {
+        name: crate::event_triggers::DROPPED_OBJECTS,
+        result_type: dropped_objects_type,
+        rows: dropped_objects_rows,
+        fields: true,
+    },
 ];
+
+fn ddl_commands_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    crate::event_triggers::record_type(crate::event_triggers::DDL_COMMANDS, types)
+}
+
+fn dropped_objects_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    crate::event_triggers::record_type(crate::event_triggers::DROPPED_OBJECTS, types)
+}
+
+fn ddl_commands_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::event_triggers::record_rows(crate::event_triggers::DDL_COMMANDS, values, sink)
+}
+
+fn dropped_objects_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::event_triggers::record_rows(crate::event_triggers::DROPPED_OBJECTS, values, sink)
+}
 
 fn hstore_keys_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
     crate::hstore_functions::set_result_type("skeys", types)
@@ -255,6 +283,20 @@ fn record_columns(name: &str) -> Vec<OutputColumn> {
             })
             .collect();
     }
+    if name == crate::event_triggers::DDL_COMMANDS || name == crate::event_triggers::DROPPED_OBJECTS {
+        let columns: &[(&str, SqlType)] = if name == crate::event_triggers::DDL_COMMANDS {
+            &crate::event_triggers::DDL_COMMANDS_COLUMNS
+        } else {
+            &crate::event_triggers::DROPPED_OBJECTS_COLUMNS
+        };
+        return columns
+            .iter()
+            .map(|(column, sql_type)| OutputColumn {
+                name: (*column).to_owned(),
+                sql_type: Some(*sql_type),
+            })
+            .collect();
+    }
     if name == crate::pg_catalog::acl::EXPLODE {
         return crate::pg_catalog::acl::EXPLODED_COLUMNS
             .iter()
@@ -294,6 +336,10 @@ fn record_rows(
         crate::pg_catalog::acl::exploded_records(values, sink)
     } else if name == crate::pg_catalog::PARTITION_TREE {
         crate::pg_catalog::partition_tree_records(values, sink)
+    } else if name == crate::event_triggers::DDL_COMMANDS {
+        crate::event_triggers::ddl_command_records(values, sink)
+    } else if name == crate::event_triggers::DROPPED_OBJECTS {
+        crate::event_triggers::dropped_object_records(values, sink)
     } else if name == crate::sqlite_json::EACH || name == crate::sqlite_json::TREE {
         crate::sqlite_json::each_records(name, values, sink)
     } else if name == crate::json_functions::OPENJSON_PAIRS {

@@ -718,7 +718,7 @@ impl<'t> Parser<'t> {
                 "void" => Some(ReturnType::Void),
                 "trigger" => Some(ReturnType::Trigger),
                 "record" => Some(ReturnType::Record),
-                "event_trigger" => return Err(self.not_supported("event trigger functions")),
+                "event_trigger" => Some(ReturnType::EventTrigger),
                 _ => None,
             },
             _ => None,

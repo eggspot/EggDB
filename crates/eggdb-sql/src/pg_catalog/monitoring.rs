@@ -788,6 +788,7 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             })
             .collect(),
         MonitoringRelation::Tables => table_rows(snapshot),
+        MonitoringRelation::EventTrigger => event_trigger_rows(snapshot),
         MonitoringRelation::Stats => statistics_rows(snapshot),
         MonitoringRelation::Views => view_rows(snapshot),
         MonitoringRelation::Sequences => sequence_rows(snapshot),
@@ -917,6 +918,67 @@ fn table_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     )
                     .done(),
             )
+        })
+        .collect()
+}
+
+fn event_trigger_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    const FIRST_EVENT_TRIGGER_OID: u32 = 17_000;
+    let field = |row: &[(String, Value)], name: &str| {
+        row.iter()
+            .find(|(column, _)| column == name)
+            .and_then(|(_, value)| value.to_text())
+            .unwrap_or_default()
+    };
+    let mut rows: Vec<&Vec<(String, Value)>> = snapshot.event_triggers.iter().collect();
+    rows.sort_by_key(|row| field(row, "name"));
+    rows.into_iter()
+        .enumerate()
+        .map(|(at, row)| {
+            let function = field(row, "function");
+            let (schema, name) = match function.split_once('.') {
+                Some((schema, name)) => (Some(schema.to_owned()), name.to_owned()),
+                None => (None, function.clone()),
+            };
+            let function_oid = snapshot
+                .routines
+                .iter()
+                .find(|routine| {
+                    routine.name == name
+                        && schema.as_ref().is_none_or(|schema| *schema == routine.schema)
+                        && routine.definition.returns
+                            == crate::routines::RoutineReturns::One(
+                                crate::routines::ReturnType::EventTrigger,
+                            )
+                })
+                .map_or(0, |routine| routine.oid);
+            let tags: Vec<Value> = field(row, "tags")
+                .split(',')
+                .filter(|tag| !tag.is_empty())
+                .map(|tag| Value::Text(tag.to_owned()))
+                .collect();
+            CatalogRow::new(&EVENT_TRIGGER)
+                .set(
+                    "oid",
+                    Value::Oid(FIRST_EVENT_TRIGGER_OID + u32::try_from(at).unwrap_or(0)),
+                )
+                .set("evtname", Value::Text(field(row, "name")))
+                .set("evtevent", Value::Text(field(row, "event")))
+                .set("evtowner", Value::Oid(oids::SESSION_USER))
+                .set("evtfoid", Value::Oid(function_oid))
+                .set("evtenabled", Value::Text(field(row, "enabled")))
+                .set(
+                    "evttags",
+                    if tags.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Array(Box::new(crate::arrays::ArrayValue::new(
+                            ArrayElement::Text,
+                            tags,
+                        )))
+                    },
+                )
+                .done()
         })
         .collect()
 }

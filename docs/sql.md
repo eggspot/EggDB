@@ -3214,6 +3214,18 @@ calls don't see them. As in PostgreSQL, `OLD TABLE` needs `DELETE` or `UPDATE` a
 needs `INSERT` or `UPDATE` among the events (`42P17`), and `TRUNCATE` triggers can't have them
 (`0A000`).
 
+### Event triggers
+
+In PostgreSQL's dialect `CREATE EVENT TRIGGER name ON ddl_command_start | ddl_command_end | sql_drop
+[WHEN TAG IN ('CREATE TABLE', ...)] EXECUTE FUNCTION f()`, `ALTER EVENT TRIGGER ... ENABLE [REPLICA | ALWAYS] |
+DISABLE | RENAME TO | OWNER TO` and `DROP EVENT TRIGGER [IF EXISTS]` keep event triggers, listed in
+`pg_event_trigger`; only a superuser manages them. A PL/pgSQL function `RETURNS event_trigger` sees `TG_EVENT` and
+`TG_TAG`, and calls `pg_event_trigger_ddl_commands()` (at `ddl_command_end`, one row for the command's object) and
+`pg_event_trigger_dropped_objects()` (at `sql_drop`, one row per dropped object; OIDs are 0). They fire around the
+DDL a client sends (not around statements EggDB runs for itself or inside functions), in name order, inside one
+transaction with the command, so a failing trigger undoes it (D787). `table_rewrite` triggers are accepted but never
+fire.
+
 ## Geometry (PostGIS-compatible functions)
 
 Geometries are written as WKT or EWKT text (`'SRID=4326;POINT(-71.06 42.36)'`) or WKB bytes

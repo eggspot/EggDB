@@ -811,3 +811,4 @@ its full title with its status.
 - [D784](decisions/D784.md) Code-only batch 432 (M14): tenant-aware backup and restore in `eggdb_tenancy`
 - [D785](decisions/D785.md) Code-only batch 433 (M10): SQL Server Database Mail, `sp_send_dbmail` and operator notifications sent by `eggdb serve`
 - [D786](decisions/D786.md) Code-only batch 434 (M5): column statistics gathered by `ANALYZE`, the `pg_stats` view, `n_distinct` in equality estimates
+- [D787](decisions/D787.md) Code-only batch 435 (M5): PostgreSQL event triggers (`CREATE EVENT TRIGGER`, `ddl_command_start`/`end`, `sql_drop`)

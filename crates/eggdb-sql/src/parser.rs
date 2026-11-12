@@ -3,6 +3,7 @@ mod constraints;
 mod copy;
 mod create_table_as;
 mod cursors;
+mod event_triggers;
 mod databases;
 mod generated;
 mod group_concat;
@@ -995,6 +996,9 @@ impl<'t> Parser<'t> {
             "refresh" if self.postgresql() && self.is_word_at(1, "materialized") => {
                 self.refresh_materialized_view()
             }
+            "create" if self.at_event_trigger() => self.create_event_trigger(),
+            "drop" if self.at_event_trigger() => self.drop_event_trigger(),
+            "alter" if self.at_event_trigger() => self.alter_event_trigger(),
             "create" => self.create(),
             "drop" => self.drop(),
             "insert" => self.insert(),

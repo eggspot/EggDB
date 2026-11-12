@@ -177,7 +177,10 @@ fn invoke_in(
     let _depth = enter_routine()?;
     crate::cancel::check()?;
     let definition = Arc::clone(call.definition);
-    if is_trigger_function(&definition) && call.trigger.is_none() {
+    if (is_trigger_function(&definition) && call.trigger.is_none())
+        || (crate::plpgsql::is_event_trigger_function(&definition)
+            && !crate::event_triggers::firing())
+    {
         return Err(SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,
             "trigger functions can only be called as triggers",
@@ -670,6 +673,8 @@ impl<'r> Run<'r> {
         };
         if let Some(trigger) = trigger {
             self.bind_trigger(trigger);
+        } else if crate::plpgsql::is_event_trigger_function(definition) {
+            self.bind_event_trigger();
         }
         self.program(program)
     }
@@ -803,6 +808,17 @@ impl<'r> Run<'r> {
         }
     }
 
+    fn bind_event_trigger(&mut self) {
+        let (event, tag) = crate::event_triggers::current_event().unwrap_or_default();
+        let label = Some(base_name(&self.definition.name).to_owned());
+        for (name, value) in [("tg_event", event), ("tg_tag", tag)] {
+            let mut variable =
+                FrameVariable::new(name, Slot::Typed(SqlType::Text), Value::Text(value));
+            variable.label = label.clone();
+            self.frame.variables.push(variable);
+        }
+    }
+
     fn bind_trigger(&mut self, trigger: TriggerCall) {
         let arguments = trigger.arguments.len();
         let argv = Value::Array(Box::new(ArrayValue {
@@ -927,6 +943,7 @@ impl<'r> Run<'r> {
             RoutineReturns::One(ReturnType::Void) => {
                 Ok(Returned::Value(Value::Text(String::new())))
             }
+            RoutineReturns::One(ReturnType::EventTrigger) => Ok(Returned::Value(Value::Null)),
             RoutineReturns::One(ReturnType::Trigger) => match self.result.take() {
                 Some(value) => Ok(Returned::Value(value)),
                 None => Err(SqlError::new(

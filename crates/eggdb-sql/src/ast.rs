@@ -129,6 +129,7 @@ pub(crate) enum Statement {
     CreatePackage(Box<CreatePackage>),
     DropPackage(DropPackage),
     AlterPackage(AlterPackage),
+    EventTrigger(EventTriggerCommand),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,6 +164,32 @@ pub(crate) enum PackagePart {
 pub(crate) struct AlterPackage {
     pub(crate) name: Name,
     pub(crate) part: PackagePart,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EventTriggerCommand {
+    Create {
+        name: Name,
+        event: Name,
+        tags: Vec<String>,
+        function: String,
+    },
+    Drop {
+        name: Name,
+        if_exists: bool,
+    },
+    Alter {
+        name: Name,
+        change: EventTriggerChange,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EventTriggerChange {
+    Enable(char),
+    Disable,
+    Rename(Name),
+    Owner(Name),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -163,6 +163,8 @@ impl SqlState {
     pub const DEPENDENT_OBJECTS_STILL_EXIST: Self = Self(*b"2BP01");
     /// `42710` duplicate_object.
     pub const DUPLICATE_OBJECT: Self = Self(*b"42710");
+    /// `39P03` event_trigger_protocol_violated.
+    pub const EVENT_TRIGGER_PROTOCOL_VIOLATED: Self = Self(*b"39P03");
     /// `42830` invalid_foreign_key.
     pub const INVALID_FOREIGN_KEY: Self = Self(*b"42830");
     /// `3F000` invalid_schema_name.

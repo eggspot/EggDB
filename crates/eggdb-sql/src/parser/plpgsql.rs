@@ -139,6 +139,9 @@ fn root_scope(definition: &RoutineDefinition) -> Scope {
     if is_trigger_function(definition) {
         variables.extend(TRIGGER_VARIABLES.into_iter().map(Variable::plain));
     }
+    if crate::plpgsql::is_event_trigger_function(definition) {
+        variables.extend(["tg_event", "tg_tag"].into_iter().map(Variable::plain));
+    }
     Scope {
         label: Some(base_name(&definition.name).to_owned()),
         is_loop: false,
@@ -1495,7 +1498,9 @@ impl<'t> Compiler<'t, '_> {
                 Ok(())
             };
         }
-        if definition.returns == RoutineReturns::One(ReturnType::Void) {
+        if definition.returns == RoutineReturns::One(ReturnType::Void)
+            || definition.returns == RoutineReturns::One(ReturnType::EventTrigger)
+        {
             return if has_value {
                 Err(mismatch(
                     "RETURN cannot have a parameter in function returning void",
