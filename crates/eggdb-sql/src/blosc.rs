@@ -1,5 +1,5 @@
 //! Blosc 1 chunks as Zarr stores them (D806): the 16-byte header, the block starts, split
-//! streams, byte shuffle, and the BloscLZ, LZ4, Snappy, zlib and Zstandard compressors.
+//! streams, byte shuffle and bit shuffle, and the BloscLZ, LZ4, Snappy, zlib and Zstandard compressors.
 
 const HEADER_BYTES: usize = 16;
 const BYTE_SHUFFLE: u8 = 0x01;
@@ -9,6 +9,7 @@ const DONT_SPLIT: u8 = 0x10;
 const MOST_SPLITS: usize = 16;
 const LEAST_SPLIT_ELEMENTS: usize = 128;
 const BLOSCLZ_FAR_DISTANCE: usize = 8191;
+const FIRST_PARTIAL_BITSHUFFLE_VERSION: u8 = 3;
 
 fn word(input: &[u8], at: usize) -> Result<u32, &'static str> {
     input
@@ -21,6 +22,7 @@ fn word(input: &[u8], at: usize) -> Result<u32, &'static str> {
 /// panic.
 pub(crate) fn decompress(input: &[u8], limit: usize) -> Result<Vec<u8>, &'static str> {
     let header = input.get(..HEADER_BYTES).ok_or("the Blosc chunk is truncated")?;
+    let version = header[0];
     let flags = header[2];
     let typesize = usize::from(header[3]).max(1);
     let nbytes = word(header, 4)? as usize;
@@ -28,8 +30,8 @@ pub(crate) fn decompress(input: &[u8], limit: usize) -> Result<Vec<u8>, &'static
     if nbytes > limit {
         return Err("the Blosc chunk holds more bytes than the array allows");
     }
-    if flags & BIT_SHUFFLE != 0 {
-        return Err("bit-shuffled and Blosc2 chunks are not supported yet");
+    if flags & BIT_SHUFFLE != 0 && flags & BYTE_SHUFFLE != 0 {
+        return Err("Blosc2 chunks are not supported yet");
     }
     if flags & MEMCPYED != 0 {
         return input
@@ -81,6 +83,8 @@ pub(crate) fn decompress(input: &[u8], limit: usize) -> Result<Vec<u8>, &'static
         }
         if flags & BYTE_SHUFFLE != 0 && typesize > 1 {
             decoded = unshuffle(&decoded, typesize);
+        } else if flags & BIT_SHUFFLE != 0 {
+            decoded = bit_unshuffle(&decoded, typesize, version);
         }
         out.extend_from_slice(&decoded);
     }
@@ -110,6 +114,31 @@ fn unshuffle(shuffled: &[u8], typesize: usize) -> Vec<u8> {
     for element in 0..elements {
         for byte in 0..typesize {
             out[element * typesize + byte] = shuffled[byte * elements + element];
+        }
+    }
+    let tail = elements * typesize;
+    out[tail..].copy_from_slice(&shuffled[tail..]);
+    out
+}
+
+fn bit_unshuffle(shuffled: &[u8], typesize: usize, version: u8) -> Vec<u8> {
+    let whole = shuffled.len() / typesize;
+    let elements = if version >= FIRST_PARTIAL_BITSHUFFLE_VERSION {
+        whole - whole % 8
+    } else if whole % 8 == 0 {
+        whole
+    } else {
+        0
+    };
+    let mut out = vec![0u8; shuffled.len()];
+    let row_bytes = elements / 8;
+    for byte in 0..typesize {
+        for bit in 0..8 {
+            let row = &shuffled[(byte * 8 + bit) * row_bytes..(byte * 8 + bit + 1) * row_bytes];
+            for element in 0..elements {
+                let value = (row[element / 8] >> (element % 8)) & 1;
+                out[element * typesize + byte] |= value << bit;
+            }
         }
     }
     let tail = elements * typesize;
@@ -213,9 +242,50 @@ mod tests {
         assert!(blosclz(&[5, b'a'], 8).is_err());
     }
 
+    fn bit_shuffle(plain: &[u8], typesize: usize) -> Vec<u8> {
+        let whole = plain.len() / typesize;
+        let elements = whole - whole % 8;
+        let row_bytes = elements / 8;
+        let mut out = vec![0u8; plain.len()];
+        for element in 0..elements {
+            for byte in 0..typesize {
+                for bit in 0..8 {
+                    let value = (plain[element * typesize + byte] >> bit) & 1;
+                    out[(byte * 8 + bit) * row_bytes + element / 8] |= value << (element % 8);
+                }
+            }
+        }
+        let tail = elements * typesize;
+        out[tail..].copy_from_slice(&plain[tail..]);
+        out
+    }
+
     #[test]
-    fn bit_shuffled_chunks_are_refused() {
-        let chunk = header(BIT_SHUFFLE, 4, 16, 16, 0);
+    fn bit_shuffled_blocks_are_unshuffled() {
+        let plain: Vec<u8> = (0u8..36).map(|value| value.wrapping_mul(37)).collect();
+        assert_eq!(bit_unshuffle(&bit_shuffle(&plain, 2), 2, 3), plain);
+        let ones = [1u8, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(bit_shuffle(&ones, 1), vec![1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(bit_unshuffle(&[0xff, 0, 0, 0, 0, 0, 0, 0], 1, 3), vec![1; 8]);
+        let odd = [9u8, 8, 7];
+        assert_eq!(bit_unshuffle(&odd, 1, 2), odd.to_vec());
+    }
+
+    #[test]
+    fn bit_shuffled_chunks_decode() {
+        let plain: Vec<u8> = (0u8..32).collect();
+        let shuffled = bit_shuffle(&plain, 4);
+        let mut chunk = header(BIT_SHUFFLE | DONT_SPLIT, 4, 32, 32, 0);
+        chunk.extend_from_slice(&20u32.to_le_bytes());
+        chunk.extend_from_slice(&32i32.to_le_bytes());
+        chunk.extend_from_slice(&shuffled);
+        chunk[0] = 3;
+        assert_eq!(decompress(&chunk, 64).unwrap(), plain);
+    }
+
+    #[test]
+    fn blosc2_chunks_are_refused() {
+        let chunk = header(BIT_SHUFFLE | BYTE_SHUFFLE, 4, 16, 16, 0);
         assert!(decompress(&chunk, 64).is_err());
     }
 }

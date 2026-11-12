@@ -876,3 +876,4 @@ its full title with its status.
 - [D849](decisions/D849.md) Code-only batch 497 (M10): T-SQL cursor variables
 - [D850](decisions/D850.md) Code-only batch 498 (M6b): SQL Server block predicates AFTER INSERT and AFTER UPDATE
 - [D851](decisions/D851.md) Code-only batch 499 (M6b): Oracle VPD static policies through DBMS_RLS
+- [D852](decisions/D852.md) Code-only batch 500 (M11): Blosc bit shuffle in Zarr chunks
