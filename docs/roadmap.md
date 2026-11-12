@@ -618,8 +618,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `sqlite3_create_function[_v2]` with the `sqlite3_value_*` and `sqlite3_result_*` calls, and the status and
   statement calls (`sqlite3_errstr`, `sqlite3_get_autocommit`, `sqlite3_complete`, `sqlite3_interrupt`,
   `sqlite3_sql`, `sqlite3_column_decltype`, `sqlite3_bind_parameter_name`/`index` and others): **code written,
-  unbuilt** (code-only mode, 2026-11-12, D790). Left: user aggregates and window functions, collations,
-  `sqlite3_backup_*`, named `:name` parameters, and rows streamed per step.
+  unbuilt** (code-only mode, 2026-11-12, D790); named `:name`, `@name` and `$name` parameters: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D874). Left: user aggregates and window functions, collations,
+  `sqlite3_backup_*`, and rows streamed per step.
 - The C API: parsed plans kept in prepared statements, binary result formats, typed `Parse` on
   server sessions and the remaining open options, `check` and `stats` (D142, D268, D293).
 - Asynchronous C API calls, completed by one callback per batch (D17, D293).

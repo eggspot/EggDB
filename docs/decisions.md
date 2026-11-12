@@ -898,3 +898,4 @@ its full title with its status.
 - [D871](decisions/D871.md) Code-only batch 519 (M6b): SQL Server BEFORE UPDATE and BEFORE DELETE block predicates
 - [D872](decisions/D872.md) Code-only batch 520 (M5): SQL Server DDL triggers
 - [D873](decisions/D873.md) Code-only batch 521 (M5): Oracle DDL and database event triggers
+- [D874](decisions/D874.md) Code-only batch 522 (M5): named parameters in libsqlite3

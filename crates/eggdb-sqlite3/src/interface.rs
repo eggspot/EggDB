@@ -308,7 +308,8 @@ pub unsafe extern "C" fn sqlite3_column_decltype(
         .map_or(std::ptr::null(), |name| name.as_ptr())
 }
 
-/// The name of parameter `index` (from 1): `?NNN` for a numbered one, NULL for a plain `?`.
+/// The name of parameter `index` (from 1): `?NNN` for a numbered one, `:name`, `@name` or
+/// `$name` for a named one, NULL for a plain `?`.
 ///
 /// # Safety
 /// `statement` is a live statement.
@@ -331,7 +332,8 @@ pub unsafe extern "C" fn sqlite3_bind_parameter_name(
         .map_or(std::ptr::null(), |name| name.as_ptr())
 }
 
-/// The index (from 1) of the parameter named `name` (`?NNN`), or 0 when there is none.
+/// The index (from 1) of the parameter named `name` (`?NNN`, `:name`, `@name` or `$name`),
+/// or 0 when there is none.
 ///
 /// # Safety
 /// `statement` is a live statement and `name` a NUL-terminated string.
@@ -359,31 +361,76 @@ pub unsafe extern "C" fn sqlite3_bind_parameter_index(
         .unwrap_or(0)
 }
 
+fn is_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+fn skipped_quote_or_comment(bytes: &[u8], at: usize) -> Option<usize> {
+    let close = match (bytes[at], bytes.get(at + 1)) {
+        (b'\'' | b'"' | b'`', _) => bytes[at],
+        (b'[', _) => b']',
+        (b'-', Some(b'-')) => {
+            return Some(bytes[at..].iter().position(|&byte| byte == b'\n').map_or(bytes.len(), |length| at + length + 1));
+        }
+        (b'/', Some(b'*')) => {
+            let rest = &bytes[at + 2..];
+            return Some(rest.windows(2).position(|pair| pair == b"*/").map_or(bytes.len(), |length| at + 2 + length + 2));
+        }
+        _ => return None,
+    };
+    let rest = &bytes[at + 1..];
+    Some(rest.iter().position(|&byte| byte == close).map_or(bytes.len(), |length| at + 1 + length + 1))
+}
+
+/// The name of each parameter slot, numbered as SQLite (and EggDB's SQLite lexer) numbers
+/// them: `?NNN` takes slot NNN, a plain `?` the slot after the highest so far, and a
+/// `:name`, `@name` or `$name` the same slot each time its name repeats, else the slot after
+/// the highest so far.
 fn numbered_parameters(text: &str, count: usize) -> Vec<Option<CString>> {
     let mut names = vec![None; count];
     let bytes = text.as_bytes();
-    let mut quote: Option<u8> = None;
+    let mut highest = 0usize;
+    let mut named: Vec<String> = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
+        if let Some(next) = skipped_quote_or_comment(bytes, at) {
+            at = next;
+            continue;
+        }
         let byte = bytes[at];
-        match quote {
-            Some(open) if byte == open => quote = None,
-            Some(_) => {}
-            None if matches!(byte, b'\'' | b'"' | b'`') => quote = Some(byte),
-            None if byte == b'?' => {
-                let digits: String = bytes[at + 1..]
-                    .iter()
-                    .take_while(|digit| digit.is_ascii_digit())
-                    .map(|&digit| char::from(digit))
-                    .collect();
-                if let Ok(number) = digits.parse::<usize>()
-                    && let Some(slot) = number.checked_sub(1).and_then(|slot| names.get_mut(slot))
-                {
-                    *slot = CString::new(format!("?{number}")).ok();
+        if byte == b'?' {
+            let length = bytes[at + 1..].iter().take_while(|digit| digit.is_ascii_digit()).count();
+            let digits = &text[at + 1..at + 1 + length];
+            match digits.parse::<usize>() {
+                Ok(number) => {
+                    highest = highest.max(number);
+                    if let Some(slot) = number.checked_sub(1).and_then(|slot| names.get_mut(slot)) {
+                        *slot = CString::new(format!("?{number}")).ok();
+                    }
                 }
-                at += digits.len();
+                Err(_) => highest += 1,
             }
-            None => {}
+            at += 1 + length;
+            continue;
+        }
+        if matches!(byte, b':' | b'@' | b'$') {
+            let length = bytes[at + 1..].iter().take_while(|&&next| is_name_byte(next)).count();
+            if length > 0 {
+                let name = &text[at..at + 1 + length];
+                if !named.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+                    highest += 1;
+                    named.push(name.to_owned());
+                    if let Some(entry) = names.get_mut(highest - 1) {
+                        *entry = CString::new(name).ok();
+                    }
+                }
+                at += 1 + length;
+                continue;
+            }
+        }
+        if is_name_byte(byte) {
+            at += bytes[at..].iter().take_while(|&&next| is_name_byte(next)).count();
+            continue;
         }
         at += 1;
     }
@@ -392,7 +439,17 @@ fn numbered_parameters(text: &str, count: usize) -> Vec<Option<CString>> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_complete;
+    use super::{is_complete, numbered_parameters};
+
+    #[test]
+    fn named_parameters_share_a_slot_per_name() {
+        let names = numbered_parameters("SELECT :a, ?, @b, :a, ?5, $c -- :ignored\n FROM t WHERE x = ':no'", 6);
+        let shown: Vec<Option<&str>> = names
+            .iter()
+            .map(|name| name.as_ref().and_then(|name| name.to_str().ok()))
+            .collect();
+        assert_eq!(shown, [Some(":a"), None, Some("@b"), None, Some("?5"), Some("$c")]);
+    }
 
     #[test]
     fn statements_are_complete_at_a_semicolon_outside_quotes_comments_and_triggers() {
