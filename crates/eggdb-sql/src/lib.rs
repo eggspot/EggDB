@@ -310,6 +310,8 @@ mod subquery_tests;
 #[cfg(test)]
 mod table_ddl_tests;
 #[cfg(test)]
+mod xml_table_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod time_series_tests;

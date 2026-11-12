@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 39] = [
+const FUNCTIONS: [SetReturningFunction; 40] = [
     to_records("json_to_record"),
     to_records("jsonb_to_record"),
     to_records("json_to_recordset"),
@@ -30,6 +30,12 @@ const FUNCTIONS: [SetReturningFunction; 39] = [
     SetReturningFunction {
         name: crate::sql_json::TABLE,
         result_type: crate::sql_json::table_type,
+        rows: to_record_rows,
+        fields: true,
+    },
+    SetReturningFunction {
+        name: crate::xml_path::TABLE,
+        result_type: crate::xml_path::table_type,
         rows: to_record_rows,
         fields: true,
     },
@@ -1318,6 +1324,8 @@ fn function_columns(
         crate::json_to_record::columns(&defined_names(function), types)
     } else if crate::sql_json::defines_columns(found.name) {
         crate::sql_json::columns(found.name, &defined_names(function), types)
+    } else if found.name == crate::xml_path::TABLE {
+        crate::xml_path::columns(&defined_names(function), types)
     } else if found.fields {
         record_columns(found.name)
     } else {
@@ -1497,6 +1505,8 @@ impl BoundFunction {
                     &self.types,
                     &mut numbered,
                 )
+            } else if self.found.name == crate::xml_path::TABLE {
+                crate::xml_path::rows(&self.values, &self.defined_names, &self.types, &mut numbered)
             } else {
                 record_rows(self.found.name, &self.values, &mut numbered)
             };

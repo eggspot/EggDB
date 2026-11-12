@@ -4966,7 +4966,7 @@ And more, not in the suite yet:
 - `SEQUENCE.NEXTVAL` in a multitable insert's `VALUES` advances once per use, where Oracle
   advances it once per source row; rows go into an `INSERT ALL`'s targets one `INTO` clause at a
   time, so identity values follow that order (D304).
-- Not supported yet: database links, `ROWID`, and `XMLTABLE`, `XMLQUERY` and `XMLType`. `EXTRACTVALUE(xml, path)`
+- Not supported yet: database links, `ROWID`, `XMLQUERY` and `XMLType`. `XMLTABLE` reads XML into rows (D692). `EXTRACTVALUE(xml, path)`
   and `EXISTSNODE(xml, path)` evaluate XPath 1.0 over XML text (D690), as PostgreSQL's `xpath`, `xpath_exists` and
   `xml_is_well_formed*` and MySQL's `ExtractValue` do. `(+)` outer joins (D432), synonyms for relations (D433) and the SQL/XML publishing functions (D454)
   are read. `RETURNING ... INTO` works in PL/SQL blocks, and in `eggdb shell` into `VARIABLE` binds (D689).

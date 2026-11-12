@@ -716,3 +716,4 @@ its full title with its status.
 - [D689](decisions/D689.md) Code-only batch 337 (M10): Oracle `RETURNING ... INTO :bind` in `eggdb shell`, and sql.md's Oracle gaps updated
 - [D690](decisions/D690.md) Code-only batch 338 (M9, M10): an XML parser and XPath 1.0 for `xpath()`, `EXTRACTVALUE` and `EXISTSNODE`
 - [D691](decisions/D691.md) Code-only batch 339 (M10): MySQL `UpdateXML`, replacing the matched element in the original text
+- [D692](decisions/D692.md) Code-only batch 340 (M9, M10): `XMLTABLE` over the XPath evaluator

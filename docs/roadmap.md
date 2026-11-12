@@ -1086,8 +1086,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Cosmos DB's NoSQL API in gateway mode, after D58's legal check (D48).
 - Couchbase SQL++, from its documentation only (D48).
 - XML documents with XPath and XQuery (D38). Check: the W3C XQuery suite. An XML parser and XPath 1.0 with
-  `xpath()`, `EXTRACTVALUE` and `EXISTSNODE`: **code written, unbuilt** (code-only mode, 2026-11-12, D690). Left:
-  XQuery, `XMLTABLE` and the stored `xml` type.
+  `xpath()`, `EXTRACTVALUE` and `EXISTSNODE`: **code written, unbuilt** (code-only mode, 2026-11-12, D690);
+  `XMLTABLE`: **code written, unbuilt** (code-only mode, 2026-11-12, D692). Left: XQuery and the stored `xml` type.
 
 ### M10 The other SQL dialects
 - MySQL's types: `BIGINT UNSIGNED` and unsigned ranges, `ENUM`, `SET`, `YEAR`, `BIT`, the spatial
@@ -1190,7 +1190,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   source row of `INSERT ALL`; `CONNECT BY`, `INSERT ALL` and `INSERT FIRST` are built (D304).
   Check: a deep hierarchy against a recursive `WITH` on SQLite.
 - Oracle's XML functions (the SQL/XML publishing functions: **code written, unbuilt**, D454;
-  `EXTRACTVALUE` and `EXISTSNODE`: **code written, unbuilt**, D690; `XMLTABLE`, `XMLQUERY` and `XMLType` left) and `TO_DATE(... DEFAULT ... ON
+  `EXTRACTVALUE` and `EXISTSNODE`: **code written, unbuilt**, D690; `XMLTABLE`: **code written, unbuilt**, D692;
+  `XMLQUERY` and `XMLType` left) and `TO_DATE(... DEFAULT ... ON
   CONVERSION ERROR)` (sql.md; the
   conversion functions' `DEFAULT ... ON CONVERSION ERROR`: **code written, unbuilt**, code-only
   mode, 2026-11-11, D431; `CAST ... DEFAULT` and `VALIDATE_CONVERSION`: **code written, unbuilt**, code-only

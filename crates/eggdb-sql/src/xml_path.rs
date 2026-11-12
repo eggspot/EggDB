@@ -1,6 +1,6 @@
 use crate::arrays::{ArrayElement, ArrayValue};
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::types::{SqlType, Value};
+use crate::types::{Conversion, SqlType, Value, convert};
 
 const MOST_DEPTH: usize = 512;
 const MOST_NODES: usize = 1_000_000;
@@ -1277,6 +1277,121 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             format!("function {name} does not exist with these arguments"),
         )),
     })
+}
+
+/// The internal table function a parsed `XMLTABLE` becomes.
+pub(crate) const TABLE: &str = "eggdb_xml_table";
+/// What separates the columns of an `XMLTABLE` plan.
+pub(crate) const PLAN_SEPARATOR: &str = "\u{1}";
+const TABLE_FIXED_ARGUMENTS: usize = 3;
+const MOST_TABLE_ROWS: usize = 1_000_000;
+
+fn damaged_table() -> SqlError {
+    SqlError::new(SqlState::INTERNAL_ERROR, "the XMLTABLE plan is damaged")
+}
+
+/// Checks `XMLTABLE`'s internal arguments.
+pub(crate) fn table_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    if types.len() <= TABLE_FIXED_ARGUMENTS {
+        return Err(damaged_table());
+    }
+    Ok(SqlType::Text)
+}
+
+/// `XMLTABLE`'s output columns: the declared names with their placeholders' types.
+pub(crate) fn columns(names: &[String], types: &[Option<SqlType>]) -> Vec<crate::session::OutputColumn> {
+    names
+        .iter()
+        .zip(types.iter().skip(TABLE_FIXED_ARGUMENTS))
+        .map(|(name, sql_type)| crate::session::OutputColumn {
+            name: name.clone(),
+            sql_type: *sql_type,
+        })
+        .collect()
+}
+
+enum ColumnPlan {
+    Ordinality,
+    Serialized,
+    Path(XPath),
+}
+
+/// The rows of an `XMLTABLE`: one per node the row expression selects, each column read by
+/// its path from that node (its string value; the `DEFAULT` when nothing matches) and cast to
+/// its declared type.
+pub(crate) fn rows(
+    values: &[Value],
+    names: &[String],
+    types: &[Option<SqlType>],
+    sink: &mut crate::json_functions::RecordSink<'_>,
+) -> SqlResult<()> {
+    let [document, row_path, plan, rest @ ..] = values else {
+        return Err(damaged_table());
+    };
+    let width = names.len();
+    let (Some(row_path), Some(plan)) = (row_path.to_text(), plan.to_text()) else {
+        return Err(damaged_table());
+    };
+    let plans: Vec<ColumnPlan> = plan
+        .split(PLAN_SEPARATOR)
+        .map(|column| match column.split_at(column.len().min(1)) {
+            ("O", _) => Ok(ColumnPlan::Ordinality),
+            ("X", _) => Ok(ColumnPlan::Serialized),
+            ("P", path) => XPath::compile(path).map(ColumnPlan::Path),
+            _ => Err(damaged_table()),
+        })
+        .collect::<SqlResult<_>>()?;
+    if plans.len() != width || rest.len() < width * 2 {
+        return Err(damaged_table());
+    }
+    if document.is_null() {
+        return Ok(());
+    }
+    let xml = document.to_text().ok_or_else(damaged_table)?;
+    let parsed = Document::parse(&xml, false)?;
+    let Outcome::Nodes(nodes) = parsed.run(&XPath::compile(&row_path)?)? else {
+        return Err(invalid_path("an XMLTABLE row expression must select nodes"));
+    };
+    if nodes.len() > MOST_TABLE_ROWS {
+        return Err(invalid_path(format!("an XMLTABLE may make at most {MOST_TABLE_ROWS} rows")));
+    }
+    let size = nodes.len();
+    for (index, node) in nodes.iter().enumerate() {
+        let mut row = Vec::with_capacity(width);
+        for (column, plan) in plans.iter().enumerate() {
+            let value = match plan {
+                ColumnPlan::Ordinality => Value::BigInt(index as i64 + 1),
+                ColumnPlan::Serialized => {
+                    let mut out = String::new();
+                    parsed.serialize(*node, &mut out);
+                    Value::Text(out)
+                }
+                ColumnPlan::Path(path) => {
+                    let context = Context { target: *node, position: index + 1, size };
+                    match parsed.evaluate(&path.expr, context)? {
+                        Outcome::Nodes(found) if found.is_empty() => rest[width + column].clone(),
+                        Outcome::Nodes(found) if found.len() == 1 => Value::Text(parsed.string_value(found[0])),
+                        Outcome::Nodes(_) => {
+                            return Err(SqlError::new(
+                                SqlState::CARDINALITY_VIOLATION,
+                                format!("more than one value returned by column XPath expression for {}", names[column]),
+                            ));
+                        }
+                        other => Value::Text(parsed.string_of(&other)),
+                    }
+                }
+            };
+            let sql_type = types.get(TABLE_FIXED_ARGUMENTS + column).copied().flatten();
+            row.push(match sql_type {
+                Some(sql_type) if !value.is_null() && !(sql_type.is_string() && matches!(value, Value::Text(_))) => {
+                    convert(value, sql_type, Conversion::Explicit)?
+                }
+                _ => value,
+            });
+        }
+        sink(row)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

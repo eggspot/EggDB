@@ -37,6 +37,7 @@ mod row_security;
 mod schemas;
 mod select_into;
 mod sql_json;
+mod xml_table;
 mod sqlite;
 mod sqlserver;
 mod sqlserver_batch;
@@ -2944,6 +2945,9 @@ impl<'t> Parser<'t> {
         }
         if self.at_json_table() {
             return self.json_table();
+        }
+        if self.at_xml_table() {
+            return self.xml_table();
         }
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
