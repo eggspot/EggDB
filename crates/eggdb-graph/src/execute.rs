@@ -1093,6 +1093,94 @@ impl<'g> Executor<'g, '_> {
         Ok(out)
     }
 
+    /// One repetition of a quantified pattern from `from`: its first relationship and, inside a
+    /// group, every relationship after it, each landing on a node its pattern accepts. Each
+    /// result is where the repetition ends and the relationships it walked.
+    fn repetition(
+        &self,
+        from: u64,
+        relationship_pattern: &RelationshipPattern,
+        row: &Row,
+        taken: &[u64],
+    ) -> GraphResult<Vec<(u64, Vec<Relationship>)>> {
+        let mut walks: Vec<(u64, Vec<Relationship>)> = Vec::new();
+        for (relationship, next) in self.steps_from(from, relationship_pattern, row, taken)? {
+            if let Some(group) = &relationship_pattern.group
+                && !self.node_matches(&self.existing_node(next)?, &group.right, row)?
+            {
+                continue;
+            }
+            walks.push((next, vec![relationship]));
+        }
+        let Some(group) = &relationship_pattern.group else {
+            return Ok(walks);
+        };
+        for (inner, node_pattern) in &group.rest {
+            let mut longer = Vec::new();
+            for (node, walked) in &walks {
+                let mut used = taken.to_vec();
+                used.extend(walked.iter().map(|relationship| relationship.id));
+                for (relationship, next) in self.steps_from(*node, inner, row, &used)? {
+                    if !self.node_matches(&self.existing_node(next)?, node_pattern, row)? {
+                        continue;
+                    }
+                    let mut extended = walked.clone();
+                    extended.push(relationship);
+                    longer.push((next, extended));
+                }
+            }
+            if longer.len() > MAX_ROWS {
+                return Err(out_of_memory("the quantified pattern reaches too many paths"));
+            }
+            walks = longer;
+        }
+        Ok(walks)
+    }
+
+    /// Binds a quantified group's variables as GQL's group variables: each node and each
+    /// relationship variable in the group becomes the list of what it matched in every
+    /// repetition, in order.
+    fn bind_group(
+        &self,
+        row: &mut Row,
+        relationship_pattern: &RelationshipPattern,
+        group: &crate::cypher::QuantifiedGroup,
+        start: u64,
+        path: &[Relationship],
+    ) -> GraphResult<()> {
+        let width = 1 + group.rest.len();
+        let mut nodes: Vec<Vec<Value>> = vec![Vec::new(); width + 1];
+        let mut relationships: Vec<Vec<Value>> = vec![Vec::new(); width];
+        let mut current = start;
+        for (at, relationship) in path.iter().enumerate() {
+            let position = at % width;
+            if position == 0 {
+                nodes[0].push(Value::Node(Box::new(self.existing_node(current)?)));
+            }
+            let next = if relationship.start == current { relationship.end } else { relationship.start };
+            relationships[position].push(Value::Relationship(Box::new(relationship.clone())));
+            nodes[position + 1].push(Value::Node(Box::new(self.existing_node(next)?)));
+            current = next;
+        }
+        let mut node_patterns = vec![&group.left, &group.right];
+        node_patterns.extend(group.rest.iter().map(|(_, node)| node));
+        for (pattern, matched) in node_patterns.into_iter().zip(nodes) {
+            if let Some(name) = &pattern.variable {
+                bind(row, name, Value::List(matched));
+            }
+        }
+        if !group.rest.is_empty() {
+            let mut relationship_patterns = vec![relationship_pattern];
+            relationship_patterns.extend(group.rest.iter().map(|(inner, _)| inner));
+            for (pattern, matched) in relationship_patterns.into_iter().zip(relationships) {
+                if let Some(name) = &pattern.variable {
+                    bind(row, name, Value::List(matched));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn extend(
         &self,
         row: Row,
@@ -1132,7 +1220,7 @@ impl<'g> Executor<'g, '_> {
             let mut next_frontier = Vec::new();
             for (node, path) in &frontier {
                 if let Some(group) = &relationship_pattern.group
-                    && !self.node_matches(&self.existing_node(*node)?, &group.0, &row)?
+                    && !self.node_matches(&self.existing_node(*node)?, &group.left, &row)?
                 {
                     continue;
                 }
@@ -1141,16 +1229,9 @@ impl<'g> Executor<'g, '_> {
                     taken.extend_from_slice(&walk.used);
                     taken.extend(path.iter().map(|relationship| relationship.id));
                 }
-                for (relationship, next) in
-                    self.steps_from(*node, relationship_pattern, &row, &taken)?
-                {
-                    if let Some(group) = &relationship_pattern.group
-                        && !self.node_matches(&self.existing_node(next)?, &group.1, &row)?
-                    {
-                        continue;
-                    }
+                for (next, walked) in self.repetition(*node, relationship_pattern, &row, &taken)? {
                     let mut extended = path.clone();
-                    extended.push(relationship);
+                    extended.extend(walked);
                     if hop >= min {
                         reached.push((next, extended.clone()));
                     }
@@ -1203,21 +1284,7 @@ impl<'g> Executor<'g, '_> {
                 bind(&mut next_row, name, relationship_value);
             }
             if let Some(group) = &relationship_pattern.group {
-                let mut starts = Vec::with_capacity(path.len());
-                let mut ends = Vec::with_capacity(path.len());
-                let mut current = at;
-                for relationship in &path {
-                    let next = if relationship.start == current { relationship.end } else { relationship.start };
-                    starts.push(Value::Node(Box::new(self.existing_node(current)?)));
-                    ends.push(Value::Node(Box::new(self.existing_node(next)?)));
-                    current = next;
-                }
-                if let Some(name) = &group.0.variable {
-                    bind(&mut next_row, name, Value::List(starts));
-                }
-                if let Some(name) = &group.1.variable {
-                    bind(&mut next_row, name, Value::List(ends));
-                }
+                self.bind_group(&mut next_row, relationship_pattern, group, at, &path)?;
             }
             let node_value = Value::Node(Box::new(node.clone()));
             if let Some(name) = &node_pattern.variable {
@@ -1655,8 +1722,12 @@ impl<'g> Executor<'g, '_> {
             for (relationship, node) in &pattern.steps {
                 names.extend(relationship.variable.clone());
                 if let Some(group) = &relationship.group {
-                    names.extend(group.0.variable.clone());
-                    names.extend(group.1.variable.clone());
+                    names.extend(group.left.variable.clone());
+                    names.extend(group.right.variable.clone());
+                    for (inner, node) in &group.rest {
+                        names.extend(inner.variable.clone());
+                        names.extend(node.variable.clone());
+                    }
                 }
                 names.extend(node.variable.clone());
             }

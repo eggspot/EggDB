@@ -1463,3 +1463,25 @@ fn list_predicates_answer_and_steer_shortest_paths() {
     );
     assert_eq!(any.rows, vec![vec![Value::Integer(2)]]);
 }
+
+#[test]
+fn quantified_groups_walk_several_relationships_per_repetition() {
+    let keyspace = MemoryKeyspace::default();
+    query(
+        &keyspace,
+        "CREATE (a:Stop {name: 'a'}), (b:Platform {name: 'b'}), (c:Stop {name: 'c'}), (d:Platform {name: 'd'}), (e:Stop {name: 'e'})
+         CREATE (a)-[:WALK]->(b), (b)-[:RIDE]->(c), (c)-[:WALK]->(d), (d)-[:RIDE]->(e), (a)-[:RIDE]->(c)",
+    );
+    let trips = query(
+        &keyspace,
+        "MATCH (s:Stop {name: 'a'})((x:Stop)-[w:WALK]->(p:Platform)-[r:RIDE]->(y:Stop)){1,2}(t)
+         RETURN t.name AS reached, size(w) AS walks, [n IN p | n.name] AS platforms ORDER BY reached",
+    );
+    assert_eq!(
+        trips.rows,
+        vec![
+            vec![text("c"), Value::Integer(1), Value::List(vec![text("b")])],
+            vec![text("e"), Value::Integer(2), Value::List(vec![text("b"), text("d")])],
+        ]
+    );
+}

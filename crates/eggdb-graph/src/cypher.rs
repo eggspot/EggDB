@@ -372,7 +372,16 @@ pub(crate) struct RelationshipPattern {
     pub(crate) properties: Vec<(String, Expr)>,
     pub(crate) direction: Direction,
     pub(crate) hops: Option<(u32, u32)>,
-    pub(crate) group: Option<Box<(NodePattern, NodePattern)>>,
+    pub(crate) group: Option<Box<QuantifiedGroup>>,
+}
+
+/// The node patterns of a GQL quantified path pattern around its first relationship, and the
+/// relationships and nodes that follow it inside the group: every repetition walks them all.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QuantifiedGroup {
+    pub(crate) left: NodePattern,
+    pub(crate) right: NodePattern,
+    pub(crate) rest: Vec<(RelationshipPattern, NodePattern)>,
 }
 
 /// Which shortest paths a `shortestPath()` or `allShortestPaths()` pattern asks for.
@@ -1069,9 +1078,9 @@ impl Parser<'_> {
         self.is_symbol("(") && matches!(self.peek_at(1), Some(Token::Symbol("(")))
     }
 
-    /// A GQL quantified path pattern of one relationship, `((a)-[r:R]->(b)){m,n}`: the
-    /// relationship repeated `m` to `n` times, with the group's node patterns holding at the
-    /// start and the end of every hop.
+    /// A GQL quantified path pattern, `((a)-[r:R]->(b)-[s:S]->(c)){m,n}`: its relationships
+    /// walked in order `m` to `n` times, with the group's node patterns holding at every
+    /// repetition.
     fn quantified_group(&mut self) -> GraphResult<RelationshipPattern> {
         self.expect_symbol("(")?;
         let left = self.node_pattern()?;
@@ -1082,10 +1091,17 @@ impl Parser<'_> {
             return Err(syntax("a relationship inside a quantified path pattern cannot be quantified itself"));
         }
         let right = self.node_pattern()?;
-        if !self.is_symbol(")") {
+        let mut rest = Vec::new();
+        while let Some(next) = self.relationship_pattern()? {
+            if next.hops.is_some() {
+                return Err(syntax("a relationship inside a quantified path pattern cannot be quantified itself"));
+            }
+            rest.push((next, self.node_pattern()?));
+        }
+        if self.is_keyword("where") {
             return Err(GraphError::new(
                 "Neo.ClientError.Statement.FeatureNotSupported",
-                "quantified path patterns with more than one relationship are not supported yet",
+                "WHERE inside a quantified path pattern is not supported yet",
             ));
         }
         self.expect_symbol(")")?;
@@ -1093,7 +1109,7 @@ impl Parser<'_> {
             return Err(syntax("a parenthesized path pattern needs a quantifier such as {1,3} or +"));
         };
         relationship.hops = Some(bounds);
-        relationship.group = Some(Box::new((left, right)));
+        relationship.group = Some(Box::new(QuantifiedGroup { left, right, rest }));
         Ok(relationship)
     }
 
