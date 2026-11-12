@@ -209,6 +209,168 @@ pub(super) fn metrics_request(families: &[Family], start_nanos: u128, now_nanos:
     )
 }
 
+fn put_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn put_key(out: &mut Vec<u8>, field: u64, wire: u64) {
+    put_varint(out, field << 3 | wire);
+}
+
+fn put_bytes(out: &mut Vec<u8>, field: u64, bytes: &[u8]) {
+    put_key(out, field, 2);
+    put_varint(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+fn put_fixed64(out: &mut Vec<u8>, field: u64, value: u64) {
+    put_key(out, field, 1);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put_varint_field(out: &mut Vec<u8>, field: u64, value: u64) {
+    put_key(out, field, 0);
+    put_varint(out, value);
+}
+
+fn nanos64(nanos: u128) -> u64 {
+    u64::try_from(nanos).unwrap_or(u64::MAX)
+}
+
+fn string_value(text: &str) -> Vec<u8> {
+    let mut value = Vec::new();
+    put_bytes(&mut value, 1, text.as_bytes());
+    value
+}
+
+fn key_value(key: &str, value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, 1, key.as_bytes());
+    put_bytes(&mut out, 2, value);
+    out
+}
+
+fn text_key_value(key: &str, text: &str) -> Vec<u8> {
+    key_value(key, &string_value(text))
+}
+
+fn resource_message() -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, 1, &text_key_value("service.name", "eggdb"));
+    put_bytes(&mut out, 1, &text_key_value("service.version", env!("CARGO_PKG_VERSION")));
+    out
+}
+
+fn scope_message() -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, 1, b"eggdb");
+    out
+}
+
+fn wrapped(items_field: u64, items: &[Vec<u8>]) -> Vec<u8> {
+    let mut scoped = Vec::new();
+    put_bytes(&mut scoped, 1, &scope_message());
+    for item in items {
+        put_bytes(&mut scoped, 2, item);
+    }
+    let mut resourced = Vec::new();
+    put_bytes(&mut resourced, 1, &resource_message());
+    put_bytes(&mut resourced, items_field, &scoped);
+    let mut request = Vec::new();
+    put_bytes(&mut request, 1, &resourced);
+    request
+}
+
+/// [`metrics_request`] in OTLP's protobuf encoding (`ExportMetricsServiceRequest`).
+pub(super) fn metrics_protobuf(families: &[Family], start_nanos: u128, now_nanos: u128) -> Vec<u8> {
+    let mut metrics = Vec::with_capacity(families.len());
+    for family in families {
+        let counter = family.kind == "counter";
+        let mut data = Vec::new();
+        for (database, value) in &family.samples {
+            let mut point = Vec::new();
+            if counter {
+                put_fixed64(&mut point, 2, nanos64(start_nanos));
+            }
+            put_fixed64(&mut point, 3, nanos64(now_nanos));
+            put_fixed64(&mut point, 6, *value);
+            if let Some(database) = database {
+                put_bytes(&mut point, 7, &text_key_value("database", database));
+            }
+            put_bytes(&mut data, 1, &point);
+        }
+        if counter {
+            put_varint_field(&mut data, 2, u64::from(CUMULATIVE));
+            put_varint_field(&mut data, 3, 1);
+        }
+        let mut metric = Vec::new();
+        put_bytes(&mut metric, 1, family.name.as_bytes());
+        put_bytes(&mut metric, 2, family.help.as_bytes());
+        put_bytes(&mut metric, 3, b"1");
+        put_bytes(&mut metric, if counter { 7 } else { 5 }, &data);
+        metrics.push(metric);
+    }
+    wrapped(2, &metrics)
+}
+
+/// [`logs_request`] in OTLP's protobuf encoding (`ExportLogsServiceRequest`).
+pub(super) fn logs_protobuf(lines: &[(u128, String)]) -> Vec<u8> {
+    let records: Vec<Vec<u8>> = lines
+        .iter()
+        .map(|(nanos, line)| {
+            let mut record = Vec::new();
+            put_fixed64(&mut record, 1, nanos64(*nanos));
+            put_varint_field(&mut record, 2, 9);
+            put_bytes(&mut record, 3, b"INFO");
+            put_bytes(&mut record, 5, &string_value(line));
+            record
+        })
+        .collect();
+    wrapped(2, &records)
+}
+
+/// [`traces_request`] in OTLP's protobuf encoding (`ExportTraceServiceRequest`).
+pub(super) fn traces_protobuf(spans: &[StatementSpan]) -> Vec<u8> {
+    let encoded: Vec<Vec<u8>> = spans
+        .iter()
+        .enumerate()
+        .map(|(at, span)| {
+            let identity = span.start_nanos ^ (at as u128) << 64;
+            let mut message = Vec::new();
+            put_bytes(&mut message, 1, &identity.to_be_bytes());
+            put_bytes(&mut message, 2, &((identity as u64) | 1).to_be_bytes());
+            put_bytes(&mut message, 5, format!("{} statement", span.protocol).as_bytes());
+            put_varint_field(&mut message, 6, u64::from(SERVER_SPAN));
+            put_fixed64(&mut message, 7, nanos64(span.start_nanos));
+            put_fixed64(&mut message, 8, nanos64(span.end_nanos));
+            for (key, value) in [
+                ("db.system", "eggdb"),
+                ("db.name", span.database.as_str()),
+                ("db.user", span.user.as_str()),
+                ("network.protocol.name", span.protocol.as_str()),
+                ("db.statement", span.query.as_str()),
+            ] {
+                put_bytes(&mut message, 9, &text_key_value(key, value));
+            }
+            let mut rows = Vec::new();
+            put_varint_field(&mut rows, 3, span.rows);
+            put_bytes(&mut message, 9, &key_value("db.response.returned_rows", &rows));
+            message
+        })
+        .collect();
+    wrapped(2, &encoded)
+}
+
+/// Whether the exports use OTLP's protobuf encoding: `OTEL_EXPORTER_OTLP_PROTOCOL` set to
+/// `http/protobuf`, as OpenTelemetry's exporters read it. JSON otherwise.
+fn protobuf_chosen() -> bool {
+    std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").is_ok_and(|protocol| protocol.trim() == "http/protobuf")
+}
+
 /// Posts the server's metrics, and the log lines and slow statements `held` gathered, to the
 /// OTLP/HTTP collector at `endpoint` (its `/v1/metrics`, `/v1/logs` and `/v1/traces`) once a
 /// minute until `stop`, starting at once; a collector that is down or refuses a request misses
@@ -227,21 +389,28 @@ pub(super) fn export_telemetry(
         return;
     };
     let start = now_nanos();
+    let protobuf = protobuf_chosen();
+    let content_type = if protobuf { "application/x-protobuf" } else { "application/json" };
     let mut next = Instant::now();
     loop {
         let stopping = stop();
         if stopping || Instant::now() >= next {
-            let body = metrics_request(&collect(), start, now_nanos());
-            let _ = eggdb_http::post(&metrics, "application/json", body.as_bytes(), EXPORT_TIMEOUT);
+            let families = collect();
+            let body = if protobuf {
+                metrics_protobuf(&families, start, now_nanos())
+            } else {
+                metrics_request(&families, start, now_nanos()).into_bytes()
+            };
+            let _ = eggdb_http::post(&metrics, content_type, &body, EXPORT_TIMEOUT);
             let lines = drained(&held.logs);
             if !lines.is_empty() {
-                let body = logs_request(&lines);
-                let _ = eggdb_http::post(&logs, "application/json", body.as_bytes(), EXPORT_TIMEOUT);
+                let body = if protobuf { logs_protobuf(&lines) } else { logs_request(&lines).into_bytes() };
+                let _ = eggdb_http::post(&logs, content_type, &body, EXPORT_TIMEOUT);
             }
             let spans = drained(&held.spans);
             if !spans.is_empty() {
-                let body = traces_request(&spans);
-                let _ = eggdb_http::post(&traces, "application/json", body.as_bytes(), EXPORT_TIMEOUT);
+                let body = if protobuf { traces_protobuf(&spans) } else { traces_request(&spans).into_bytes() };
+                let _ = eggdb_http::post(&traces, content_type, &body, EXPORT_TIMEOUT);
             }
             next = Instant::now() + EXPORT_EVERY;
         }
@@ -297,5 +466,26 @@ mod tests {
         assert!(traces.contains("\"name\":\"postgresql statement\""), "{traces}");
         assert!(traces.contains("\"endTimeUnixNano\":\"250\""), "{traces}");
         assert!(eggdb_sql::json::parse_document(&traces).is_ok(), "{traces}");
+    }
+
+    #[test]
+    fn protobuf_requests_nest_resource_scope_and_records() {
+        let families = vec![Family {
+            name: "eggdb_queries_total",
+            kind: "counter",
+            help: "Statements run.",
+            samples: vec![(Some("app".to_owned()), 7)],
+        }];
+        let body = metrics_protobuf(&families, 1, 2);
+        assert_eq!(body[0], 0x0a);
+        let contains = |needle: &[u8]| body.windows(needle.len()).any(|window| window == needle);
+        assert!(contains(b"eggdb_queries_total"));
+        assert!(contains(b"service.name"));
+        assert!(contains(&7u64.to_le_bytes()));
+        let logs = logs_protobuf(&[(5, "ready".to_owned())]);
+        assert!(logs.windows(5).any(|window| window == b"ready"));
+        let mut buffer = Vec::new();
+        put_varint(&mut buffer, 300);
+        assert_eq!(buffer, vec![0xac, 0x02]);
     }
 }

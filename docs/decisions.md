@@ -712,3 +712,4 @@ its full title with its status.
 - [D685](decisions/D685.md) Code-only batch 333 (M5): SQL*Plus `COLUMN` text wrapping (`WRAPPED`, `WORD_WRAPPED`, `TRUNCATED`) in `eggdb shell`
 - [D686](decisions/D686.md) Code-only batch 334 (M5): SQL*Plus output binds set inside PL/SQL blocks in `eggdb shell`
 - [D687](decisions/D687.md) Code-only batch 335 (M8): an Indonesian stemmer and the `indonesian` text-search configuration
+- [D688](decisions/D688.md) Code-only batch 336 (M6c): OTLP protobuf for EggDB's own metrics, logs and traces, chosen by `OTEL_EXPORTER_OTLP_PROTOCOL`

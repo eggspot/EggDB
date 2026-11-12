@@ -760,7 +760,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M6c Operations
 - OTLP export of EggDB's own metrics, logs and traces (D25, D188). Metrics over OTLP/HTTP JSON: **code written,
   unbuilt** (code-only mode, 2026-11-12, D567); logs and slow statements as traces: **code written, unbuilt**
-  (code-only mode, 2026-11-12, D666). Left: protobuf and TLS.
+  (code-only mode, 2026-11-12, D666); protobuf: **code written, unbuilt** (code-only mode, 2026-11-12, D688).
+  Left: TLS.
 - Live activity, locks and wait events: `pg_stat_activity` for every session,
   `sys.dm_exec_requests` and `SHOW PROCESSLIST` across sessions (D25, D188). `pg_stat_activity` and MySQL's process
   list across sessions: **code written, unbuilt** (code-only mode, 2026-11-11, D488); `sys.dm_exec_sessions` and
