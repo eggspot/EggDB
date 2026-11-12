@@ -962,6 +962,57 @@ fn statement(
                 name.table.clone(),
             )
         }
+        Statement::AlterType { name, change } => {
+            let keyspace = keyspace_of(name, current)?;
+            let CqlType::Udt(before) = catalog.user_type(&keyspace, &name.table)? else {
+                return Err(format!("Unknown type {keyspace}.{}", name.table));
+            };
+            let mut fields = before.fields.clone();
+            match change {
+                crate::cql::TypeChange::Add(field) => {
+                    if fields.iter().any(|(known, _)| *known == field.name) {
+                        return Err(format!("Cannot add new field {} to type {}: a field of the same name already exists", field.name, name.table));
+                    }
+                    fields.push((field.name.clone(), resolve(field.cql, &keyspace, catalog, 0)?));
+                }
+                crate::cql::TypeChange::Rename(renames) => {
+                    for (from, to) in renames {
+                        if fields.iter().any(|(known, _)| known == to) {
+                            return Err(format!("Duplicate field name {to} in type {}", name.table));
+                        }
+                        let Some(found) = fields.iter_mut().find(|(known, _)| known == from) else {
+                            return Err(format!("Unknown field {from} in user type {}", name.table));
+                        };
+                        found.0 = to.clone();
+                    }
+                }
+            }
+            let after = crate::types::interned_user_type(crate::types::UserType {
+                keyspace: keyspace.clone(),
+                name: name.table.clone(),
+                fields,
+            })?;
+            let (old_text, new_text) = (CqlType::Udt(before).stored_name(), CqlType::Udt(after).stored_name());
+            builder.sql(&format!(
+                "{METADATA_DDL}; UPDATE eggdb_cql.types SET definition = {} WHERE keyspace_name = {} AND type_name = {}; UPDATE eggdb_cql.tables SET column_types = replace(column_types, {}, {}) WHERE keyspace_name = {}",
+                literal(&new_text),
+                literal(&keyspace),
+                literal(&name.table),
+                literal(&old_text),
+                literal(&new_text),
+                literal(&keyspace)
+            ));
+            (
+                Outcome::SchemaChange {
+                    change: "UPDATED",
+                    target: "TYPE",
+                    keyspace: keyspace.clone(),
+                    name: Some(name.table.clone()),
+                },
+                keyspace,
+                name.table.clone(),
+            )
+        }
         Statement::DropType { name, if_exists } => {
             let keyspace = keyspace_of(name, current)?;
             if !*if_exists {

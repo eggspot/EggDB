@@ -867,3 +867,4 @@ its full title with its status.
 - [D840](decisions/D840.md) Code-only batch 488 (M6c): an admin REST API with the MCP tools
 - [D841](decisions/D841.md) Code-only batch 489 (M6c): OAuth access tokens for MCP over HTTP
 - [D842](decisions/D842.md) Code-only batch 490 (M14): roles, grants, routines and triggers in the SQL dump
+- [D843](decisions/D843.md) Code-only batch 491 (M16): CQL ALTER TYPE

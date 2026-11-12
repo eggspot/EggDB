@@ -803,6 +803,18 @@ fn user_defined_types_are_created_stored_and_used_in_tables() {
 }
 
 #[test]
+fn alter_type_adds_and_renames_fields_in_place() {
+    let added = typed_sql("ALTER TYPE address ADD zip text").unwrap();
+    assert!(added.contains("SET definition = 'udt<ks.address, street text, number int, zip text>'"), "{added}");
+    assert!(added.contains("replace(column_types, 'udt<ks.address, street text, number int>', 'udt<ks.address, street text, number int, zip text>')"), "{added}");
+    let renamed = typed_sql("ALTER TYPE address RENAME street TO road AND number TO house").unwrap();
+    assert!(renamed.contains("'udt<ks.address, road text, house int>'"), "{renamed}");
+    assert!(typed_sql("ALTER TYPE address ADD street text").is_err());
+    assert!(typed_sql("ALTER TYPE address RENAME floor TO level").is_err());
+    assert!(typed_sql("ALTER TYPE missing ADD x int").is_err());
+}
+
+#[test]
 fn stored_user_types_read_back_without_a_lookup() {
     let stored = "list<udt<ks.address, street text, number int>>";
     let parsed = CqlType::parse(stored).expect("a stored type");

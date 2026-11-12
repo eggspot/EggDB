@@ -230,6 +230,12 @@ pub(crate) struct ColumnDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TypeChange {
+    Add(ColumnDefinition),
+    Rename(Vec<(String, String)>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AlterChange {
     Add(Vec<ColumnDefinition>),
     Drop(Vec<String>),
@@ -282,6 +288,10 @@ pub(crate) enum Statement {
     DropType {
         name: TableName,
         if_exists: bool,
+    },
+    AlterType {
+        name: TableName,
+        change: TypeChange,
     },
     Truncate(TableName),
     Insert {
@@ -1090,8 +1100,32 @@ impl Parser {
                 }
             }
             "alter" => {
+                if self.eat_word("type") {
+                    let name = self.table_name()?;
+                    let change = if self.eat_word("add") {
+                        let _ = self.if_not_exists()?;
+                        let field = self.identifier()?;
+                        let cql = self.cql_type()?;
+                        TypeChange::Add(ColumnDefinition { name: field, cql })
+                    } else if self.eat_word("rename") {
+                        let _ = self.if_exists()?;
+                        let mut renames = Vec::new();
+                        loop {
+                            let from = self.identifier()?;
+                            self.expect_word("to")?;
+                            renames.push((from, self.identifier()?));
+                            if !self.eat_word("and") {
+                                break;
+                            }
+                        }
+                        TypeChange::Rename(renames)
+                    } else {
+                        return Err(unsupported("this ALTER TYPE (ADD and RENAME are)"));
+                    };
+                    return Ok(Statement::AlterType { name, change });
+                }
                 if !(self.eat_word("table") || self.eat_word("columnfamily")) {
-                    return Err(unsupported("this ALTER statement (only tables are)"));
+                    return Err(unsupported("this ALTER statement (only tables and types are)"));
                 }
                 let table = self.table_name()?;
                 let change = if self.eat_word("add") {
