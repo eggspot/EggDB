@@ -820,3 +820,4 @@ its full title with its status.
 - [D793](decisions/D793.md) Code-only batch 441 (M5): `CREATE FUNCTION ... LANGUAGE wasm` on EggDB's interpreter
 - [D794](decisions/D794.md) Code-only batch 442 (M14): `FOR SYSTEM_TIME` queries over the history `eggdb_temporal` keeps
 - [D795](decisions/D795.md) Code-only batch 443 (M14): SQL Server's and MariaDB's system-versioning syntax on `eggdb_temporal`
+- [D796](decisions/D796.md) Code-only batch 444 (M12): a stored `vector` type with binary I/O and a catalog entry

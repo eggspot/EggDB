@@ -591,6 +591,8 @@ fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
         Ok(crate::citext::value(text.to_owned()))
     } else if defined == DefinedType::HSTORE {
         crate::hstore::parse_text(text).map(crate::hstore::value)
+    } else if defined == DefinedType::VECTOR {
+        crate::vector_type::parse_text(text).map(crate::vector_type::value)
     } else {
         Err(crate::encoding::corrupt("type definition"))
     }
@@ -607,6 +609,15 @@ fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) ->
             Some(text) => text.to_owned(),
             None => value.to_text().unwrap_or_default(),
         }));
+    }
+    if target == DefinedType::VECTOR {
+        return match (&value, text) {
+            (Value::Array(array), _) => {
+                crate::vector_type::from_array(&array.items).map(crate::vector_type::value)
+            }
+            (_, Some(text)) => crate::vector_type::parse_text(text).map(crate::vector_type::value),
+            _ => Err(cannot_cast(&value, target)),
+        };
     }
     match (text, conversion) {
         (Some(text), Conversion::Explicit) => parse_base(text, target),

@@ -125,10 +125,17 @@ impl DefinedType {
         oid: crate::hstore::HSTORE_OID,
     };
 
+    /// The type `vector`: pgvector's list of single-precision floats.
+    pub const VECTOR: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::vector_type::VECTOR_OID,
+    };
+
     pub(crate) fn builtin_base_named(name: &str) -> Option<Self> {
         match name {
             "citext" => Some(Self::CITEXT),
             "hstore" => Some(Self::HSTORE),
+            "vector" => Some(Self::VECTOR),
             _ => None,
         }
     }
@@ -137,6 +144,7 @@ impl DefinedType {
         match oid {
             crate::citext::CITEXT_OID => Some("citext"),
             crate::hstore::HSTORE_OID => Some("hstore"),
+            crate::vector_type::VECTOR_OID => Some("vector"),
             _ => None,
         }
     }
@@ -169,6 +177,8 @@ pub enum DefinedValue {
     Citext(String),
     /// An `hstore` value.
     Hstore(crate::hstore::HstoreValue),
+    /// A `vector` value: its single-precision floats.
+    Vector(Vec<f32>),
 }
 
 impl DefinedValue {
@@ -183,6 +193,7 @@ impl DefinedValue {
             Self::Range(range) => DefinedType::range(range.type_oid),
             Self::Citext(_) => SqlType::Defined(DefinedType::CITEXT),
             Self::Hstore(_) => SqlType::Defined(DefinedType::HSTORE),
+            Self::Vector(_) => SqlType::Defined(DefinedType::VECTOR),
         }
     }
 
@@ -194,6 +205,7 @@ impl DefinedValue {
             Self::Range(range) => crate::ranges::format_text(range),
             Self::Citext(text) => text.clone(),
             Self::Hstore(hstore) => crate::hstore::to_text(hstore),
+            Self::Vector(values) => crate::vector_type::to_text(values),
         }
     }
 }
@@ -1396,6 +1408,7 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (DefinedValue::Range(a), DefinedValue::Range(b)) => crate::ranges::compare(a, b),
         (DefinedValue::Citext(a), DefinedValue::Citext(b)) => crate::citext::compare(a, b),
         (DefinedValue::Hstore(a), DefinedValue::Hstore(b)) => crate::hstore::compare(a, b),
+        (DefinedValue::Vector(a), DefinedValue::Vector(b)) => crate::vector_type::compare(a, b),
         (DefinedValue::Enum(_), _) => Ordering::Less,
         (_, DefinedValue::Enum(_)) => Ordering::Greater,
         (DefinedValue::Record(_), _) => Ordering::Less,
@@ -1404,6 +1417,8 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (_, DefinedValue::Range(_)) => Ordering::Greater,
         (DefinedValue::Citext(_), _) => Ordering::Less,
         (_, DefinedValue::Citext(_)) => Ordering::Greater,
+        (DefinedValue::Hstore(_), _) => Ordering::Less,
+        (_, DefinedValue::Hstore(_)) => Ordering::Greater,
     }
 }
 
@@ -1431,6 +1446,13 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
                 out.push(18);
                 out.extend_from_slice(&(folded.len() as u64).to_le_bytes());
                 out.extend_from_slice(folded.as_bytes());
+            }
+            DefinedValue::Vector(values) => {
+                out.push(20);
+                out.extend_from_slice(&(values.len() as u64).to_le_bytes());
+                for value in values {
+                    out.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
             }
             DefinedValue::Hstore(hstore) => {
                 out.push(19);

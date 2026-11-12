@@ -29,6 +29,7 @@ const UUID_OID: u32 = 2950;
 const JSONB_OID: u32 = 3802;
 const CITEXT_OID: u32 = crate::citext::CITEXT_OID;
 const HSTORE_OID: u32 = crate::hstore::HSTORE_OID;
+const VECTOR_OID: u32 = crate::vector_type::VECTOR_OID;
 
 const IDENTIFIER_OIDS: [u32; 7] = [26, 28, 24, 2205, 2206, 4089, 4096];
 
@@ -194,6 +195,12 @@ pub fn encode_pg_binary(value: &Value, oid: u32, zone: TimeZone) -> SqlResult<Op
         }
         HSTORE_OID => match crate::hstore::hstore_of(value) {
             Some(hstore) => hstore_binary(hstore).ok_or_else(|| cannot_send(value, oid))?,
+            None => return Err(cannot_send(value, oid)),
+        },
+        VECTOR_OID => match crate::vector_type::vector_of(value) {
+            Some(values) => {
+                crate::vector_type::binary(values).ok_or_else(|| cannot_send(value, oid))?
+            }
             None => return Err(cannot_send(value, oid)),
         },
         _ => text.into_bytes(),
@@ -545,6 +552,10 @@ pub fn decode_pg_binary_text(bytes: &[u8], oid: u32) -> SqlResult<String> {
         },
         HSTORE_OID => {
             return hstore_from_binary(bytes).map(|hstore| crate::hstore::to_text(&hstore));
+        }
+        VECTOR_OID => {
+            return crate::vector_type::from_binary(bytes)
+                .map(|values| crate::vector_type::to_text(&values));
         }
         oid if TEXT_INPUT_OIDS.contains(&oid) => return text_of(bytes),
         oid => match ArrayElement::of_array_oid(oid) {

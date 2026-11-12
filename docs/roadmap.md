@@ -1378,7 +1378,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M12 Vectors, geospatial and AI
 - A stored `vector(n)` type with its dimension checked, binary send and receive and a catalog
-  entry (D203).
+  entry (D203). **Code written, unbuilt** (code-only mode, 2026-11-12, D796). Left: the dimension kept as a type modifier
+  (`atttypmod`, shown as `vector(3)`) rather than a check, and pgvector's own 22000 error for a wrong dimension.
 - `CREATE INDEX ... USING hnsw` and `ivfflat`, kept in the file and used by `ORDER BY ... LIMIT`
   (D203).
 - `halfvec`, `sparsevec`, `int8` and bit vectors, and vector arithmetic (D19, D203). Bit distances,

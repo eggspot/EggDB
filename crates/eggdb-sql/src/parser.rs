@@ -442,6 +442,7 @@ pub(crate) struct Parser<'t> {
     mysql_column_check: Option<mysql::MysqlColumnCheck>,
     system_period: Option<(String, String)>,
     system_versioning_on: Option<Option<crate::ast::Name>>,
+    vector_dimensions: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -573,6 +574,7 @@ impl<'t> Parser<'t> {
             mysql_column_check: None,
             system_period: None,
             system_versioning_on: None,
+            vector_dimensions: None,
         }
     }
 
@@ -2225,6 +2227,7 @@ impl<'t> Parser<'t> {
             None => self.sql_type()?,
         };
         let implicit_check = if serial.is_none() && !untyped { self.mysql_column_check.take() } else { None };
+        let vector_dimensions = self.vector_dimensions.take();
         let mut column = ColumnDefinition {
             name,
             sql_type,
@@ -2244,6 +2247,11 @@ impl<'t> Parser<'t> {
         };
         if let Some(check) = implicit_check {
             column.constraints.push(check.constraint(&column.name));
+        }
+        if let Some(dimensions) = vector_dimensions {
+            column
+                .constraints
+                .push(crate::vector_type::dimensions_check(&column.name, dimensions));
         }
         if untyped && self.sqlserver() {
             self.sqlserver_computed_column(&mut column)?;
@@ -2767,8 +2775,8 @@ impl<'t> Parser<'t> {
                 SqlType::Text
             }
             "vector" if self.postgresql() => {
-                self.varchar_length(token.start)?;
-                SqlType::Text
+                self.vector_dimensions = self.varchar_length(token.start)?;
+                SqlType::Defined(crate::types::DefinedType::VECTOR)
             }
             "bytea" => SqlType::Bytea,
             "character" | "char" => {

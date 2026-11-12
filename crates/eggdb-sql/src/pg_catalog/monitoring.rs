@@ -24,6 +24,7 @@ const STAMP: SqlType = SqlType::TimestampTz(None);
 const PLPGSQL_EXTENSION: u32 = 13_581;
 const CITEXT_EXTENSION: u32 = 9_100;
 const HSTORE_EXTENSION: u32 = 9_101;
+const VECTOR_EXTENSION: u32 = 9_102;
 const FIRST_OID: u32 = 12_500;
 
 const fn column(name: &'static str, sql_type: SqlType) -> CatalogColumn {
@@ -633,7 +634,7 @@ fn session_user_name() -> String {
 }
 
 /// Each installed extension's OID and the description `pg_description` holds for it.
-pub(crate) fn extension_descriptions() -> [(u32, &'static str); 3] {
+pub(crate) fn extension_descriptions() -> [(u32, &'static str); 4] {
     [
         (PLPGSQL_EXTENSION, "PL/pgSQL procedural language"),
         (
@@ -643,6 +644,10 @@ pub(crate) fn extension_descriptions() -> [(u32, &'static str); 3] {
         (
             HSTORE_EXTENSION,
             "data type for storing sets of (key, value) pairs",
+        ),
+        (
+            VECTOR_EXTENSION,
+            "vector data type and ivfflat and hnsw access methods",
         ),
     ]
 }
@@ -750,6 +755,7 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             (PLPGSQL_EXTENSION, "plpgsql", oids::PG_CATALOG, false, "1.0"),
             (CITEXT_EXTENSION, "citext", oids::PUBLIC, true, "1.6"),
             (HSTORE_EXTENSION, "hstore", oids::PUBLIC, true, "1.8"),
+            (VECTOR_EXTENSION, "vector", oids::PUBLIC, true, "0.8.0"),
         ]
         .into_iter()
         .map(|(oid, name, namespace, relocatable, version)| {

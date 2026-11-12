@@ -45,6 +45,9 @@ fn sparse_vector(text: &str) -> SqlResult<Vec<f32>> {
 }
 
 fn vector_of(value: &Value) -> SqlResult<Option<Vec<f32>>> {
+    if let Some(stored) = crate::vector_type::vector_of(value) {
+        return Ok(Some(stored.to_vec()));
+    }
     Ok(match value {
         Value::Null => None,
         Value::Text(text) | Value::Bpchar(text) if text.trim_start().starts_with('{') => {

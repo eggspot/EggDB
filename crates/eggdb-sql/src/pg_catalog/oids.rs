@@ -1314,9 +1314,24 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 80] = [
         storage: 'x',
         collation: 0,
     },
+    BuiltinType {
+        oid: 9004,
+        typname: "vector",
+        shown: "vector",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'U',
+        preferred: false,
+        element: 0,
+        array: 0,
+        align: 'i',
+        storage: 'x',
+        collation: 0,
+    },
 ];
 
-pub(crate) const EXTENSION_TYPES: [u32; 4] = [9000, 9001, 9002, 9003];
+pub(crate) const EXTENSION_TYPES: [u32; 5] = [9000, 9001, 9002, 9003, 9004];
 
 pub(crate) fn builtin_type(oid: u32) -> Option<&'static BuiltinType> {
     BUILTIN_TYPES

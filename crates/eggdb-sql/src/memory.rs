@@ -64,6 +64,7 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
             }),
             crate::types::DefinedValue::Citext(text) => text.len(),
             crate::types::DefinedValue::Hstore(hstore) => hstore.held_bytes(),
+            crate::types::DefinedValue::Vector(values) => crate::vector_type::held_bytes(values),
         },
         _ => 0,
     }
