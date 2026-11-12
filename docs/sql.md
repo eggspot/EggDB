@@ -4296,6 +4296,15 @@ arguments given (installations made before D429 lack it). Not yet: `cron.schedul
 `cron.timezone`, checking a schedule when it is added, SQL Server Agent jobs and Oracle's
 `DBMS_SCHEDULER`; MySQL events run on the same scheduler (D421).
 
+SQL Server's Database Mail (D785): `EXEC msdb.dbo.sp_send_dbmail @recipients = 'ops@example.com', @subject = ...,
+@body = ...` queues a message (`@copy_recipients` and `@blind_copy_recipients` too; `@query` and `@file_attachments`
+are refused as not supported), and SQL Server Agent's operator notifications (`sp_notify_operator`, and alerts whose
+operators are notified by e-mail) queue one to each operator's `email_address`. `msdb.dbo.sysmail_allitems`,
+`sysmail_unsentitems`, `sysmail_sentitems` and `sysmail_faileditems` show the queue. While `eggdb serve` runs with
+`EGGDB_SMTP_SERVER` set (and `EGGDB_SMTP_FROM`, `EGGDB_SMTP_USER` and `EGGDB_SMTP_PASSWORD_FILE` as for report
+mail, D747), it sends unsent items every few seconds through that mail server and marks each `sent`, or `failed`
+with the error.
+
 ## Functions, procedures and DO blocks
 
 In the PostgreSQL dialect (D158), users create and call their own functions and procedures in

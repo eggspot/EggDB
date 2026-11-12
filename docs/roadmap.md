@@ -1202,7 +1202,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL Server Agent jobs on the job scheduler (D27, D200). **Code written, unbuilt** (code-only mode, 2026-11-11, D523).
   The `msdb` views: **code written, unbuilt** (code-only mode, 2026-11-12, D623); step flow options and retries:
   **code written, unbuilt** (D624); operators and alerts: **code written, unbuilt** (code-only mode, 2026-11-12, D635).
-  Left: sending the notifications (Database Mail).
+  Sending the notifications (Database Mail, `sp_send_dbmail`): **code written, unbuilt** (code-only mode, 2026-11-12,
+  D785).
 - Identity on any column, `NEXT VALUE FOR` returning the sequence's type and its `OVER` form,
   `sp_sequence_get_range`, and extended properties beyond `MS_Description` (D148). `sp_sequence_get_range`:
   **code written, unbuilt** (code-only mode, 2026-11-11, D449).

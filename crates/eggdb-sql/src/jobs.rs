@@ -873,5 +873,63 @@ pub fn run_due_agent_jobs<S: KeyValueStore>(store: &S, epoch_seconds: i64) -> Sq
     Ok(outcome)
 }
 
+/// Sends SQL Server Database Mail: the oldest `limit` unsent items `sp_send_dbmail` and the
+/// Agent's operator notifications queued, each recipient of `recipients`, `copy_recipients` and
+/// `blind_copy_recipients` (separated by `;` or `,`) handed to `send` with the subject and body.
+/// An item is marked `sent` when every recipient took it and `failed`, with the first error, when
+/// one did not. A file without Database Mail has nothing to send.
+pub fn deliver_database_mail<S: KeyValueStore>(
+    store: &S,
+    limit: u64,
+    send: &mut dyn FnMut(&str, &str, &str) -> Result<(), String>,
+) -> SqlResult<u64> {
+    let mut session = Session::with_dialect(store, Dialect::PostgreSql);
+    let mut rows = Vec::new();
+    let listed = session.execute(
+        &format!(
+            "SELECT mailitem_id, concat_ws(';', recipients, copy_recipients, blind_copy_recipients), coalesce(subject, ''), coalesce(body, '') FROM {} WHERE sent_status = 'unsent' ORDER BY mailitem_id LIMIT {limit}",
+            crate::session::sqlserver_agent::alerts::MAIL_TABLE
+        ),
+        &mut |result| rows = result.rows,
+    );
+    if let Err(error) = listed {
+        let _ = session.close();
+        return if matches!(error.state(), crate::error::SqlState::UNDEFINED_TABLE | crate::error::SqlState::INVALID_SCHEMA_NAME) {
+            Ok(0)
+        } else {
+            Err(error)
+        };
+    }
+    let mut sent = 0;
+    for row in &rows {
+        let (Some(Value::BigInt(id)), Some(recipients), Some(subject), Some(body)) = (
+            row.first(),
+            row.get(1).and_then(Value::to_text),
+            row.get(2).and_then(Value::to_text),
+            row.get(3).and_then(Value::to_text),
+        ) else {
+            continue;
+        };
+        let failure = recipients
+            .split([';', ','])
+            .map(str::trim)
+            .filter(|recipient| !recipient.is_empty())
+            .find_map(|recipient| send(recipient, &subject, &body).err());
+        let outcome = match &failure {
+            None => "sent_status = 'sent', sent_date = now(), last_error = NULL".to_owned(),
+            Some(error) => format!("sent_status = 'failed', sent_date = now(), last_error = '{}'", error.replace('\'', "''")),
+        };
+        session.execute(
+            &format!("UPDATE {} SET {outcome} WHERE mailitem_id = {id}", crate::session::sqlserver_agent::alerts::MAIL_TABLE),
+            &mut |_| {},
+        )?;
+        if failure.is_none() {
+            sent += 1;
+        }
+    }
+    let _ = session.close();
+    Ok(sent)
+}
+
 #[cfg(test)]
 mod tests;

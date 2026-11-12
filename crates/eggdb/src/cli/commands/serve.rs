@@ -1020,6 +1020,8 @@ impl Session<'_> {
                 .spawn(|| super::serve_jobs::run_scheduled_jobs(&store, &stop_signals::requested));
             let report_delivery = scope
                 .spawn(|| super::serve_jobs::deliver_reports(&store, &stop_signals::requested));
+            let mail_delivery = scope
+                .spawn(|| super::serve_jobs::deliver_database_mail(&store, &stop_signals::requested));
             let cdc_delivery = scope.spawn(|| {
                 if let Some(url) = &options.cdc_webhook {
                     super::serve_jobs::deliver_changes(
@@ -1295,6 +1297,7 @@ impl Session<'_> {
             let _ = dynamodb_server.join();
             let _ = job_scheduler.join();
             let _ = report_delivery.join();
+            let _ = mail_delivery.join();
             let _ = cdc_delivery.join();
             postgresql
                 .and_then(|open| mysql.map(|mysql_open| open + mysql_open))

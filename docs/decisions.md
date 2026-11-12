@@ -809,3 +809,4 @@ its full title with its status.
 - [D782](decisions/D782.md) Code-only batch 430 (M12): routing at pgRouting's level, `CREATE EXTENSION pgrouting`
 - [D783](decisions/D783.md) Code-only batch 431 (M16): syslog over TLS (RFC 5425) and beyond loopback
 - [D784](decisions/D784.md) Code-only batch 432 (M14): tenant-aware backup and restore in `eggdb_tenancy`
+- [D785](decisions/D785.md) Code-only batch 433 (M10): SQL Server Database Mail, `sp_send_dbmail` and operator notifications sent by `eggdb serve`

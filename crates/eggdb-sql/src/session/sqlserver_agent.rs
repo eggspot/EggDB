@@ -6,7 +6,7 @@ use crate::eval::{Evaluator, Scope};
 use crate::session::mysql_events::quoted;
 use crate::types::Value;
 
-mod alerts;
+pub(crate) mod alerts;
 
 pub(crate) const JOBS_TABLE: &str = "eggdb_internal.sqlserver_agent_jobs";
 pub(crate) const STEPS_TABLE: &str = "eggdb_internal.sqlserver_agent_steps";
@@ -34,7 +34,7 @@ const CREATE_TABLES: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysjobhistory AS SELECT (row_number() OVER (ORDER BY h.run_time, h.job_name, h.step_id, h.run_status DESC))::integer AS instance_id, md5(h.job_name)::uuid AS job_id, h.step_id, coalesce(st.step_name, '(Job outcome)') AS step_name, h.message, h.run_status, to_char(h.run_time, 'YYYYMMDD')::integer AS run_date, to_char(h.run_time, 'HH24MISS')::integer AS run_time, 0 AS run_duration, 0 AS sql_message_id, 0 AS sql_severity FROM eggdb_internal.sqlserver_agent_history h LEFT JOIN eggdb_internal.sqlserver_agent_steps st ON st.job_name = h.job_name AND st.step_id = h.step_id";
 
 /// The `msdb.dbo` views SQL Server Agent's tools read, each kept as a view over the Agent tables.
-pub(crate) const AGENT_VIEWS: [&str; 8] = [
+pub(crate) const AGENT_VIEWS: [&str; 12] = [
     "sysjobs",
     "sysjobsteps",
     "sysschedules",
@@ -43,6 +43,10 @@ pub(crate) const AGENT_VIEWS: [&str; 8] = [
     "sysoperators",
     "sysalerts",
     "sysnotifications",
+    "sysmail_allitems",
+    "sysmail_unsentitems",
+    "sysmail_sentitems",
+    "sysmail_faileditems",
 ];
 const MAX_MESSAGE_CHARS: usize = 1_000;
 const SUPPORTED_FREQUENCIES: [i64; 4] = [1, 4, 8, 16];
@@ -70,6 +74,7 @@ pub(crate) enum AgentProcedure {
     AddNotification,
     DeleteNotification,
     NotifyOperator,
+    SendDbmail,
 }
 
 impl AgentProcedure {
@@ -96,6 +101,7 @@ impl AgentProcedure {
             "sp_add_notification" => Self::AddNotification,
             "sp_delete_notification" => Self::DeleteNotification,
             "sp_notify_operator" => Self::NotifyOperator,
+            "sp_send_dbmail" => Self::SendDbmail,
             _ => return None,
         })
     }
@@ -214,6 +220,32 @@ impl AgentProcedure {
                 "@body",
                 "@file_attachments",
                 "@mail_database",
+            ],
+            Self::SendDbmail => &[
+                "@profile_name",
+                "@recipients",
+                "@copy_recipients",
+                "@blind_copy_recipients",
+                "@from_address",
+                "@reply_to",
+                "@subject",
+                "@body",
+                "@body_format",
+                "@importance",
+                "@sensitivity",
+                "@file_attachments",
+                "@query",
+                "@execute_query_database",
+                "@attach_query_result_as_file",
+                "@query_attachment_filename",
+                "@query_result_header",
+                "@query_result_width",
+                "@query_result_separator",
+                "@exclude_query_output",
+                "@append_query_error",
+                "@query_no_truncate",
+                "@query_result_no_padding",
+                "@mailitem_id",
             ],
         }
     }
@@ -393,6 +425,7 @@ impl Session<'_> {
                 | AgentProcedure::AddNotification
                 | AgentProcedure::DeleteNotification
                 | AgentProcedure::NotifyOperator
+                | AgentProcedure::SendDbmail
         ) {
             return self.agent_alert_procedure(procedure, &arguments, &procedure_name);
         }

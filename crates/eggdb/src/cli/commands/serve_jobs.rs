@@ -114,6 +114,24 @@ fn now_ms() -> i64 {
 
 const REPORT_TARGETS: &str = "EGGDB_REPORT_TARGETS";
 
+const MAIL_EVERY: Duration = Duration::from_secs(5);
+const SMTP_SERVER: &str = "EGGDB_SMTP_SERVER";
+
+pub(super) fn deliver_database_mail(
+    store: &impl eggdb_sql::KeyValueStore,
+    stop: &(dyn Fn() -> bool + Sync),
+) {
+    if std::env::var(SMTP_SERVER).is_err() {
+        return;
+    }
+    while !stop() {
+        std::thread::sleep(MAIL_EVERY);
+        let _ = eggdb_sql::jobs::deliver_database_mail(store, EVENTS_PER_ROUND, &mut |to, subject, body| {
+            super::report_delivery::send_mail(to, subject, body, WEBHOOK_TIMEOUT).map_err(|error| error.to_string())
+        });
+    }
+}
+
 pub(super) fn deliver_reports(
     store: &impl eggdb_sql::KeyValueStore,
     stop: &(dyn Fn() -> bool + Sync),

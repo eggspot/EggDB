@@ -1,5 +1,5 @@
 use super::{AgentProcedure, Arguments, agent_error, quoted};
-use crate::error::SqlResult;
+use crate::error::{SqlError, SqlResult};
 use crate::session::{QueryResult, Session};
 use crate::types::Value;
 use std::cell::Cell;
@@ -8,12 +8,19 @@ const OPERATORS_TABLE: &str = "eggdb_internal.sqlserver_agent_operators";
 const ALERTS_TABLE: &str = "eggdb_internal.sqlserver_agent_alerts";
 const NOTIFICATIONS_TABLE: &str = "eggdb_internal.sqlserver_agent_alert_notifications";
 const SENT_TABLE: &str = "eggdb_internal.sqlserver_agent_notifications_sent";
+pub(crate) const MAIL_TABLE: &str = "eggdb_internal.sqlserver_dbmail_items";
+const EMAIL_METHOD: i64 = 1;
 const HIGHEST_SEVERITY: i64 = 25;
 const NOTIFY_BY_EVERY_METHOD: i64 = 7;
 pub(super) const CREATE_ALERT_TABLES: &str = "CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_operators (name text PRIMARY KEY, enabled boolean NOT NULL, email_address text, pager_address text, netsend_address text); \
     CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_alerts (name text PRIMARY KEY, message_id integer NOT NULL, severity integer NOT NULL, enabled boolean NOT NULL, delay_between_responses integer NOT NULL, notification_message text, database_name text, event_description_keyword text, job_name text, occurrence_count integer NOT NULL DEFAULT 0, last_occurrence timestamptz, last_response timestamptz); \
     CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_alert_notifications (alert_name text NOT NULL, operator_name text NOT NULL, notification_method integer NOT NULL, PRIMARY KEY (alert_name, operator_name)); \
     CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_agent_notifications_sent (operator_name text NOT NULL, alert_name text, subject text, body text, sent_at timestamptz NOT NULL DEFAULT now()); \
+    CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_dbmail_items (mailitem_id bigserial PRIMARY KEY, recipients text, copy_recipients text, blind_copy_recipients text, subject text, body text, send_request_date timestamptz NOT NULL DEFAULT now(), send_request_user text NOT NULL DEFAULT current_user, sent_status text NOT NULL DEFAULT 'unsent', sent_date timestamptz, last_error text); \
+    CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysmail_allitems AS SELECT mailitem_id::integer AS mailitem_id, 1 AS profile_id, recipients, copy_recipients, blind_copy_recipients, subject, body, 'TEXT' AS body_format, 'Normal' AS importance, 'Normal' AS sensitivity, send_request_date, send_request_user, sent_status, sent_date FROM eggdb_internal.sqlserver_dbmail_items; \
+    CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysmail_unsentitems AS SELECT * FROM eggdb_internal.sqlserver_agent_sysmail_allitems WHERE sent_status = 'unsent'; \
+    CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysmail_sentitems AS SELECT * FROM eggdb_internal.sqlserver_agent_sysmail_allitems WHERE sent_status = 'sent'; \
+    CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysmail_faileditems AS SELECT * FROM eggdb_internal.sqlserver_agent_sysmail_allitems WHERE sent_status = 'failed'; \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysoperators AS SELECT (row_number() OVER (ORDER BY name))::integer AS id, name, CASE WHEN enabled THEN 1 ELSE 0 END AS enabled, email_address, pager_address, netsend_address, 0 AS last_email_date, 0 AS last_email_time, 0 AS category_id FROM eggdb_internal.sqlserver_agent_operators; \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysalerts AS SELECT (row_number() OVER (ORDER BY a.name))::integer AS id, a.name, 'MSSQLSERVER' AS event_source, a.message_id, a.severity, CASE WHEN a.enabled THEN 1 ELSE 0 END AS enabled, a.delay_between_responses, coalesce(to_char(a.last_occurrence, 'YYYYMMDD')::integer, 0) AS last_occurrence_date, coalesce(to_char(a.last_occurrence, 'HH24MISS')::integer, 0) AS last_occurrence_time, coalesce(to_char(a.last_response, 'YYYYMMDD')::integer, 0) AS last_response_date, coalesce(to_char(a.last_response, 'HH24MISS')::integer, 0) AS last_response_time, a.notification_message, a.database_name, a.event_description_keyword, a.occurrence_count, CASE WHEN a.job_name IS NULL THEN '00000000-0000-0000-0000-000000000000'::uuid ELSE md5(a.job_name)::uuid END AS job_id, (SELECT count(*)::integer FROM eggdb_internal.sqlserver_agent_alert_notifications n WHERE n.alert_name = a.name) AS has_notification, 0 AS category_id FROM eggdb_internal.sqlserver_agent_alerts a; \
     CREATE OR REPLACE VIEW eggdb_internal.sqlserver_agent_sysnotifications AS SELECT a.id AS alert_id, o.id AS operator_id, n.notification_method FROM eggdb_internal.sqlserver_agent_alert_notifications n JOIN eggdb_internal.sqlserver_agent_sysalerts a ON a.name = n.alert_name JOIN eggdb_internal.sqlserver_agent_sysoperators o ON o.name = n.operator_name";
@@ -231,6 +238,29 @@ impl Session<'_> {
                     text_or_null(arguments.text("@subject")),
                     text_or_null(arguments.text("@body")),
                 ))?;
+                self.agent_sql(&format!(
+                    "INSERT INTO {MAIL_TABLE} (recipients, subject, body) SELECT o.email_address, {}, {} FROM {OPERATORS_TABLE} o WHERE o.name = {} AND o.email_address IS NOT NULL",
+                    text_or_null(arguments.text("@subject")),
+                    text_or_null(arguments.text("@body")),
+                    quoted(&name),
+                ))?;
+            }
+            AgentProcedure::SendDbmail => {
+                if arguments.value("@query").is_some() || arguments.value("@file_attachments").is_some() {
+                    return Err(SqlError::not_supported("sp_send_dbmail with @query or @file_attachments"));
+                }
+                let (recipients, copies, blind) = (arguments.text("@recipients"), arguments.text("@copy_recipients"), arguments.text("@blind_copy_recipients"));
+                if recipients.is_none() && copies.is_none() && blind.is_none() {
+                    return Err(agent_error(14624, "At least one of the following parameters must be specified. \"@recipients, @copy_recipients, @blind_copy_recipients\".".to_owned()));
+                }
+                self.agent_sql(&format!(
+                    "INSERT INTO {MAIL_TABLE} (recipients, copy_recipients, blind_copy_recipients, subject, body) VALUES ({}, {}, {}, {}, {})",
+                    text_or_null(recipients),
+                    text_or_null(copies),
+                    text_or_null(blind),
+                    text_or_null(arguments.text("@subject")),
+                    text_or_null(arguments.text("@body")),
+                ))?;
             }
             _ => {}
         }
@@ -277,6 +307,14 @@ impl Session<'_> {
             self.agent_sql(&format!(
                 "INSERT INTO {SENT_TABLE} (operator_name, alert_name, subject, body) \
                  SELECT operator_name, alert_name, {subject}, {body} FROM {NOTIFICATIONS_TABLE} WHERE alert_name = {alert}",
+                subject = quoted(&format!("SQL Server Alert System: '{alert}' occurred")),
+                body = quoted(&body),
+                alert = quoted(&alert)
+            ))?;
+            self.agent_sql(&format!(
+                "INSERT INTO {MAIL_TABLE} (recipients, subject, body) \
+                 SELECT o.email_address, {subject}, {body} FROM {NOTIFICATIONS_TABLE} n JOIN {OPERATORS_TABLE} o ON o.name = n.operator_name \
+                 WHERE n.alert_name = {alert} AND o.enabled AND o.email_address IS NOT NULL AND (n.notification_method & {EMAIL_METHOD}) = {EMAIL_METHOD}",
                 subject = quoted(&format!("SQL Server Alert System: '{alert}' occurred")),
                 body = quoted(&body),
                 alert = quoted(&alert)
