@@ -1569,7 +1569,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - FIX and EDIFACT dictionaries, HL7 v2 message building and ACKs, and FHIR validation (D50, D243). HL7
   building and ACKs, FIX building and name dictionaries: **code written, unbuilt** (code-only mode,
   2026-11-11, D445). Left: full dictionaries and FHIR validation.
-- ISO 20022 and DICOM (D50).
+- ISO 20022 and DICOM (D50). DICOM files as DICOM's JSON model (`dicom_parse`): **code written, unbuilt** (code-only
+  mode, 2026-11-12, D698). Left: ISO 20022.
 - IoT models: W3C Web of Things, and DTDL after D58's legal check (D57).
 - OPC UA, Modbus and Sparkplug ingest (D57).
 - Email stores with IMAP, JMAP and SMTP (D56).

@@ -722,3 +722,4 @@ its full title with its status.
 - [D695](decisions/D695.md) Code-only batch 343 (M10): SQL Server `xml` columns and their `value()`, `query()` and `exist()` methods
 - [D696](decisions/D696.md) Code-only batch 344 (M10): SQL Server `xml.nodes()` in `CROSS APPLY` and node-relative methods
 - [D697](decisions/D697.md) Code-only batch 345 (M6a): PostgreSQL's `xml` type accepted and read as `text`
+- [D698](decisions/D698.md) Code-only batch 346 (M16): `dicom_parse`, DICOM Part 10 files as DICOM's JSON model

@@ -43,6 +43,7 @@ mod create_table_like;
 mod datetime;
 mod deferred_checks;
 mod destructive;
+mod dicom;
 mod dml_row_limit;
 mod dialect;
 mod dump;
