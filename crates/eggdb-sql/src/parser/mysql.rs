@@ -548,6 +548,7 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn mysql_type(&mut self) -> SqlResult<SqlType> {
+        self.mysql_column_check = None;
         let token = self.peek();
         let word: &str = match &token.kind {
             TokenKind::Word(word) => word,
@@ -557,10 +558,18 @@ impl<'t> Parser<'t> {
         self.at += 1;
         if ["decimal", "dec", "numeric", "fixed"].contains(&word) {
             let sql_type = self.mysql_decimal(token.start)?;
-            return self.integer_attributes(sql_type);
+            let attributes_from = self.at;
+            let sql_type = self.integer_attributes(sql_type)?;
+            if self.took_unsigned(attributes_from) {
+                self.mysql_column_check = Some(MysqlColumnCheck::Range(0, None));
+            }
+            return Ok(sql_type);
         }
         if word == "enum" || word == "set" {
             let members = self.mysql_type_members()?;
+            if word == "enum" {
+                self.mysql_column_check = Some(MysqlColumnCheck::Members(members.clone()));
+            }
             let lengths = members.iter().map(|member| member.chars().count());
             let longest = if word == "enum" {
                 lengths.max().unwrap_or(1)
@@ -622,6 +631,7 @@ impl<'t> Parser<'t> {
                     .with_vendor_code(1818)
                     .at(token.start));
                 }
+                self.mysql_column_check = Some(MysqlColumnCheck::Year);
                 SqlType::SmallInt
             }
             "bit" => match width.unwrap_or(1) {
@@ -651,9 +661,26 @@ impl<'t> Parser<'t> {
                 .at(token.start));
             }
         };
+        let attributes_from = self.at;
         let sql_type = self.integer_attributes(sql_type)?;
+        if self.took_unsigned(attributes_from) {
+            let highest = match word {
+                "tinyint" => Some(255),
+                "smallint" => Some(65_535),
+                "mediumint" => Some(16_777_215),
+                "int" | "integer" => Some(4_294_967_295),
+                _ => None,
+            };
+            self.mysql_column_check = Some(MysqlColumnCheck::Range(0, highest));
+        }
         self.skip_character_set_and_collation()?;
         Ok(sql_type)
+    }
+
+    fn took_unsigned(&self, from: usize) -> bool {
+        self.tokens[from..self.at]
+            .iter()
+            .any(|token| matches!(&token.kind, TokenKind::Word(word) if word == "unsigned"))
     }
 
     fn skip_character_set_and_collation(&mut self) -> SqlResult<()> {
@@ -1387,5 +1414,90 @@ pub(super) fn postgresql_source(expr: &Expr) -> Option<String> {
             postgresql_source(operand).map(|source| format!("-{source}"))
         }
         _ => None,
+    }
+}
+
+/// A rule of a MySQL column type that the stored type does not keep, checked as an implicit
+/// `CHECK` constraint on the column: an `ENUM`'s members, an `UNSIGNED` range, or `YEAR`'s
+/// 1901 to 2155 (and 0).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MysqlColumnCheck {
+    Members(Vec<String>),
+    Range(i64, Option<i64>),
+    Year,
+}
+
+impl MysqlColumnCheck {
+    pub(crate) fn constraint(&self, column: &crate::ast::Name) -> crate::ast::ConstraintSpec {
+        use crate::ast::{ConstraintKind, ConstraintSpec, Expr, ExprKind, Literal};
+        let position = column.position;
+        let at = |kind: ExprKind| Expr { kind, position };
+        let column_expr = || {
+            Box::new(at(ExprKind::Column {
+                qualifier: None,
+                name: column.text.clone(),
+            }))
+        };
+        let integer = |value: i64| at(ExprKind::Literal(Literal::Integer(value)));
+        let quoted = format!("`{}`", column.text.replace('`', "``"));
+        let (expr, text) = match self {
+            Self::Members(members) => (
+                at(ExprKind::InList {
+                    expr: column_expr(),
+                    list: members.iter().map(|member| at(ExprKind::Literal(Literal::String(member.clone())))).collect(),
+                    negated: false,
+                }),
+                format!(
+                    "{quoted} in ({})",
+                    members
+                        .iter()
+                        .map(|member| format!("'{}'", member.replace('\'', "''")))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            ),
+            Self::Range(low, Some(high)) => (
+                at(ExprKind::Between {
+                    expr: column_expr(),
+                    low: Box::new(integer(*low)),
+                    high: Box::new(integer(*high)),
+                    negated: false,
+                }),
+                format!("{quoted} between {low} and {high}"),
+            ),
+            Self::Range(low, None) => (
+                at(ExprKind::Between {
+                    expr: column_expr(),
+                    low: Box::new(integer(i64::MIN)),
+                    high: Box::new(integer(low - 1)),
+                    negated: true,
+                }),
+                format!("{quoted} >= {low}"),
+            ),
+            Self::Year => (
+                at(ExprKind::Or(vec![
+                    at(ExprKind::Between {
+                        expr: column_expr(),
+                        low: Box::new(integer(1901)),
+                        high: Box::new(integer(2155)),
+                        negated: false,
+                    }),
+                    at(ExprKind::InList {
+                        expr: column_expr(),
+                        list: vec![integer(0)],
+                        negated: false,
+                    }),
+                ])),
+                format!("{quoted} between 1901 and 2155 or {quoted} = 0"),
+            ),
+        };
+        ConstraintSpec {
+            name: None,
+            kind: ConstraintKind::Check { expr, text },
+            position,
+            column: Some(column.clone()),
+            using_index: None,
+            not_valid: false,
+        }
     }
 }

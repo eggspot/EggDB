@@ -434,6 +434,7 @@ pub(crate) struct Parser<'t> {
     later_set_operand: bool,
     routine_setting_spans: Option<Vec<routines::SettingSpan>>,
     oracle_unaliased_expressions: Vec<usize>,
+    mysql_column_check: Option<mysql::MysqlColumnCheck>,
 }
 
 #[derive(Clone, Copy)]
@@ -562,6 +563,7 @@ impl<'t> Parser<'t> {
             later_set_operand: false,
             routine_setting_spans: None,
             oracle_unaliased_expressions: Vec::new(),
+            mysql_column_check: None,
         }
     }
 
@@ -2202,6 +2204,7 @@ impl<'t> Parser<'t> {
             None if untyped => SqlType::Text,
             None => self.sql_type()?,
         };
+        let implicit_check = if serial.is_none() && !untyped { self.mysql_column_check.take() } else { None };
         let mut column = ColumnDefinition {
             name,
             sql_type,
@@ -2219,6 +2222,9 @@ impl<'t> Parser<'t> {
             comment: None,
             generated: None,
         };
+        if let Some(check) = implicit_check {
+            column.constraints.push(check.constraint(&column.name));
+        }
         if untyped && self.sqlserver() {
             self.sqlserver_computed_column(&mut column)?;
         }

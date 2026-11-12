@@ -708,3 +708,4 @@ its full title with its status.
 - [D681](decisions/D681.md) Code-only batch 329 (M16): InfluxQL `tz()`, with local buckets and offset times
 - [D682](decisions/D682.md) Code-only batch 330 (M16): a Flux core over `/api/v2/query` with annotated CSV
 - [D683](decisions/D683.md) Code-only batch 331 (M16): native histogram buckets and exemplars from remote write 2.0, and `query_exemplars`
+- [D684](decisions/D684.md) Code-only batch 332 (M10): MySQL `ENUM` members, `UNSIGNED` ranges and `YEAR`'s range as implicit checks
