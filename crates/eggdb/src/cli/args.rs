@@ -328,7 +328,7 @@ impl CommandName {
             }
             OptionName::Arrow => matches!(self, Self::Export | Self::Import),
             OptionName::ParquetCompression => self == Self::Export,
-            OptionName::Dbf | OptionName::Copybook | OptionName::Ebcdic => self == Self::Import,
+            OptionName::Dbf | OptionName::Copybook | OptionName::Ebcdic | OptionName::Iceberg => self == Self::Import,
             OptionName::SqlDump | OptionName::WholeDump => self == Self::Export,
             OptionName::OnConflict
             | OptionName::Csv
@@ -537,6 +537,7 @@ enum OptionName {
     Copybook,
     Ebcdic,
     Avro,
+    Iceberg,
     Arrow,
     SqlDump,
     WholeDump,
@@ -682,6 +683,7 @@ impl OptionName {
             b"copybook" => Self::Copybook,
             b"ebcdic" => Self::Ebcdic,
             b"avro" => Self::Avro,
+            b"iceberg" => Self::Iceberg,
             b"arrow" => Self::Arrow,
             b"sql" => Self::SqlDump,
             b"dump" => Self::WholeDump,
@@ -904,6 +906,7 @@ pub(crate) struct CsvOptions {
     pub(crate) copybook: Option<PathBuf>,
     pub(crate) ebcdic: Option<PathBuf>,
     pub(crate) avro: Option<PathBuf>,
+    pub(crate) iceberg: Option<PathBuf>,
     pub(crate) arrow: Option<PathBuf>,
     pub(crate) sql_dump: Option<eggdb_sql::Dialect>,
     pub(crate) whole_dump: bool,
@@ -1870,6 +1873,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Copybook => request.csv.copybook = Some(PathBuf::from(value)),
             OptionName::Ebcdic => request.csv.ebcdic = Some(PathBuf::from(value)),
             OptionName::Avro => request.csv.avro = Some(PathBuf::from(value)),
+            OptionName::Iceberg => request.csv.iceberg = Some(PathBuf::from(value)),
             OptionName::Arrow => request.csv.arrow = Some(PathBuf::from(value)),
             OptionName::SqlDump => {
                 request.csv.sql_dump = Some(match value.to_str().unwrap_or_default() {

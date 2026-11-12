@@ -22,6 +22,7 @@ mod expiry;
 mod explain;
 mod follow;
 mod follow_mongo;
+mod iceberg_io;
 mod follow_mysql;
 mod follow_sql_server;
 mod follow_state;

@@ -221,6 +221,9 @@ impl Session<'_> {
         if let Some(source) = self.request.csv.avro.clone() {
             return self.import_avro(&source);
         }
+        if let Some(location) = self.request.csv.iceberg.clone() {
+            return self.import_iceberg(&location);
+        }
         if let (Some(copybook), Some(source)) =
             (self.request.csv.copybook.clone(), self.request.csv.ebcdic.clone())
         {

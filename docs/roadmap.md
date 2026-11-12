@@ -1500,7 +1500,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-12, D735); ORC list, map and struct columns as JSON text: **code written,
   unbuilt** (code-only mode, 2026-11-12, D836); ORC unions: **code written, unbuilt** (code-only mode, 2026-11-12, D896).
 - Apache Iceberg and Hudi tables, and Delta Lake after D58's legal check, read and written, with
-  an Iceberg REST catalog (D29, D46).
+  an Iceberg REST catalog (D29, D46). Iceberg tables read into a SQL table (`eggdb import --iceberg`): **code written, unbuilt**
+  (code-only mode, 2026-11-13, D1002). Left: writing Iceberg tables, the REST catalog, row-level deletes, Hudi and
+  Delta Lake.
 - Excel files read and written as tables: `.xlsx` (OOXML), and `.xls` (MS-XLS) after D58's
   legal check (D49). `.xlsx`: **code written, unbuilt** (code-only mode, 2026-11-11, D506).
 - Mainframe loaders: COBOL copybooks, EBCDIC, packed decimal, and VSAM and IMS exports (D49, D242).

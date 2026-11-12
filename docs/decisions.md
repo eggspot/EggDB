@@ -1026,3 +1026,4 @@ its full title with its status.
 - [D999](decisions/D999.md) Code-only batch 647 (M11): EggDB's own HTTP/2, HPACK and gRPC framing
 - [D1000](decisions/D1000.md) Code-only batch 648 (M11): Arrow Flight SQL
 - [D1001](decisions/D1001.md) Code-only batch 649 (M11): EggDB's ADBC driver
+- [D1002](decisions/D1002.md) Code-only batch 650 (M11): reading Apache Iceberg tables
