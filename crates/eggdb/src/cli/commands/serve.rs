@@ -696,6 +696,7 @@ impl Session<'_> {
             memory_budget: Arc::clone(&memory_budget),
             log_batches: options.log_batches,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.tds)),
+            auth_rules: config.auth_rules.clone(),
         });
         let sockets = Sockets {
             postgresql: socket_path.clone(),

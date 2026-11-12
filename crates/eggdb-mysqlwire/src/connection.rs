@@ -343,40 +343,6 @@ fn may_log_in<D: DatabaseDirectory>(directory: &D, database: &str, user: &str) -
         .is_some_and(|role| role.login)
 }
 
-fn ruled_password_check(
-    method: &eggdb_auth::AuthMethod,
-    user: &str,
-    password: &[u8],
-    api_key_ok: &dyn Fn(&str) -> bool,
-) -> Result<(), String> {
-    let text = std::str::from_utf8(password).map_err(|_| "the password is not UTF-8".to_owned())?;
-    match method {
-        eggdb_auth::AuthMethod::Ldap(config) => match config.authenticate(user, text) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err("the LDAP server refused the password".to_owned()),
-            Err(error) => Err(error.to_string()),
-        },
-        eggdb_auth::AuthMethod::Jwt { keys, policy } => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
-            match eggdb_auth::jwt::verify(text, keys, policy, now) {
-                Ok(named) if named == user => Ok(()),
-                Ok(_) => Err("the token names another user".to_owned()),
-                Err(error) => Err(error.to_string()),
-            }
-        }
-        eggdb_auth::AuthMethod::ApiKey => {
-            if api_key_ok(text) {
-                Ok(())
-            } else {
-                Err("the API key is not a live key of this role".to_owned())
-            }
-        }
-        _ => Err("no password method".to_owned()),
-    }
-}
-
 fn authenticate_by_rule<D: DatabaseDirectory>(
     wire: &mut Wire<'_>,
     shared: &Shared<'_>,
@@ -444,7 +410,8 @@ fn authenticate_by_rule<D: DatabaseDirectory>(
                     .is_some_and(|attached| eggdb_sql::api_keys::check_api_key(&attached, &response.user, key))
             };
             let check = |password: &[u8]| {
-                ruled_password_check(external, &response.user, password, &api_key_ok).is_ok()
+                std::str::from_utf8(password)
+                    .is_ok_and(|secret| external.check_secret(&response.user, secret, &api_key_ok).is_ok())
                     && may_log_in(directory, database, &response.user)
             };
             authenticate_stored_role(wire, shared, response, None, Some(&check))

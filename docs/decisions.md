@@ -850,3 +850,4 @@ its full title with its status.
 - [D823](decisions/D823.md) Code-only batch 471 (M6b): MySQL logins for stored roles
 - [D824](decisions/D824.md) Code-only batch 472 (M6b): TDS logins for stored roles
 - [D825](decisions/D825.md) Code-only batch 473 (M6b): the authentication rule file on the MySQL listener
+- [D826](decisions/D826.md) Code-only batch 474 (M6b): the authentication rule file on the TDS listener

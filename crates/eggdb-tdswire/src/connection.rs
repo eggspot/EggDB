@@ -521,9 +521,42 @@ fn check_login<D: DatabaseDirectory>(
     let stored_role = user != config.user;
     let accepted = if stored_role {
         let wanted = if login.database.is_empty() { config.database.as_str() } else { login.database.as_str() };
-        let verifier = stored_role_verifier(served, wanted, &user);
-        match (&login.password, verifier) {
-            (Some(password), Some(verifier)) => verifier.matches_password(password.bytes()),
+        let method = config.auth_rules.as_ref().map_or(eggdb_auth::AuthMethod::ScramSha256, |rules| {
+            rules.method_for_connection(&user, Some(wanted), wire.peer_ip()).clone()
+        });
+        let may_log_in = || {
+            served
+                .matching_name(wanted)
+                .and_then(|name| served.attach(&name))
+                .and_then(|attached| {
+                    let reader = attached.begin_read().ok()?;
+                    eggdb_sql::stored_role(&reader, &user).ok().flatten()
+                })
+                .is_some_and(|role| role.login)
+        };
+        match (&method, &login.password) {
+            (eggdb_auth::AuthMethod::ScramSha256, Some(password)) => stored_role_verifier(served, wanted, &user)
+                .is_some_and(|verifier| verifier.matches_password(password.bytes())),
+            (eggdb_auth::AuthMethod::Certificate, _) => {
+                wire.tls()
+                    .and_then(|info| info.peer_certificates.first())
+                    .is_some_and(|leaf| leaf.subject().common_names().iter().any(|name| name == &user))
+                    && may_log_in()
+            }
+            (
+                eggdb_auth::AuthMethod::Ldap(_) | eggdb_auth::AuthMethod::Jwt { .. } | eggdb_auth::AuthMethod::ApiKey,
+                Some(password),
+            ) => {
+                let api_key_ok = |key: &str| {
+                    served
+                        .matching_name(wanted)
+                        .and_then(|name| served.attach(&name))
+                        .is_some_and(|attached| eggdb_sql::api_keys::check_api_key(&attached, &user, key))
+                };
+                std::str::from_utf8(password.bytes())
+                    .is_ok_and(|secret| method.check_secret(&user, secret, &api_key_ok).is_ok())
+                    && may_log_in()
+            }
             _ => false,
         }
     } else {

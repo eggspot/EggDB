@@ -257,6 +257,7 @@ impl TestServer {
             memory_budget: limits.memory_budget,
             log_batches: true,
             tls,
+            auth_rules: None,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);
@@ -290,6 +291,7 @@ impl TestServer {
             memory_budget: Arc::default(),
             log_batches: true,
             tls: None,
+            auth_rules: None,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);

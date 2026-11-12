@@ -81,6 +81,33 @@ impl AuthMethod {
         }
     }
 
+    /// Checks a password, token or key that `user` sent in clear text against this method:
+    /// `ldap` binds to the directory, `jwt` verifies the token (which must name `user`), and
+    /// `apikey` asks `api_key_ok`, which looks the key up in the database. Other methods take no
+    /// such secret and fail.
+    pub fn check_secret(&self, user: &str, secret: &str, api_key_ok: &dyn Fn(&str) -> bool) -> Result<(), String> {
+        match self {
+            Self::Ldap(config) => match config.authenticate(user, secret) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err("the LDAP server refused the password".to_owned()),
+                Err(error) => Err(error.to_string()),
+            },
+            Self::Jwt { keys, policy } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+                match crate::jwt::verify(secret, keys, policy, now) {
+                    Ok(named) if named == user => Ok(()),
+                    Ok(_) => Err("the token names another user".to_owned()),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            Self::ApiKey if api_key_ok(secret) => Ok(()),
+            Self::ApiKey => Err("the API key is not a live key of this role".to_owned()),
+            _ => Err(format!("{} takes no password", self.name())),
+        }
+    }
+
     /// Whether the method has the client send its password or token in clear text, so it is
     /// allowed only over TLS or a local socket.
     pub fn sends_secret_in_clear(&self) -> bool {

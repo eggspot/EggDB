@@ -401,6 +401,13 @@ impl<'a> Wire<'a> {
         self.stream.tcp().and_then(|stream| stream.try_clone().ok())
     }
 
+    pub(crate) fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        self.stream
+            .tcp()
+            .and_then(|stream| stream.peer_addr().ok())
+            .map(|peer| peer.ip())
+    }
+
     pub(crate) fn peer_is_loopback(&self) -> bool {
         self.stream
             .tcp()

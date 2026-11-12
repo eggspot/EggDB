@@ -60,6 +60,9 @@ pub struct ServerConfig {
     /// The TLS setup, when the server offers encryption (D161): PRELOGIN then negotiates it,
     /// TDS 8 strict connections are accepted, and connections from other machines must encrypt.
     pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
+    /// The rule file that picks how stored roles log in (`--auth-rules`), as on the PostgreSQL
+    /// listener; `oauth` is refused, TDS clients having no `OAUTHBEARER`.
+    pub auth_rules: Option<std::sync::Arc<eggdb_auth::AuthRules>>,
 }
 
 /// Why a listener was not opened.
