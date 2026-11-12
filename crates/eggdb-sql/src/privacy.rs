@@ -1,7 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 3] = ["ff1_encrypt", "ff1_decrypt", "laplace_noise"];
+pub(crate) const FUNCTIONS: [&str; 6] = ["ff1_encrypt", "ff1_decrypt", "laplace_noise", "gen_random_bytes", "eggdb_seal", "eggdb_unseal"];
+const MOST_RANDOM_BYTES: i64 = 1024;
+const SEAL_VERSION: u8 = 1;
 
 const ALPHABET: &str = "0123456789abcdefghijklmnopqrstuvwxyz";
 
@@ -328,13 +330,66 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     }
     Some(match name {
         "laplace_noise" => laplace_noise(values),
+        "gen_random_bytes" => random_bytes(values),
+        "eggdb_seal" | "eggdb_unseal" => sealed(name, values),
         _ => ff1(name, values),
     })
+}
+
+fn random_bytes(values: &[Value]) -> SqlResult<Value> {
+    let count = values.first().and_then(Value::as_integer).filter(|count| (1..=MOST_RANDOM_BYTES).contains(count)).ok_or_else(|| {
+        SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("gen_random_bytes takes a length from 1 to {MOST_RANDOM_BYTES}"))
+    })?;
+    let mut bytes = vec![0u8; count as usize];
+    crate::random::fill(&mut bytes)?;
+    Ok(Value::Bytea(bytes))
+}
+
+fn bytes_of(value: &Value) -> Vec<u8> {
+    match value {
+        Value::Bytea(bytes) => bytes.clone(),
+        other => other.to_text().map(String::into_bytes).unwrap_or_default(),
+    }
+}
+
+fn sealed(name: &str, values: &[Value]) -> SqlResult<Value> {
+    let [data, key] = values else {
+        return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes data and a key")));
+    };
+    let cipher = eggdb_crypto::AesGcm::new(&bytes_of(key)).map_err(|_| {
+        SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("{name}: the key must be 16, 24 or 32 bytes"))
+    })?;
+    let data = bytes_of(data);
+    if name == "eggdb_seal" {
+        let mut nonce = [0u8; eggdb_crypto::AEAD_NONCE_BYTES];
+        crate::random::fill(&mut nonce)?;
+        let mut buffer = data;
+        let tag = cipher.seal_in_place(&nonce, &[SEAL_VERSION], &mut buffer);
+        let mut out = Vec::with_capacity(1 + nonce.len() + buffer.len() + tag.len());
+        out.push(SEAL_VERSION);
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&buffer);
+        out.extend_from_slice(&tag);
+        return Ok(Value::Bytea(out));
+    }
+    let damaged = || SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "eggdb_unseal: the data was not sealed with this key, or was changed");
+    let header = 1 + eggdb_crypto::AEAD_NONCE_BYTES;
+    if data.len() < header + eggdb_crypto::AEAD_TAG_BYTES || data[0] != SEAL_VERSION {
+        return Err(damaged());
+    }
+    let nonce: [u8; eggdb_crypto::AEAD_NONCE_BYTES] = data[1..header].try_into().map_err(|_| damaged())?;
+    let tag_at = data.len() - eggdb_crypto::AEAD_TAG_BYTES;
+    let tag: [u8; eggdb_crypto::AEAD_TAG_BYTES] = data[tag_at..].try_into().map_err(|_| damaged())?;
+    let mut buffer = data[header..tag_at].to_vec();
+    cipher.open_in_place(&nonce, &[SEAL_VERSION], &mut buffer, &tag).map_err(|_| damaged())?;
+    Ok(Value::Bytea(buffer))
 }
 
 pub(crate) fn result_type(name: &str) -> crate::types::SqlType {
     if name == "laplace_noise" {
         crate::types::SqlType::Double
+    } else if matches!(name, "gen_random_bytes" | "eggdb_seal" | "eggdb_unseal") {
+        crate::types::SqlType::Bytea
     } else {
         crate::types::SqlType::Text
     }

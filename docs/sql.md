@@ -3753,6 +3753,25 @@ pipeline's tasks run once the tasks they depend on succeed; a failing task is re
 waiting `retry_delay` doubled at each attempt, and the tasks after a failed one are marked `upstream_failed`.
 `tick()` advances every open run, and `backfill(pipeline, from, to, step)` starts a run per logical date.
 
+## Secrets and short-lived credentials (eggdb_secrets)
+
+`CREATE EXTENSION eggdb_secrets` keeps secrets and issues database credentials that expire, in Vault's style (D751):
+
+```sql
+CREATE EXTENSION eggdb_secrets;
+SELECT eggdb_secrets.put('payments/api-key', 'sk_live_...', :'key');          -- returns the new version
+SELECT eggdb_secrets.get('payments/api-key', :'key');
+SELECT * FROM eggdb_secrets.issue_credentials('reporting', interval '1 hour');  -- username, password, expires_at
+SELECT cron.schedule('expire-credentials', '* * * * *', 'SELECT eggdb_secrets.expire_credentials()');
+```
+
+Secrets are versioned and sealed with `eggdb_seal(data, key)` (AES-GCM with a random nonce; `eggdb_unseal` opens
+and checks it) under a 16, 24 or 32-byte key the application holds, so a copy of the database alone does not reveal
+them; `rotate_key` reseals every version under a new key. `issue_credentials(role, ttl)` creates a login role with a
+random password, a member of the given role and valid until the lease ends; `renew_credentials`,
+`revoke_credentials` and `expire_credentials` (for a pg_cron job) manage the leases. `gen_random_bytes(n)` gives
+random bytes from the secure source.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,
