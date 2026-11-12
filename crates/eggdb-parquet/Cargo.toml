@@ -11,3 +11,5 @@ workspace = true
 
 [dependencies]
 eggdb-columnar = { path = "../eggdb-columnar" }
+eggdb-content = { path = "../eggdb-content" }
+eggdb-storage = { path = "../eggdb-storage" }

@@ -311,6 +311,7 @@ impl CommandName {
                 matches!(self, Self::Import | Self::Export)
             }
             OptionName::Arrow => matches!(self, Self::Export | Self::Import),
+            OptionName::ParquetCompression => self == Self::Export,
             OptionName::Dbf | OptionName::Copybook | OptionName::Ebcdic => self == Self::Import,
             OptionName::SqlDump => self == Self::Export,
             OptionName::OnConflict
@@ -498,6 +499,7 @@ enum OptionName {
     Mode,
     Csv,
     Parquet,
+    ParquetCompression,
     Ndjson,
     Xlsx,
     Dbf,
@@ -624,6 +626,7 @@ impl OptionName {
             b"mode" => Self::Mode,
             b"csv" => Self::Csv,
             b"parquet" => Self::Parquet,
+            b"parquet-compression" => Self::ParquetCompression,
             b"ndjson" => Self::Ndjson,
             b"xlsx" => Self::Xlsx,
             b"dbf" => Self::Dbf,
@@ -837,6 +840,7 @@ pub(crate) struct CsvOptions {
     pub(crate) native: bool,
     pub(crate) format_file: Option<PathBuf>,
     pub(crate) parquet: Option<PathBuf>,
+    pub(crate) parquet_compression: eggdb_parquet::Compression,
     pub(crate) ndjson: Option<PathBuf>,
     pub(crate) xlsx: Option<PathBuf>,
     pub(crate) dbf: Option<PathBuf>,
@@ -1671,6 +1675,20 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Csv => request.csv.source = Some(export_file(value)),
             OptionName::Parquet => request.csv.parquet = Some(PathBuf::from(value)),
+            OptionName::ParquetCompression => {
+                request.csv.parquet_compression = match value.as_encoded_bytes().to_ascii_lowercase().as_slice() {
+                    b"none" | b"uncompressed" => eggdb_parquet::Compression::Uncompressed,
+                    b"gzip" => eggdb_parquet::Compression::Gzip,
+                    b"zstd" => eggdb_parquet::Compression::Zstd,
+                    _ => {
+                        return Err(format!(
+                            "{} takes none, gzip or zstd, not '{}'",
+                            option.spelled,
+                            shown(value)
+                        ));
+                    }
+                };
+            }
             OptionName::Ndjson => request.csv.ndjson = Some(PathBuf::from(value)),
             OptionName::Xlsx => request.csv.xlsx = Some(PathBuf::from(value)),
             OptionName::Dbf => request.csv.dbf = Some(PathBuf::from(value)),
@@ -2970,6 +2988,7 @@ mod tests {
                 parquet: None,
                 arrow: None,
                 sql_dump: None,
+                ..CsvOptions::default()
             }
         );
         let bcp = request(

@@ -383,7 +383,8 @@ impl Session<'_> {
             Ok(found) => found,
             Err(exit) => return Ok(exit),
         };
-        let bytes = eggdb_parquet::write(&columns).map_err(|error| {
+        let compression = self.request.csv.parquet_compression;
+        let bytes = eggdb_parquet::write_compressed(&columns, eggdb_parquet::ROW_GROUP_ROWS, compression).map_err(|error| {
             Failure::database(
                 format!("cannot write {shown}: {error}"),
                 Exit::DatabaseError,

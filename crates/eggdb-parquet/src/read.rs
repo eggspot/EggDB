@@ -266,8 +266,8 @@ fn decompressed(codec: i64, data: &[u8], size: usize) -> Result<Vec<u8>, Parquet
         0 => Ok(data.to_vec()),
         1 => eggdb_columnar::snappy_decompress(data, size)
             .map_err(|error| damaged(&format!("a Snappy block: {}", error.0))),
-        2 => Err(unsupported("GZIP-compressed Parquet")),
-        6 => Err(unsupported("ZSTD-compressed Parquet")),
+        2 => eggdb_content::gunzip(data, size).map_err(|error| damaged(&format!("a GZIP page: {error}"))),
+        6 => eggdb_storage::decompress_zstd(data, size).map_err(|error| damaged(&format!("a ZSTD page: {error}"))),
         other => Err(unsupported(&format!("Parquet compression codec {other}"))),
     }
 }

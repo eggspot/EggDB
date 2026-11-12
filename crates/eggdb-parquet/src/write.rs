@@ -2,7 +2,8 @@ use crate::thrift::Writer;
 use crate::{Cell, Column, ColumnType, ParquetError};
 
 const MAGIC: &[u8] = b"PAR1";
-const ROW_GROUP_ROWS: usize = 131_072;
+/// The most rows [`write`] puts in one row group.
+pub const ROW_GROUP_ROWS: usize = 131_072;
 const PLAIN: i64 = 0;
 const RLE: i64 = 3;
 
@@ -66,6 +67,36 @@ fn value_bytes(column: &Column, cells: &[Cell], out: &mut Vec<u8>) -> Result<(),
         eggdb_columnar::pack(&bits, 1, out);
     }
     Ok(())
+}
+
+/// How [`write_compressed`] compresses each data page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Compression {
+    /// No compression (Parquet's `UNCOMPRESSED`).
+    #[default]
+    Uncompressed,
+    /// GZIP, with EggDB's own DEFLATE writer.
+    Gzip,
+    /// Zstandard.
+    Zstd,
+}
+
+impl Compression {
+    fn codec(self) -> i64 {
+        match self {
+            Self::Uncompressed => 0,
+            Self::Gzip => 2,
+            Self::Zstd => 6,
+        }
+    }
+
+    fn compress(self, data: Vec<u8>) -> Vec<u8> {
+        match self {
+            Self::Uncompressed => data,
+            Self::Gzip => eggdb_content::gzip(&data),
+            Self::Zstd => eggdb_storage::compress_zstd(&data),
+        }
+    }
 }
 
 fn page(column: &Column, cells: &[Cell]) -> Result<Vec<u8>, ParquetError> {
@@ -253,6 +284,7 @@ pub fn write(columns: &[Column]) -> Result<Vec<u8>, ParquetError> {
 struct Chunk {
     offset: i64,
     size: i64,
+    uncompressed_size: i64,
     nulls: i64,
     bounds: Option<(Vec<u8>, Vec<u8>)>,
 }
@@ -261,6 +293,16 @@ struct Chunk {
 pub fn write_with_row_groups(
     columns: &[Column],
     rows_per_group: usize,
+) -> Result<Vec<u8>, ParquetError> {
+    write_compressed(columns, rows_per_group, Compression::Uncompressed)
+}
+
+/// Writes `columns` as [`write_with_row_groups`] does, each data page compressed with
+/// `compression`.
+pub fn write_compressed(
+    columns: &[Column],
+    rows_per_group: usize,
+    compression: Compression,
 ) -> Result<Vec<u8>, ParquetError> {
     let rows = columns.first().map_or(0, |column| column.cells.len());
     if columns.iter().any(|column| column.cells.len() != rows) {
@@ -277,13 +319,16 @@ pub fn write_with_row_groups(
         let mut chunks = Vec::with_capacity(columns.len());
         for column in columns {
             let cells = &column.cells[start..end];
-            let data = page(column, cells)?;
+            let plain = page(column, cells)?;
+            let plain_size = i64::try_from(plain.len())
+                .map_err(|_| ParquetError("a column is too large".to_owned()))?;
+            let data = compression.compress(plain);
             let size = i64::try_from(data.len())
                 .map_err(|_| ParquetError("a column is too large".to_owned()))?;
             let mut header = Writer::default();
             header.begin();
             header.int(1, false, 0);
-            header.int(2, false, size);
+            header.int(2, false, plain_size);
             header.int(3, false, size);
             header.begin_struct(5);
             header.int(1, false, cells.len() as i64);
@@ -296,9 +341,11 @@ pub fn write_with_row_groups(
             file.extend_from_slice(&header.out);
             file.extend_from_slice(&data);
             let (nulls, bounds) = statistics(column, cells);
+            let written = file.len() as i64 - offset;
             chunks.push(Chunk {
                 offset,
-                size: file.len() as i64 - offset,
+                size: written,
+                uncompressed_size: written - size + plain_size,
                 nulls,
                 bounds,
             });
@@ -335,9 +382,9 @@ pub fn write_with_row_groups(
             meta.list_int(RLE);
             meta.begin_list(3, 8, 1);
             meta.list_binary(column.name.as_bytes());
-            meta.int(4, false, 0);
+            meta.int(4, false, compression.codec());
             meta.int(5, true, *group_rows as i64);
-            meta.int(6, true, chunk.size);
+            meta.int(6, true, chunk.uncompressed_size);
             meta.int(7, true, chunk.size);
             meta.int(9, true, chunk.offset);
             meta.begin_struct(12);
@@ -350,7 +397,7 @@ pub fn write_with_row_groups(
             meta.end();
             meta.end();
         }
-        let total: i64 = chunks.iter().map(|chunk| chunk.size).sum();
+        let total: i64 = chunks.iter().map(|chunk| chunk.uncompressed_size).sum();
         meta.int(2, true, total);
         meta.int(3, true, *group_rows as i64);
         meta.end();

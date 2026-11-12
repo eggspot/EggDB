@@ -758,3 +758,4 @@ its full title with its status.
 - [D731](decisions/D731.md) Code-only batch 379 (M16): `image_metadata`, EXIF and XMP from JPEG, PNG, TIFF and WebP images
 - [D732](decisions/D732.md) Code-only batch 380 (M10): Oracle `UTL_ENCODE`, `UTL_I18N` and `UTL_URL`
 - [D733](decisions/D733.md) Code-only batch 381 (M10): Oracle `UTL_COMPRESS` on a DEFLATE and gzip writer in `eggdb-content`
+- [D734](decisions/D734.md) Code-only batch 382 (M11): GZIP and ZSTD Parquet pages, read and written, and `--parquet-compression`
