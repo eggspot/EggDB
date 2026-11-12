@@ -10,6 +10,7 @@ mod columns;
 mod proto;
 mod service;
 
+pub use columns::columns_of;
 pub use service::Endpoint;
 
 use eggdb_sql::KeyValueStore;

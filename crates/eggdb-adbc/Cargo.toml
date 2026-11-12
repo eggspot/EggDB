@@ -1,0 +1,21 @@
+[package]
+name = "eggdb-adbc"
+autotests = false
+description = "EggDB's ADBC driver: the embedded database through the Arrow Database Connectivity C API, with results as Arrow C data interface streams."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "eggdb_adbc"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb = { path = "../eggdb" }
+eggdb-flight = { path = "../eggdb-flight" }
+eggdb-parquet = { path = "../eggdb-parquet" }

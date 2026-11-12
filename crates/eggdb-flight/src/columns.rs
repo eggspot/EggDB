@@ -39,7 +39,7 @@ fn cell(column_type: ColumnType, value: Value) -> Cell {
 }
 
 /// A result's rows as Arrow columns, typed by the result's column types (text for the rest).
-pub(crate) fn columns_of(result: QueryResult) -> Vec<Column> {
+pub fn columns_of(result: QueryResult) -> Vec<Column> {
     let described = result.columns.unwrap_or_default();
     let types: Vec<ColumnType> = described.iter().map(|column| column_type(column.sql_type.as_ref())).collect();
     let mut cells: Vec<Vec<Cell>> = types.iter().map(|_| Vec::with_capacity(result.rows.len())).collect();

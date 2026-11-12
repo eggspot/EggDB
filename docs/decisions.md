@@ -1025,3 +1025,4 @@ its full title with its status.
 - [D998](decisions/D998.md) Code-only batch 646 (M10): Oracle's DBMS_SQL
 - [D999](decisions/D999.md) Code-only batch 647 (M11): EggDB's own HTTP/2, HPACK and gRPC framing
 - [D1000](decisions/D1000.md) Code-only batch 648 (M11): Arrow Flight SQL
+- [D1001](decisions/D1001.md) Code-only batch 649 (M11): EggDB's ADBC driver
