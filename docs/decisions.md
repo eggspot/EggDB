@@ -1024,3 +1024,4 @@ its full title with its status.
 - [D997](decisions/D997.md) Code-only batch 645 (M10): Oracle database links to PostgreSQL, MySQL and SQL Server
 - [D998](decisions/D998.md) Code-only batch 646 (M10): Oracle's DBMS_SQL
 - [D999](decisions/D999.md) Code-only batch 647 (M11): EggDB's own HTTP/2, HPACK and gRPC framing
+- [D1000](decisions/D1000.md) Code-only batch 648 (M11): Arrow Flight SQL

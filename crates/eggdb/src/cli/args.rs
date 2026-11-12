@@ -260,6 +260,7 @@ impl CommandName {
             | OptionName::RestListen
             | OptionName::ClickhouseListen
             | OptionName::TrinoListen
+            | OptionName::FlightListen
             | OptionName::SparqlListen
             | OptionName::SmtpListen
             | OptionName::ImapListen
@@ -476,6 +477,7 @@ enum OptionName {
     RestListen,
     ClickhouseListen,
     TrinoListen,
+    FlightListen,
     SparqlListen,
     SmtpListen,
     ImapListen,
@@ -620,6 +622,7 @@ impl OptionName {
             b"rest-listen" => Self::RestListen,
             b"clickhouse-listen" => Self::ClickhouseListen,
             b"trino-listen" => Self::TrinoListen,
+            b"flight-listen" => Self::FlightListen,
             b"sparql-listen" => Self::SparqlListen,
             b"smtp-listen" => Self::SmtpListen,
             b"imap-listen" => Self::ImapListen,
@@ -969,6 +972,7 @@ pub(crate) struct ServeOptions {
     pub(crate) rest_listen: Option<SocketAddr>,
     pub(crate) clickhouse_listen: Option<SocketAddr>,
     pub(crate) trino_listen: Option<SocketAddr>,
+    pub(crate) flight_listen: Option<SocketAddr>,
     pub(crate) sparql_listen: Option<SocketAddr>,
     pub(crate) smtp_listen: Option<SocketAddr>,
     pub(crate) imap_listen: Option<SocketAddr>,
@@ -1595,6 +1599,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::TrinoListen => {
                 request.serve.trino_listen =
                     Some(parse_listen(&option.spelled, value, 8080).map_err(usage)?);
+            }
+            OptionName::FlightListen => {
+                request.serve.flight_listen =
+                    Some(parse_listen(&option.spelled, value, 32010).map_err(usage)?);
             }
             OptionName::SparqlListen => {
                 request.serve.sparql_listen =

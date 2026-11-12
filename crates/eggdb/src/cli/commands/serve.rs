@@ -426,6 +426,22 @@ impl Session<'_> {
             }
             None => None,
         };
+        let flight_listener = match options.flight_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--flight-listen {address}: Arrow Flight SQL has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for Arrow Flight SQL on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let smtp_listener = match options.smtp_listen {
             Some(address) => {
                 if self.request.read_only {
@@ -957,6 +973,12 @@ impl Session<'_> {
             server_password_sha256,
             &config.database,
         );
+        let flight_endpoint = eggdb_flight::Endpoint::new(
+            &store,
+            &config.user,
+            server_password_sha256,
+            &config.database,
+        );
         let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
         let mcp_oauth = super::serve_mcp::oauth_from_environment().map_err(|message| Failure::usage(message, Some(CommandName::Serve)))?;
         let mcp_endpoint = match mcp_listener.as_ref() {
@@ -1228,6 +1250,12 @@ impl Session<'_> {
                         .with_rate_limit(rate_limiter.as_ref())
                         .decoding_content_encoding(),
                 ),
+                None => Ok(()),
+            });
+            let flight_server = scope.spawn(|| match &flight_listener {
+                Some(listener) => {
+                    eggdb_flight::serve(&flight_endpoint, listener, max_connections, &stop_signals::requested)
+                }
                 None => Ok(()),
             });
             let cql_server = scope.spawn(|| match &cql_listener {
@@ -1511,6 +1539,7 @@ impl Session<'_> {
             let _ = rest_server.join();
             let _ = clickhouse_server.join();
             let _ = trino_server.join();
+            let _ = flight_server.join();
             let _ = sparql_server.join();
             let _ = smtp_server.join();
             let _ = imap_server.join();

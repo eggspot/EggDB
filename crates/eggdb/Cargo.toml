@@ -44,6 +44,7 @@ eggdb-observability = { path = "../eggdb-observability" }
 eggdb-api = { path = "../eggdb-api" }
 eggdb-clickhouse = { path = "../eggdb-clickhouse" }
 eggdb-trino = { path = "../eggdb-trino" }
+eggdb-flight = { path = "../eggdb-flight" }
 eggdb-rdf = { path = "../eggdb-rdf" }
 eggdb-mail = { path = "../eggdb-mail" }
 eggdb-dav = { path = "../eggdb-dav" }

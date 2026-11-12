@@ -238,6 +238,24 @@ fn column_buffers(column: &Column, body: &mut Body) -> Result<i64, String> {
     Ok(i64::try_from(nulls).unwrap_or(i64::MAX))
 }
 
+/// The FlatBuffers `Message` holding `columns`' schema, as Arrow Flight's `data_header` carries it.
+pub fn schema_message_bytes(columns: &[Column]) -> Vec<u8> {
+    schema_message(columns)
+}
+
+/// `columns`' schema as an encapsulated IPC message (continuation marker, length, padded
+/// message), as Arrow Flight's `FlightInfo.schema` carries it.
+pub fn encapsulated_schema(columns: &[Column]) -> Vec<u8> {
+    let mut out = Vec::new();
+    frame(&schema_message(columns), &[], &mut out);
+    out
+}
+
+/// The FlatBuffers `Message` of one record batch holding every row of `columns`, and its body.
+pub fn record_batch_message(columns: &[Column]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    record_batch(columns)
+}
+
 /// `columns`, all of the same length, as an Arrow IPC stream: a schema message, one record
 /// batch and the end-of-stream marker.
 pub fn write_stream(columns: &[Column]) -> Result<Vec<u8>, String> {

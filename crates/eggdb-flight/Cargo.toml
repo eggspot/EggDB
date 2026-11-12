@@ -1,0 +1,19 @@
+[package]
+name = "eggdb-flight"
+autotests = false
+description = "EggDB's Arrow Flight SQL service over its own HTTP/2 and gRPC (D29): queries, updates, prepared statements and catalog commands, with results as Arrow record batches."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eggdb-arrow = { path = "../eggdb-arrow" }
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http2 = { path = "../eggdb-http2" }
+eggdb-parquet = { path = "../eggdb-parquet" }
+eggdb-platform = { path = "../eggdb-platform" }
+eggdb-sql = { path = "../eggdb-sql" }
+
+[lints]
+workspace = true
