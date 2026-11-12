@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 eggdb = { path = "../eggdb" }
+eggdb-mysqlwire = { path = "../eggdb-mysqlwire" }
 eggdb-pgwire = { path = "../eggdb-pgwire" }
 
 [[test]]

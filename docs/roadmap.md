@@ -1032,7 +1032,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   new decision that refines D15 (D15).
 
 ### M6f Network drivers, ORMs and connectors
-- The MySQL and TDS protocols as backends of the C API's network session (D192).
+- The MySQL and TDS protocols as backends of the C API's network session (D192). MySQL's (`mysql://` in
+  `eggdb_sql_connect`): **code written, unbuilt** (code-only mode, 2026-11-13, D967). Left: TDS, whose client reads
+  only `nvarchar` columns, and prepared statements and `COPY` on MySQL sessions.
 - Connection pooling, prepared statement reuse, binary result formats, cancel and `COPY` in the
   network drivers (D192).
 - Each driver's tests run against `eggdb serve` over the network, Python, .NET, Java, Node.js and

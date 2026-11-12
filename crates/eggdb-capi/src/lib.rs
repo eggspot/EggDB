@@ -32,6 +32,7 @@ mod scan;
 mod sql;
 mod statement;
 mod status;
+mod text_backend;
 mod transaction;
 
 pub use copy::{

@@ -991,3 +991,4 @@ its full title with its status.
 - [D964](decisions/D964.md) Code-only batch 612 (M6f): Hibernate's dialect and Exposed's registration for the JDBC driver
 - [D965](decisions/D965.md) Code-only batch 613 (M6f): named parameters in the ADO.NET provider, NHibernate's driver and dialect
 - [D966](decisions/D966.md) Code-only batch 614 (M6f): the Dart package as a Flutter plugin and the Swift package on an XCFramework
+- [D967](decisions/D967.md) Code-only batch 615 (M6f): MySQL's protocol as a backend of the C API's network session

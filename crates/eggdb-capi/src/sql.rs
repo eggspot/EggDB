@@ -387,6 +387,7 @@ pub(crate) enum Backend {
         database: Arc<Database>,
     },
     Remote(Box<RemoteSession>),
+    MySql(Box<crate::text_backend::MySqlRemote>),
 }
 
 const BROKEN_CONNECTION: &str = "the connection to the server broke during an earlier call; close this session with eggdb_sql_close and connect again";
@@ -482,6 +483,7 @@ impl EggdbSql {
         let canceller = match &backend {
             Backend::Local { session, .. } => Canceller::Local(session.cancel_signal()),
             Backend::Remote(remote) => Canceller::Remote(remote.client.cancel_request()),
+            Backend::MySql(_) => Canceller::Remote(None),
         };
         Self {
             canceller,
@@ -608,7 +610,7 @@ impl SessionState {
     pub(crate) fn remote(&mut self) -> Result<&mut RemoteSession, Failure> {
         match &mut self.backend {
             Backend::Remote(remote) => Ok(&mut **remote),
-            Backend::Local { .. } => Err(Failure::new(
+            Backend::Local { .. } | Backend::MySql(_) => Err(Failure::new(
                 EGGDB_ERR_INTERNAL,
                 "a handle that reads from a server is used on a session in the process",
             )),
@@ -727,6 +729,16 @@ pub(crate) fn run_on(
             };
             let gathered = answered.map_err(|error| remote.failed(error))?;
             for result in &gathered {
+                batch.add_remote(result);
+            }
+        }
+        Backend::MySql(remote) => {
+            if copy.is_some() {
+                return Err(Failure::invalid_argument(
+                    "COPY is not available on a mysql:// session; use LOAD DATA or INSERT",
+                ));
+            }
+            for result in &remote.run(text, parameters)? {
                 batch.add_remote(result);
             }
         }
@@ -866,6 +878,11 @@ fn remote_failure(error: ClientError) -> Failure {
 /// server, stepped rows are read from the connection as they are stepped, `COPY` uses the
 /// copy sub-protocol piece by piece, and [`eggdb_sql_cancel`] sends a cancel request.
 ///
+/// A `mysql://user@host:port/database` URL connects to a MySQL server (EggDB's own or any
+/// other) over MySQL's text protocol instead, with the password from `MYSQL_PWD`: parameters
+/// are sent inlined as escaped literals, values come back as text, and prepared statements,
+/// `COPY` and cancel are refused for now.
+///
 /// # Safety
 /// `url` is a NUL-terminated string and `sql` points to writable memory for one handle.
 #[unsafe(no_mangle)]
@@ -875,6 +892,12 @@ pub unsafe extern "C" fn eggdb_sql_connect(url: *const c_char, sql: *mut *mut Eg
         unsafe { args::write(sql, std::ptr::null_mut(), "sql") }?;
         // SAFETY: eggdb.h asks for a NUL-terminated URL.
         let url = unsafe { args::text(url, "url") }?;
+        if crate::text_backend::is_mysql_url(url) {
+            let remote = crate::text_backend::MySqlRemote::connect(url)?;
+            let handle = args::give(EggdbSql::new(Backend::MySql(Box::new(remote))));
+            // SAFETY: as for the first write to `sql`.
+            return unsafe { args::write(sql, handle, "sql") };
+        }
         let options = eggdb_pgwire::client::parse_postgres_url_with_password(url)
             .map_err(Failure::invalid_argument)?;
         let client = PgClient::connect(&options).map_err(remote_failure)?;
@@ -935,6 +958,10 @@ pub unsafe extern "C" fn eggdb_sql_close(sql: *mut EggdbSql) -> c_int {
             }
             Backend::Remote(remote) => {
                 remote.client.terminate();
+                Ok(())
+            }
+            Backend::MySql(remote) => {
+                drop(remote);
                 Ok(())
             }
         }

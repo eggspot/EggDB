@@ -229,6 +229,7 @@ impl EggdbStmt {
                     column_types: Vec::new(),
                 };
             }
+            Backend::MySql(_) => return Err(prepared_on_mysql()),
         }
         state.hold(Holder::Stepping(self.id));
         Ok(())
@@ -400,6 +401,7 @@ pub unsafe extern "C" fn eggdb_sql_prepare(
                 let columns = remote_columns(&outline.columns, &outline.column_types);
                 (outline.parameter_types.len(), columns, Some(name))
             }
+            Backend::MySql(_) => return Err(prepared_on_mysql()),
         };
         // SAFETY: as for `session_state` above; this only counts the statement.
         unsafe { args::handle(sql, "sql") }?.statement_prepared();
@@ -962,6 +964,12 @@ pub unsafe extern "C" fn eggdb_stmt_finalize(stmt: *mut EggdbStmt) -> c_int {
         unsafe { args::handle(handle.session, "the statement's session") }?.statement_finalized();
         ended
     })
+}
+
+fn prepared_on_mysql() -> Failure {
+    Failure::invalid_argument(
+        "prepared statements are not available on a mysql:// session yet; run the statement with eggdb_sql_execute_with_parameters",
+    )
 }
 
 #[cfg(test)]

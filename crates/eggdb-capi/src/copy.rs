@@ -627,6 +627,11 @@ pub unsafe extern "C" fn eggdb_sql_copy_in(
         let (backend, batch) = state.parts();
         let (published, len) = match backend {
             Backend::Remote(remote) => copy_in_remote(remote, batch, text, data)?,
+            Backend::MySql(_) => {
+                return Err(Failure::invalid_argument(
+                    "COPY is not available on a mysql:// session; use LOAD DATA or INSERT",
+                ));
+            }
             Backend::Local { .. } => {
                 let mut channel = CopyInData {
                     remaining: data,
