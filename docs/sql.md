@@ -3541,7 +3541,7 @@ expressions, metrics being aggregates) defined once in `eggdb_bi.models`, `dimen
 INSERT INTO eggdb_bi.models VALUES ('orders', 'SELECT * FROM orders', NULL);
 INSERT INTO eggdb_bi.dimensions VALUES ('orders', 'month', 'date_trunc(''month'', ordered_at)', NULL);
 INSERT INTO eggdb_bi.metrics VALUES ('orders', 'revenue', 'sum(amount)', NULL);
-SELECT eggdb_bi.metric_query('orders', ARRAY['revenue'], ARRAY['month'], order_by => '1');
+SELECT eggdb_bi.metric_query('orders', ARRAY['revenue'], ARRAY['month'], NULL, '1');
 ```
 
 ## Time-series policies (timescaledb)
