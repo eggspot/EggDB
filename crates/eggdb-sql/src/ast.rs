@@ -126,6 +126,7 @@ pub(crate) enum Statement {
     Do(DoBlock),
     PlsqlBlock(Box<PlsqlBlock>),
     Synonym(SynonymCommand),
+    OracleContext(OracleContextCommand),
     CreatePackage(Box<CreatePackage>),
     DropPackage(DropPackage),
     AlterPackage(AlterPackage),
@@ -1300,6 +1301,19 @@ pub(crate) struct AlterEvent {
     pub(crate) rename: Option<Name>,
     pub(crate) comment: Option<String>,
     pub(crate) body: Option<String>,
+}
+
+/// Oracle's `CREATE [OR REPLACE] CONTEXT namespace USING [schema.]package` and `DROP CONTEXT`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum OracleContextCommand {
+    Create {
+        namespace: String,
+        package: String,
+        replace: bool,
+    },
+    Drop {
+        namespace: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

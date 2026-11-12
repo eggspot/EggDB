@@ -1046,3 +1046,41 @@ fn application_info_and_the_client_identifier_show_in_sys_context() {
     );
     failure(&mut session, "BEGIN DBMS_SESSION.NO_SUCH_MEMBER; END;");
 }
+
+#[test]
+fn application_contexts_are_set_only_by_their_trusted_package() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut session,
+        "CREATE OR REPLACE PACKAGE tenant_ctx AS\n  PROCEDURE choose(tenant VARCHAR2);\n  PROCEDURE forget;\nEND tenant_ctx;",
+    );
+    values(
+        &mut session,
+        "CREATE OR REPLACE PACKAGE BODY tenant_ctx AS\n  PROCEDURE choose(tenant VARCHAR2) IS\n  BEGIN\n    DBMS_SESSION.SET_CONTEXT('app_ctx', 'tenant', tenant);\n  END choose;\n  PROCEDURE forget IS\n  BEGIN\n    DBMS_SESSION.CLEAR_CONTEXT('app_ctx', NULL, 'tenant');\n  END forget;\nEND tenant_ctx;",
+    );
+    failure(&mut session, "BEGIN tenant_ctx.choose('acme'); END;");
+    values(&mut session, "CREATE CONTEXT app_ctx USING tenant_ctx");
+    failure(&mut session, "CREATE CONTEXT app_ctx USING tenant_ctx");
+    values(&mut session, "CREATE OR REPLACE CONTEXT app_ctx USING tenant_ctx");
+    values(&mut session, "BEGIN tenant_ctx.choose('acme'); END;");
+    assert_eq!(
+        values(&mut session, "SELECT SYS_CONTEXT('APP_CTX', 'TENANT'), SYS_CONTEXT('app_ctx', 'other') FROM dual"),
+        vec![vec![text("acme"), Value::Null]]
+    );
+    failure(
+        &mut session,
+        "BEGIN DBMS_SESSION.SET_CONTEXT('app_ctx', 'tenant', 'spoofed'); END;",
+    );
+    assert_eq!(
+        values(&mut session, "SELECT SYS_CONTEXT('app_ctx', 'tenant') FROM dual"),
+        vec![vec![text("acme")]]
+    );
+    values(&mut session, "BEGIN tenant_ctx.forget; END;");
+    assert_eq!(
+        values(&mut session, "SELECT SYS_CONTEXT('app_ctx', 'tenant') FROM dual"),
+        vec![vec![Value::Null]]
+    );
+    values(&mut session, "DROP CONTEXT app_ctx");
+    failure(&mut session, "DROP CONTEXT app_ctx");
+}

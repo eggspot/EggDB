@@ -145,6 +145,7 @@ pub(crate) fn statement_kind(statement: &crate::ast::Statement) -> Option<AuditK
         | Statement::DropRoutine(_)
         | Statement::AlterRoutine(_)
         | Statement::Synonym(_)
+        | Statement::OracleContext(_)
         | Statement::CreatePackage(_)
         | Statement::DropPackage(_)
         | Statement::AlterPackage(_)

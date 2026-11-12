@@ -9,6 +9,7 @@ pub(crate) mod mysql_events;
 mod mysql_load;
 mod nonatomic;
 mod oracle;
+pub(crate) mod oracle_contexts;
 mod oracle_over_tds;
 mod prepared;
 mod read_only;
@@ -3759,6 +3760,7 @@ impl<'s> Session<'s> {
             Statement::Do(block) => self.write("DO", |writer, tables| {
                 crate::routines::run_do(writer, tables, &settings, &block.code)
             }),
+            Statement::OracleContext(command) => self.run_oracle_context(&command),
             Statement::Synonym(command) => {
                 let tag = match command {
                     crate::ast::SynonymCommand::Create { .. } => "CREATE SYNONYM",

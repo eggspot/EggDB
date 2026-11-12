@@ -12,6 +12,8 @@ const MIN_OUTPUT_BUFFER_BYTES: usize = 2_000;
 const MAX_OUTPUT_LINE_BYTES: usize = 32_767;
 const PACKAGE_ERROR_CODE: u16 = 20_000;
 const MAX_PACKAGE_INSTANCES: usize = 1_000;
+const MAX_CONTEXT_VALUES: usize = 10_000;
+const MAX_CONTEXT_VALUE_BYTES: usize = 4_000;
 
 pub(crate) type SharedPlsqlSession = Arc<Mutex<PlsqlSession>>;
 
@@ -20,6 +22,7 @@ pub(crate) struct PlsqlSession {
     pub(crate) output: ServerOutput,
     packages: Vec<PackageInstance>,
     generations: u64,
+    contexts: std::collections::BTreeMap<(String, String), String>,
 }
 
 #[derive(Debug)]
@@ -97,6 +100,45 @@ impl PlsqlSession {
             cursors: Vec::new(),
         });
         Ok(self.generations)
+    }
+
+    /// Sets an application context attribute (`DBMS_SESSION.SET_CONTEXT`); names are kept in
+    /// upper case, as Oracle compares them.
+    pub(crate) fn set_context(&mut self, namespace: &str, attribute: &str, value: &str) -> SqlResult<()> {
+        if value.len() > MAX_CONTEXT_VALUE_BYTES {
+            return Err(SqlError::new(
+                SqlState::STRING_DATA_RIGHT_TRUNCATION,
+                format!("ORA-01401: an application context value holds at most {MAX_CONTEXT_VALUE_BYTES} bytes"),
+            )
+            .with_oracle_code(1401));
+        }
+        let key = (namespace.to_uppercase(), attribute.to_uppercase());
+        if !self.contexts.contains_key(&key) && self.contexts.len() >= MAX_CONTEXT_VALUES {
+            return Err(package_error(format!(
+                "a session keeps at most {MAX_CONTEXT_VALUES} application context values"
+            )));
+        }
+        self.contexts.insert(key, value.to_owned());
+        Ok(())
+    }
+
+    /// Clears one attribute of an application context, or all of them when `attribute` is
+    /// `None` (`DBMS_SESSION.CLEAR_CONTEXT`).
+    pub(crate) fn clear_context(&mut self, namespace: &str, attribute: Option<&str>) {
+        let namespace = namespace.to_uppercase();
+        match attribute {
+            Some(attribute) => {
+                self.contexts.remove(&(namespace, attribute.to_uppercase()));
+            }
+            None => self.contexts.retain(|(kept, _), _| *kept != namespace),
+        }
+    }
+
+    /// The value `SYS_CONTEXT(namespace, attribute)` reads from an application context.
+    pub(crate) fn context_value(&self, namespace: &str, attribute: &str) -> Option<String> {
+        self.contexts
+            .get(&(namespace.trim().to_uppercase(), attribute.trim().to_uppercase()))
+            .cloned()
     }
 
     pub(crate) fn discard_package(&mut self, name: &str) {

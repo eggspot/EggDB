@@ -429,7 +429,17 @@ impl<'t> Parser<'t> {
             return Err(self.not_supported("SYS_CONTEXT with arguments other than text constants"));
         };
         if !namespace.trim().eq_ignore_ascii_case("userenv") {
-            return Ok(literal(Literal::Null, position));
+            let value = crate::plsql::with_session(|session| session.context_value(&namespace, &parameter)).flatten();
+            return Ok(match value {
+                Some(value) => Expr {
+                    kind: ExprKind::SessionValue {
+                        name: "sys_context",
+                        value,
+                    },
+                    position,
+                },
+                None => literal(Literal::Null, position),
+            });
         }
         let user = self.oracle_user();
         let current_schema = self.oracle_current_schema();
@@ -467,6 +477,35 @@ impl<'t> Parser<'t> {
         };
         let statement = match word.as_ref() {
             "drop" if self.is_word_at(1, "table") => self.oracle_drop_table()?,
+            "create"
+                if self.is_word_at(1, "context")
+                    || (self.is_word_at(1, "or")
+                        && self.is_word_at(2, "replace")
+                        && self.is_word_at(3, "context")) =>
+            {
+                self.at += 1;
+                let replace = self.take_word("or");
+                if replace {
+                    self.expect_word("replace")?;
+                }
+                self.expect_word("context")?;
+                let namespace = swap_uniform_case(&self.name()?.text);
+                self.expect_word("using")?;
+                let package = self.table_name()?.text;
+                if self.is_word("initialized") || self.is_word("accessed") {
+                    return Err(self.not_supported("contexts initialized externally or globally, or accessed globally"));
+                }
+                Statement::OracleContext(crate::ast::OracleContextCommand::Create {
+                    namespace,
+                    package,
+                    replace,
+                })
+            }
+            "drop" if self.is_word_at(1, "context") => {
+                self.at += 2;
+                let namespace = swap_uniform_case(&self.name()?.text);
+                Statement::OracleContext(crate::ast::OracleContextCommand::Drop { namespace })
+            }
             "create"
                 if self.is_word_at(1, "synonym")
                     || (self.is_word_at(1, "public") && self.is_word_at(2, "synonym"))

@@ -7,6 +7,7 @@ use crate::lexer::swap_uniform_case;
 use crate::oracle_dictionary::{
     ACTION_SETTING, CLIENT_IDENTIFIER_SETTING, CLIENT_INFO_SETTING, MODULE_SETTING,
 };
+use crate::session::oracle_contexts::{CONTEXTS_TABLE, CREATE_CONTEXTS_SCHEMA, CREATE_CONTEXTS_TABLE};
 use crate::settings::SettingScope;
 use crate::types::Value;
 
@@ -130,6 +131,19 @@ fn truncated(text: String, bytes: usize) -> String {
     text[..end].to_owned()
 }
 
+fn insufficient_privileges() -> SqlError {
+    SqlError::new(
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        "ORA-01031: insufficient privileges",
+    )
+    .with_oracle_code(1031)
+    .with_hint("Only the package named in the context's CREATE CONTEXT ... USING may set or clear it.")
+}
+
+fn last_part(name: &str) -> String {
+    name.rsplit('.').next().unwrap_or(name).trim().trim_matches('"').to_ascii_lowercase()
+}
+
 fn quoted_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
@@ -138,6 +152,38 @@ impl Run<'_> {
     fn package_sql(&mut self, text: &str) -> SqlResult<()> {
         let statement = parsed(text, &self.settings, &RoutineFrame::default(), Dialect::PostgreSql)?;
         self.execute(statement).map(drop)
+    }
+
+    fn trusted_context(&mut self, namespace: &str) -> SqlResult<String> {
+        let namespace = namespace.trim().to_uppercase();
+        self.package_sql(CREATE_CONTEXTS_SCHEMA)?;
+        self.package_sql(CREATE_CONTEXTS_TABLE)?;
+        let statement = parsed(
+            &format!(
+                "SELECT package FROM {CONTEXTS_TABLE} WHERE namespace = '{}'",
+                namespace.replace('\'', "''")
+            ),
+            &self.settings,
+            &RoutineFrame::default(),
+            Dialect::PostgreSql,
+        )?;
+        let result = self.execute(statement)?;
+        let trusted = result
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Value::to_text)
+            .ok_or_else(insufficient_privileges)?;
+        let running = self
+            .definition
+            .plsql
+            .as_ref()
+            .and_then(|routine| routine.package.as_deref())
+            .map(last_part);
+        if running.as_deref() != Some(last_part(&trusted).as_str()) {
+            return Err(insufficient_privileges());
+        }
+        Ok(namespace)
     }
 
     fn package_arguments(
@@ -208,6 +254,9 @@ impl Run<'_> {
             ("dbms_application_info", "set_client_info") => &["client_info"],
             ("dbms_session", "set_identifier") => &["client_id"],
             ("dbms_session", "clear_identifier") => &[],
+            ("dbms_session", "set_context") => &["namespace", "attribute", "value", "username", "client_id"],
+            ("dbms_session", "clear_context") => &["namespace", "client_id", "attribute"],
+            ("dbms_session", "clear_all_context") => &["namespace"],
             ("dbms_session" | "dbms_lock", "sleep") => &["seconds"],
             ("dbms_stats", "gather_table_stats") => &GATHER_TABLE_STATS,
             ("dbms_stats", "gather_schema_stats") => &GATHER_SCHEMA_STATS,
@@ -248,6 +297,25 @@ impl Run<'_> {
             }
             ("dbms_session", "clear_identifier") => {
                 self.change_setting(CLIENT_IDENTIFIER_SETTING, None, SettingScope::Session)?;
+            }
+            ("dbms_session", "set_context") => {
+                let text = |name: &str| argument(name).as_ref().and_then(Value::to_text);
+                let (Some(namespace), Some(attribute)) = (text("namespace"), text("attribute")) else {
+                    return Err(wrong_arguments(&call.member));
+                };
+                let value = text("value").unwrap_or_default();
+                let namespace = self.trusted_context(&namespace)?;
+                crate::plsql::with_session(|session| session.set_context(&namespace, &attribute, &value))
+                    .unwrap_or(Ok(()))?;
+            }
+            ("dbms_session", "clear_context" | "clear_all_context") => {
+                let namespace = argument("namespace")
+                    .as_ref()
+                    .and_then(Value::to_text)
+                    .ok_or_else(|| wrong_arguments(&call.member))?;
+                let attribute = argument("attribute").as_ref().and_then(Value::to_text);
+                let namespace = self.trusted_context(&namespace)?;
+                crate::plsql::with_session(|session| session.clear_context(&namespace, attribute.as_deref()));
             }
             ("dbms_session" | "dbms_lock", _) => {
                 self.package_sleep(argument("seconds").as_ref(), &call.member)?;

@@ -1301,7 +1301,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `DECRYPT` with AES: **code written, unbuilt** (code-only mode, 2026-11-12, D661); `UTL_ENCODE`, `UTL_I18N` and
   `UTL_URL`: **code written, unbuilt** (code-only mode, 2026-11-12, D732); `UTL_COMPRESS`: **code written, unbuilt**
   (code-only mode, 2026-11-12, D733); `DBMS_APPLICATION_INFO`, `DBMS_SESSION`, `DBMS_LOCK.SLEEP` and `DBMS_STATS`:
-  **code written, unbuilt** (code-only mode, 2026-11-12, D857). Left: `DBMS_SESSION.SET_CONTEXT`, `DBMS_SQL`,
+  **code written, unbuilt** (code-only mode, 2026-11-12, D857); application contexts (`CREATE CONTEXT`,
+  `DBMS_SESSION.SET_CONTEXT`): **code written, unbuilt** (code-only mode, 2026-11-12, D858). Left: `DBMS_SQL`,
   `DBMS_METADATA`, `UTL_FILE` and the rest.
 - PL/SQL: autonomous transactions (after concurrent writers, M3), compound triggers, the
   mutating-table check, `IS A SET`, `IS EMPTY`, `MULTISET`, `MULTISET (subquery)`, `SET()` and
