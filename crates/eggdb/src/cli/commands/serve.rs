@@ -829,15 +829,25 @@ impl Session<'_> {
             &config.database,
         );
         let mcp_opener = super::serve_mcp::SharedOpener { db: &db };
-        let mcp_endpoint = mcp_listener.as_ref().map(|(_, tokens)| {
-            super::serve_mcp::McpEndpoint::new(
-                &mcp_opener,
-                &config.database,
-                tokens.clone(),
-                mcp_tables.clone(),
-                eggdb_mcp::audit::audit_path_for(&self.request.file),
-            )
-        });
+        let mcp_oauth = super::serve_mcp::oauth_from_environment().map_err(|message| Failure::usage(message, Some(CommandName::Serve)))?;
+        let mcp_endpoint = match mcp_listener.as_ref() {
+            None => None,
+            Some((_, tokens)) => {
+                let endpoint = super::serve_mcp::McpEndpoint::new(
+                    &mcp_opener,
+                    &config.database,
+                    tokens.clone(),
+                    mcp_tables.clone(),
+                    eggdb_mcp::audit::audit_path_for(&self.request.file),
+                );
+                Some(match mcp_oauth {
+                    Some((issuer, jwks, resource)) => endpoint
+                        .with_oauth(issuer, &jwks, resource)
+                        .map_err(|message| Failure::usage(message, Some(CommandName::Serve)))?,
+                    None => endpoint,
+                })
+            }
+        };
         let resp_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::RESP_COLLECTIONS,

@@ -48,6 +48,33 @@ pub(super) struct McpEndpoint<'d> {
     sessions: Mutex<HashMap<String, McpSession<'d>>>,
     order: Mutex<Vec<String>>,
     usage: Mutex<HashMap<usize, (std::time::Instant, u32)>>,
+    oauth: Option<McpOAuth>,
+}
+
+const OAUTH_ISSUER_VARIABLE: &str = "EGGDB_MCP_OAUTH_ISSUER";
+const OAUTH_JWKS_VARIABLE: &str = "EGGDB_MCP_OAUTH_JWKS";
+const OAUTH_RESOURCE_VARIABLE: &str = "EGGDB_MCP_OAUTH_RESOURCE";
+const PROTECTED_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource";
+const OAUTH_LEEWAY_SECONDS: i64 = 60;
+
+struct McpOAuth {
+    keys: eggdb_auth::jwt::JwtKeys,
+    policy: eggdb_auth::jwt::JwtPolicy,
+}
+
+/// The OAuth setup of the MCP endpoint from the environment, when `EGGDB_MCP_OAUTH_ISSUER`,
+/// `EGGDB_MCP_OAUTH_JWKS` (a key set file) and `EGGDB_MCP_OAUTH_RESOURCE` (this endpoint's URL,
+/// the audience tokens must name) are all set.
+pub(super) fn oauth_from_environment() -> Result<Option<(String, String, String)>, String> {
+    let read = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    match (read(OAUTH_ISSUER_VARIABLE), read(OAUTH_JWKS_VARIABLE), read(OAUTH_RESOURCE_VARIABLE)) {
+        (None, None, None) => Ok(None),
+        (Some(issuer), Some(jwks), Some(resource)) => {
+            let document = std::fs::read_to_string(&jwks).map_err(|error| format!("cannot read {OAUTH_JWKS_VARIABLE} {jwks}: {error}"))?;
+            Ok(Some((issuer, document, resource)))
+        }
+        _ => Err(format!("MCP OAuth needs {OAUTH_ISSUER_VARIABLE}, {OAUTH_JWKS_VARIABLE} and {OAUTH_RESOURCE_VARIABLE} together")),
+    }
 }
 
 #[derive(Clone)]
@@ -150,6 +177,14 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
     Ok(tokens)
 }
 
+fn origin_of(url: &str) -> &str {
+    let after_scheme = url.find("://").map_or(0, |at| at + 3);
+    match url[after_scheme..].find('/') {
+        Some(slash) => &url[..after_scheme + slash],
+        None => url,
+    }
+}
+
 fn admin_response(answer: &str) -> eggdb_http::Response {
     use eggdb_sql::json::{Json, parse_document};
     let Ok(document) = parse_document(answer) else {
@@ -212,7 +247,64 @@ impl<'d> McpEndpoint<'d> {
             sessions: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             usage: Mutex::new(HashMap::new()),
+            oauth: None,
         }
+    }
+
+    /// Accepts OAuth access tokens too: JWTs signed by a key of `jwks` (a JSON Web Key Set), from
+    /// `issuer`, for the audience `resource`; the token's `sub` is the role the agent runs as.
+    pub(super) fn with_oauth(mut self, issuer: String, jwks: &str, resource: String) -> Result<Self, String> {
+        let keys = eggdb_auth::jwt::JwtKeys::from_jwks(jwks).map_err(|error| format!("{OAUTH_JWKS_VARIABLE}: {error}"))?;
+        self.oauth = Some(McpOAuth {
+            keys,
+            policy: eggdb_auth::jwt::JwtPolicy {
+                issuer,
+                audience: resource,
+                user_claim: "sub".to_owned(),
+                leeway_seconds: OAUTH_LEEWAY_SECONDS,
+            },
+        });
+        Ok(self)
+    }
+
+    fn caller(&self, request: &eggdb_http::Request) -> Option<(Option<String>, Option<usize>)> {
+        if let Some(index) = self.agent_index(request) {
+            return Some((self.tokens[index].role.clone(), Some(index)));
+        }
+        let oauth = self.oauth.as_ref()?;
+        let given = request.header("authorization").and_then(|value| value.strip_prefix("Bearer "))?.trim();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+        eggdb_auth::jwt::verify(given, &oauth.keys, &oauth.policy, now)
+            .ok()
+            .map(|role| (Some(role), None))
+    }
+
+    fn unauthorized(&self) -> eggdb_http::Response {
+        let challenge = match &self.oauth {
+            Some(oauth) => format!(
+                "Bearer resource_metadata=\"{}{PROTECTED_RESOURCE_PATH}\"",
+                origin_of(&oauth.policy.audience)
+            ),
+            None => "Bearer".to_owned(),
+        };
+        eggdb_http::Response::text(401, "a Bearer token is required").with_header("WWW-Authenticate", &challenge)
+    }
+
+    fn protected_resource(&self) -> eggdb_http::Response {
+        let Some(oauth) = &self.oauth else {
+            return eggdb_http::Response::text(404, "this server takes no OAuth tokens");
+        };
+        let quote = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+        eggdb_http::Response::ok(
+            "application/json",
+            format!(
+                "{{\"resource\":{},\"authorization_servers\":[{}],\"bearer_methods_supported\":[\"header\"]}}",
+                quote(&oauth.policy.audience),
+                quote(&oauth.policy.issuer)
+            ),
+        )
     }
 
     fn agent_index(&self, request: &eggdb_http::Request) -> Option<usize> {
@@ -284,11 +376,10 @@ impl<'d> McpEndpoint<'d> {
         if request.header("origin").is_some() {
             return eggdb_http::Response::text(403, "requests from web pages are refused");
         }
-        let Some(index) = self.agent_index(request) else {
-            return eggdb_http::Response::text(401, "a Bearer token is required")
-                .with_header("WWW-Authenticate", "Bearer");
+        let Some((role, index)) = self.caller(request) else {
+            return self.unauthorized();
         };
-        if let Some(wait) = self.over_quota(index) {
+        if let Some(wait) = index.and_then(|index| self.over_quota(index)) {
             return json_error(429, "this agent's calls_per_minute quota is spent")
                 .with_header("Retry-After", &wait.to_string());
         }
@@ -307,7 +398,6 @@ impl<'d> McpEndpoint<'d> {
                 return eggdb_http::Response::text(405, "the admin API takes GET and POST").with_header("Allow", "GET, POST");
             }
         };
-        let role = self.tokens[index].role.clone();
         let Some((_, mut server)) = self.new_session(role) else {
             return json_error(500, "the admin call could not start");
         };
@@ -324,6 +414,9 @@ impl<'d> McpEndpoint<'d> {
     }
 
     pub(super) fn answer(&self, request: &eggdb_http::Request) -> eggdb_http::Response {
+        if request.path.starts_with(PROTECTED_RESOURCE_PATH) && request.method == "GET" {
+            return self.protected_resource();
+        }
         if let Some(rest) = request.path.strip_prefix("/admin/tools") {
             return self.admin(request, rest);
         }
@@ -333,13 +426,11 @@ impl<'d> McpEndpoint<'d> {
         if request.header("origin").is_some() {
             return eggdb_http::Response::text(403, "requests from web pages are refused");
         }
-        let Some(index) = self.agent_index(request) else {
-            return eggdb_http::Response::text(401, "a Bearer token is required")
-                .with_header("WWW-Authenticate", "Bearer");
+        let Some((role, index)) = self.caller(request) else {
+            return self.unauthorized();
         };
-        let role = self.tokens[index].role.clone();
         if request.method == "POST"
-            && let Some(wait) = self.over_quota(index)
+            && let Some(wait) = index.and_then(|index| self.over_quota(index))
         {
             return json_error(429, "this agent's calls_per_minute quota is spent")
                 .with_header("Retry-After", &wait.to_string());
