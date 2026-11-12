@@ -246,6 +246,10 @@ fn relations_after(
     for (index, relation) in relations.iter().enumerate() {
         builder.sql(if index == 0 { first } else { " AND " });
         let cql = column(info, &relation.column)?;
+        if matches!(relation.operator, Operator::Contains | Operator::ContainsKey) {
+            contains(builder, relation, cql)?;
+            continue;
+        }
         builder.sql(&identifier(&relation.column));
         if relation.operator == Operator::In {
             if relation.terms.is_empty() {
@@ -268,10 +272,35 @@ fn relations_after(
             Operator::LessOrEqual => " <= ",
             Operator::Greater => " > ",
             Operator::GreaterOrEqual => " >= ",
-            Operator::NotEqual | Operator::In => " <> ",
+            Operator::NotEqual | Operator::In | Operator::Contains | Operator::ContainsKey => " <> ",
         });
         let term = relation.terms.first().ok_or("a relation has no value")?;
         builder.term(term, &relation.column, cql)?;
+    }
+    Ok(())
+}
+
+fn contains(builder: &mut Builder, relation: &Relation, cql: CqlType) -> Result<(), String> {
+    let term = relation.terms.first().ok_or("a relation has no value")?;
+    let column = identifier(&relation.column);
+    match (relation.operator, cql) {
+        (Operator::Contains, CqlType::List(element) | CqlType::Set(element)) => {
+            builder.sql(&format!("{column}::jsonb @> jsonb_build_array(to_jsonb("));
+            builder.term(term, &relation.column, *element)?;
+            builder.sql("))");
+        }
+        (Operator::Contains, CqlType::Map(_, item)) | (Operator::ContainsKey, CqlType::Map(item, _)) => {
+            let side = if relation.operator == Operator::ContainsKey { 0 } else { 1 };
+            builder.sql(&format!(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements({column}::jsonb) AS entry WHERE entry.value -> {side} = to_jsonb("
+            ));
+            builder.term(term, &relation.column, *item)?;
+            builder.sql("))");
+        }
+        (Operator::ContainsKey, _) => {
+            return Err(format!("Cannot use CONTAINS KEY on non-map column {}", relation.column));
+        }
+        _ => return Err(format!("Cannot use CONTAINS on non-collection column {}", relation.column)),
     }
     Ok(())
 }
@@ -327,20 +356,19 @@ fn upsert(
         columns.join(", ")
     ));
     let mut first = true;
-    for (name, term) in
-        keys.iter().copied().chain(
-            assignments
-                .iter()
-                .map(|(name, assignment)| match assignment {
-                    Assignment::Set(term) | Assignment::Add(term) => (name.as_str(), term),
-                }),
-        )
-    {
+    for (name, term) in keys.iter().copied() {
         if !first {
             builder.sql(", ");
         }
         first = false;
         builder.term(term, name, column(info, name)?)?;
+    }
+    for (name, assignment) in assignments {
+        if !first {
+            builder.sql(", ");
+        }
+        first = false;
+        inserted_value(builder, name, column(info, name)?, assignment)?;
     }
     let conflict: Vec<String> = info.primary_key().map(|key| identifier(key)).collect();
     builder.sql(&format!(") ON CONFLICT ({}) DO ", conflict.join(", ")));
@@ -348,26 +376,141 @@ fn upsert(
         builder.sql("NOTHING");
         return Ok(());
     }
-    let mut updates: Vec<String> = Vec::with_capacity(assignments.len());
-    for (name, assignment) in assignments {
-        updates.push(match (assignment, column(info, name)?) {
-            (Assignment::Set(_), _) => format!("{} = EXCLUDED.{}", identifier(name), identifier(name)),
-            (Assignment::Add(_), CqlType::List(_)) => format!(
-                "{0} = (COALESCE({1}.{0}, '[]')::jsonb || EXCLUDED.{0}::jsonb)::text",
-                identifier(name),
-                identifier(&info.table)
-            ),
-            (Assignment::Add(_), cql) if cql.is_collection() => {
-                return Err(format!("adding to a {} column is not supported yet; set the whole value", cql.name()));
-            }
-            (Assignment::Add(_), _) => format!(
-                "{0} = COALESCE({1}.{0}, 0) + EXCLUDED.{0}",
-                identifier(name),
-                identifier(&info.table)
-            ),
-        });
+    builder.sql("UPDATE SET ");
+    let owner = format!("{}.", identifier(&info.table));
+    for (at, (name, assignment)) in assignments.iter().enumerate() {
+        if at > 0 {
+            builder.sql(", ");
+        }
+        builder.sql(&format!("{} = ", identifier(name)));
+        assigned_value(builder, &owner, name, column(info, name)?, assignment, true)?;
     }
-    builder.sql(&format!("UPDATE SET {}", updates.join(", ")));
+    Ok(())
+}
+
+fn inserted_value(builder: &mut Builder, name: &str, cql: CqlType, assignment: &Assignment) -> Result<(), String> {
+    match (assignment, cql) {
+        (Assignment::Set(term) | Assignment::Add(term) | Assignment::Prepend(term), _) => builder.term(term, name, cql),
+        (Assignment::Remove(term), cql) if !cql.is_collection() => {
+            builder.sql("-(");
+            builder.term(term, name, cql)?;
+            builder.sql(")");
+            Ok(())
+        }
+        (Assignment::Element(..), CqlType::Map(..)) => {
+            new_json(builder, name, cql, assignment, false)?;
+            builder.sql("::text");
+            Ok(())
+        }
+        _ => {
+            builder.sql("NULL");
+            Ok(())
+        }
+    }
+}
+
+fn new_json(builder: &mut Builder, name: &str, cql: CqlType, assignment: &Assignment, excluded: bool) -> Result<(), String> {
+    if excluded {
+        builder.sql(&format!("EXCLUDED.{}::jsonb", identifier(name)));
+        return Ok(());
+    }
+    match (assignment, cql) {
+        (Assignment::Element(key, value), CqlType::Map(key_type, value_type)) => {
+            builder.sql("jsonb_build_array(jsonb_build_array(to_jsonb(");
+            builder.term(key, name, *key_type)?;
+            builder.sql("), to_jsonb(");
+            builder.term(value, name, *value_type)?;
+            builder.sql(")))");
+        }
+        (Assignment::Set(term) | Assignment::Add(term) | Assignment::Prepend(term), _) => {
+            builder.sql("(");
+            builder.term(term, name, cql)?;
+            builder.sql(")::jsonb");
+        }
+        _ => return Err(format!("this update of the {} column {name} carries no value", cql.name())),
+    }
+    Ok(())
+}
+
+fn assigned_value(
+    builder: &mut Builder,
+    owner: &str,
+    name: &str,
+    cql: CqlType,
+    assignment: &Assignment,
+    excluded: bool,
+) -> Result<(), String> {
+    let column = format!("{owner}{}", identifier(name));
+    let current = format!("COALESCE({column}, '[]')::jsonb");
+    match (assignment, cql) {
+        (Assignment::Set(term), _) => {
+            if excluded {
+                builder.sql(&format!("EXCLUDED.{}", identifier(name)));
+            } else {
+                builder.term(term, name, cql)?;
+            }
+        }
+        (Assignment::Add(_), CqlType::List(_)) => {
+            builder.sql(&format!("({current} || "));
+            new_json(builder, name, cql, assignment, excluded)?;
+            builder.sql(")::text");
+        }
+        (Assignment::Prepend(_), CqlType::List(_)) => {
+            builder.sql("(");
+            new_json(builder, name, cql, assignment, excluded)?;
+            builder.sql(&format!(" || {current})::text"));
+        }
+        (Assignment::Add(_), CqlType::Set(_)) => {
+            builder.sql(&format!(
+                "(SELECT COALESCE(jsonb_agg(merged.value ORDER BY merged.value), '[]'::jsonb) FROM (SELECT DISTINCT item.value FROM jsonb_array_elements({current} || "
+            ));
+            new_json(builder, name, cql, assignment, excluded)?;
+            builder.sql(") AS item) AS merged)::text");
+        }
+        (Assignment::Add(_) | Assignment::Element(..), CqlType::Map(..)) => {
+            builder.sql("(SELECT COALESCE(jsonb_agg(merged.value ORDER BY merged.value -> 0), '[]'::jsonb) FROM (SELECT fresh.value FROM jsonb_array_elements(");
+            new_json(builder, name, cql, assignment, excluded)?;
+            builder.sql(&format!(
+                ") AS fresh UNION ALL SELECT kept.value FROM jsonb_array_elements({current}) AS kept WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements("
+            ));
+            new_json(builder, name, cql, assignment, excluded)?;
+            builder.sql(") AS other WHERE other.value -> 0 = kept.value -> 0)) AS merged)::text");
+        }
+        (Assignment::Remove(term), CqlType::List(_) | CqlType::Set(_)) => {
+            builder.sql(&format!(
+                "(SELECT COALESCE(jsonb_agg(item.value), '[]'::jsonb) FROM jsonb_array_elements({current}) AS item WHERE NOT (("
+            ));
+            builder.term(term, name, cql)?;
+            builder.sql(")::jsonb @> jsonb_build_array(item.value)))::text");
+        }
+        (Assignment::Remove(term), CqlType::Map(key, _)) => {
+            builder.sql(&format!(
+                "(SELECT COALESCE(jsonb_agg(item.value), '[]'::jsonb) FROM jsonb_array_elements({current}) AS item WHERE NOT (("
+            ));
+            builder.term(term, name, CqlType::Set(key))?;
+            builder.sql(")::jsonb @> jsonb_build_array(item.value -> 0)))::text");
+        }
+        (Assignment::Element(index, value), CqlType::List(element)) => {
+            builder.sql(&format!("jsonb_set({current}, ARRAY[("));
+            builder.term(index, name, CqlType::Int)?;
+            builder.sql(")::text], to_jsonb(");
+            builder.term(value, name, *element)?;
+            builder.sql("))::text");
+        }
+        (Assignment::Add(term), cql) if !cql.is_collection() => {
+            builder.sql(&format!("COALESCE({column}, 0) + "));
+            if excluded {
+                builder.sql(&format!("EXCLUDED.{}", identifier(name)));
+            } else {
+                builder.term(term, name, cql)?;
+            }
+        }
+        (Assignment::Remove(term), cql) if !cql.is_collection() => {
+            builder.sql(&format!("COALESCE({column}, 0) - "));
+            builder.term(term, name, cql)?;
+        }
+        (_, cql) => return Err(format!("this update of the {} column {name} is not supported", cql.name())),
+    }
     Ok(())
 }
 
@@ -781,7 +924,11 @@ fn statement(
                     assignments
                         .iter()
                         .map(|(name, assignment)| match assignment {
-                            Assignment::Set(term) | Assignment::Add(term) => (name.as_str(), term),
+                            Assignment::Set(term)
+                            | Assignment::Add(term)
+                            | Assignment::Prepend(term)
+                            | Assignment::Remove(term)
+                            | Assignment::Element(_, term) => (name.as_str(), term),
                         }),
                 );
                 let names: Vec<String> = entries.iter().map(|(name, _)| identifier(name)).collect();
@@ -832,16 +979,8 @@ fn statement(
                     builder.sql(", ");
                 }
                 let cql = column(&info, name)?;
-                match assignment {
-                    Assignment::Set(term) => {
-                        builder.sql(&format!("{} = ", identifier(name)));
-                        builder.term(term, name, cql)?;
-                    }
-                    Assignment::Add(term) => {
-                        builder.sql(&format!("{0} = COALESCE({0}, 0) + ", identifier(name)));
-                        builder.term(term, name, cql)?;
-                    }
-                }
+                builder.sql(&format!("{} = ", identifier(name)));
+                assigned_value(builder, "", name, cql, assignment, false)?;
             }
             relations(builder, &info, conditions)?;
             if let Condition::Columns(checks) = condition {

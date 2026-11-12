@@ -665,3 +665,76 @@ fn conditional_updates_and_deletes_report_whether_they_applied() {
     let (statement, markers) = parse("UPDATE t SET v = 1 WHERE k = 'a' IF EXISTS").unwrap();
     assert!(translate(&statement, markers, Some("ks"), &mut FixedCatalog).is_err());
 }
+
+struct CollectionCatalog;
+
+impl Catalog for CollectionCatalog {
+    fn table(&mut self, keyspace: &str, table: &str) -> Result<TableInfo, String> {
+        let text = crate::types::interned(CqlType::Varchar)?;
+        let int = crate::types::interned(CqlType::Int)?;
+        Ok(TableInfo {
+            keyspace: keyspace.to_owned(),
+            table: table.to_owned(),
+            columns: vec![
+                ("k".to_owned(), CqlType::Varchar),
+                ("tags".to_owned(), CqlType::Set(text)),
+                ("scores".to_owned(), CqlType::Map(text, int)),
+                ("items".to_owned(), CqlType::List(int)),
+                ("hits".to_owned(), CqlType::Counter),
+            ],
+            partition: vec!["k".to_owned()],
+            clustering: Vec::new(),
+            descending: Vec::new(),
+        })
+    }
+}
+
+fn collection_sql(cql: &str, values: &[Option<&str>]) -> Result<String, String> {
+    let (statement, markers) = parse(cql)?;
+    let translation = translate(&statement, markers, Some("ks"), &mut CollectionCatalog)?;
+    Ok(translation.render(&values.iter().map(|value| value.map(str::to_owned)).collect::<Vec<_>>()))
+}
+
+#[test]
+fn collection_updates_parse_into_their_assignments() {
+    let (statement, _) = parse("UPDATE t SET tags = tags - {'a'}, items = [0] + items, scores['x'] = 3 WHERE k = 'a'").unwrap();
+    let Statement::Update { assignments, .. } = statement else {
+        panic!("an update");
+    };
+    assert!(matches!(&assignments[0].1, Assignment::Remove(Term::Set(items)) if items.len() == 1));
+    assert!(matches!(&assignments[1].1, Assignment::Prepend(Term::List(_))));
+    assert!(matches!(&assignments[2].1, Assignment::Element(Term::Text(key), Term::Number(value)) if key == "x" && value == "3"));
+}
+
+#[test]
+fn collection_updates_merge_with_the_stored_value() {
+    let added = collection_sql("UPDATE t SET tags = tags + {'b', 'a'} WHERE k = 'a'", &[]).unwrap();
+    assert!(added.contains("SELECT DISTINCT item.value FROM jsonb_array_elements(COALESCE(\"t\".\"tags\", '[]')::jsonb || EXCLUDED.\"tags\"::jsonb)"), "{added}");
+    let removed = collection_sql("UPDATE t SET tags = tags - {'a'} WHERE k = 'a'", &[]).unwrap();
+    assert!(removed.contains("VALUES ('a'::text, NULL)"), "{removed}");
+    assert!(removed.contains("@> jsonb_build_array(item.value)"), "{removed}");
+    let put = collection_sql("UPDATE t SET scores[?] = ? WHERE k = 'a'", &[Some("x"), Some("3")]).unwrap();
+    assert!(put.contains("jsonb_build_array(jsonb_build_array(to_jsonb('x'::text), to_jsonb('3'::integer)))::text"), "{put}");
+    let dropped = collection_sql("UPDATE t SET scores = scores - {'x'} WHERE k = 'a'", &[]).unwrap();
+    assert!(dropped.contains("@> jsonb_build_array(item.value -> 0)"), "{dropped}");
+    let indexed = collection_sql("UPDATE t SET items[1] = 9 WHERE k = 'a'", &[]).unwrap();
+    assert!(indexed.contains("jsonb_set(COALESCE(\"t\".\"items\", '[]')::jsonb, ARRAY[(1::integer)::text], to_jsonb(9::integer))"), "{indexed}");
+    let prepended = collection_sql("UPDATE t SET items = [1] + items WHERE k = 'a'", &[]).unwrap();
+    assert!(prepended.contains("(EXCLUDED.\"items\"::jsonb || COALESCE(\"t\".\"items\", '[]')::jsonb)::text"), "{prepended}");
+    let counted = collection_sql("UPDATE t SET hits = hits - 2 WHERE k = 'a'", &[]).unwrap();
+    assert!(counted.contains("-(2::"), "{counted}");
+    assert!(counted.contains("COALESCE(\"t\".\"hits\", 0) - 2::"), "{counted}");
+    assert!(collection_sql("UPDATE t SET tags[0] = 'x' WHERE k = 'a'", &[]).is_err());
+}
+
+#[test]
+fn contains_and_contains_key_filter_collections() {
+    let tagged = collection_sql("SELECT k FROM t WHERE tags CONTAINS 'a' ALLOW FILTERING", &[]).unwrap();
+    assert!(tagged.contains("\"tags\"::jsonb @> jsonb_build_array(to_jsonb('a'::text))"), "{tagged}");
+    let keyed = collection_sql("SELECT k FROM t WHERE scores CONTAINS KEY ? ALLOW FILTERING", &[Some("x")]).unwrap();
+    assert!(keyed.contains("entry.value -> 0 = to_jsonb('x'::text)"), "{keyed}");
+    let valued = collection_sql("SELECT k FROM t WHERE scores CONTAINS 3 ALLOW FILTERING", &[]).unwrap();
+    assert!(valued.contains("entry.value -> 1 = to_jsonb(3::integer)"), "{valued}");
+    assert!(collection_sql("SELECT k FROM t WHERE tags CONTAINS KEY 'a' ALLOW FILTERING", &[]).is_err());
+    assert!(collection_sql("SELECT k FROM t WHERE k CONTAINS 'a' ALLOW FILTERING", &[]).is_err());
+}

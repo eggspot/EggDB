@@ -831,3 +831,4 @@ its full title with its status.
 - [D804](decisions/D804.md) Code-only batch 452 (M6b): SHA-3, SHAKE and ML-KEM-768 in `eggdb-crypto`
 - [D805](decisions/D805.md) Code-only batch 453 (M6b): X25519MLKEM768 hybrid key exchange in TLS 1.3
 - [D806](decisions/D806.md) Code-only batch 454 (D57): Zarr v3 sharding and Blosc chunks in `read_zarr`
+- [D807](decisions/D807.md) Code-only batch 455 (M16): CQL collection element updates, `CONTAINS` and `CONTAINS KEY`

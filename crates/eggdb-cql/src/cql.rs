@@ -14,8 +14,8 @@ enum Token {
     Symbol(&'static str),
 }
 
-const SYMBOLS: [&str; 18] = [
-    "<=", ">=", "!=", "(", ")", ",", ";", ".", "=", "<", ">", "*", "{", "}", "[", "]", ":", "+",
+const SYMBOLS: [&str; 19] = [
+    "<=", ">=", "!=", "(", ")", ",", ";", ".", "=", "<", ">", "*", "{", "}", "[", "]", ":", "+", "-",
 ];
 
 fn is_uuid(bytes: &[u8]) -> bool {
@@ -182,6 +182,8 @@ pub(crate) enum Operator {
     GreaterOrEqual,
     NotEqual,
     In,
+    Contains,
+    ContainsKey,
 }
 
 /// The `IF` of a lightweight transaction on `UPDATE` or `DELETE`.
@@ -215,6 +217,9 @@ pub(crate) enum Selection {
 pub(crate) enum Assignment {
     Set(Term),
     Add(Term),
+    Prepend(Term),
+    Remove(Term),
+    Element(Term, Term),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,8 +536,15 @@ impl Parser {
                 Some(Token::Symbol(">=")) => Operator::GreaterOrEqual,
                 Some(Token::Symbol("!=")) => Operator::NotEqual,
                 Some(Token::Word(word)) if word == "in" => Operator::In,
-                Some(Token::Word(word)) if word == "contains" || word == "like" => {
-                    return Err(unsupported("CONTAINS and LIKE relations"));
+                Some(Token::Word(word)) if word == "contains" => {
+                    if self.eat_word("key") {
+                        Operator::ContainsKey
+                    } else {
+                        Operator::Contains
+                    }
+                }
+                Some(Token::Word(word)) if word == "like" => {
+                    return Err(unsupported("LIKE relations"));
                 }
                 _ => {
                     return Err(
@@ -786,14 +798,31 @@ impl Parser {
         let mut assignments = Vec::new();
         loop {
             let column = self.identifier()?;
+            let element = if self.eat_symbol("[") {
+                let index = self.term()?;
+                self.expect_symbol("]")?;
+                Some(index)
+            } else {
+                None
+            };
             self.expect_symbol("=")?;
-            let assignment = if matches!(self.peek(), Some(Token::Word(word) | Token::Quoted(word)) if *word == column)
-                && matches!(self.tokens.get(self.at + 1), Some(Token::Symbol("+")))
-            {
+            let names_column = |token: Option<&Token>| matches!(token, Some(Token::Word(word) | Token::Quoted(word)) if *word == column);
+            let assignment = if let Some(index) = element {
+                Assignment::Element(index, self.term()?)
+            } else if names_column(self.peek()) && matches!(self.tokens.get(self.at + 1), Some(Token::Symbol("+"))) {
                 self.at += 2;
                 Assignment::Add(self.term()?)
+            } else if names_column(self.peek()) && matches!(self.tokens.get(self.at + 1), Some(Token::Symbol("-"))) {
+                self.at += 2;
+                Assignment::Remove(self.term()?)
             } else {
-                Assignment::Set(self.term()?)
+                let term = self.term()?;
+                if matches!(self.peek(), Some(Token::Symbol("+"))) && names_column(self.tokens.get(self.at + 1)) {
+                    self.at += 2;
+                    Assignment::Prepend(term)
+                } else {
+                    Assignment::Set(term)
+                }
             };
             assignments.push((column, assignment));
             if !self.eat_symbol(",") {
