@@ -42,7 +42,7 @@ impl<'t> Lexer<'t> {
             ));
         }
         self.at = end + 1;
-        Ok(TokenKind::Binary(&self.text[digits_start..end]))
+        Ok(TokenKind::Binary(self.text[digits_start..end].into()))
     }
 
     pub(super) fn next_sqlite_kind(&mut self, byte: u8) -> SqlResult<TokenKind<'t>> {

@@ -96,7 +96,7 @@ impl<'t> Lexer<'t> {
             let near: String = rest.chars().take(self.at - start + 1).collect();
             return Err(incorrect_syntax(&near, start));
         }
-        Ok(TokenKind::Binary(&self.text[digits_start..self.at]))
+        Ok(TokenKind::Binary(self.text[digits_start..self.at].into()))
     }
 
     fn sqlserver_word(&mut self) -> SqlResult<TokenKind<'t>> {
@@ -257,7 +257,7 @@ mod tests {
     fn binary_literals_are_hexadecimal_digits_after_0x() {
         for (text, digits) in [("0x0102FF", "0102FF"), ("0x", ""), ("0X123", "123")] {
             let tokens = tokenize_in(text, Dialect::SqlServer).expect(text);
-            assert_eq!(tokens[0].kind, TokenKind::Binary(digits), "{text}");
+            assert_eq!(tokens[0].kind, TokenKind::Binary(digits.into()), "{text}");
         }
         let error = tokenize_in("SELECT 0xZ1", Dialect::SqlServer).expect_err("0xZ1");
         assert_eq!(error.state().code(), "42601");

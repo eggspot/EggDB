@@ -1,3 +1,4 @@
+mod mysql;
 mod oracle;
 mod sqlite;
 mod sqlserver;
@@ -16,7 +17,7 @@ pub(crate) enum TokenKind<'t> {
     QuotedIdentifier(String),
     Integer(&'t str),
     Decimal(&'t str),
-    Binary(&'t str),
+    Binary(Cow<'t, str>),
     String(Cow<'t, str>),
     Parameter(&'t str),
     Placeholder,
@@ -391,10 +392,12 @@ impl<'t> Lexer<'t> {
                 self.at += 1;
                 Ok(TokenKind::Dot)
             }
+            b'0' if matches!(self.peek(1), Some(b'x' | b'X' | b'b')) => self.mysql_prefixed_number(),
             b'0'..=b'9' => self.number(),
             b'\'' | b'"' => self.mysql_string(byte),
             b'`' => self.backtick_identifier(),
             b'x' | b'X' if self.peek(1) == Some(b'\'') => self.blob_literal(),
+            b'b' | b'B' if self.peek(1) == Some(b'\'') => self.mysql_quoted_bits(),
             b'?' => {
                 self.at += 1;
                 Ok(TokenKind::Placeholder)
