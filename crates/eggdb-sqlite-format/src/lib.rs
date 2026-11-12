@@ -3,7 +3,9 @@
 //! serial types, overflow pages, the `sqlite_schema` table, and the pages of a write-ahead log up
 //! to its last commit. Every length, offset and page number read from the file is checked
 //! before it is used, and every walk is bounded, so a hostile file is an error, never a panic or
-//! a hang. [`write_database`] writes a whole new file: table and index b-trees, records and
+//! a hang. Text in UTF-8, UTF-16LE and UTF-16BE databases is decoded, and `WITHOUT ROWID`
+//! tables, whose rows live in index b-trees, are read through [`SqliteFile::without_rowid_rows`].
+//! [`write_database`] writes a whole new file: table and index b-trees, records and
 //! overflow pages; editing a file in place, with its rollback journal or write-ahead log, is not
 //! part of this crate yet.
 
@@ -87,10 +89,21 @@ pub struct SchemaEntry {
     pub sql: Option<String>,
 }
 
+/// How a database file stores text, from its header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextEncoding {
+    /// UTF-8.
+    Utf8,
+    /// UTF-16, little-endian.
+    Utf16Le,
+    /// UTF-16, big-endian.
+    Utf16Be,
+}
+
 /// One row of a table: its rowid and its record's values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqliteRow {
-    /// The rowid.
+    /// The rowid, 0 for a row of a `WITHOUT ROWID` table.
     pub rowid: i64,
     /// The record's values, in column order.
     pub values: Vec<SqliteValue>,
@@ -104,8 +117,15 @@ pub struct SqliteFile {
     page_size: usize,
     usable: usize,
     page_count: u32,
+    encoding: TextEncoding,
     wal_pages: HashMap<u32, Vec<u8>>,
     read_budget: Cell<usize>,
+}
+
+struct IndexWalk {
+    visited: HashSet<u32>,
+    overflow_pages: HashSet<u32>,
+    records: Vec<Vec<SqliteValue>>,
 }
 
 struct TableWalk {
@@ -264,15 +284,12 @@ impl SqliteFile {
             .checked_sub(reserved)
             .filter(|usable| *usable >= 480)
             .ok_or_else(|| damaged("too much reserved space at the end of each page"))?;
-        match u32_at(&bytes, 56)? {
-            0 | 1 => {}
-            2 | 3 => {
-                return Err(SqliteFormatError::Unsupported(
-                    "a database in UTF-16".to_owned(),
-                ));
-            }
+        let encoding = match u32_at(&bytes, 56)? {
+            0 | 1 => TextEncoding::Utf8,
+            2 => TextEncoding::Utf16Le,
+            3 => TextEncoding::Utf16Be,
             _ => return Err(damaged("an unknown text encoding")),
-        }
+        };
         let pages_in_file = u32::try_from(bytes.len() / page_size).unwrap_or(u32::MAX);
         let counter = u32_at(&bytes, 24)?;
         let valid_for = u32_at(&bytes, 92)?;
@@ -294,6 +311,7 @@ impl SqliteFile {
             page_size,
             usable,
             page_count,
+            encoding,
             wal_pages,
             read_budget: Cell::new(held_bytes.saturating_mul(2).saturating_add(1 << 20)),
         })
@@ -312,6 +330,119 @@ impl SqliteFile {
     /// The page size in bytes.
     pub fn page_size(&self) -> usize {
         self.page_size
+    }
+
+    /// How the file stores text.
+    pub fn text_encoding(&self) -> TextEncoding {
+        self.encoding
+    }
+
+    /// Every record of the index b-tree whose root is `root_page`, in key order: the entries
+    /// of an index, or the rows of a `WITHOUT ROWID` table as SQLite stores them, primary key
+    /// columns first.
+    pub fn index_records(&self, root_page: u32) -> Result<Vec<Vec<SqliteValue>>> {
+        let mut walk = IndexWalk {
+            visited: HashSet::new(),
+            overflow_pages: HashSet::new(),
+            records: Vec::new(),
+        };
+        self.walk_index(root_page, 0, &mut walk)?;
+        Ok(walk.records)
+    }
+
+    /// The rows of the `WITHOUT ROWID` table whose b-tree's root is `root_page`, in primary key
+    /// order, with their values put back in column order. `columns` is the table's column count
+    /// and `primary_key` the positions of its primary key columns in key order; SQLite keeps
+    /// those first in each record, then the other columns in table order.
+    pub fn without_rowid_rows(
+        &self,
+        root_page: u32,
+        columns: usize,
+        primary_key: &[usize],
+    ) -> Result<Vec<SqliteRow>> {
+        if primary_key.is_empty()
+            || primary_key.iter().any(|at| *at >= columns)
+            || (1..primary_key.len()).any(|at| primary_key[..at].contains(&primary_key[at]))
+        {
+            return Err(damaged("a WITHOUT ROWID table's primary key does not fit its columns"));
+        }
+        let rest: Vec<usize> = (0..columns)
+            .filter(|at| !primary_key.contains(at))
+            .collect();
+        self.index_records(root_page)?
+            .into_iter()
+            .map(|record| {
+                let mut values = vec![SqliteValue::Null; columns];
+                let mut stored = record.into_iter();
+                for at in primary_key.iter().chain(&rest) {
+                    match stored.next() {
+                        Some(value) => values[*at] = value,
+                        None => break,
+                    }
+                }
+                Ok(SqliteRow { rowid: 0, values })
+            })
+            .collect()
+    }
+
+    fn walk_index(&self, number: u32, depth: usize, walk: &mut IndexWalk) -> Result<()> {
+        if depth > MOST_DEPTH || !walk.visited.insert(number) {
+            return Err(damaged("a b-tree loops or is too deep"));
+        }
+        self.spend(self.page_size)?;
+        let page = self.page(number)?;
+        let start = if number == 1 { HEADER_BYTES } else { 0 };
+        let kind = *page.get(start).ok_or_else(|| damaged("an empty page"))?;
+        let cells = usize::from(u16_at(page, start + 3)?);
+        let (header, interior) = match kind {
+            INDEX_LEAF => (8, false),
+            INDEX_INTERIOR => (12, true),
+            TABLE_LEAF | TABLE_INTERIOR => {
+                return Err(damaged(format!(
+                    "page {number} is a table page inside an index b-tree"
+                )));
+            }
+            _ => {
+                return Err(damaged(format!(
+                    "page {number} has an unknown b-tree type {kind}"
+                )));
+            }
+        };
+        let mut offsets = HashSet::with_capacity(cells);
+        for cell in 0..cells {
+            let offset = usize::from(u16_at(page, start + header + cell * 2)?);
+            if offset >= self.usable {
+                return Err(damaged("a cell pointer lies past the usable page"));
+            }
+            if !offsets.insert(offset) {
+                return Err(damaged("two cells of a page start at the same place"));
+            }
+            let mut at = offset;
+            if interior {
+                let child = u32_at(page, offset)?;
+                self.walk_index(child, depth + 1, walk)?;
+                at += 4;
+            }
+            let payload_bytes = usize::try_from(varint(page, &mut at)?)
+                .ok()
+                .filter(|bytes| *bytes <= (1 << 30) + 1024)
+                .ok_or_else(|| damaged("a record is larger than any SQLite record can be"))?;
+            self.spend(payload_bytes)?;
+            let inline_most = ((self.usable - 12) * 64 / 255) - 23;
+            let payload = self.payload_up_to(
+                page,
+                at,
+                payload_bytes,
+                inline_most,
+                &mut walk.overflow_pages,
+            )?;
+            walk.records.push(record(&payload, self.encoding)?);
+        }
+        if interior {
+            let right = u32_at(page, start + 8)?;
+            self.walk_index(right, depth + 1, walk)?;
+        }
+        Ok(())
     }
 
     fn page(&self, number: u32) -> Result<&[u8]> {
@@ -380,7 +511,7 @@ impl SqliteFile {
             TABLE_INTERIOR => (12, true),
             INDEX_LEAF | INDEX_INTERIOR => {
                 return Err(SqliteFormatError::Unsupported(
-                    "a WITHOUT ROWID table".to_owned(),
+                    "a WITHOUT ROWID table through rows(); without_rowid_rows()".to_owned(),
                 ));
             }
             _ => {
@@ -430,7 +561,7 @@ impl SqliteFile {
         let payload = self.payload(page, at, payload_bytes, &mut walk.overflow_pages)?;
         Ok(SqliteRow {
             rowid,
-            values: record(&payload)?,
+            values: record(&payload, self.encoding)?,
         })
     }
 
@@ -441,8 +572,18 @@ impl SqliteFile {
         total: usize,
         overflow_pages: &mut HashSet<u32>,
     ) -> Result<Vec<u8>> {
+        self.payload_up_to(page, at, total, self.usable - 35, overflow_pages)
+    }
+
+    fn payload_up_to(
+        &self,
+        page: &[u8],
+        at: usize,
+        total: usize,
+        inline_most: usize,
+        overflow_pages: &mut HashSet<u32>,
+    ) -> Result<Vec<u8>> {
         let usable = self.usable;
-        let inline_most = usable - 35;
         let local = if total <= inline_most {
             total
         } else {
@@ -482,7 +623,7 @@ impl SqliteFile {
     }
 }
 
-fn record(payload: &[u8]) -> Result<Vec<SqliteValue>> {
+fn record(payload: &[u8], encoding: TextEncoding) -> Result<Vec<SqliteValue>> {
     let mut at = 0;
     let header_bytes = usize::try_from(varint(payload, &mut at)?)
         .ok()
@@ -495,7 +636,8 @@ fn record(payload: &[u8]) -> Result<Vec<SqliteValue>> {
     let mut body = header_bytes;
     let mut values = Vec::with_capacity(types.len());
     for serial in types {
-        let (value, width) = value_of(serial, payload.get(body..).unwrap_or_default())?;
+        let (value, width) =
+            value_of(serial, payload.get(body..).unwrap_or_default(), encoding)?;
         body += width;
         values.push(value);
     }
@@ -514,7 +656,21 @@ fn signed(bytes: &[u8]) -> i64 {
     value
 }
 
-fn value_of(serial: u64, rest: &[u8]) -> Result<(SqliteValue, usize)> {
+fn decoded_text(bytes: &[u8], encoding: TextEncoding) -> String {
+    let units = |word: fn([u8; 2]) -> u16| {
+        bytes
+            .chunks_exact(2)
+            .map(|pair| word([pair[0], pair[1]]))
+            .collect::<Vec<u16>>()
+    };
+    match encoding {
+        TextEncoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+        TextEncoding::Utf16Le => String::from_utf16_lossy(&units(u16::from_le_bytes)),
+        TextEncoding::Utf16Be => String::from_utf16_lossy(&units(u16::from_be_bytes)),
+    }
+}
+
+fn value_of(serial: u64, rest: &[u8], encoding: TextEncoding) -> Result<(SqliteValue, usize)> {
     let take = |width: usize| -> Result<&[u8]> {
         rest.get(..width)
             .ok_or_else(|| damaged("a record's value runs past the record"))
@@ -544,7 +700,7 @@ fn value_of(serial: u64, rest: &[u8]) -> Result<(SqliteValue, usize)> {
         odd => {
             let width =
                 usize::try_from((odd - 13) / 2).map_err(|_| damaged("a text is too long"))?;
-            let text = String::from_utf8_lossy(take(width)?).into_owned();
+            let text = decoded_text(take(width)?, encoding);
             (SqliteValue::Text(text), width)
         }
     })
@@ -553,6 +709,21 @@ fn value_of(serial: u64, rest: &[u8]) -> Result<(SqliteValue, usize)> {
 mod writer;
 
 pub use writer::{KeyOrder, SqliteObject, compare_values, encode_record, write_database};
+
+/// Whether an SQLite `CREATE TABLE` statement ends with the `WITHOUT ROWID` option.
+pub fn creates_without_rowid(sql: &str) -> bool {
+    let Some(options) = sql.rfind(')').map(|at| &sql[at + 1..]) else {
+        return false;
+    };
+    let words: Vec<String> = options
+        .split(|character: char| character.is_whitespace() || character == ',' || character == ';')
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words
+        .windows(2)
+        .any(|pair| pair[0] == "without" && pair[1] == "rowid")
+}
 
 #[cfg(test)]
 mod tests;

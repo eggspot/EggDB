@@ -572,7 +572,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Check: files EggDB writes pass `PRAGMA integrity_check`. The b-tree writer for whole new files
   and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631). Left: editing a
   file in place with the rollback journal and the WAL.
-- `WITHOUT ROWID` tables and UTF-16 databases in SQLite files (D180).
+- `WITHOUT ROWID` tables and UTF-16 databases in SQLite files (D180). Reading them (and importing them with
+  `eggdb restore`): **code written, unbuilt** (code-only mode, 2026-11-12, D788). Left: writing them.
 - `eggdb restore` from an SQLite file into an EggDB file (D13, D180). **Code written, unbuilt** (code-only mode, 2026-11-12,
   D568).
 - SQLite's dynamic typing for `INTEGER` columns (text kept as text, reals as reals), an integer

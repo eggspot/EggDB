@@ -1,5 +1,6 @@
 use crate::{
-    KeyOrder, SqliteFile, SqliteObject, SqliteRow, SqliteValue, encode_record, record, varint,
+    KeyOrder, SqliteFile, SqliteObject, SqliteRow, SqliteValue, TextEncoding, encode_record, record,
+    varint,
     write_database,
 };
 
@@ -30,7 +31,7 @@ fn walk_index(bytes: &[u8], page: u32, out: &mut Vec<Vec<SqliteValue>>) {
             at += 4;
         }
         let payload = usize::try_from(varint(bytes, &mut at).expect("a payload size")).unwrap();
-        out.push(record(&bytes[at..at + payload]).expect("an index record"));
+        out.push(record(&bytes[at..at + payload], TextEncoding::Utf8).expect("an index record"));
     }
     if kind == 2 {
         walk_index(bytes, u32_at(bytes, start + 8), out);
@@ -61,7 +62,7 @@ fn records_use_the_smallest_serial_types() {
     );
     let wide = encode_record(&[SqliteValue::Integer(i64::MIN), SqliteValue::Real(1.5)]);
     assert_eq!(&wide[..3], &[3, 6, 7]);
-    assert_eq!(record(&wide).unwrap(), vec![
+    assert_eq!(record(&wide, TextEncoding::Utf8).unwrap(), vec![
         SqliteValue::Integer(i64::MIN),
         SqliteValue::Real(1.5)
     ]);
@@ -204,4 +205,80 @@ fn descending_keys_and_value_classes_sort_as_sqlite_does() {
         SqliteValue::Integer(4),
         SqliteValue::Integer(3)
     ]);
+}
+
+#[test]
+fn index_records_read_the_written_index_in_key_order() {
+    let entries: Vec<Vec<SqliteValue>> = (0..3000i64)
+        .map(|at| {
+            vec![
+                SqliteValue::Text(format!("{:0>200}", (at * 7919) % 3000)),
+                SqliteValue::Integer(at),
+            ]
+        })
+        .collect();
+    let objects = vec![SqliteObject::Index {
+        name: "i".to_owned(),
+        table: "t".to_owned(),
+        sql: Some("CREATE INDEX i ON t(a)".to_owned()),
+        entries: entries.clone(),
+        orders: Vec::new(),
+    }];
+    let bytes = write_database(&objects).expect("written");
+    let root = index_root(&bytes, "i");
+    let file = read_back(bytes);
+    let mut expected = entries;
+    expected.sort_by(|left, right| {
+        crate::compare_values(&left[0], &right[0]).then(crate::compare_values(&left[1], &right[1]))
+    });
+    assert_eq!(file.index_records(root).expect("records"), expected);
+}
+
+#[test]
+fn without_rowid_rows_put_the_key_columns_back_in_place() {
+    let entries = vec![
+        vec![
+            SqliteValue::Text("k1".to_owned()),
+            SqliteValue::Integer(10),
+            SqliteValue::Text("x".to_owned()),
+        ],
+        vec![
+            SqliteValue::Text("k2".to_owned()),
+            SqliteValue::Integer(20),
+            SqliteValue::Null,
+        ],
+    ];
+    let objects = vec![SqliteObject::Index {
+        name: "w".to_owned(),
+        table: "w".to_owned(),
+        sql: None,
+        entries,
+        orders: Vec::new(),
+    }];
+    let bytes = write_database(&objects).expect("written");
+    let root = index_root(&bytes, "w");
+    let file = read_back(bytes);
+    let rows = file.without_rowid_rows(root, 3, &[1]).expect("rows");
+    assert_eq!(rows[0].values, vec![
+        SqliteValue::Integer(10),
+        SqliteValue::Text("k1".to_owned()),
+        SqliteValue::Text("x".to_owned())
+    ]);
+    assert_eq!(rows[1].rowid, 0);
+    assert!(file.without_rowid_rows(root, 3, &[3]).is_err());
+    assert!(file.without_rowid_rows(root, 3, &[]).is_err());
+    assert!(file.without_rowid_rows(root, 3, &[0, 0]).is_err());
+}
+
+#[test]
+fn without_rowid_is_found_after_the_column_list() {
+    assert!(crate::creates_without_rowid(
+        "CREATE TABLE w(a TEXT PRIMARY KEY, b) WITHOUT ROWID"
+    ));
+    assert!(crate::creates_without_rowid(
+        "CREATE TABLE w(a TEXT PRIMARY KEY, b) STRICT, without rowid;"
+    ));
+    assert!(!crate::creates_without_rowid(
+        "CREATE TABLE w(a TEXT DEFAULT 'without rowid', b)"
+    ));
 }

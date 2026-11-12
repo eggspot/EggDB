@@ -169,12 +169,12 @@ fn varints_and_serial_types_follow_the_format() {
         assert_eq!(at, bytes.len());
     }
     assert_eq!(
-        value_of(3, &[0xff, 0xff, 0xfe]).unwrap(),
+        value_of(3, &[0xff, 0xff, 0xfe], TextEncoding::Utf8).unwrap(),
         (SqliteValue::Integer(-2), 3)
     );
-    assert_eq!(value_of(8, &[]).unwrap().0, SqliteValue::Integer(0));
-    assert!(value_of(10, &[]).is_err());
-    assert!(value_of(6, &[0; 4]).is_err());
+    assert_eq!(value_of(8, &[], TextEncoding::Utf8).unwrap().0, SqliteValue::Integer(0));
+    assert!(value_of(10, &[], TextEncoding::Utf8).is_err());
+    assert!(value_of(6, &[0; 4], TextEncoding::Utf8).is_err());
 }
 
 #[test]
@@ -251,4 +251,29 @@ fn a_far_page_in_the_write_ahead_log_does_not_raise_the_budget() {
     assert_eq!(file.rows(2).unwrap().len(), 2);
     let reads = (0..100_000).take_while(|_| file.rows(2).is_ok()).count();
     assert!(reads < 10_000, "{reads}");
+}
+
+#[test]
+fn utf16_text_is_decoded_in_either_byte_order() {
+    let little = [0x68, 0x00, 0xe9, 0x00, 0x3d, 0xd8, 0x00, 0xde];
+    let big = [0x00, 0x68, 0x00, 0xe9, 0xd8, 0x3d, 0xde, 0x00];
+    let serial = 13 + 2 * 8;
+    assert_eq!(
+        value_of(serial, &little, TextEncoding::Utf16Le).unwrap(),
+        (SqliteValue::Text("hé\u{1f600}".to_owned()), 8)
+    );
+    assert_eq!(
+        value_of(serial, &big, TextEncoding::Utf16Be).unwrap(),
+        (SqliteValue::Text("hé\u{1f600}".to_owned()), 8)
+    );
+}
+
+#[test]
+fn a_utf16_header_opens_and_reports_its_encoding() {
+    let mut bytes = sample_database();
+    bytes[56..60].copy_from_slice(&2u32.to_be_bytes());
+    let file = SqliteFile::from_bytes(bytes.clone(), &[]).unwrap();
+    assert_eq!(file.text_encoding(), TextEncoding::Utf16Le);
+    bytes[56..60].copy_from_slice(&4u32.to_be_bytes());
+    assert!(SqliteFile::from_bytes(bytes, &[]).is_err());
 }

@@ -82,9 +82,29 @@ pub(crate) fn import(db: &Database, path: &Path) -> Result<Vec<String>, Error> {
         .tables()
         .map_err(|error| failed(path, error))?;
     for entry in &tables {
-        let alias = defined
+        let found = defined
             .iter()
-            .find(|table| table.name.eq_ignore_ascii_case(&entry.name))
+            .find(|table| table.name.eq_ignore_ascii_case(&entry.name));
+        if entry
+            .sql
+            .as_deref()
+            .is_some_and(eggdb_sqlite_format::creates_without_rowid)
+        {
+            let Some(table) = found else {
+                continue;
+            };
+            let key: Vec<usize> = table
+                .primary_key
+                .iter()
+                .filter_map(|name| table.columns.iter().position(|column| &column.name == name))
+                .collect();
+            let rows = file
+                .without_rowid_rows(entry.root_page, table.columns.len(), &key)
+                .map_err(|error| failed(path, error))?;
+            insert_rows(&mut run, &mut warnings, &entry.name, &rows, None);
+            continue;
+        }
+        let alias = found
             .and_then(|table| match table.primary_key.as_slice() {
                 [only] => table.columns.iter().position(|column| {
                     &column.name == only
