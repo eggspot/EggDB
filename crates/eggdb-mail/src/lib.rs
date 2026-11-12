@@ -1,14 +1,18 @@
 //! EggDB's email store (D56, D892): mailboxes and messages kept on EggDB's key-value
 //! transactions through [`eggdb_keyspace::Keyspace`] (database 0 of the keyspace the caller
 //! gives, which the `eggdb` binary keeps in the collection `mail0`), mail received over SMTP
-//! ([`serve_smtp`]) and read over IMAP ([`serve_imap`]). Everything is written from the IETF
-//! RFCs (RFC 3501, RFC 4315, RFC 5321, RFC 5322, RFC 2047, RFC 6851, RFC 7888); no other mail
+//! ([`serve_smtp`]) and read over IMAP ([`serve_imap`]) and JMAP ([`JmapEndpoint`]). Everything is written from the IETF
+//! RFCs (RFC 3501, RFC 4315, RFC 8620, RFC 8621, RFC 5321, RFC 5322, RFC 2047, RFC 6851, RFC 7888); no other mail
 //! server's code is used or read.
 
 mod imap;
+mod jmap;
+mod json;
 pub mod message;
 mod smtp;
 pub mod store;
+
+pub use jmap::{Endpoint as JmapEndpoint, MAX_REQUEST_BYTES as MAX_JMAP_REQUEST_BYTES};
 
 use eggdb_keyspace::Keyspace;
 use std::io;

@@ -466,6 +466,27 @@ impl Session<'_> {
             }
             None => None,
         };
+        let jmap_listener = match options.jmap_listen {
+            Some(address) => {
+                if self.request.read_only {
+                    return Err(usage(format!(
+                        "--jmap-listen {address}: JMAP changes mailboxes and keywords, which a read-only server cannot"
+                    )));
+                }
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--jmap-listen {address}: the JMAP endpoint has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for JMAP on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let sparql_listener = match options.sparql_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -794,6 +815,7 @@ impl Session<'_> {
                 sparql_listener.as_ref(),
                 smtp_listener.as_ref(),
                 imap_listener.as_ref(),
+                jmap_listener.as_ref(),
                 cql_listener.as_ref(),
                 stomp_listener.as_ref(),
                 nats_listener.as_ref(),
@@ -949,6 +971,7 @@ impl Session<'_> {
             max_connections,
             max_message_bytes: 25 << 20,
         };
+        let jmap_endpoint = eggdb_mail::JmapEndpoint::new(&mail_database, mail_config.clone());
         let sparql_endpoint = eggdb_rdf::Endpoint::new(
             &rdf_database,
             0,
@@ -1102,6 +1125,17 @@ impl Session<'_> {
             });
             let imap_server = scope.spawn(|| match &imap_listener {
                 Some(listener) => eggdb_mail::serve_imap(&mail_database, listener, &mail_config, &stop_signals::requested),
+                None => Ok(()),
+            });
+            let jmap_server = scope.spawn(|| match &jmap_listener {
+                Some(listener) => eggdb_http::serve_with_limits(
+                    listener,
+                    &|request| jmap_endpoint.answer(request),
+                    &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_mail::MAX_JMAP_REQUEST_BYTES, &memory_budget)
+                        .with_rate_limit(rate_limiter.as_ref())
+                        .decoding_content_encoding(),
+                ),
                 None => Ok(()),
             });
             let sparql_server = scope.spawn(|| match &sparql_listener {
@@ -1409,6 +1443,7 @@ impl Session<'_> {
             let _ = sparql_server.join();
             let _ = smtp_server.join();
             let _ = imap_server.join();
+            let _ = jmap_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = cdc_topic_delivery.join();
             let _ = sqs_server.join();
