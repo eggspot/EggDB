@@ -7,13 +7,14 @@
 //! signed-in user, so roles and row security apply unchanged. Rows read with `GET` are sent as
 //! they are written out, in HTTP/1.1 chunks, so a large result never sits in memory twice.
 //! `POST /graphql` (or `/v1/graphql`) answers GraphQL queries and mutations over the same
-//! tables in Hasura's style.
+//! tables in Hasura's style, and `/odata` serves them as an OData v4 service.
 //! PostgREST and Hasura are trademarks of their owners; EggDB is compatible with their
 //! conventions.
 
 mod graphql;
 mod graphql_execute;
 mod graphql_schema;
+mod odata;
 mod ogc;
 mod request;
 
@@ -354,6 +355,9 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             } else {
                 self.describe().into()
             };
+        }
+        if path == "odata" || path.starts_with("odata/") {
+            return self.odata(path["odata".len()..].trim_start_matches('/'), request).into();
         }
         if path == "graphql" || path == "v1/graphql" {
             return self.graphql(request).into();

@@ -901,3 +901,4 @@ its full title with its status.
 - [D874](decisions/D874.md) Code-only batch 522 (M5): named parameters in libsqlite3
 - [D875](decisions/D875.md) Code-only batch 523 (M6a): a GraphQL API generated from the schema
 - [D876](decisions/D876.md) Code-only batch 524 (M6a): GraphQL introspection
+- [D877](decisions/D877.md) Code-only batch 525 (M6a): an OData v4 service over the schema

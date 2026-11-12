@@ -426,3 +426,47 @@ fn graphql_reads_and_writes_tables_with_relationships() {
     let refused = graphql(&endpoint, "mutation { insert_books_one(object: {id: 10, title: \"Dup\"}) { id } }", "{}");
     assert!(refused.contains("\"errors\""), "{refused}");
 }
+
+#[test]
+fn odata_serves_metadata_sets_keys_and_writes() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE products (id integer PRIMARY KEY, name text NOT NULL, price numeric)",
+        "INSERT INTO products VALUES (1, 'Egg', 0.5), (2, 'Omelette', 4.25), (3, 'Toast', NULL)",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let metadata = call(&endpoint, "GET", "/odata/$metadata", "", None);
+    assert_eq!(metadata.status, 200);
+    assert!(text(&metadata).contains("<EntityType Name=\"products\"><Key><PropertyRef Name=\"id\"/></Key>"), "{}", text(&metadata));
+    assert!(text(&metadata).contains("<Property Name=\"price\" Type=\"Edm.Decimal\"/>"), "{}", text(&metadata));
+    let listed = call(
+        &endpoint,
+        "GET",
+        "/odata/products?$filter=price%20gt%201%20or%20price%20eq%20null&$select=id,name&$orderby=id%20desc&$count=true",
+        "",
+        None,
+    );
+    assert_eq!(listed.status, 200, "{}", text(&listed));
+    assert!(
+        text(&listed).contains("\"@odata.count\":2,\"value\":[{\"id\":3,\"name\":\"Toast\"},{\"id\":2,\"name\":\"Omelette\"}]"),
+        "{}",
+        text(&listed)
+    );
+    let one = call(&endpoint, "GET", "/odata/products(1)", "", None);
+    assert!(text(&one).contains("\"name\":\"Egg\""), "{}", text(&one));
+    let counted = call(&endpoint, "GET", "/odata/products/$count", "", None);
+    assert_eq!(text(&counted), "3");
+    let created = call(&endpoint, "POST", "/odata/products", "{\"id\":4,\"name\":\"Pancake\"}", None);
+    assert_eq!(created.status, 201, "{}", text(&created));
+    let changed = call(&endpoint, "PATCH", "/odata/products(4)", "{\"price\":2}", None);
+    assert_eq!(changed.status, 204, "{}", text(&changed));
+    let removed = call(&endpoint, "DELETE", "/odata/products(4)", "", None);
+    assert_eq!(removed.status, 204);
+    let missing = call(&endpoint, "GET", "/odata/products(4)", "", None);
+    assert_eq!(missing.status, 404);
+    let refused = call(&endpoint, "GET", "/odata/products?$filter=nope%20eq%201", "", None);
+    assert_eq!(refused.status, 400);
+}
