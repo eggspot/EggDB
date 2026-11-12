@@ -915,3 +915,4 @@ its full title with its status.
 - [D888](decisions/D888.md) Code-only batch 536 (M13): SPARQL 1.1 queries evaluated
 - [D889](decisions/D889.md) Code-only batch 537 (M13): SPARQL updates, the SPARQL protocols and eggdb serve --sparql-listen
 - [D890](decisions/D890.md) Code-only batch 538 (M10): QUALIFY
+- [D891](decisions/D891.md) Code-only batch 539 (M10): SQL Server global temporary tables

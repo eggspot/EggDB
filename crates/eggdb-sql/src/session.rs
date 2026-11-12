@@ -546,6 +546,7 @@ pub struct Session<'s> {
     keeps_identity_values: bool,
     statement_start: usize,
     shown_statement: Option<String>,
+    global_temporary_tables: Vec<String>,
     ddl_command_text: Option<String>,
     explain_plan_displays: bool,
     scan_stats: bool,
@@ -637,6 +638,7 @@ impl<'s> Session<'s> {
             keeps_identity_values: false,
             statement_start: 0,
             shown_statement: None,
+            global_temporary_tables: Vec::new(),
             ddl_command_text: None,
             explain_plan_displays: false,
             scan_stats: false,
@@ -2880,8 +2882,33 @@ impl<'s> Session<'s> {
             }
             Block::Reading(_) | Block::Failed | Block::None => {}
         }
+        self.drop_global_temporary_tables();
         self.settle_sequences()?;
         Ok(was_open)
+    }
+
+    fn remember_global_temporary(&mut self, statement: &Statement) {
+        let name = match statement {
+            Statement::CreateTable(create) => &create.name.text,
+            Statement::CreateTableAs(create) => &create.name.text,
+            _ => return,
+        };
+        if crate::temporary::is_sqlserver_global_temporary(name) && !self.global_temporary_tables.contains(name) {
+            self.global_temporary_tables.push(name.clone());
+        }
+    }
+
+    /// Drops the `##` tables this session made, as SQL Server does when their session ends;
+    /// one another session dropped already is skipped.
+    fn drop_global_temporary_tables(&mut self) {
+        let dialect = self.dialect;
+        self.dialect = Dialect::PostgreSql;
+        for name in std::mem::take(&mut self.global_temporary_tables) {
+            let shown = crate::schemas::display(&name);
+            let quoted: Vec<String> = shown.split('.').map(crate::schema::quoted).collect();
+            let _ = self.run_quietly(&format!("DROP TABLE IF EXISTS {}", quoted.join(".")));
+        }
+        self.dialect = dialect;
     }
 
     fn fail_block(&mut self) {
@@ -3115,6 +3142,9 @@ impl<'s> Session<'s> {
             self.transaction_mode.forget_transaction();
         }
         let result = self.run_with_event_triggers(statement, io);
+        if result.is_ok() && self.sqlserver() {
+            self.remember_global_temporary(statement);
+        }
         self.sync_transaction_read_only();
         result
     }

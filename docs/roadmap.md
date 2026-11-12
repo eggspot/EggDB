@@ -1257,7 +1257,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `SELECT ... INTO` are built (sql.md, D300, D303). `deleted.` in `UPDATE`'s `OUTPUT`: **code
   written, unbuilt** (code-only mode, 2026-11-11, D430). `TOP (n)` in `UPDATE` and `DELETE`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D605); `TOP ... PERCENT` and `INSERT TOP` in DML: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D632). Left: `##temp` tables.
+  unbuilt** (code-only mode, 2026-11-12, D632); `##temp` tables: **code written, unbuilt** (code-only mode, 2026-11-12,
+  D891).
 - `MERGE`: `DELETE` triggers fired by its deletes (by-source deletes too), SQL Server's refusal of
   an `OUTPUT ... INTO` target with triggers, checks or foreign keys, `SELECT ... INTO` keeping the
   source's identity (`NOT NULL` is built, D342), describing a prepared `OUTPUT ... INTO` that still returns

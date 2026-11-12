@@ -35,7 +35,13 @@ pub(crate) fn internal_name(name: &str) -> String {
 }
 
 pub(crate) fn is_sqlserver_temporary(name: &str) -> bool {
-    name.starts_with('#')
+    name.starts_with('#') && !is_sqlserver_global_temporary(name)
+}
+
+/// Whether `name` is a SQL Server global temporary table (`##name`): an ordinary table every
+/// session sees, dropped when the session that made it closes.
+pub(crate) fn is_sqlserver_global_temporary(name: &str) -> bool {
+    crate::schemas::base_name(name).starts_with("##")
 }
 
 pub(crate) struct Entered {

@@ -2107,3 +2107,15 @@ fn agent_steps_follow_their_flow_options_and_retries() {
             .is_err()
     );
 }
+
+#[test]
+fn global_temporary_tables_are_shared_and_go_with_their_session() {
+    let store = MemoryStore::default();
+    let mut owner = Session::with_dialect(&store, Dialect::SqlServer);
+    batch(&mut owner, "CREATE TABLE ##shared (id int); INSERT INTO ##shared VALUES (1), (2); CREATE TABLE #mine (id int)").unwrap();
+    let mut other = Session::with_dialect(&store, Dialect::SqlServer);
+    assert_eq!(values(&mut other, "SELECT count(*) FROM ##shared"), vec![vec![Value::Integer(2)]]);
+    assert!(batch(&mut other, "SELECT count(*) FROM #mine").map_or(true, |steps| steps.iter().any(|step| step.outcome.is_err())));
+    owner.close().unwrap();
+    assert!(batch(&mut other, "SELECT count(*) FROM ##shared").map_or(true, |steps| steps.iter().any(|step| step.outcome.is_err())));
+}
