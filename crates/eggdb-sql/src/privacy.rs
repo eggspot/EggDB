@@ -220,6 +220,81 @@ BEGIN
     RETURN copied;
 END
 $$;
+CREATE FUNCTION eggdb_privacy.synthetic_copy(schema_name text, table_name text, target_table text, row_count bigint, minimum_group integer DEFAULT 5) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    found_column record;
+    chosen text[] := '{}';
+    null_rate double precision;
+    mean double precision;
+    spread double precision;
+    lowest text;
+    highest text;
+    choices text[];
+    weights bigint[];
+    kept bigint;
+    running bigint;
+    position integer;
+    choice text;
+    branches text;
+    expression text;
+    made bigint;
+BEGIN
+    IF row_count < 0 OR row_count > 100000000 THEN
+        RAISE EXCEPTION 'row_count must be 0 to 100000000' USING ERRCODE = '22023';
+    END IF;
+    IF minimum_group < 1 THEN
+        RAISE EXCEPTION 'minimum_group must be at least 1' USING ERRCODE = '22023';
+    END IF;
+    FOR found_column IN SELECT c.column_name AS name, c.data_type FROM information_schema.columns c WHERE c.table_schema = synthetic_copy.schema_name AND c.table_name = synthetic_copy.table_name ORDER BY c.ordinal_position LOOP
+        EXECUTE format('SELECT CASE WHEN count(*) = 0 THEN 1 ELSE 1 - count(%1$I)::double precision / count(*) END FROM %2$I.%3$I', found_column.name, schema_name, table_name) INTO null_rate;
+        IF found_column.data_type IN ('ARRAY', 'USER-DEFINED') THEN
+            expression := 'NULL';
+        ELSIF found_column.data_type IN ('smallint', 'integer', 'bigint', 'numeric', 'real', 'double precision') THEN
+            EXECUTE format('SELECT avg(%1$I)::double precision, coalesce(stddev_samp(%1$I), 0)::double precision, min(%1$I)::text, max(%1$I)::text FROM %2$I.%3$I', found_column.name, schema_name, table_name)
+                INTO mean, spread, lowest, highest;
+            expression := format('least(greatest(%L::double precision + %L::double precision * sqrt(-2 * ln(1 - random())) * cos(2 * pi() * random()), %L::double precision), %L::double precision)',
+                coalesce(mean, 0), spread, coalesce(lowest, '0'), coalesce(highest, '0'));
+            IF found_column.data_type IN ('smallint', 'integer', 'bigint') THEN
+                expression := format('round(%s)::%s', expression, found_column.data_type);
+            ELSE
+                expression := format('(%s)::%s', expression, found_column.data_type);
+            END IF;
+        ELSIF found_column.data_type = 'date' THEN
+            EXECUTE format('SELECT min(%1$I)::text, max(%1$I)::text FROM %2$I.%3$I', found_column.name, schema_name, table_name) INTO lowest, highest;
+            expression := CASE WHEN lowest IS NULL THEN 'NULL::date'
+                ELSE format('(%1$L::date + floor(random() * (%2$L::date - %1$L::date + 1))::integer)', lowest, highest) END;
+        ELSIF found_column.data_type LIKE 'timestamp%' THEN
+            EXECUTE format('SELECT min(%1$I)::text, max(%1$I)::text FROM %2$I.%3$I', found_column.name, schema_name, table_name) INTO lowest, highest;
+            expression := CASE WHEN lowest IS NULL THEN format('NULL::%s', found_column.data_type)
+                ELSE format('(%1$L::%3$s + (%2$L::%3$s - %1$L::%3$s) * random())', lowest, highest, found_column.data_type) END;
+        ELSE
+            EXECUTE format('SELECT array_agg(t.v ORDER BY t.n DESC, t.v), array_agg(t.n ORDER BY t.n DESC, t.v), coalesce(sum(t.n), 0) FROM (SELECT %1$I::text AS v, count(*) AS n FROM %2$I.%3$I WHERE %1$I IS NOT NULL GROUP BY 1 HAVING count(*) >= %4$s ORDER BY 2 DESC, 1 LIMIT 100) t',
+                found_column.name, schema_name, table_name, minimum_group) INTO choices, weights, kept;
+            IF kept = 0 THEN
+                expression := 'NULL';
+            ELSE
+                position := 0;
+                running := 0;
+                branches := '';
+                FOREACH choice IN ARRAY choices LOOP
+                    position := position + 1;
+                    running := running + weights[position];
+                    branches := branches || format(' WHEN x.r < %s THEN %L', running::double precision / kept, choice);
+                END LOOP;
+                expression := format('(SELECT CASE%s END FROM (SELECT random() + 0 * g.n AS r) x)::%s', branches, found_column.data_type);
+            END IF;
+        END IF;
+        chosen := chosen || format('CASE WHEN random() < %s THEN NULL ELSE %s END AS %I', null_rate, expression, found_column.name);
+    END LOOP;
+    IF coalesce(array_length(chosen, 1), 0) = 0 THEN
+        RAISE EXCEPTION 'table %.% does not exist', schema_name, table_name USING ERRCODE = '42P01';
+    END IF;
+    EXECUTE format('CREATE TABLE %s AS SELECT * FROM %I.%I WHERE false', target_table, schema_name, table_name);
+    EXECUTE format('INSERT INTO %s SELECT %s FROM generate_series(1, %s) AS g(n)', target_table, array_to_string(chosen, ', '), row_count);
+    GET DIAGNOSTICS made = ROW_COUNT;
+    RETURN made;
+END
+$$;
 "#;
 
 fn invalid(message: impl Into<String>) -> SqlError {
@@ -482,6 +557,27 @@ mod tests {
                 "SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY[]::text[])"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn synthetic_copies_follow_each_column_and_drop_rare_values() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_privacy",
+            "CREATE TABLE customers (id integer, country text, signed_up date)",
+            "INSERT INTO customers SELECT g.n, CASE WHEN g.n <= 6 THEN 'VN' WHEN g.n <= 9 THEN 'SE' ELSE 'XX' END, DATE '2026-01-01' + g.n FROM generate_series(1, 10) AS g(n)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut session, "SELECT eggdb_privacy.synthetic_copy('public', 'customers', 'customers_synthetic', 200) AS made").unwrap(),
+            "made\n200\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT count(DISTINCT country) AS countries, min(id) >= 1 AND max(id) <= 10 AS ids_in_range, min(signed_up) >= DATE '2026-01-02' AND max(signed_up) <= DATE '2026-01-11' AS dates_in_range FROM customers_synthetic").unwrap(),
+            "countries|ids_in_range|dates_in_range\n1|t|t\nSELECT 1"
         );
     }
 }

@@ -752,7 +752,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Left: the snapping mechanism and l-diversity.
 - Blind-index search on encrypted columns (D52). **Code written, unbuilt** (code-only mode, 2026-11-12, D752).
 - Synthetic data, and masked copies for non-production use (D52). Masked copies (`eggdb_privacy.masked_copy`): **code
-  written, unbuilt** (code-only mode, 2026-11-12, D748). Left: synthetic data.
+  written, unbuilt** (code-only mode, 2026-11-12, D748). Synthetic data (`eggdb_privacy.synthetic_copy`): **code written,
+  unbuilt** (code-only mode, 2026-11-12, D757).
 - A secrets store with dynamic, short-lived credentials in Vault's style (D54). **Code written, unbuilt** (code-only mode,
   2026-11-12, D751), in `eggdb_secrets`.
 - An LDAP v3 server, SCIM, and the published Active Directory protocols (MS-ADTS) after D58's

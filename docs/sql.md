@@ -3671,6 +3671,11 @@ SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY['zip', 'age_band'])
   budget is spent they refuse with `53400`.
 - `eggdb_privacy.masked_copy(schema, table, target, masks)` copies a table for non-production use with each column
   kept or masked as `masks` says: `null`, `redact`, `hash`, `email` (a fake address) or `keep_last:N`.
+- `eggdb_privacy.synthetic_copy(schema, table, target, rows [, minimum_group])` writes a table of made-up rows with
+  the same columns (D757). Each column keeps its share of NULLs and is drawn on its own: numbers from a normal
+  distribution with the column's mean and spread, kept between its smallest and largest value; dates and timestamps
+  evenly between their first and last; anything else from its values that occur at least `minimum_group` times (5),
+  at their frequencies (the 100 most common). Correlations between columns are not kept.
 
 ## Retention, legal hold and erasure (eggdb_retention)
 
