@@ -677,6 +677,13 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{dialect:?}: {error}"));
             assert!(found >= 1, "{dialect:?}");
         }
+        let mut mysql = crate::Session::with_dialect(&store, crate::Dialect::MySql);
+        mysql.identify("eggdb", "statistics_probe");
+        let digests = texts(
+            &mut mysql,
+            "SELECT digest_text, count_star, sum_rows_sent FROM performance_schema.events_statements_summary_by_digest WHERE digest_text LIKE '%AS probe_value'",
+        );
+        assert_eq!(digests, vec!["digest_text|count_star|sum_rows_sent\nSELECT $1 AS probe_value|3|3\nSELECT 1".to_owned()]);
         texts(&mut session, "SELECT pg_stat_statements_reset()");
         assert_eq!(
             texts(

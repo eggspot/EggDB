@@ -377,7 +377,7 @@ impl CatalogRelation {
             Self::Information(_) => crate::schemas::INFORMATION_SCHEMA,
             Self::SqlServer(relation) => relation.schema(),
             Self::Oracle(relation) => relation.schema(),
-            Self::MySql(_) => crate::schemas::INFORMATION_SCHEMA,
+            Self::MySql(relation) => relation.schema(),
             _ => crate::schemas::CATALOG_SCHEMA,
         }
     }

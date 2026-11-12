@@ -45,7 +45,26 @@ pub(crate) enum MySqlRelation {
     Collations,
     Plugins,
     ProcessList,
+    StatementDigests,
 }
+
+const PERFORMANCE_SCHEMA: &str = "performance_schema";
+const PICOSECONDS_PER_MILLISECOND: f64 = 1e9;
+
+const STATEMENT_DIGESTS: &[CatalogColumn] = &[
+    column("schema_name", NAME),
+    column("digest", SqlType::Varchar(Some(64))),
+    column("digest_text", TEXT),
+    column("count_star", NUMBER),
+    column("sum_timer_wait", NUMBER),
+    column("min_timer_wait", NUMBER),
+    column("avg_timer_wait", NUMBER),
+    column("max_timer_wait", NUMBER),
+    column("sum_rows_affected", NUMBER),
+    column("sum_rows_sent", NUMBER),
+    column("first_seen", STAMP),
+    column("last_seen", STAMP),
+];
 
 const SCHEMATA: &[CatalogColumn] = &[
     column("catalog_name", NAME),
@@ -466,6 +485,7 @@ impl MySqlRelation {
         Self::Collations,
         Self::Plugins,
         Self::ProcessList,
+        Self::StatementDigests,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -488,18 +508,26 @@ impl MySqlRelation {
             Self::Collations => "collations",
             Self::Plugins => "plugins",
             Self::ProcessList => "processlist",
+            Self::StatementDigests => "events_statements_summary_by_digest",
         }
     }
 
     /// The view `name` refers to, written `information_schema.<view>` in any case.
     pub(crate) fn referenced(name: &str) -> Option<Self> {
         let (schema, base) = name.split_once(crate::schemas::QUALIFIER)?;
-        if !schema.eq_ignore_ascii_case(crate::schemas::INFORMATION_SCHEMA) {
-            return None;
-        }
         Self::ALL
             .into_iter()
+            .filter(|relation| relation.schema().eq_ignore_ascii_case(schema))
             .find(|relation| relation.name().eq_ignore_ascii_case(base))
+    }
+
+    /// The schema the view is in: `information_schema`, or `performance_schema` for the
+    /// statement digests.
+    pub(crate) fn schema(self) -> &'static str {
+        match self {
+            Self::StatementDigests => PERFORMANCE_SCHEMA,
+            _ => crate::schemas::INFORMATION_SCHEMA,
+        }
     }
 
     pub(crate) fn oid(self) -> u32 {
@@ -530,11 +558,42 @@ impl MySqlRelation {
             Self::Collations => COLLATIONS,
             Self::Plugins => PLUGINS,
             Self::ProcessList => PROCESS_LIST,
+            Self::StatementDigests => STATEMENT_DIGESTS,
         }
     }
 }
 
 type NamedRow = HashMap<&'static str, Value>;
+
+fn statement_digest_rows(columns: &'static [CatalogColumn]) -> Vec<Vec<Value>> {
+    let picoseconds = |ms: f64| Value::BigInt((ms * PICOSECONDS_PER_MILLISECOND).round().min(i64::MAX as f64) as i64);
+    let count = |value: u64| Value::BigInt(i64::try_from(value).unwrap_or(i64::MAX));
+    crate::statement_statistics::statistics()
+        .into_iter()
+        .map(|statistics| {
+            let reads = statistics
+                .query
+                .trim_start()
+                .get(..6)
+                .is_some_and(|word| word.eq_ignore_ascii_case("select"));
+            build(
+                columns,
+                vec![
+                    ("schema_name", Value::Text(statistics.database.clone())),
+                    ("digest", Value::Text(format!("{:016x}", statistics.query_id))),
+                    ("digest_text", Value::Text(statistics.query.clone())),
+                    ("count_star", count(statistics.calls)),
+                    ("sum_timer_wait", picoseconds(statistics.total_ms)),
+                    ("min_timer_wait", picoseconds(statistics.min_ms)),
+                    ("avg_timer_wait", picoseconds(statistics.mean_ms)),
+                    ("max_timer_wait", picoseconds(statistics.max_ms)),
+                    ("sum_rows_affected", count(if reads { 0 } else { statistics.rows })),
+                    ("sum_rows_sent", count(if reads { statistics.rows } else { 0 })),
+                ],
+            )
+        })
+        .collect()
+}
 
 fn standard_rows(snapshot: &CatalogSnapshot, relation: InformationRelation) -> Vec<NamedRow> {
     let names: Vec<&'static str> = relation
@@ -1343,6 +1402,7 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MySqlRelation) -> Vec<V
             })
             .collect(),
         MySqlRelation::Events => event_rows(snapshot),
+        MySqlRelation::StatementDigests => statement_digest_rows(columns),
         MySqlRelation::Triggers => trigger_rows(snapshot),
         MySqlRelation::Partitions | MySqlRelation::Plugins => Vec::new(),
     }

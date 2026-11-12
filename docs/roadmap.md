@@ -806,7 +806,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `pg_terminate_backend`: **code written, unbuilt** (code-only mode, 2026-11-11, D490).
 - Statement statistics in the other dialects' views: `performance_schema`'s digest summary and
   `sys.dm_exec_query_stats` (D25, D286). `sys.dm_exec_query_stats`: **code
-  written, unbuilt** (code-only mode, 2026-11-11, D489); `performance_schema` waits for that schema.
+  written, unbuilt** (code-only mode, 2026-11-11, D489); `performance_schema.events_statements_summary_by_digest`:
+  **code written, unbuilt** (code-only mode, 2026-11-12, D813).
 - SQLite's `.scanstats on|off` in `eggdb sql`'s shell: after each `SELECT` the shell prints its
   `QUERY PLAN` with `--SCAN t (loops=1 rows=3)` lines (D327).
 - MySQL's `EXPLAIN FORMAT=JSON`: `key_length` (**code written, unbuilt**, code-only mode, 2026-11-12, D663),
