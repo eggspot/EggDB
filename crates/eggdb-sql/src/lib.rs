@@ -209,6 +209,7 @@ mod set_returning;
 mod settings;
 mod sparkplug;
 mod opcua;
+mod fhir;
 mod sql_json;
 mod sql_json_constructors;
 mod sqlite_datetime;

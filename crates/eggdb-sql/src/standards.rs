@@ -1,8 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 21] = [
+pub(crate) const FUNCTIONS: [&str; 22] = [
     "eggdb_pdf_table",
+    "fhir_validate",
     "opcua_decode",
     "eggdb_route_dijkstra",
     "eggdb_route_astar",
@@ -501,6 +502,19 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         return Some(match values {
             [Value::Jsonb(sheet) | Value::Json(sheet) | Value::Text(sheet)] => crate::spreadsheet::recalculate(sheet).and_then(jsonb),
             _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "spreadsheet_recalculate takes the cells as jsonb")),
+        });
+    }
+    if name == "fhir_validate" {
+        return Some(match values {
+            [resource] => match resource.to_text() {
+                Some(text) if text.len() <= MOST_MESSAGE_BYTES => jsonb(crate::fhir::validate(&text)),
+                Some(_) => Err(SqlError::new(
+                    SqlState::PROGRAM_LIMIT_EXCEEDED,
+                    format!("fhir_validate reads resources of at most {MOST_MESSAGE_BYTES} bytes"),
+                )),
+                None => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "fhir_validate takes the resource as jsonb or text")),
+            },
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "fhir_validate takes one resource")),
         });
     }
     if name == "extract_text" {
