@@ -3309,6 +3309,13 @@ SELECT id, rrf_score(semantic.rank) + rrf_score(lexical.rank) AS score
 FROM semantic JOIN lexical USING (id) ORDER BY score DESC LIMIT 10;
 ```
 
+`CREATE EXTENSION eggdb_ai` adds a semantic cache and agent memory on these functions (D740):
+`eggdb_ai.cache_put(namespace, prompt, answer [, embedding, ttl])` and `cache_get(namespace, prompt [, embedding,
+max_distance])` return a cached answer whose prompt is within the cosine distance (0.1 by default) of the new one;
+`eggdb_ai.remember(agent, content [, embedding, metadata])`, `recall(agent, query [, k, embedding])` and `forget`
+keep an agent's memories and recall them by reciprocal rank fusion of embedding distance and full-text rank. Without
+an embedding, `eggdb_embed` makes one.
+
 Nearest-neighbour queries are exact for now: they read every row. Not yet: `vector(n)` as its
 own stored type (it is text, and its dimensions are not checked on insert), HNSW and IVFFlat
 indexes in SQL (the HNSW graph is written, in `eggdb-vector`), `halfvec`, `sparsevec`,

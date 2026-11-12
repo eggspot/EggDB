@@ -103,6 +103,7 @@ mod image_metadata;
 mod netcdf;
 mod orc;
 mod timescale;
+mod ai_memory;
 mod zarr;
 mod new_files;
 mod file_readers;
