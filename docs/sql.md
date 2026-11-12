@@ -3529,6 +3529,11 @@ the queue at least once, oldest first, to `http://` targets allowed by
 the entry's). It sends nothing when that is unset, and drops a
 message whose target is not allowed.
 
+`eggdb_bi.render_report(name, format [, filters])` renders a report's rows as `csv` (RFC 4180, a heading row), an
+HTML `<table>` or a `pdf` of A4 pages (`eggdb_pdf_table(title, rows)`, Helvetica, Latin-1 text), as `bytea`, after
+keeping only the rows whose columns equal the `filters` object's values, so a dashboard drills down by passing them
+(D746).
+
 ### Semantic layer: metrics and dimensions
 
 `eggdb_bi` also keeps a semantic layer (D745): a model is a table or query, with named dimensions and metrics (SQL

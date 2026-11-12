@@ -96,6 +96,67 @@ BEGIN
     RETURN built;
 END
 $$;
+CREATE FUNCTION eggdb_bi.render_report(report_name text, output text DEFAULT 'csv', filters jsonb DEFAULT '{}') RETURNS bytea LANGUAGE plpgsql AS $$
+DECLARE
+    report_query text;
+    conditions text[] := '{}';
+    wanted text;
+    found_rows json;
+    header text[];
+    item json;
+    cell text;
+    line text[];
+    written text := '';
+BEGIN
+    SELECT r.query INTO report_query FROM eggdb_bi.reports r WHERE r.name = report_name;
+    IF report_query IS NULL THEN
+        RAISE EXCEPTION 'no report is named %', report_name USING ERRCODE = '42704';
+    END IF;
+    IF output NOT IN ('csv', 'html', 'pdf') THEN
+        RAISE EXCEPTION 'reports render as csv, html or pdf, not %', output USING ERRCODE = '22023';
+    END IF;
+    FOR wanted IN SELECT jsonb_object_keys(coalesce(filters, '{}'::jsonb)) LOOP
+        conditions := conditions || format('(to_jsonb(q) ->> %L) = %L', wanted, filters ->> wanted);
+    END LOOP;
+    EXECUTE format('SELECT coalesce(json_agg(q), ''[]''::json) FROM (SELECT * FROM (%s) q %s) q', report_query,
+        CASE WHEN coalesce(array_length(conditions, 1), 0) = 0 THEN '' ELSE 'WHERE ' || array_to_string(conditions, ' AND ') END)
+        INTO found_rows;
+    IF output = 'pdf' THEN
+        RETURN eggdb_pdf_table(report_name, found_rows::text);
+    END IF;
+    SELECT coalesce(array_agg(k), '{}') INTO header FROM json_object_keys(coalesce(found_rows -> 0, '{}'::json)) k;
+    IF output = 'html' THEN
+        written := '<table><thead><tr>';
+        FOR i IN 1..coalesce(array_length(header, 1), 0) LOOP
+            written := written || '<th>' || replace(replace(replace(header[i], '&', '&amp;'), '<', '&lt;'), '>', '&gt;') || '</th>';
+        END LOOP;
+        written := written || '</tr></thead><tbody>';
+        FOR item IN SELECT * FROM json_array_elements(found_rows) LOOP
+            written := written || '<tr>';
+            FOR i IN 1..coalesce(array_length(header, 1), 0) LOOP
+                cell := coalesce(item ->> header[i], '');
+                written := written || '<td>' || replace(replace(replace(cell, '&', '&amp;'), '<', '&lt;'), '>', '&gt;') || '</td>';
+            END LOOP;
+            written := written || '</tr>';
+        END LOOP;
+        RETURN convert_to(written || '</tbody></table>' || chr(10), 'UTF8');
+    END IF;
+    line := '{}';
+    FOR i IN 1..coalesce(array_length(header, 1), 0) LOOP
+        line := line || (chr(34) || replace(header[i], chr(34), chr(34) || chr(34)) || chr(34));
+    END LOOP;
+    written := array_to_string(line, ',') || chr(13) || chr(10);
+    FOR item IN SELECT * FROM json_array_elements(found_rows) LOOP
+        line := '{}';
+        FOR i IN 1..coalesce(array_length(header, 1), 0) LOOP
+            cell := item ->> header[i];
+            line := line || CASE WHEN cell IS NULL THEN '' ELSE chr(34) || replace(cell, chr(34), chr(34) || chr(34)) || chr(34) END;
+        END LOOP;
+        written := written || array_to_string(line, ',') || chr(13) || chr(10);
+    END LOOP;
+    RETURN convert_to(written, 'UTF8');
+END
+$$;
 CREATE FUNCTION eggdb_bi.metric_query(model text, metric_names text[], dimension_names text[] DEFAULT '{}', filter text DEFAULT NULL, order_by text DEFAULT NULL, row_limit integer DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE
     found_rows jsonb;

@@ -1,7 +1,8 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 12] = [
+pub(crate) const FUNCTIONS: [&str; 13] = [
+    "eggdb_pdf_table",
     "geotiff_info",
     "image_metadata",
     "icalendar_parse",
@@ -396,6 +397,12 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if values.iter().any(Value::is_null) {
         return Some(Ok(Value::Null));
     }
+    if name == "eggdb_pdf_table" {
+        return Some(match values {
+            [title, rows] => crate::report_pdf::table_pdf(&title.to_text().unwrap_or_default(), &rows.to_text().unwrap_or_default()).map(Value::Bytea),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_pdf_table takes a title and rows")),
+        });
+    }
     if matches!(name, "dicom_parse" | "sparkplug_decode" | "geotiff_info" | "image_metadata") {
         return Some(match values {
             [Value::Bytea(file)] if name == "image_metadata" => crate::image_metadata::metadata(file).and_then(jsonb),
@@ -452,7 +459,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 }
 
 pub(crate) fn result_type(name: &str) -> crate::types::SqlType {
-    if matches!(name, "fix_field" | "extract_text") {
+    if name == "eggdb_pdf_table" {
+        crate::types::SqlType::Bytea
+    } else if matches!(name, "fix_field" | "extract_text") {
         crate::types::SqlType::Text
     } else {
         crate::types::SqlType::Jsonb

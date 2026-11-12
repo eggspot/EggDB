@@ -770,3 +770,4 @@ its full title with its status.
 - [D743](decisions/D743.md) Code-only batch 391 (M15): service discovery in `eggdb_coordination` with heartbeats, expiry and `eggdb_services` notifications
 - [D744](decisions/D744.md) Code-only batch 392 (M12): `CREATE EXTENSION eggdb_features`, feature views, online serving and point-in-time reads
 - [D745](decisions/D745.md) Code-only batch 393 (M11): a semantic layer of models, dimensions and metrics in `eggdb_bi`
+- [D746](decisions/D746.md) Code-only batch 394 (M11): `eggdb_bi.render_report` in CSV, HTML and PDF with filters, and `eggdb_pdf_table`

@@ -1325,7 +1325,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A semantic layer of metrics and dimensions, defined once and used by BI and OLAP (D46, D238). Models, dimensions and
   metrics in `eggdb_bi`: **code written, unbuilt** (code-only mode, 2026-11-12, D745). Left: OLAP use.
 - BI dashboards and charts, designed by Claude Fable (D46, D238).
-- Interactive reports with filters and drill-down, in CSV, HTML and PDF (D46, D238).
+- Interactive reports with filters and drill-down, in CSV, HTML and PDF (D46, D238). **Code written, unbuilt**
+  (code-only mode, 2026-11-12, D746): `eggdb_bi.render_report` with filters. Left: charts.
 - Reports sent to `https://` targets and by email through the operator's mail server, shared and
   embedded in other applications (D46, D238).
 - Spreadsheet-style tables with formula columns, and a grid view of them in the client (D38).

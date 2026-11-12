@@ -105,6 +105,7 @@ mod orc;
 mod timescale;
 mod ai_memory;
 mod features;
+mod report_pdf;
 mod zarr;
 mod new_files;
 mod file_readers;
