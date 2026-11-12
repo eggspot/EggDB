@@ -3,7 +3,8 @@ use crate::json::{Json, Node, parse_document};
 use crate::types::Value;
 use std::sync::OnceLock;
 
-pub(crate) const FUNCTIONS: [&str; 2] = ["eggdb_remote_embed", "eggdb_remote_complete"];
+pub(crate) const FUNCTIONS: [&str; 3] = ["eggdb_remote_embed", "eggdb_remote_complete", "eggdb_remote_rerank"];
+const MOST_DOCUMENTS: usize = 1000;
 const MOST_INPUT_BYTES: usize = 1 << 20;
 
 /// One call to a remote model: the endpoint's URL, the JSON request body, the API key if any,
@@ -108,9 +109,61 @@ fn complete(endpoint: &str, model: &str, prompt: &str, api_key: Option<&str>) ->
     }
 }
 
+fn rerank(endpoint: &str, model: &str, query: &str, documents: &str, api_key: Option<&str>) -> SqlResult<String> {
+    let invalid = |message: &str| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("eggdb_remote_rerank: {message}"));
+    let given = parse_document(documents).map_err(|_| invalid("the documents are not JSON"))?;
+    let Json::Array(items) = &given.value else {
+        return Err(invalid("the documents are a JSON array of texts"));
+    };
+    if items.len() > MOST_DOCUMENTS {
+        return Err(invalid("at most 1000 documents are reranked at once"));
+    }
+    let mut texts = Vec::with_capacity(items.len());
+    for item in items {
+        match &item.value {
+            Json::String(text) => texts.push(json_string(text)),
+            _ => return Err(invalid("each document is a text")),
+        }
+    }
+    let body = format!("{{\"model\": {}, \"query\": {}, \"documents\": [{}]}}", json_string(model), json_string(query), texts.join(", "));
+    let answer = post(endpoint, &body, api_key)?;
+    let document = parse_document(&answer).map_err(|_| SqlError::new(SqlState::FDW_ERROR, format!("{endpoint}: the answer is not JSON")))?;
+    let Some(Node { value: Json::Array(results), .. }) = member(&document, "results").or_else(|| member(&document, "data")) else {
+        return Err(SqlError::new(SqlState::FDW_ERROR, format!("{endpoint}: the answer has no results")));
+    };
+    let mut scores = vec!["null".to_owned(); texts.len()];
+    for result in results {
+        let index = member(result, "index").and_then(|node| match &node.value {
+            Json::Number(number) => number.parse::<usize>().ok(),
+            _ => None,
+        });
+        let score = member(result, "relevance_score").or_else(|| member(result, "score")).and_then(|node| match &node.value {
+            Json::Number(number) => Some(number.clone()),
+            _ => None,
+        });
+        if let (Some(index), Some(score)) = (index, score)
+            && let Some(slot) = scores.get_mut(index)
+        {
+            *slot = score;
+        }
+    }
+    Ok(format!("[{}]", scores.join(", ")))
+}
+
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if !FUNCTIONS.contains(&name) {
         return None;
+    }
+    if name == "eggdb_remote_rerank" {
+        let texts: Vec<Option<String>> = values.iter().map(Value::to_text).collect();
+        return Some(match texts.as_slice() {
+            [Some(endpoint), Some(model), Some(query), Some(documents)] => rerank(endpoint, model, query, documents, None).and_then(|text| crate::json::normalize(&text).map(Value::Jsonb)),
+            [Some(endpoint), Some(model), Some(query), Some(documents), key] => {
+                rerank(endpoint, model, query, documents, key.as_deref()).and_then(|text| crate::json::normalize(&text).map(Value::Jsonb))
+            }
+            [_, _, _, _] | [_, _, _, _, _] => Ok(Value::Null),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_remote_rerank takes an endpoint, a model, the query, the documents as a JSON array and optionally an API key")),
+        });
     }
     let texts: Vec<Option<String>> = values.iter().map(Value::to_text).collect();
     let (endpoint, model, input) = match texts.as_slice() {

@@ -3319,7 +3319,10 @@ the operator lists the endpoints in `EGGDB_MODEL_ENDPOINTS` (comma-separated URL
 only to this machine; `#roles=a+b` lets those roles call an endpoint, which otherwise only superusers may), else
 `0A000`. Keep the API key in the secrets store and pass it in: `eggdb_remote_embed('https://api.example.com/v1/embeddings',
 'text-embedding-3-small', body, eggdb_secrets.get('models/key', $1))`. Certificates are checked against
-`EGGDB_REPORT_CA_FILE` or the system's roots.
+`EGGDB_REPORT_CA_FILE` or the system's roots. For hybrid search, `eggdb_remote_rerank(endpoint, model, query,
+documents [, api_key])` sends a JSON array of texts to a rerank endpoint (the `results` of `index` and
+`relevance_score` that Cohere-, Jina- and vLLM-style rerankers return) and gives back a JSON array of scores in the
+documents' order (D778): rerank the top fused candidates with `ORDER BY (scores ->> position)::float DESC`.
 
 `CREATE EXTENSION eggdb_ai` adds a semantic cache and agent memory on these functions (D740):
 `eggdb_ai.cache_put(namespace, prompt, answer [, embedding, ttl])` and `cache_get(namespace, prompt [, embedding,

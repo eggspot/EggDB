@@ -1383,7 +1383,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - An ONNX runtime with `embed(model, text)` on local models (D31, D205).
 - Opt-in remote embedding and language-model providers, with keys from the secrets store (D31,
   D205). **Code written, unbuilt** (code-only mode, 2026-11-12, D777).
-- Reranking models in hybrid search (D31).
+- Reranking models in hybrid search (D31). Remote rerank models (`eggdb_remote_rerank`): **code written, unbuilt**
+  (code-only mode, 2026-11-12, D778). Left: local models.
 - A semantic cache (D31). **Code written, unbuilt** (code-only mode, 2026-11-12, D740).
 - Agent memory as a built-in model: first a memory table per agent (text, embedding, time)
   recalled by hybrid search and offered as MCP tools (D31, D205). Check: an MCP recall test. The memory table and

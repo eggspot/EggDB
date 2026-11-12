@@ -202,6 +202,7 @@ fn added_function_type(
         name if crate::webauthn::FUNCTIONS.contains(&name) => {
             Some(crate::webauthn::result_type(name))
         }
+        "eggdb_remote_rerank" => Some(SqlType::Jsonb),
         name if crate::remote_models::FUNCTIONS.contains(&name) => Some(SqlType::Text),
         "l2_normalize" => Some(SqlType::Text),
         "strpos" | "position" | "ascii" | "regexp_count" | "regexp_instr" => Some(SqlType::Integer),
