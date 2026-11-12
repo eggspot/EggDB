@@ -191,6 +191,7 @@ impl Api<'_> {
                     .get(&document_key(&item.index, &item.id))?
                     .as_deref()
                     .and_then(unstored)
+                    .filter(|(_, source)| crate::permissions::source_visible(source))
                 {
                     Some((version, source)) => {
                         held = held.saturating_add(source.len());

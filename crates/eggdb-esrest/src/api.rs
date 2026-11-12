@@ -9,6 +9,7 @@ mod tasks;
 mod templates;
 
 use crate::json_out::{Out, escaped, written};
+use crate::permissions::{Principal, SearchUser};
 use crate::query::{Stats, parse, score};
 use crate::script::{Context, Operation, Script};
 use crate::sort::{Sort, SortValue, write_values};
@@ -27,6 +28,7 @@ const SETTINGS_RECORD: u8 = 8;
 const DEFAULT_SIZE: usize = 10;
 const MAX_RESULT_WINDOW: usize = 10_000;
 const VERSION: &str = "2.11.0";
+const DEFAULT_PERMISSION_FIELD: &str = "readers";
 
 /// What the REST API needs to answer requests.
 pub struct Api<'k> {
@@ -38,6 +40,8 @@ pub struct Api<'k> {
     scrolls: scroll::Scrolls,
     pits: pit::Pits,
     tasks: tasks::Tasks,
+    readers: Vec<SearchUser>,
+    permission_field: String,
 }
 
 impl std::fmt::Debug for Api<'_> {
@@ -425,6 +429,8 @@ impl<'k> Api<'k> {
             scrolls: scroll::Scrolls::default(),
             pits: pit::Pits::default(),
             tasks: tasks::Tasks::default(),
+            readers: Vec::new(),
+            permission_field: DEFAULT_PERMISSION_FIELD.to_owned(),
         }
     }
 
@@ -436,27 +442,29 @@ impl<'k> Api<'k> {
         self
     }
 
-    fn authorized(&self, request: &Request) -> bool {
-        let Some(encoded) = request
+    /// Adds users who may only read, and only the documents whose `permission_field` (a
+    /// dotted path into `_source`) names them, one of their groups, or `*` (D56).
+    pub fn with_search_users(mut self, readers: Vec<SearchUser>, permission_field: &str) -> Self {
+        self.readers = readers;
+        permission_field.clone_into(&mut self.permission_field);
+        self
+    }
+
+    fn principal(&self, request: &Request) -> Option<Principal> {
+        let encoded = request
             .header("authorization")
-            .and_then(|value| value.strip_prefix("Basic "))
-        else {
-            return false;
-        };
-        let Ok(decoded) = eggdb_crypto::base64_decode(encoded.trim().as_bytes()) else {
-            return false;
-        };
-        let Ok(text) = String::from_utf8(decoded) else {
-            return false;
-        };
-        let Some((user, password)) = text.split_once(':') else {
-            return false;
-        };
-        user == self.user
-            && eggdb_crypto::constant_time_eq(
-                &eggdb_crypto::sha256(password.as_bytes()),
-                &self.password_sha256,
-            )
+            .and_then(|value| value.strip_prefix("Basic "))?;
+        let decoded = eggdb_crypto::base64_decode(encoded.trim().as_bytes()).ok()?;
+        let text = String::from_utf8(decoded).ok()?;
+        let (user, password) = text.split_once(':')?;
+        let digest = eggdb_crypto::sha256(password.as_bytes());
+        if user == self.user && eggdb_crypto::constant_time_eq(&digest, &self.password_sha256) {
+            return Some(Principal::Administrator);
+        }
+        self.readers
+            .iter()
+            .find(|reader| reader.name == user && eggdb_crypto::constant_time_eq(&digest, &reader.password_sha256))
+            .map(Principal::reader)
     }
 
     fn new_id(&self) -> String {
@@ -477,8 +485,12 @@ impl<'k> Api<'k> {
     /// Answers one request; the hits of a `_search` are a [`StreamedResponse`], each hit
     /// rendered as it is sent.
     pub fn reply(&self, request: &Request) -> Reply<'static> {
+        let principal = self.principal(request);
+        let _restricted = principal
+            .as_ref()
+            .map(|principal| crate::permissions::enter(principal, &self.permission_field));
         let searched = matches!(request.method.as_str(), "GET" | "POST")
-            && self.authorized(request)
+            && principal.is_some()
             && !request.path.contains('%')
             && query_flag(request, "scroll").is_none();
         if searched {
@@ -508,14 +520,15 @@ impl<'k> Api<'k> {
 
     /// Answers one request with its whole response in memory.
     pub fn answer(&self, request: &Request) -> Response {
-        if !self.authorized(request) {
+        let Some(principal) = self.principal(request) else {
             return error(
                 401,
                 "security_exception",
                 "missing authentication credentials for REST request",
             )
             .with_header("WWW-Authenticate", "Basic realm=\"eggdb\"");
-        }
+        };
+        let _restricted = crate::permissions::enter(&principal, &self.permission_field);
         let Some(decoded) = request
             .path
             .split('/')
@@ -531,6 +544,15 @@ impl<'k> Api<'k> {
         };
         let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
         let method = request.method.as_str();
+        if let Principal::Reader { name, .. } = &principal
+            && !crate::permissions::only_reads(method, &parts)
+        {
+            return error(
+                403,
+                "security_exception",
+                &format!("action [{method} {}] is unauthorized for user [{name}]", request.path),
+            );
+        }
         let outcome = match (method, parts.as_slice()) {
             ("GET" | "HEAD", []) => Ok(self.root(dashboards::version_for(request))),
             ("GET", ["_nodes", ..]) => Ok(self.nodes_info(request)),
@@ -958,7 +980,8 @@ impl<'k> Api<'k> {
                 .get(&document_key(index, id))?
                 .as_deref()
                 .and_then(unstored))
-        })?;
+        })?
+        .filter(|(_, source)| crate::permissions::source_visible(source));
         let filter = multi::flag_filter(request);
         Ok(match found {
             Some(_) if head => json(200, String::new()),
@@ -994,7 +1017,8 @@ impl<'k> Api<'k> {
                 .get(&document_key(index, id))?
                 .as_deref()
                 .and_then(unstored))
-        })?;
+        })?
+        .filter(|(_, source)| crate::permissions::source_visible(source));
         let filter = multi::flag_filter(request);
         Ok(match found {
             Some(_) if head => json(200, String::new()),
@@ -1319,7 +1343,9 @@ impl<'k> Api<'k> {
             let mut all = Vec::new();
             for index in searched {
                 for (id, _, source) in documents_of(keys, &index)? {
-                    all.push((index.clone(), id, source));
+                    if crate::permissions::source_visible(&source) {
+                        all.push((index.clone(), id, source));
+                    }
                 }
             }
             Ok(Ok(all))

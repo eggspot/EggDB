@@ -243,6 +243,8 @@ impl CommandName {
             | OptionName::MemcachedListen
             | OptionName::ZookeeperListen
             | OptionName::EsListen
+            | OptionName::EsUsers
+            | OptionName::EsPermissionField
             | OptionName::MongoListen
             | OptionName::MongoReplicaSet
             | OptionName::BoltListen
@@ -457,6 +459,8 @@ enum OptionName {
     MemcachedListen,
     ZookeeperListen,
     EsListen,
+    EsUsers,
+    EsPermissionField,
     MongoListen,
     MongoReplicaSet,
     BoltListen,
@@ -599,6 +603,8 @@ impl OptionName {
             b"memcached-listen" => Self::MemcachedListen,
             b"zookeeper-listen" => Self::ZookeeperListen,
             b"es-listen" => Self::EsListen,
+            b"es-users" => Self::EsUsers,
+            b"es-permission-field" => Self::EsPermissionField,
             b"mongo-listen" => Self::MongoListen,
             b"mongo-replica-set" => Self::MongoReplicaSet,
             b"bolt-listen" => Self::BoltListen,
@@ -946,6 +952,8 @@ pub(crate) struct ServeOptions {
     pub(crate) memcached_listen: Option<SocketAddr>,
     pub(crate) zookeeper_listen: Option<SocketAddr>,
     pub(crate) es_listen: Option<SocketAddr>,
+    pub(crate) es_users: Option<PathBuf>,
+    pub(crate) es_permission_field: Option<String>,
     pub(crate) mongo_listen: Option<SocketAddr>,
     pub(crate) mongo_replica_set: Option<String>,
     pub(crate) bolt_listen: Option<SocketAddr>,
@@ -1659,6 +1667,16 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::EsListen => {
                 request.serve.es_listen =
                     Some(parse_listen(&option.spelled, value, 9200).map_err(usage)?);
+            }
+            OptionName::EsUsers => request.serve.es_users = Some(PathBuf::from(value)),
+            OptionName::EsPermissionField => {
+                if value.is_empty() || value.split('.').any(str::is_empty) {
+                    return Err(usage(format!(
+                        "{}: give a field name or a dotted path such as acl.readers",
+                        option.spelled
+                    )));
+                }
+                request.serve.es_permission_field = Some(value.to_owned());
             }
             OptionName::RespListen => {
                 request.serve.resp_listen =

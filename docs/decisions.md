@@ -1010,3 +1010,4 @@ its full title with its status.
 - [D983](decisions/D983.md) Code-only batch 631 (M8): SQL text search dictionaries and configurations
 - [D984](decisions/D984.md) Code-only batch 632 (M8): OpenSearch Dashboards and Kibana against EggDB
 - [D985](decisions/D985.md) Code-only batch 633 (M8): a benchmark against OpenSearch
+- [D986](decisions/D986.md) Code-only batch 634 (M8): search that respects each user's permissions

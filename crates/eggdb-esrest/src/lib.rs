@@ -14,6 +14,7 @@ mod json_out;
 mod knn;
 mod mappings;
 mod mustache;
+mod permissions;
 mod query;
 mod query_string;
 mod script;
@@ -22,6 +23,7 @@ mod source_filter;
 mod suggest;
 
 pub use api::{Api, over_memory_budget};
+pub use permissions::{SearchUser, parse_search_users};
 
 #[cfg(test)]
 mod tests;

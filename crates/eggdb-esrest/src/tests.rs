@@ -66,6 +66,39 @@ fn a_request_without_credentials_is_refused() {
 }
 
 #[test]
+fn readers_see_only_the_documents_that_name_them() {
+    let keyspace = MemoryKeyspace::default();
+    let reader = crate::SearchUser {
+        name: "ada".to_owned(),
+        password_sha256: eggdb_crypto::sha256(b"reader"),
+        groups: vec!["engineering".to_owned()],
+    };
+    let api = api(&keyspace).with_search_users(vec![reader], "readers");
+    let bulk = concat!(
+        "{\"index\":{\"_index\":\"files\",\"_id\":\"1\"}}\n",
+        "{\"title\":\"roadmap\",\"readers\":[\"engineering\"]}\n",
+        "{\"index\":{\"_index\":\"files\",\"_id\":\"2\"}}\n",
+        "{\"title\":\"roadmap salaries\",\"readers\":\"finance\"}\n",
+        "{\"index\":{\"_index\":\"files\",\"_id\":\"3\"}}\n",
+        "{\"title\":\"roadmap lunch\",\"readers\":\"*\"}\n",
+    );
+    assert_eq!(api.answer(&request("POST", "/_bulk?refresh=true", bulk)).status, 200);
+    let as_reader = |method: &str, target: &str, body: &str| {
+        let mut sent = request(method, target, body);
+        let credentials = eggdb_crypto::base64_encode(b"ada:reader");
+        sent.headers = vec![("authorization".to_owned(), format!("Basic {credentials}"))];
+        api.answer(&sent)
+    };
+    let found = as_reader("POST", "/files/_count", "{\"query\":{\"match\":{\"title\":\"roadmap\"}}}");
+    assert!(body(&found).contains("\"count\":2"), "{}", body(&found));
+    assert_eq!(as_reader("GET", "/files/_doc/2", "").status, 404);
+    assert_eq!(as_reader("GET", "/files/_doc/1", "").status, 200);
+    assert_eq!(as_reader("PUT", "/files/_doc/4", "{\"readers\":\"*\"}").status, 403);
+    let everything = api.answer(&request("POST", "/files/_count", ""));
+    assert!(body(&everything).contains("\"count\":3"), "{}", body(&everything));
+}
+
+#[test]
 fn the_root_describes_the_cluster() {
     let keyspace = MemoryKeyspace::default();
     let response = api(&keyspace).answer(&request("GET", "/", ""));

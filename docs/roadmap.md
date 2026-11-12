@@ -1207,7 +1207,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Kibana and OpenSearch Dashboards working against EggDB (D12, D196). Check: `compatibility` job.
   **Code written, unbuilt** (code-only mode, 2026-11-13, D984).
 - A benchmark against OpenSearch (D7, D196). **Code written, unbuilt** (code-only mode, 2026-11-13, D985).
-- Enterprise search that respects each user's permissions (D56).
+- Enterprise search that respects each user's permissions (D56). Document-level permissions for readers of the
+  search API: **code written, unbuilt** (code-only mode, 2026-11-13, D986); in SQL, row security (D22) already filters `@@`.
 - Text extracted from PDF files, and from PST files after D58's legal check, and OCR through ONNX
   models (D56, D249). PDF text: **code written, unbuilt** (code-only mode, 2026-11-12, D714). Left: PST
   and OCR.

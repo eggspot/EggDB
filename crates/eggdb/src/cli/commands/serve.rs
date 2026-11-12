@@ -995,8 +995,18 @@ impl Session<'_> {
             db: &db,
             prefix: super::serve_resp::ES_COLLECTIONS,
         };
+        let es_readers = match &options.es_users {
+            Some(path) => {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|error| usage(format!("cannot read --es-users {}: {error}", path.display())))?;
+                eggdb_esrest::parse_search_users(&text)
+                    .map_err(|reason| usage(format!("--es-users {}: {reason}", path.display())))?
+            }
+            None => Vec::new(),
+        };
         let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password)
-            .with_memory_budget(Arc::clone(&memory_budget));
+            .with_memory_budget(Arc::clone(&memory_budget))
+            .with_search_users(es_readers, options.es_permission_field.as_deref().unwrap_or("readers"));
         let graph_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::GRAPH_COLLECTIONS,
