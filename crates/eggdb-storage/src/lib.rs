@@ -77,7 +77,8 @@ mod tree_page;
 
 pub use btree::{BTree, TreeReport};
 pub use compression::{
-    ValueCompression, compress_lz4_frame, compress_zstd, decompress_lz4_frame, decompress_zstd,
+    ValueCompression, compress_lz4_frame, compress_zstd, decompress_lz4_block, decompress_lz4_frame,
+    decompress_zstd,
 };
 pub use cursor::{Cursor, ScanOrder};
 pub use eggdb_format::crc32c::{self, crc32c, crc32c_append};

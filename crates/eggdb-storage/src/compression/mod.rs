@@ -24,6 +24,12 @@ pub fn decompress_lz4_frame(input: &[u8], expected: usize) -> Result<Vec<u8>, &'
     lz4::decompress_frame(input, expected)
 }
 
+/// Decompresses one raw LZ4 block (no frame) that must give exactly `expected` bytes, as Blosc
+/// and Zarr store them. Hostile input is an error, never a panic.
+pub fn decompress_lz4_block(input: &[u8], expected: usize) -> Result<Vec<u8>, &'static str> {
+    lz4::decompress(input, expected)
+}
+
 /// Whether large values are compressed when written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValueCompression {

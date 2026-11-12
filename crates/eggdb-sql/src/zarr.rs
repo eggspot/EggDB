@@ -52,6 +52,15 @@ enum Codec {
     Zlib,
     Gzip,
     Zstd,
+    Blosc,
+}
+
+struct Sharding {
+    inner: Vec<usize>,
+    codec: Codec,
+    big_endian: bool,
+    index_at_start: bool,
+    index_checksum: bool,
 }
 
 struct Layout {
@@ -62,6 +71,7 @@ struct Layout {
     codec: Codec,
     fill: f64,
     key: Box<dyn Fn(&[usize]) -> String>,
+    sharding: Option<Sharding>,
 }
 
 fn fill_value(node: Option<&Node>) -> f64 {
@@ -80,6 +90,7 @@ fn codec_named(name: &str) -> SqlResult<Codec> {
         "zlib" => Codec::Zlib,
         "gzip" => Codec::Gzip,
         "zstd" => Codec::Zstd,
+        "blosc" => Codec::Blosc,
         other => return Err(invalid(format!("the {other} compressor is not supported yet"))),
     })
 }
@@ -121,7 +132,46 @@ fn version_two(metadata: &Node) -> SqlResult<Layout> {
                 index.iter().map(usize::to_string).collect::<Vec<_>>().join(&separator)
             }
         }),
+        sharding: None,
     })
+}
+
+fn chunk_codecs(node: Option<&Node>) -> SqlResult<(bool, Codec, Option<Sharding>)> {
+    let mut big_endian = false;
+    let mut codec = Codec::Raw;
+    let mut sharding = None;
+    if let Some(Json::Array(codecs)) = node.map(|node| &node.value) {
+        for entry in codecs {
+            let configuration = member(entry, "configuration");
+            match text(member(entry, "name")).unwrap_or_default() {
+                "bytes" => {
+                    big_endian = text(configuration.and_then(|configuration| member(configuration, "endian"))) == Some("big");
+                }
+                "crc32c" => {}
+                "sharding_indexed" => {
+                    let configuration = configuration.ok_or_else(|| invalid("sharding has no configuration"))?;
+                    let inner = sizes(member(configuration, "chunk_shape"), "the shard's chunk_shape")?;
+                    let (inner_big_endian, inner_codec, nested) = chunk_codecs(member(configuration, "codecs"))?;
+                    if nested.is_some() {
+                        return Err(invalid("nested sharding is not supported yet"));
+                    }
+                    let index_checksum = match member(configuration, "index_codecs").map(|node| &node.value) {
+                        Some(Json::Array(index_codecs)) => index_codecs.iter().any(|codec| text(member(codec, "name")) == Some("crc32c")),
+                        _ => false,
+                    };
+                    sharding = Some(Sharding {
+                        inner,
+                        codec: inner_codec,
+                        big_endian: inner_big_endian,
+                        index_at_start: text(member(configuration, "index_location")) == Some("start"),
+                        index_checksum,
+                    });
+                }
+                other => codec = codec_named(other)?,
+            }
+        }
+    }
+    Ok((big_endian, codec, sharding))
 }
 
 fn version_three(metadata: &Node) -> SqlResult<Layout> {
@@ -141,19 +191,7 @@ fn version_three(metadata: &Node) -> SqlResult<Layout> {
     };
     let grid = member(metadata, "chunk_grid").and_then(|grid| member(grid, "configuration"));
     let chunks = sizes(grid.and_then(|configuration| member(configuration, "chunk_shape")), "chunk_shape")?;
-    let mut big_endian = false;
-    let mut codec = Codec::Raw;
-    if let Some(Json::Array(codecs)) = member(metadata, "codecs").map(|node| &node.value) {
-        for entry in codecs {
-            match text(member(entry, "name")).unwrap_or_default() {
-                "bytes" => {
-                    big_endian = text(member(entry, "configuration").and_then(|configuration| member(configuration, "endian"))) == Some("big");
-                }
-                "crc32c" => {}
-                other => codec = codec_named(other)?,
-            }
-        }
-    }
+    let (big_endian, codec, sharding) = chunk_codecs(member(metadata, "codecs"))?;
     let encoding = member(metadata, "chunk_key_encoding");
     let v2_keys = text(encoding.and_then(|encoding| member(encoding, "name"))) == Some("v2");
     let separator = text(encoding.and_then(|encoding| member(encoding, "configuration")).and_then(|configuration| member(configuration, "separator")))
@@ -176,6 +214,7 @@ fn version_three(metadata: &Node) -> SqlResult<Layout> {
                 format!("c{separator}{joined}")
             }
         }),
+        sharding,
     })
 }
 
@@ -222,39 +261,106 @@ pub(crate) fn elements(path: &str, read: &dyn Fn(&str) -> SqlResult<Vec<u8>>) ->
     let total = layout.shape.iter().try_fold(1usize, |total, length| total.checked_mul(*length)).filter(|total| *total <= MOST_ELEMENTS)
         .ok_or_else(|| invalid(format!("an array may hold at most {MOST_ELEMENTS} elements")))?;
     let width = element_width(layout.kind);
-    let chunk_elements: usize = layout.chunks.iter().product();
-    let grid: Vec<usize> = layout.shape.iter().zip(&layout.chunks).map(|(length, chunk)| length.div_ceil(*chunk)).collect();
+    let (unit, codec, big_endian, per_shard) = match &layout.sharding {
+        None => (layout.chunks.clone(), layout.codec, layout.big_endian, None),
+        Some(sharding) => {
+            if sharding.inner.len() != layout.chunks.len()
+                || sharding.inner.contains(&0)
+                || layout.chunks.iter().zip(&sharding.inner).any(|(shard, inner)| shard % inner != 0)
+            {
+                return Err(invalid("the shard's chunk_shape does not divide the shard"));
+            }
+            let per_shard: Vec<usize> = layout.chunks.iter().zip(&sharding.inner).map(|(shard, inner)| shard / inner).collect();
+            (sharding.inner.clone(), sharding.codec, sharding.big_endian, Some(per_shard))
+        }
+    };
+    let chunk_elements: usize = unit.iter().product();
+    let chunk_bytes = chunk_elements.checked_mul(width).ok_or_else(|| invalid("a chunk is too large"))?;
+    let grid: Vec<usize> = layout.shape.iter().zip(&unit).map(|(length, chunk)| length.div_ceil(*chunk)).collect();
     let mut out = Vec::with_capacity(total);
     let mut chunk_index = vec![0usize; grid.len()];
     let chunk_count: usize = grid.iter().product();
+    let mut shard: Option<(String, Option<Vec<u8>>)> = None;
     for _ in 0..chunk_count {
-        let key = (layout.key)(&chunk_index);
-        let data = match read(&format!("{base}/{key}")) {
-            Ok(raw) => Some(match layout.codec {
-                Codec::Raw => raw,
-                Codec::Zlib => eggdb_content::zlib_inflate(&raw, chunk_elements * width).map_err(|error| invalid(error))?,
-                Codec::Gzip => eggdb_content::gunzip(&raw, chunk_elements * width).map_err(|error| invalid(error))?,
-                Codec::Zstd => eggdb_storage::decompress_zstd(&raw, chunk_elements * width).map_err(invalid)?,
-            }),
-            Err(_) => None,
+        let encoded = match (&layout.sharding, &per_shard) {
+            (Some(sharding), Some(per_shard)) => {
+                let shard_index: Vec<usize> = chunk_index.iter().zip(per_shard).map(|(at, count)| at / count).collect();
+                let within: Vec<usize> = chunk_index.iter().zip(per_shard).map(|(at, count)| at % count).collect();
+                let key = (layout.key)(&shard_index);
+                if shard.as_ref().is_none_or(|(held, _)| *held != key) {
+                    let bytes = read(&format!("{base}/{key}")).ok();
+                    shard = Some((key, bytes));
+                }
+                match shard.as_ref().and_then(|(_, bytes)| bytes.as_deref()) {
+                    Some(bytes) => inner_chunk(bytes, sharding, per_shard, &within)?.map(<[u8]>::to_vec),
+                    None => None,
+                }
+            }
+            _ => read(&format!("{base}/{}", (layout.key)(&chunk_index))).ok(),
+        };
+        let data = match encoded {
+            Some(raw) => Some(decode(codec, raw, chunk_bytes)?),
+            None => None,
         };
         let mut within = vec![0usize; grid.len()];
         for element in 0..chunk_elements {
-            let coordinates: Vec<usize> = chunk_index.iter().zip(&layout.chunks).zip(&within).map(|((chunk, size), at)| chunk * size + at).collect();
+            let coordinates: Vec<usize> = chunk_index.iter().zip(&unit).zip(&within).map(|((chunk, size), at)| chunk * size + at).collect();
             if coordinates.iter().zip(&layout.shape).all(|(at, length)| at < length) {
                 let value = match &data {
                     Some(bytes) => bytes
                         .get(element * width..element * width + width)
-                        .map_or(layout.fill, |raw| read_value(layout.kind, layout.big_endian, raw)),
+                        .map_or(layout.fill, |raw| read_value(layout.kind, big_endian, raw)),
                     None => layout.fill,
                 };
                 out.push((coordinates.iter().map(|at| *at as i64).collect(), value));
             }
-            advance(&mut within, &layout.chunks);
+            advance(&mut within, &unit);
         }
         advance(&mut chunk_index, &grid);
     }
     Ok(out)
+}
+
+fn decode(codec: Codec, raw: Vec<u8>, chunk_bytes: usize) -> SqlResult<Vec<u8>> {
+    Ok(match codec {
+        Codec::Raw => raw,
+        Codec::Zlib => eggdb_content::zlib_inflate(&raw, chunk_bytes).map_err(|error| invalid(error))?,
+        Codec::Gzip => eggdb_content::gunzip(&raw, chunk_bytes).map_err(|error| invalid(error))?,
+        Codec::Zstd => eggdb_storage::decompress_zstd(&raw, chunk_bytes).map_err(invalid)?,
+        Codec::Blosc => crate::blosc::decompress(&raw, chunk_bytes).map_err(invalid)?,
+    })
+}
+
+const EMPTY_INNER_CHUNK: u64 = u64::MAX;
+
+fn inner_chunk<'s>(shard: &'s [u8], sharding: &Sharding, per_shard: &[usize], within: &[usize]) -> SqlResult<Option<&'s [u8]>> {
+    let count: usize = per_shard.iter().product();
+    let index_bytes = count
+        .checked_mul(16)
+        .and_then(|bytes| bytes.checked_add(if sharding.index_checksum { 4 } else { 0 }))
+        .filter(|bytes| *bytes <= shard.len())
+        .ok_or_else(|| invalid("the shard is shorter than its index"))?;
+    let index = if sharding.index_at_start { &shard[..index_bytes] } else { &shard[shard.len() - index_bytes..] };
+    if sharding.index_checksum {
+        let (entries, stored) = index.split_at(count * 16);
+        if eggdb_storage::crc32c(entries).to_le_bytes() != stored {
+            return Err(invalid("the shard index fails its CRC-32C"));
+        }
+    }
+    let position = within.iter().zip(per_shard).fold(0usize, |position, (at, count)| position * count + at);
+    let entry = &index[position * 16..position * 16 + 16];
+    let offset = u64::from_le_bytes(entry[..8].try_into().map_err(|_| invalid("the shard index is short"))?);
+    let length = u64::from_le_bytes(entry[8..].try_into().map_err(|_| invalid("the shard index is short"))?);
+    if offset == EMPTY_INNER_CHUNK && length == EMPTY_INNER_CHUNK {
+        return Ok(None);
+    }
+    let start = usize::try_from(offset).map_err(|_| invalid("a shard offset is too large"))?;
+    let length = usize::try_from(length).map_err(|_| invalid("a shard length is too large"))?;
+    start
+        .checked_add(length)
+        .and_then(|end| shard.get(start..end))
+        .map(Some)
+        .ok_or_else(|| invalid("an inner chunk runs past its shard"))
 }
 
 fn advance(point: &mut [usize], shape: &[usize]) {
@@ -282,5 +388,71 @@ mod tests {
         };
         let found = elements("a", &files).unwrap();
         assert_eq!(found, vec![(vec![0], 1.0), (vec![1], -2.0), (vec![2], 9.0)]);
+    }
+
+    fn shard_of(chunks: &[Option<Vec<u8>>]) -> Vec<u8> {
+        let mut data = Vec::new();
+        let mut index = Vec::new();
+        for chunk in chunks {
+            match chunk {
+                Some(bytes) => {
+                    index.extend_from_slice(&(data.len() as u64).to_le_bytes());
+                    index.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                    data.extend_from_slice(bytes);
+                }
+                None => {
+                    index.extend_from_slice(&u64::MAX.to_le_bytes());
+                    index.extend_from_slice(&u64::MAX.to_le_bytes());
+                }
+            }
+        }
+        let checksum = eggdb_storage::crc32c(&index);
+        data.extend_from_slice(&index);
+        data.extend_from_slice(&checksum.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn version_three_shards_hold_inner_chunks_and_empty_ones_fill() {
+        let shard = shard_of(&[Some(vec![1, 2]), None]);
+        let metadata = br#"{"zarr_format":3,"node_type":"array","shape":[5],"data_type":"uint8","chunk_grid":{"name":"regular","configuration":{"chunk_shape":[4]}},"chunk_key_encoding":{"name":"default"},"fill_value":7,"codecs":[{"name":"sharding_indexed","configuration":{"chunk_shape":[2],"codecs":[{"name":"bytes"}],"index_codecs":[{"name":"bytes","configuration":{"endian":"little"}},{"name":"crc32c"}],"index_location":"end"}}]}"#;
+        let files = |path: &str| -> SqlResult<Vec<u8>> {
+            match path {
+                "s/zarr.json" => Ok(metadata.to_vec()),
+                "s/c/0" => Ok(shard.clone()),
+                _ => Err(invalid("absent")),
+            }
+        };
+        let values: Vec<f64> = elements("s", &files).unwrap().into_iter().map(|(_, value)| value).collect();
+        assert_eq!(values, vec![1.0, 2.0, 7.0, 7.0, 7.0]);
+        let mut broken = shard_of(&[Some(vec![1, 2]), None]);
+        let last = broken.len() - 1;
+        broken[last] ^= 1;
+        let broken_files = |path: &str| -> SqlResult<Vec<u8>> {
+            match path {
+                "s/zarr.json" => Ok(metadata.to_vec()),
+                "s/c/0" => Ok(broken.clone()),
+                _ => Err(invalid("absent")),
+            }
+        };
+        assert!(elements("s", &broken_files).is_err());
+    }
+
+    #[test]
+    fn version_two_blosc_chunks_decode() {
+        let mut chunk = vec![2u8, 1, 0x02, 2];
+        chunk.extend_from_slice(&4u32.to_le_bytes());
+        chunk.extend_from_slice(&4u32.to_le_bytes());
+        chunk.extend_from_slice(&20u32.to_le_bytes());
+        chunk.extend_from_slice(&[5, 0, 6, 0]);
+        let files = |path: &str| -> SqlResult<Vec<u8>> {
+            match path {
+                "b/.zarray" => Ok(br#"{"zarr_format":2,"shape":[2],"chunks":[2],"dtype":"<u2","compressor":{"id":"blosc","cname":"lz4","clevel":5,"shuffle":1},"fill_value":0,"order":"C","filters":null}"#.to_vec()),
+                "b/0" => Ok(chunk.clone()),
+                _ => Err(invalid("absent")),
+            }
+        };
+        let values: Vec<f64> = elements("b", &files).unwrap().into_iter().map(|(_, value)| value).collect();
+        assert_eq!(values, vec![5.0, 6.0]);
     }
 }

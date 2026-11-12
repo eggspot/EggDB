@@ -136,6 +136,7 @@ mod routing;
 mod pgrouting;
 mod report_pdf;
 mod zarr;
+mod blosc;
 mod new_files;
 mod file_readers;
 mod notifications;
