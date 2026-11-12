@@ -629,39 +629,109 @@ fn cell_of(slot: &Slot, record: &[u8]) -> Result<Cell, String> {
     })
 }
 
-fn records_of(data: &[u8], length: usize) -> Result<Vec<&[u8]>, String> {
+const LARGE_BLOCK_FLAG: u32 = 0x8000_0000;
+const SEGMENT_COMPLETE: u8 = 0;
+const SEGMENT_FIRST: u8 = 1;
+const SEGMENT_LAST: u8 = 2;
+const SEGMENT_MIDDLE: u8 = 3;
+
+fn variable_records(data: &[u8]) -> Option<Vec<std::borrow::Cow<'_, [u8]>>> {
+    let mut records = Vec::new();
+    let mut spanned: Option<Vec<u8>> = None;
+    let mut at = 0;
+    while at < data.len() {
+        let descriptor = data.get(at..at + RECORD_DESCRIPTOR_LENGTH)?;
+        if descriptor[3] != 0 || descriptor[2] > SEGMENT_MIDDLE {
+            return None;
+        }
+        let size = usize::from(u16::from_be_bytes([descriptor[0], descriptor[1]]));
+        let body = data.get(at + RECORD_DESCRIPTOR_LENGTH..at.checked_add(size)?).filter(|_| size >= RECORD_DESCRIPTOR_LENGTH)?;
+        match (descriptor[2], spanned.as_mut()) {
+            (SEGMENT_COMPLETE, None) => records.push(std::borrow::Cow::Borrowed(body)),
+            (SEGMENT_FIRST, None) => spanned = Some(body.to_vec()),
+            (SEGMENT_MIDDLE, Some(joined)) => joined.extend_from_slice(body),
+            (SEGMENT_LAST, Some(joined)) => {
+                joined.extend_from_slice(body);
+                records.push(std::borrow::Cow::Owned(spanned.take()?));
+            }
+            _ => return None,
+        }
+        at += size;
+    }
+    spanned.is_none().then_some(records)
+}
+
+fn blocked_records(data: &[u8]) -> Option<Vec<std::borrow::Cow<'_, [u8]>>> {
+    let mut blocks = Vec::new();
+    let mut at = 0;
+    while at < data.len() {
+        let word = u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?);
+        let size = if word & LARGE_BLOCK_FLAG != 0 {
+            usize::try_from(word & !LARGE_BLOCK_FLAG).ok()?
+        } else if word & 0xFFFF == 0 {
+            usize::try_from(word >> 16).ok()?
+        } else {
+            return None;
+        };
+        let body = data.get(at + 4..at.checked_add(size)?).filter(|_| size > 4)?;
+        blocks.push(body);
+        at += size;
+    }
+    let mut records = Vec::new();
+    let mut joined: Vec<u8> = Vec::new();
+    let mut spanning = false;
+    for block in blocks {
+        let mut inner = 0;
+        while inner < block.len() {
+            let descriptor = block.get(inner..inner + RECORD_DESCRIPTOR_LENGTH)?;
+            if descriptor[3] != 0 || descriptor[2] > SEGMENT_MIDDLE {
+                return None;
+            }
+            let size = usize::from(u16::from_be_bytes([descriptor[0], descriptor[1]]));
+            let body = block.get(inner + RECORD_DESCRIPTOR_LENGTH..inner.checked_add(size)?).filter(|_| size >= RECORD_DESCRIPTOR_LENGTH)?;
+            match (descriptor[2], spanning) {
+                (SEGMENT_COMPLETE, false) => records.push(std::borrow::Cow::Borrowed(body)),
+                (SEGMENT_FIRST, false) => {
+                    joined = body.to_vec();
+                    spanning = true;
+                }
+                (SEGMENT_MIDDLE, true) => joined.extend_from_slice(body),
+                (SEGMENT_LAST, true) => {
+                    joined.extend_from_slice(body);
+                    records.push(std::borrow::Cow::Owned(std::mem::take(&mut joined)));
+                    spanning = false;
+                }
+                _ => return None,
+            }
+            inner += size;
+        }
+    }
+    (!spanning).then_some(records)
+}
+
+fn records_of(data: &[u8], length: usize) -> Result<Vec<std::borrow::Cow<'_, [u8]>>, String> {
     if length == 0 {
         return Err("the copybook's record is empty".to_owned());
     }
     if data.len() % length == 0 {
-        return Ok(data.chunks(length).collect());
+        return Ok(data.chunks(length).map(std::borrow::Cow::Borrowed).collect());
     }
-    let mut records = Vec::new();
-    let mut at = 0;
-    while at < data.len() {
-        let descriptor = data
-            .get(at..at + RECORD_DESCRIPTOR_LENGTH)
-            .filter(|descriptor| descriptor[2] == 0 && descriptor[3] == 0);
-        let size = descriptor.map(|descriptor| usize::from(u16::from_be_bytes([descriptor[0], descriptor[1]])));
-        let Some(body) = size
-            .filter(|size| *size > RECORD_DESCRIPTOR_LENGTH)
-            .and_then(|size| data.get(at + RECORD_DESCRIPTOR_LENGTH..at + size))
-        else {
-            return Err(format!(
-                "it is neither whole {length}-byte records nor variable records with record descriptor words"
-            ));
-        };
-        records.push(body);
-        at += RECORD_DESCRIPTOR_LENGTH + body.len();
-    }
-    Ok(records)
+    blocked_records(data)
+        .filter(|records| !records.is_empty())
+        .or_else(|| variable_records(data))
+        .ok_or_else(|| {
+            format!(
+                "it is neither whole {length}-byte records nor variable records (RECFM V, VB or VBS, as a VSAM or sequential data set is unloaded) with record and block descriptor words"
+            )
+        })
 }
 
 /// The records of an EBCDIC (code page 037) data set as table columns, laid out by `copybook`:
 /// text fields decoded and right-trimmed, zoned, packed (COMP-3) and binary (COMP, COMP-4, COMP-5)
 /// numbers as integers or decimals, COMP-1 and COMP-2 hexadecimal floats as doubles, and numbers
 /// of all spaces or low-values as null. Fixed-length records, or variable ones each led by a
-/// record descriptor word.
+/// record descriptor word, blocked behind block descriptor words or spanned over segments, as
+/// IDCAMS `REPRO` and IEBGENER unload VSAM and sequential data sets (D839).
 pub(super) fn columns_of(copybook: &str, data: &[u8]) -> Result<Vec<Column>, String> {
     let (slots, length) = layout_of(copybook)?;
     let records = records_of(data, length)?;
@@ -760,5 +830,30 @@ mod tests {
         assert_eq!(columns[5].cells, vec![Cell::Decimal(-125)]);
         assert_eq!(ibm_float(&[0x41, 0x10, 0x00, 0x00]), 1.0);
         assert_eq!(ibm_float(&[0xC2, 0x76, 0xA0, 0x00]), -118.625);
+    }
+
+    #[test]
+    fn blocked_and_spanned_variable_records_are_unblocked() {
+        let record = |body: &[u8], segment: u8| {
+            let mut out = ((body.len() + 4) as u16).to_be_bytes().to_vec();
+            out.extend([segment, 0]);
+            out.extend_from_slice(body);
+            out
+        };
+        let unblocked = [record(b"abc", 0), record(b"de", 1), record(b"fg", 2)].concat();
+        let found = variable_records(&unblocked).unwrap();
+        assert_eq!(found.iter().map(|record| record.to_vec()).collect::<Vec<_>>(), vec![b"abc".to_vec(), b"defg".to_vec()]);
+        let inner = [record(b"abc", 0), record(b"xy", 0)].concat();
+        let mut blocked = ((inner.len() + 4) as u16).to_be_bytes().to_vec();
+        blocked.extend([0, 0]);
+        blocked.extend_from_slice(&inner);
+        let found = blocked_records(&blocked).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(&*found[1], b"xy");
+        let mut large = (0x8000_0000u32 | (inner.len() as u32 + 4)).to_be_bytes().to_vec();
+        large.extend_from_slice(&inner);
+        assert_eq!(blocked_records(&large).unwrap().len(), 2);
+        assert!(variable_records(&record(b"de", 1)).is_none());
+        assert!(records_of(&[1, 2, 3], 2).is_err());
     }
 }

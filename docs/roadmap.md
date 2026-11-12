@@ -1389,7 +1389,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   legal check (D49). `.xlsx`: **code written, unbuilt** (code-only mode, 2026-11-11, D506).
 - Mainframe loaders: COBOL copybooks, EBCDIC, packed decimal, and VSAM and IMS exports (D49, D242).
   Copybooks, EBCDIC and packed decimal: **code written, unbuilt** (code-only mode, 2026-11-11,
-  D508). Left: VSAM and IMS exports.
+  D508); VSAM and sequential unloads in RECFM V, VB and VBS (block descriptor words, spanned records): **code
+  written, unbuilt** (code-only mode, 2026-11-12, D839). Left: IMS exports.
 - dBase, ISAM and Btrieve readers where public specifications exist (D49). dBase: **code written,
   unbuilt** (code-only mode, 2026-11-11, D507).
 - KQL, after D58's legal check: `join`, `union`, `let`, `parse`, `mv-expand`, `make-series`,

@@ -863,3 +863,4 @@ its full title with its status.
 - [D836](decisions/D836.md) Code-only batch 484 (D29): nested ORC columns as JSON
 - [D837](decisions/D837.md) Code-only batch 485 (M5): PostgreSQL MERGE
 - [D838](decisions/D838.md) Code-only batch 486 (M11): nested Parquet columns as JSON
+- [D839](decisions/D839.md) Code-only batch 487 (M11): VSAM and sequential unloads (RECFM V, VB, VBS)
