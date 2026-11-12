@@ -4109,6 +4109,14 @@ SELECT eggdb_shredding.shred('user-1');
 - `place_hold(name, subject, reason)` keeps a subject from being shredded until `lift_hold(name, subject)`;
   `shred` then returns false, and every request is logged in `eggdb_shredding.shred_log`.
 
+## Modbus frames: modbus_decode
+
+`modbus_decode(frame bytea, direction text [, framing text])` decodes one Modbus frame, a `request` or a `response`,
+framed for Modbus TCP (`tcp`, the default, with its MBAP header) or serial RTU (`rtu`, whose CRC is checked), into
+JSON (D775): `{"transaction": 1, "unit": 17, "function": 3, "function_name": "read_holding_registers", "registers":
+[555, 0, 100]}`. It reads the read and write functions 1 to 6, 15 and 16 (coils as booleans, registers as numbers)
+and exception responses (`exception`, `exception_name`); other functions keep their data as hex.
+
 ## Web of Things (eggdb_iot)
 
 `CREATE EXTENSION eggdb_iot` keeps devices described by W3C Web of Things Thing Descriptions (TD 1.0 and 1.1) and

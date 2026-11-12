@@ -799,3 +799,4 @@ its full title with its status.
 - [D772](decisions/D772.md) Code-only batch 420 (M6a): WebAuthn passkeys, `webauthn_registration`, `webauthn_assertion` and passkey sign-in in `eggdb_app_auth`
 - [D773](decisions/D773.md) Code-only batch 421 (M6b): crypto-shredding with per-subject keys under an outside key-encryption key, `eggdb_shredding`
 - [D774](decisions/D774.md) Code-only batch 422 (M16): W3C Web of Things Thing Descriptions with checked readings and events, `eggdb_iot`
+- [D775](decisions/D775.md) Code-only batch 423 (M16): Modbus TCP and RTU frames decoded in SQL, `modbus_decode`

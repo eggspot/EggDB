@@ -1,8 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 15] = [
+pub(crate) const FUNCTIONS: [&str; 16] = [
     "eggdb_pdf_table",
+    "modbus_decode",
     "spreadsheet_recalculate",
     "row_pattern_matches",
     "geotiff_info",
@@ -412,6 +413,22 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             [Value::Bytea(file)] if name == "geotiff_info" => crate::geotiff::info(file).and_then(jsonb),
             [Value::Bytea(payload)] => crate::sparkplug::decode(payload).and_then(jsonb),
             _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} takes bytea"))),
+        });
+    }
+    if name == "modbus_decode" {
+        let direction = match values.get(1).and_then(Value::to_text).as_deref() {
+            Some("request") => crate::modbus::Direction::Request,
+            Some("response") => crate::modbus::Direction::Response,
+            _ => return Some(Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "modbus_decode: the direction is 'request' or 'response'"))),
+        };
+        let framing = match values.get(2).and_then(Value::to_text).as_deref() {
+            None | Some("tcp") => crate::modbus::Framing::Tcp,
+            Some("rtu") => crate::modbus::Framing::Rtu,
+            _ => return Some(Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "modbus_decode: the framing is 'tcp' or 'rtu'"))),
+        };
+        return Some(match values.first() {
+            Some(Value::Bytea(frame)) if values.len() <= 3 => crate::modbus::decode(frame, direction, framing).and_then(jsonb),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "modbus_decode takes a frame as bytea, a direction and optionally a framing")),
         });
     }
     if name == "row_pattern_matches" {
