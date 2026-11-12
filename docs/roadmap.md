@@ -1463,7 +1463,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `ST_Transform` between any projections, overlay operations (union, intersection, buffer) and
   validity checks (D204, D250). Check: the OGC test suite cases. Validity checks (rings and
   self-crossings) and 22 more functions: **code written, unbuilt** (code-only mode, 2026-11-11,
-  D438); World Mercator and UTM projections: **code written, unbuilt** (code-only mode, 2026-11-12, D741). Left:
+  D438); World Mercator and UTM projections: **code written, unbuilt** (code-only mode, 2026-11-12, D741); linear
+  referencing and line intersections: **code written, unbuilt** (code-only mode, 2026-11-12, D883). Left: area
   overlays, full validity, other projections and datum shifts.
 - SQL Server's `geometry` and `geography` types with their methods (D19, D204).
 - Vector tiles (`ST_AsMVT`, `ST_AsMVTGeom`), and H3 and S2 indexes (D57, D250). `ST_AsMVTGeom`:
@@ -1478,7 +1479,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `pgr_aStar`, `pgr_dijkstraCost` and `pgr_bdDijkstra`: **code written, unbuilt** (code-only mode, 2026-11-12, D832).
   Many-to-many forms and `pgr_dijkstraCostMatrix`: **code written, unbuilt** (code-only mode, 2026-11-12, D865).
   `pgr_TSP`, `pgr_TSPeuclidean` and `pgr_analyzeGraph`: **code written, unbuilt** (code-only mode, 2026-11-12, D882).
-  Left: the rest of pgRouting's functions (`pgr_nodeNetwork`, flows, spanning trees and others).
+  `pgr_nodeNetwork`: **code written, unbuilt** (code-only mode, 2026-11-12, D883). Left: the rest of pgRouting's
+  functions (flows, spanning trees and others).
 - The OGC APIs (D57). OGC API - Features (Core, GeoJSON) on `--rest-listen`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D781). CQL2 filters (text and JSON) and queryables (Part 3): **code written, unbuilt**
   (code-only mode, 2026-11-12, D879); CRS (Part 2): **code written, unbuilt** (code-only mode, 2026-11-12, D880).

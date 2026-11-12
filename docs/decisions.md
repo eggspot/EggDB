@@ -907,3 +907,4 @@ its full title with its status.
 - [D880](decisions/D880.md) Code-only batch 528 (M12): coordinate reference systems in OGC API - Features
 - [D881](decisions/D881.md) Code-only batch 529 (M12): OGC API - Tiles with vector tiles
 - [D882](decisions/D882.md) Code-only batch 530 (M12): pgRouting TSP and graph analysis
+- [D883](decisions/D883.md) Code-only batch 531 (M12): linear referencing, line intersections and pgr_nodeNetwork

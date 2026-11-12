@@ -4,7 +4,8 @@
 /// edges query with `id`, `source`, `target`, `cost` and optionally `reverse_cost`, computed by
 /// EggDB's own graph code (D57); and `pgr_createTopology` and `pgr_createVerticesTable`, which
 /// number line ends as vertices (D831); `pgr_TSP` and `pgr_TSPeuclidean`, tours by EggDB's own
-/// nearest-neighbour and 2-opt code, and `pgr_analyzeGraph`, which checks a topology (D882).
+/// nearest-neighbour and 2-opt code, and `pgr_analyzeGraph`, which checks a topology (D882);
+/// and `pgr_nodeNetwork`, which cuts edges where they cross (D883).
 pub(crate) const PGROUTING_SCRIPT: &str = r#"
 CREATE SCHEMA pgrouting;
 CREATE FUNCTION public.pgr_edges_json(edges_sql text) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -218,6 +219,25 @@ BEGIN
     RETURN QUERY SELECT * FROM public.pgr_tsp_rows(eggdb_route_tsp_euclidean(points, start_id, end_id));
 END
 $$;
+CREATE FUNCTION public.pgr_nodenetwork(edge_table text, tolerance double precision, id text DEFAULT 'id', the_geom text DEFAULT 'the_geom', table_ending text DEFAULT 'noded', rows_where text DEFAULT 'true', outall boolean DEFAULT false) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    noded text := edge_table || '_' || table_ending;
+    edges jsonb;
+BEGIN
+    IF tolerance IS NULL OR tolerance < 0 THEN
+        RAISE EXCEPTION 'the tolerance must be zero or more' USING ERRCODE = '22023';
+    END IF;
+    IF coalesce(rows_where, '') = '' THEN
+        rows_where := 'true';
+    END IF;
+    EXECUTE format('SELECT coalesce(jsonb_agg(jsonb_build_object(''id'', e.%I, ''the_geom'', ST_AsEWKT(e.%I)) ORDER BY e.%I), ''[]''::jsonb) FROM %s e WHERE %s', id, the_geom, id, edge_table, rows_where) INTO edges;
+    EXECUTE format('DROP TABLE IF EXISTS %s', noded);
+    EXECUTE format('CREATE TABLE %s (id bigserial PRIMARY KEY, old_id bigint, sub_id integer, source bigint, target bigint, the_geom text)', noded);
+    EXECUTE format('INSERT INTO %s (old_id, sub_id, the_geom) SELECT (piece.value ->> ''old_id'')::bigint, (piece.value ->> ''sub_id'')::integer, piece.value ->> ''the_geom'' FROM jsonb_array_elements(eggdb_route_node_network($1, $2)) piece', noded) USING edges, tolerance;
+    RAISE NOTICE 'Split edges into the table %', noded;
+    RETURN 'OK';
+END
+$$;
 CREATE FUNCTION public.pgr_analyzegraph(edge_table text, tolerance double precision, the_geom text DEFAULT 'the_geom', id text DEFAULT 'id', source text DEFAULT 'source', target text DEFAULT 'target', rows_where text DEFAULT 'true') RETURNS varchar LANGUAGE plpgsql AS $$
 DECLARE
     vertices text := edge_table || '_vertices_pgr';
@@ -353,6 +373,12 @@ mod tests {
         run(&mut session, "SELECT pgr_createTopology('roads', 0.001)").unwrap();
         assert_eq!(run(&mut session, "SELECT pgr_analyzeGraph('roads', 0.001) AS done").unwrap(), "done\nOK\nSELECT 1");
         assert_eq!(run(&mut session, "SELECT count(*) AS n FROM roads_vertices_pgr WHERE cnt = 1").unwrap(), "n\n4\nSELECT 1");
+        run(&mut session, "INSERT INTO roads VALUES (4, NULL, NULL, 'LINESTRING(0.5 -1, 0.5 1)')").unwrap();
+        assert_eq!(run(&mut session, "SELECT pgr_nodeNetwork('roads', 0.001) AS done").unwrap(), "done\nOK\nSELECT 1");
+        assert_eq!(
+            run(&mut session, "SELECT old_id, count(*) AS pieces FROM roads_noded GROUP BY old_id ORDER BY old_id").unwrap(),
+            "old_id|pieces\n1|2\n2|1\n3|1\n4|2\nSELECT 4"
+        );
     }
 
     #[test]

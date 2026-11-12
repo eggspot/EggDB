@@ -451,6 +451,71 @@ pub(crate) fn tsp_euclidean(points_json: &str, start: i64, last: i64) -> SqlResu
     Ok(tour_rows(&nodes, &tour, &cost))
 }
 
+const MOST_NODED_EDGES: usize = 20_000;
+
+fn text_member(node: &Node, name: &str) -> Option<String> {
+    let Json::Object(members) = &node.value else {
+        return None;
+    };
+    members.iter().find(|(key, _)| key == name).and_then(|(_, value)| match &value.value {
+        Json::String(text) => Some(text.clone()),
+        _ => None,
+    })
+}
+
+/// pgRouting's `pgr_nodeNetwork`: every line of `edges` (a JSON array of `{id, the_geom}`
+/// with WKT or EWKT text) cut where it crosses or touches another within `tolerance`, as a
+/// JSON array of `{old_id, sub_id, the_geom}` pieces (EWKT) in order along each line. A line
+/// that crosses nothing stays whole, with `sub_id` 1.
+pub(crate) fn node_network(edges_json: &str, tolerance: f64) -> SqlResult<String> {
+    if !tolerance.is_finite() || tolerance < 0.0 {
+        return Err(invalid("the tolerance must be zero or more"));
+    }
+    let document = parse_document(edges_json).map_err(|_| invalid("the edges are not JSON"))?;
+    let Json::Array(items) = &document.value else {
+        return Err(invalid("the edges are a JSON array of objects"));
+    };
+    if items.len() > MOST_NODED_EDGES {
+        return Err(SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "pgr_nodeNetwork reads at most 20,000 edges"));
+    }
+    let mut edges = Vec::with_capacity(items.len());
+    for item in items {
+        let id = whole(item, "id")?;
+        let text = text_member(item, "the_geom").ok_or_else(|| invalid("every edge needs the_geom as text"))?;
+        let spatial = eggdb_geo::from_wkt(&text).map_err(|error| invalid(&error.0))?;
+        if !matches!(spatial.geometry, eggdb_geo::Geometry::LineString(_)) {
+            return Err(invalid(&format!("edge {id} is not a LINESTRING")));
+        }
+        edges.push((id, spatial));
+    }
+    let mut rows = Vec::new();
+    for (at, (id, spatial)) in edges.iter().enumerate() {
+        let mut cuts = Vec::new();
+        for (other_at, (_, other)) in edges.iter().enumerate() {
+            if other_at != at {
+                cuts.extend(eggdb_geo::line_crossings(&spatial.geometry, &other.geometry));
+                cuts.extend(other.geometry.coords().into_iter().filter(|_| tolerance > 0.0));
+            }
+        }
+        let pieces = eggdb_geo::line_split(&spatial.geometry, &cuts, tolerance).map_err(|error| invalid(&error.0))?;
+        for (sub, piece) in pieces.into_iter().enumerate() {
+            let text = eggdb_geo::to_wkt(
+                &eggdb_geo::Spatial {
+                    srid: spatial.srid,
+                    geometry: piece,
+                },
+                true,
+            );
+            rows.push(format!(
+                "{{\"old_id\": {id}, \"sub_id\": {}, \"the_geom\": \"{}\"}}",
+                sub + 1,
+                text.replace('\\', "\\\\").replace('"', "\\\"")
+            ));
+        }
+    }
+    Ok(format!("[{}]", rows.join(", ")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +535,16 @@ mod tests {
             r#"[{"component": 1, "node": 1}, {"component": 1, "node": 2}, {"component": 1, "node": 3}, {"component": 1, "node": 4}, {"component": 7, "node": 7}, {"component": 7, "node": 8}]"#
         );
         assert!(dijkstra("[{\"id\": 1}]", 1, 2, true).is_err());
+    }
+
+    #[test]
+    fn crossing_edges_are_noded() {
+        let edges = r#"[{"id": 1, "the_geom": "LINESTRING(0 1, 4 1)"}, {"id": 2, "the_geom": "LINESTRING(2 0, 2 4)"}, {"id": 3, "the_geom": "LINESTRING(9 9, 10 10)"}]"#;
+        let noded = node_network(edges, 0.0).unwrap();
+        assert_eq!(noded.matches("\"old_id\": 1").count(), 2, "{noded}");
+        assert_eq!(noded.matches("\"old_id\": 2").count(), 2, "{noded}");
+        assert_eq!(noded.matches("\"old_id\": 3, \"sub_id\": 1").count(), 1, "{noded}");
+        assert!(node_network(edges, -1.0).is_err());
     }
 
     #[test]

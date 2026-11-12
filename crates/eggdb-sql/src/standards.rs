@@ -1,7 +1,7 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 24] = [
+pub(crate) const FUNCTIONS: [&str; 25] = [
     "eggdb_pdf_table",
     "fhir_validate",
     "opcua_decode",
@@ -11,6 +11,7 @@ pub(crate) const FUNCTIONS: [&str; 24] = [
     "eggdb_route_components",
     "eggdb_route_tsp",
     "eggdb_route_tsp_euclidean",
+    "eggdb_route_node_network",
     "modbus_decode",
     "spreadsheet_recalculate",
     "row_pattern_matches",
@@ -461,6 +462,10 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             ("eggdb_route_tsp", Some(matrix)) => match (whole(1).or(Some(0)), whole(2).or(Some(0))) {
                 (Some(start), Some(last)) => crate::routing::tsp(&matrix, start, last).and_then(jsonb),
                 _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_tsp takes a cost matrix, a start and an end")),
+            },
+            ("eggdb_route_node_network", Some(edges)) => match values.get(1).and_then(Value::to_text).and_then(|text| text.parse::<f64>().ok()) {
+                Some(tolerance) => crate::routing::node_network(&edges, tolerance).and_then(jsonb),
+                None => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_node_network takes edges and a tolerance")),
             },
             ("eggdb_route_tsp_euclidean", Some(points)) => match (whole(1).or(Some(0)), whole(2).or(Some(0))) {
                 (Some(start), Some(last)) => crate::routing::tsp_euclidean(&points, start, last).and_then(jsonb),

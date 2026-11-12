@@ -4,7 +4,11 @@ use crate::types::{SqlType, Value};
 use eggdb_geo::{Coord, Geometry, Spatial};
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 62] = [
+pub(crate) const FUNCTIONS: [&str; 66] = [
+    "st_linelocatepoint",
+    "st_lineinterpolatepoint",
+    "st_linesubstring",
+    "st_intersection",
     "st_centroid",
     "st_perimeter",
     "st_convexhull",
@@ -76,7 +80,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "s2_cellidfrompoint" => SqlType::BigInt,
         "s2_cellidtotoken" => SqlType::Text,
         "st_x" | "st_y" | "st_distance" | "st_area" | "st_length" | "st_distancesphere"
-        | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" => SqlType::Double,
+        | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" | "st_linelocatepoint" => SqlType::Double,
         "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" => {
             SqlType::Integer
         }
@@ -740,6 +744,55 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
             geometry_value(&Spatial {
                 srid: source.srid,
                 geometry: eggdb_geo::simplified(&source.geometry, tolerance),
+            })
+        }
+        ("st_linelocatepoint", [_, _]) => {
+            let (line, point) = pair()?;
+            Value::Double(eggdb_geo::line_locate_point(&line.geometry, &point.geometry).map_err(argument_error)?)
+        }
+        ("st_lineinterpolatepoint", [_, fraction]) => {
+            let source = spatial(0)?;
+            let geometry = eggdb_geo::line_interpolate_point(&source.geometry, number(fraction)?).map_err(argument_error)?;
+            geometry_value(&Spatial {
+                srid: source.srid,
+                geometry,
+            })
+        }
+        ("st_linesubstring", [_, from, to]) => {
+            let source = spatial(0)?;
+            let geometry = eggdb_geo::line_substring(&source.geometry, number(from)?, number(to)?).map_err(argument_error)?;
+            geometry_value(&Spatial {
+                srid: source.srid,
+                geometry,
+            })
+        }
+        ("st_intersection", [_, _]) => {
+            let (left, right) = pair()?;
+            let geometry = match (&left.geometry, &right.geometry) {
+                (Geometry::Point(Some(point)), other) | (other, Geometry::Point(Some(point))) => {
+                    if eggdb_geo::intersects(&Geometry::Point(Some(*point)), other) {
+                        Geometry::Point(Some(*point))
+                    } else {
+                        Geometry::Point(None)
+                    }
+                }
+                (
+                    Geometry::LineString(_) | Geometry::MultiLineString(_),
+                    Geometry::LineString(_) | Geometry::MultiLineString(_),
+                ) => match eggdb_geo::line_crossings(&left.geometry, &right.geometry).as_slice() {
+                    [] => Geometry::Point(None),
+                    [only] => Geometry::Point(Some(*only)),
+                    many => Geometry::MultiPoint(many.to_vec()),
+                },
+                _ => {
+                    return Err(SqlError::not_supported(
+                        "ST_Intersection of areas (polygon overlays); points and lines are supported",
+                    ));
+                }
+            };
+            geometry_value(&Spatial {
+                srid: left.srid,
+                geometry,
             })
         }
         ("st_makeline", [_, _]) => {
