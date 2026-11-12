@@ -724,7 +724,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-12, D909). Left: nested inserts deeper than one relationship, and `on_conflict` with them.
 - gRPC and OData APIs generated from the schema, OData for Excel, Power BI and SAP (D37). The OData v4 service
   (`$metadata`, entity sets with `$filter`/`$select`/`$orderby`/`$top`/`$skip`/`$count`, keys, writes): **code
-  written, unbuilt** (code-only mode, 2026-11-12, D877). Left: gRPC, and OData's `$expand` and batches.
+  written, unbuilt** (code-only mode, 2026-11-12, D877); navigation properties from foreign keys and `$expand`:
+  **code written, unbuilt** (code-only mode, 2026-11-12, D910). Left: gRPC, OData's batches, and options inside
+  `$expand`.
 - Realtime subscriptions over WebSocket and Server-Sent Events on live queries (D37). Live queries over
   Server-Sent Events for REST reads and GraphQL subscriptions: **code written, unbuilt** (code-only mode,
   2026-11-12, D878). Left: WebSocket transports and change-driven invalidation.

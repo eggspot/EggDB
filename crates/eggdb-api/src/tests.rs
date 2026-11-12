@@ -502,6 +502,31 @@ fn odata_serves_metadata_sets_keys_and_writes() {
     assert_eq!(refused.status, 400);
 }
 
+#[test]
+fn odata_expands_navigation_properties_from_foreign_keys() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE authors (id integer PRIMARY KEY, name text NOT NULL)",
+        "CREATE TABLE books (id integer PRIMARY KEY, title text NOT NULL, author_id integer REFERENCES authors (id))",
+        "INSERT INTO authors VALUES (1, 'Ada'), (2, 'Brian')",
+        "INSERT INTO books VALUES (10, 'Engines', 1), (11, 'Notes', 1), (12, 'Orphan', NULL)",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let metadata = text(&call(&endpoint, "GET", "/odata/$metadata", "", None));
+    assert!(metadata.contains("<NavigationProperty Name=\"author\" Type=\"EggDB.authors\"><ReferentialConstraint Property=\"author_id\" ReferencedProperty=\"id\"/></NavigationProperty>"), "{metadata}");
+    assert!(metadata.contains("<NavigationProperty Name=\"books\" Type=\"Collection(EggDB.books)\"/>"), "{metadata}");
+    let books = text(&call(&endpoint, "GET", "/odata/books?$select=title&$expand=author", "", None));
+    assert!(books.contains("{\"title\":\"Engines\",\"author\":{\"id\":1,\"name\":\"Ada\"}}"), "{books}");
+    assert!(books.contains("{\"title\":\"Orphan\",\"author\":null}"), "{books}");
+    let author = text(&call(&endpoint, "GET", "/odata/authors(2)?$expand=books", "", None));
+    assert!(author.contains("\"name\":\"Brian\",\"books\":[]"), "{author}");
+    let unknown = call(&endpoint, "GET", "/odata/books?$expand=publisher", "", None);
+    assert_eq!(unknown.status, 400);
+}
+
 fn live(endpoint: &Endpoint<'_, MemoryStore>, method: &str, path: &str, query: Option<&str>, body: &str) -> String {
     let headers = vec![
         (

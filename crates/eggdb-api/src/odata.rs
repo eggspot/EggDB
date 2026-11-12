@@ -1,7 +1,8 @@
 //! An OData v4 service over the schema's tables (D877), for Excel, Power BI, SAP and the
 //! other OData consumers: the service document, `$metadata` in CSDL XML, entity sets with
 //! `$filter`, `$select`, `$orderby`, `$top`, `$skip` and `$count`, server-driven paging with
-//! `@odata.nextLink`, entities by key, `$count` segments, and inserts, updates and deletes.
+//! `@odata.nextLink`, entities by key, `$count` segments, navigation properties from foreign
+//! keys with `$expand`, and inserts, updates and deletes.
 //! Every request runs as SQL in the signed-in user's session. OData is a standard of OASIS.
 
 use crate::request::{identifier, literal, percent_decode};
@@ -22,13 +23,32 @@ struct Property {
 }
 
 #[derive(Debug, Clone)]
+struct Navigation {
+    name: String,
+    target: String,
+    many: bool,
+    from: Vec<String>,
+    to: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 struct EntitySet {
     name: String,
     properties: Vec<Property>,
     key: Vec<String>,
+    navigations: Vec<Navigation>,
 }
 
 impl EntitySet {
+    fn has_member(&self, name: &str) -> bool {
+        self.properties.iter().any(|property| property.name == name)
+            || self.navigations.iter().any(|navigation| navigation.name == name)
+    }
+
+    fn position(&self, name: &str) -> Option<usize> {
+        self.properties.iter().position(|property| property.name == name)
+    }
+
     fn key_columns(&self) -> Vec<&Property> {
         if self.key.is_empty() {
             return self.properties.iter().collect();
@@ -676,6 +696,10 @@ fn whole_number(options: &[(String, String)], name: &str) -> Result<Option<u64>,
 }
 
 fn entity_json(context: &str, properties: &[&Property], row: &[Value]) -> String {
+    entity_with(context, properties, row, &[])
+}
+
+fn entity_with(context: &str, properties: &[&Property], row: &[Value], expanded: &[String]) -> String {
     let mut members = Vec::new();
     if !context.is_empty() {
         members.push(format!("\"@odata.context\":{}", json_string(context)));
@@ -683,7 +707,65 @@ fn entity_json(context: &str, properties: &[&Property], row: &[Value]) -> String
     for (property, value) in properties.iter().zip(row) {
         members.push(format!("{}:{}", json_string(&property.name), odata_value(value, &property.data_type)));
     }
+    members.extend(expanded.iter().cloned());
     format!("{{{}}}", members.join(","))
+}
+
+fn projected(set: &EntitySet, columns: &[&Property], row: &[Value]) -> Vec<Value> {
+    columns
+        .iter()
+        .map(|property| set.position(&property.name).and_then(|at| row.get(at)).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn expand_names<'s>(set: &'s EntitySet, text: Option<&str>) -> Result<Vec<&'s Navigation>, String> {
+    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    if text.contains('(') {
+        return Err("options inside $expand are not supported yet".to_owned());
+    }
+    if text == "*" {
+        return Ok(set.navigations.iter().collect());
+    }
+    text.split(',')
+        .map(str::trim)
+        .map(|name| {
+            set.navigations
+                .iter()
+                .find(|navigation| navigation.name == name)
+                .ok_or_else(|| format!("Could not find a navigation property named '{name}' on type '{}'.", set.name))
+        })
+        .collect()
+}
+
+fn add_navigations(sets: &mut [EntitySet], child: &str, child_columns: &[String], parent: &str, parent_columns: &[String]) {
+    let single_name = match child_columns {
+        [only] => only.strip_suffix("_id").filter(|name| !name.is_empty()).unwrap_or(parent).to_owned(),
+        _ => parent.to_owned(),
+    };
+    if let Some(set) = sets.iter_mut().find(|set| set.name == child)
+        && !set.has_member(&single_name)
+    {
+        set.navigations.push(Navigation {
+            name: single_name,
+            target: parent.to_owned(),
+            many: false,
+            from: child_columns.to_vec(),
+            to: parent_columns.to_vec(),
+        });
+    }
+    if let Some(set) = sets.iter_mut().find(|set| set.name == parent)
+        && !set.has_member(child)
+    {
+        set.navigations.push(Navigation {
+            name: child.to_owned(),
+            target: child.to_owned(),
+            many: true,
+            from: parent_columns.to_vec(),
+            to: child_columns.to_vec(),
+        });
+    }
 }
 
 fn rows_of(results: &[QueryResult]) -> Vec<Vec<Value>> {
@@ -719,6 +801,7 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                     name: text(0),
                     properties: vec![property],
                     key: Vec::new(),
+                    navigations: Vec::new(),
                 }),
             }
         }
@@ -735,7 +818,84 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                 set.key.push(text(1));
             }
         }
+        let foreign = self.run(&format!(
+            "SELECT fk.constraint_name, fk.table_name, fk.column_name, pk.table_name, pk.column_name FROM information_schema.referential_constraints rc JOIN information_schema.key_column_usage fk ON fk.constraint_schema = rc.constraint_schema AND fk.constraint_name = rc.constraint_name JOIN information_schema.key_column_usage pk ON pk.constraint_schema = rc.unique_constraint_schema AND pk.constraint_name = rc.unique_constraint_name AND pk.ordinal_position = fk.position_in_unique_constraint WHERE fk.table_schema = {schema} AND pk.table_schema = {schema} ORDER BY fk.table_name, fk.constraint_name, fk.ordinal_position"
+        ))?;
+        let mut keys: Vec<(String, String, Vec<String>, String, Vec<String>)> = Vec::new();
+        for row in foreign
+            .iter()
+            .filter(|result| result.columns.is_some())
+            .flat_map(|result| result.rows.iter())
+        {
+            let text = |at: usize| row.get(at).and_then(Value::to_text).unwrap_or_default();
+            match keys.last_mut() {
+                Some((constraint, child, child_columns, _, parent_columns)) if *constraint == text(0) && *child == text(1) => {
+                    child_columns.push(text(2));
+                    parent_columns.push(text(4));
+                }
+                _ => keys.push((text(0), text(1), vec![text(2)], text(3), vec![text(4)])),
+            }
+        }
+        for (_, child, child_columns, parent, parent_columns) in &keys {
+            add_navigations(&mut sets, child, child_columns, parent, parent_columns);
+        }
         Ok(sets)
+    }
+
+    fn expansions(&self, set: &EntitySet, sets: &[EntitySet], navigations: &[&Navigation], rows: &[Vec<Value>]) -> Result<Vec<Vec<String>>, eggdb_sql::SqlError> {
+        let mut members: Vec<Vec<String>> = vec![Vec::new(); rows.len()];
+        let schema = identifier(&self.schema).unwrap_or_else(|| "\"public\"".to_owned());
+        for navigation in navigations {
+            let Some(target) = sets.iter().find(|candidate| candidate.name == navigation.target) else {
+                continue;
+            };
+            let positions: Vec<Option<usize>> = navigation.from.iter().map(|column| set.position(column)).collect();
+            let key_of = |row: &[Value]| -> Option<Vec<String>> {
+                positions.iter().map(|at| at.and_then(|at| row.get(at)).and_then(Value::to_text)).collect()
+            };
+            let mut wanted: Vec<Vec<String>> = rows.iter().filter_map(|row| key_of(row.as_slice())).collect();
+            wanted.sort();
+            wanted.dedup();
+            let mut found: Vec<(Vec<String>, String)> = Vec::new();
+            if !wanted.is_empty() {
+                let to: Vec<String> = navigation.to.iter().filter_map(|column| identifier(column)).collect();
+                let conditions: Vec<String> = wanted
+                    .iter()
+                    .map(|key| {
+                        let parts: Vec<String> = to.iter().zip(key).map(|(column, value)| format!("{column} = {}", literal(value))).collect();
+                        format!("({})", parts.join(" AND "))
+                    })
+                    .collect();
+                let columns: Vec<String> = target.properties.iter().filter_map(|property| identifier(&property.name)).collect();
+                let table = identifier(&target.name).unwrap_or_default();
+                let results = self.run(&format!(
+                    "SELECT {} FROM {schema}.{table} WHERE {}",
+                    columns.join(", "),
+                    conditions.join(" OR ")
+                ))?;
+                let target_positions: Vec<Option<usize>> = navigation.to.iter().map(|column| target.position(column)).collect();
+                let all: Vec<&Property> = target.properties.iter().collect();
+                for row in rows_of(&results) {
+                    let key: Option<Vec<String>> = target_positions.iter().map(|at| at.and_then(|at| row.get(at)).and_then(Value::to_text)).collect();
+                    if let Some(key) = key {
+                        found.push((key, entity_json("", &all, &row)));
+                    }
+                }
+            }
+            for (row, member) in rows.iter().zip(members.iter_mut()) {
+                let matches: Vec<&str> = match key_of(row.as_slice()) {
+                    Some(key) => found.iter().filter(|(found_key, _)| *found_key == key).map(|(_, entity)| entity.as_str()).collect(),
+                    None => Vec::new(),
+                };
+                let value = if navigation.many {
+                    format!("[{}]", matches.join(","))
+                } else {
+                    matches.first().map_or_else(|| "null".to_owned(), |entity| (*entity).to_owned())
+                };
+                member.push(format!("{}:{value}", json_string(&navigation.name)));
+            }
+        }
+        Ok(members)
     }
 
     fn odata_metadata(&self, sets: &[EntitySet]) -> Response {
@@ -757,12 +917,39 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                     if property.nullable && !is_key { "" } else { " Nullable=\"false\"" }
                 ));
             }
+            for navigation in &set.navigations {
+                let target = xml_escaped(&navigation.target);
+                if navigation.many {
+                    xml.push_str(&format!(
+                        "<NavigationProperty Name=\"{}\" Type=\"Collection(EggDB.{target})\"/>",
+                        xml_escaped(&navigation.name)
+                    ));
+                } else {
+                    xml.push_str(&format!("<NavigationProperty Name=\"{}\" Type=\"EggDB.{target}\">", xml_escaped(&navigation.name)));
+                    for (from, to) in navigation.from.iter().zip(&navigation.to) {
+                        xml.push_str(&format!(
+                            "<ReferentialConstraint Property=\"{}\" ReferencedProperty=\"{}\"/>",
+                            xml_escaped(from),
+                            xml_escaped(to)
+                        ));
+                    }
+                    xml.push_str("</NavigationProperty>");
+                }
+            }
             xml.push_str("</EntityType>");
         }
         xml.push_str("<EntityContainer Name=\"Container\">");
         for set in sets {
             let name = xml_escaped(&set.name);
-            xml.push_str(&format!("<EntitySet Name=\"{name}\" EntityType=\"EggDB.{name}\"/>"));
+            xml.push_str(&format!("<EntitySet Name=\"{name}\" EntityType=\"EggDB.{name}\">"));
+            for navigation in &set.navigations {
+                xml.push_str(&format!(
+                    "<NavigationPropertyBinding Path=\"{}\" Target=\"{}\"/>",
+                    xml_escaped(&navigation.name),
+                    xml_escaped(&navigation.target)
+                ));
+            }
+            xml.push_str("</EntitySet>");
         }
         xml.push_str("</EntityContainer></Schema></edmx:DataServices></edmx:Edmx>");
         Response {
@@ -821,9 +1008,9 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         let options = query_options(request.query.as_deref());
         match (key, tail, request.method.as_str()) {
             (None, "$count", "GET") => self.odata_count(set, &target, &options),
-            (None, "", "GET") => self.odata_collection(set, &target, &options, &base, request),
+            (None, "", "GET") => self.odata_collection(set, &sets, &target, &options, &base, request),
             (None, "", "POST") => self.odata_insert(set, &target, &request.body, &base),
-            (Some(key), "", "GET") => self.odata_entity(set, &target, &key, &options, &base),
+            (Some(key), "", "GET") => self.odata_entity(set, &sets, &target, &key, &options, &base),
             (Some(key), "", "PATCH" | "PUT" | "MERGE") => self.odata_update(set, &target, &key, &request.body),
             (Some(key), "", "DELETE") => self.odata_delete(set, &target, &key),
             (Some(key), property, "GET") if !property.is_empty() => {
@@ -834,9 +1021,6 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
     }
 
     fn odata_filter(set: &EntitySet, options: &[(String, String)]) -> Result<String, Response> {
-        if option(options, "$expand").is_some() {
-            return Err(odata_error(501, "NotImplemented", "$expand is not supported yet"));
-        }
         if option(options, "$search").is_some() {
             return Err(odata_error(501, "NotImplemented", "$search is not supported yet"));
         }
@@ -871,6 +1055,7 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
     fn odata_collection(
         &self,
         set: &EntitySet,
+        sets: &[EntitySet],
         target: &str,
         options: &[(String, String)],
         base: &str,
@@ -880,8 +1065,9 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             Ok(filter) => filter,
             Err(response) => return response,
         };
-        let outcome = (|| -> Result<(Vec<&Property>, String, Option<u64>, u64, bool), String> {
+        let outcome = (|| -> Result<(Vec<&Property>, Vec<&Navigation>, String, Option<u64>, u64, bool), String> {
             let columns = select_columns(set, option(options, "$select"))?;
+            let expanded = expand_names(set, option(options, "$expand"))?;
             let order = match option(options, "$orderby") {
                 Some(text) => order_sql(set, text)?,
                 None => String::new(),
@@ -889,13 +1075,13 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             let top = whole_number(options, "$top")?;
             let skip = whole_number(options, "$skip")?.unwrap_or(0);
             let counted = option(options, "$count").is_some_and(|value| value.eq_ignore_ascii_case("true"));
-            Ok((columns, order, top, skip, counted))
+            Ok((columns, expanded, order, top, skip, counted))
         })();
-        let (columns, order, top, skip, counted) = match outcome {
+        let (columns, expanded, order, top, skip, counted) = match outcome {
             Ok(parts) => parts,
             Err(message) => return odata_error(400, "BadRequest", &message),
         };
-        let quoted: Vec<String> = columns.iter().filter_map(|property| identifier(&property.name)).collect();
+        let quoted: Vec<String> = set.properties.iter().filter_map(|property| identifier(&property.name)).collect();
         let page = top.unwrap_or(PAGE_ROWS).min(PAGE_ROWS);
         let ordered = if order.is_empty() && !set.key_columns().is_empty() {
             let keys: Vec<String> = set.key_columns().iter().filter_map(|property| identifier(&property.name)).collect();
@@ -932,7 +1118,15 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                 Err(error) => return sql_error(&error),
             }
         }
-        let entities: Vec<String> = rows.iter().map(|row| entity_json("", &columns, row)).collect();
+        let expansions = match self.expansions(set, sets, &expanded, &rows) {
+            Ok(expansions) => expansions,
+            Err(error) => return sql_error(&error),
+        };
+        let entities: Vec<String> = rows
+            .iter()
+            .zip(&expansions)
+            .map(|(row, members)| entity_with("", &columns, &projected(set, &columns, row), members))
+            .collect();
         body.push_str(&format!(",\"value\":[{}]", entities.join(",")));
         if more {
             let mut kept: Vec<String> = request
@@ -960,7 +1154,7 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         odata_json(200, body)
     }
 
-    fn odata_entity(&self, set: &EntitySet, target: &str, key: &str, options: &[(String, String)], base: &str) -> Response {
+    fn odata_entity(&self, set: &EntitySet, sets: &[EntitySet], target: &str, key: &str, options: &[(String, String)], base: &str) -> Response {
         let condition = match key_condition(set, key) {
             Ok(condition) => condition,
             Err(message) => return odata_error(400, "BadRequest", &message),
@@ -969,17 +1163,31 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             Ok(columns) => columns,
             Err(message) => return odata_error(400, "BadRequest", &message),
         };
-        let quoted: Vec<String> = columns.iter().filter_map(|property| identifier(&property.name)).collect();
-        match self.run(&format!("SELECT {} FROM {target} WHERE {condition}", quoted.join(", "))) {
-            Ok(results) => match rows_of(&results).first() {
-                Some(row) => odata_json(
-                    200,
-                    entity_json(&format!("{base}$metadata#{}/$entity", set.name), &columns, row),
-                ),
-                None => odata_error(404, "NotFound", "No entity has that key."),
-            },
-            Err(error) => sql_error(&error),
-        }
+        let expanded = match expand_names(set, option(options, "$expand")) {
+            Ok(expanded) => expanded,
+            Err(message) => return odata_error(400, "BadRequest", &message),
+        };
+        let quoted: Vec<String> = set.properties.iter().filter_map(|property| identifier(&property.name)).collect();
+        let rows = match self.run(&format!("SELECT {} FROM {target} WHERE {condition}", quoted.join(", "))) {
+            Ok(results) => rows_of(&results),
+            Err(error) => return sql_error(&error),
+        };
+        let Some(row) = rows.first() else {
+            return odata_error(404, "NotFound", "No entity has that key.");
+        };
+        let expansions = match self.expansions(set, sets, &expanded, std::slice::from_ref(row)) {
+            Ok(expansions) => expansions,
+            Err(error) => return sql_error(&error),
+        };
+        odata_json(
+            200,
+            entity_with(
+                &format!("{base}$metadata#{}/$entity", set.name),
+                &columns,
+                &projected(set, &columns, row),
+                expansions.first().map(Vec::as_slice).unwrap_or_default(),
+            ),
+        )
     }
 
     fn odata_property(&self, set: &EntitySet, target: &str, key: &str, path: &str, base: &str) -> Response {
@@ -1141,6 +1349,7 @@ mod tests {
                 property("published", "timestamp with time zone"),
             ],
             key: vec!["id".to_owned()],
+            navigations: Vec::new(),
         }
     }
 
