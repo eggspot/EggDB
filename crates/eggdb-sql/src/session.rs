@@ -21,6 +21,7 @@ pub(crate) mod sqlserver;
 pub(crate) mod sqlserver_agent;
 mod sqlserver_security;
 mod sqlserver_ddl_triggers;
+mod oracle_system_triggers;
 mod transaction_settings;
 mod triggers;
 mod tsql;
@@ -3693,6 +3694,19 @@ impl<'s> Session<'s> {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
                 crate::triggers::create_trigger(writer, tables, create)
             }),
+            Statement::DropTrigger(drop)
+                if dialect == Dialect::Oracle
+                    && drop.table.is_none()
+                    && drop.names.len() == 1
+                    && self.is_system_trigger(&drop.names[0].name.text) =>
+            {
+                self.drop_system_trigger(&drop.names[0].name.text)
+            }
+            Statement::AlterTrigger(alter)
+                if dialect == Dialect::Oracle && self.is_system_trigger(&alter.name.name.text) =>
+            {
+                self.alter_system_trigger(&alter)
+            }
             Statement::DropTrigger(drop) => self.write("DROP TRIGGER", |writer, tables| {
                 if let Some(table) = &mut drop.table {
                     binding.names(writer, tables, std::slice::from_mut(table))?;
@@ -3784,6 +3798,7 @@ impl<'s> Session<'s> {
                 crate::routines::run_do(writer, tables, &settings, &block.code)
             }),
             Statement::OracleContext(command) => self.run_oracle_context(&command),
+            Statement::OracleSystemTrigger(create) => self.create_system_trigger(&create),
             Statement::Synonym(command) => {
                 let tag = match command {
                     crate::ast::SynonymCommand::Create { .. } => "CREATE SYNONYM",

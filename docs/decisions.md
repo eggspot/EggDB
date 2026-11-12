@@ -897,3 +897,4 @@ its full title with its status.
 - [D870](decisions/D870.md) Code-only batch 518 (M6c): EXPLAIN ANALYZE in JSON, YAML and XML
 - [D871](decisions/D871.md) Code-only batch 519 (M6b): SQL Server BEFORE UPDATE and BEFORE DELETE block predicates
 - [D872](decisions/D872.md) Code-only batch 520 (M5): SQL Server DDL triggers
+- [D873](decisions/D873.md) Code-only batch 521 (M5): Oracle DDL and database event triggers

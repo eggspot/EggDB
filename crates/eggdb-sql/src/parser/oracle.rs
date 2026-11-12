@@ -1338,6 +1338,19 @@ impl<'t> Parser<'t> {
                 "rowid" | "uid" => {
                     return Err(self.not_supported(&word.to_ascii_uppercase()));
                 }
+                attribute if crate::oracle_system_triggers::ATTRIBUTES.contains(&attribute) => {
+                    self.at += 1;
+                    Expr {
+                        kind: ExprKind::Function {
+                            name: crate::oracle_system_triggers::ATTRIBUTE_FUNCTION.to_owned(),
+                            arguments: vec![Expr {
+                                kind: ExprKind::Literal(Literal::String(attribute.to_owned())),
+                                position,
+                            }],
+                        },
+                        position,
+                    }
+                }
                 _ => return Ok(None),
             },
             _ => return Ok(None),

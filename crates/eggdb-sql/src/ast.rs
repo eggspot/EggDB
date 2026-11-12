@@ -127,6 +127,7 @@ pub(crate) enum Statement {
     PlsqlBlock(Box<PlsqlBlock>),
     Synonym(SynonymCommand),
     OracleContext(OracleContextCommand),
+    OracleSystemTrigger(Box<crate::oracle_system_triggers::CreateSystemTrigger>),
     CreatePackage(Box<CreatePackage>),
     DropPackage(DropPackage),
     AlterPackage(AlterPackage),

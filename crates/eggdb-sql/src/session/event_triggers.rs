@@ -232,6 +232,9 @@ impl Session<'_> {
     /// the login; a listener reports it and closes the connection. Only a PostgreSQL-dialect
     /// session fires them.
     pub fn fire_login_event_triggers(&mut self) -> SqlResult<()> {
+        if self.dialect == Dialect::Oracle {
+            return self.fire_logon_triggers();
+        }
         if self.dialect != Dialect::PostgreSql {
             return Ok(());
         }
@@ -269,6 +272,9 @@ impl Session<'_> {
             && let Some(tag) = event_triggers::ddl_tag(statement)
         {
             return self.run_with_ddl_triggers(statement, io, tag);
+        }
+        if outermost && self.dialect == Dialect::Oracle && self.system_triggers_stored() {
+            return self.run_with_system_triggers(statement, io);
         }
         let tag = if outermost && self.dialect == Dialect::PostgreSql {
             event_triggers::ddl_tag(statement)

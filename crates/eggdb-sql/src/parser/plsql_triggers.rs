@@ -80,6 +80,9 @@ impl<'t> Parser<'t> {
         let position = self.position();
         self.expect_word("trigger")?;
         let (_, name) = self.trigger_name()?;
+        if self.at_system_trigger_heading() {
+            return self.plsql_system_trigger(name, replace);
+        }
         let heading = self.plsql_trigger_heading()?;
         let body_tokens = self.at;
         let body = if self.take_word("call") {

@@ -1557,6 +1557,15 @@ impl Evaluator<'_> {
         if name == crate::sqlserver_ddl_triggers::EVENT_DATA_FUNCTION {
             return Ok(crate::sqlserver_ddl_triggers::event_data());
         }
+        if name == crate::oracle_system_triggers::ATTRIBUTE_FUNCTION {
+            let attribute = values.first().and_then(Value::character_text).unwrap_or_default();
+            return Ok(crate::oracle_system_triggers::attribute(attribute, &[]));
+        }
+        if name == crate::oracle_system_triggers::SERVER_ERROR
+            || name == crate::oracle_system_triggers::SERVER_ERROR_MESSAGE
+        {
+            return Ok(crate::oracle_system_triggers::attribute(name, &values));
+        }
         if let Some(result) = crate::ranges::function(name, &values) {
             return result;
         }

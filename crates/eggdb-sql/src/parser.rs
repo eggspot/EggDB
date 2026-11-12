@@ -1,6 +1,7 @@
 mod asof;
 mod sqlserver_security;
 mod sqlserver_ddl_triggers;
+mod oracle_system_triggers;
 mod constraints;
 mod copy;
 mod create_table_as;
