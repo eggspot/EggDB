@@ -1004,3 +1004,4 @@ its full title with its status.
 - [D977](decisions/D977.md) Code-only batch 625 (M5): PostgreSQL's array slices
 - [D978](decisions/D978.md) Code-only batch 626 (M6b): eggdb serve --tls-client-ca
 - [D979](decisions/D979.md) Code-only batch 627 (M6b): roles with BYPASSRLS
+- [D980](decisions/D980.md) Code-only batch 628 (M6c): a Kubernetes operator in Rust

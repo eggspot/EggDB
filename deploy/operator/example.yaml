@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-password
+stringData:
+  password: change-me
+---
+apiVersion: eggspot.app/v1alpha1
+kind: EggDB
+metadata:
+  name: orders
+spec:
+  passwordSecret:
+    name: orders-password
+  mysqlPort: 3306
+  storage:
+    size: 20Gi

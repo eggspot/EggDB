@@ -916,7 +916,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   tuning.
 - An admin API, with the same actions as MCP tools (D11, D25). `GET /admin/tools` and `POST /admin/tools/<name>` beside `/mcp`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D840).
-- A Kubernetes operator in Rust (D25, D45).
+- A Kubernetes operator in Rust (D25, D45). `eggdb-operator` with the `EggDB` resource (`deploy/operator`): **code written,
+  unbuilt** (code-only mode, 2026-11-13, D980). Left: its container image in the release, backups and upgrades driven
+  by the resource, and replicas once replication is wired (M14).
 - A Terraform provider in Rust on Terraform's published plugin protocol (D25, D46).
 - A metering API (usage per tenant, database and query) with hooks for billing, and chargeback
   and showback reports on it (D44, D58). **Code written, unbuilt** (code-only mode, 2026-11-12, D760), for SQL

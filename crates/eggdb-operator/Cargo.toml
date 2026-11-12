@@ -1,0 +1,20 @@
+[package]
+name = "eggdb-operator"
+autotests = false
+description = "EggDB's Kubernetes operator: runs EggDB servers for EggDB custom resources (D25, D45)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-http = { path = "../eggdb-http" }
+eggdb-sql = { path = "../eggdb-sql" }
+
+[[test]]
+name = "all"
+path = "tests/all/main.rs"
