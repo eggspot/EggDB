@@ -847,6 +847,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             | "array_ndims"
             | "cardinality"
             | "array_subscript"
+            | "array_slice"
     );
     if !known {
         return None;
@@ -880,8 +881,35 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("cardinality", []) => integer(array.items.len() as i64),
         ("array_subscript", [Value::Null]) => Ok(Value::Null),
         ("array_subscript", [subscript]) => subscripted(array, subscript),
+        ("array_slice", [Value::Null, _] | [_, Value::Null]) => Ok(Value::Null),
+        ("array_slice", [low, high]) => sliced(array, low, high),
         _ => return None,
     })
+}
+
+fn slice_bound(value: &Value) -> SqlResult<i64> {
+    let whole = match value {
+        Value::Numeric(number) => number.to_i128_rounded(),
+        other => other.as_integer().map(i128::from),
+    };
+    whole
+        .and_then(|whole| i64::try_from(whole).ok())
+        .ok_or_else(|| SqlError::new(SqlState::DATATYPE_MISMATCH, "array subscript must have type integer"))
+}
+
+fn sliced(array: &ArrayValue, low: &Value, high: &Value) -> SqlResult<Value> {
+    let (low, high) = (slice_bound(low)?, slice_bound(high)?);
+    let first = i64::from(array.lower_bound);
+    let last = first + array.items.len() as i64 - 1;
+    let (from, to) = (low.max(first), high.min(last));
+    let items = if from > to {
+        Vec::new()
+    } else {
+        let start = usize::try_from(from - first).unwrap_or(0);
+        let end = usize::try_from(to - first).unwrap_or(0);
+        array.items[start..=end].to_vec()
+    };
+    Ok(Value::Array(Box::new(ArrayValue::new(array.element, items))))
 }
 
 fn subscripted(array: &ArrayValue, subscript: &Value) -> SqlResult<Value> {
@@ -1290,6 +1318,13 @@ pub(crate) fn function_type(
             .and_then(|array| crate::typing::static_type(array, scope))
         {
             Some(SqlType::Array(element)) => Some(element.sql_type()),
+            _ => None,
+        },
+        "array_slice" => match arguments
+            .first()
+            .and_then(|array| crate::typing::static_type(array, scope))
+        {
+            Some(SqlType::Array(element)) => Some(SqlType::Array(element)),
             _ => None,
         },
         "array_any" | "array_all" => Some(SqlType::Boolean),

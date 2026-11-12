@@ -310,7 +310,7 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
         }
         ExprKind::Function { name, .. } if name == "array_constructor" => ("array".into(), true),
         ExprKind::Function { name, arguments }
-            if name == "array_subscript" || name == "collate" =>
+            if name == "array_subscript" || name == "array_slice" || name == "collate" =>
         {
             match arguments.first().map(name_and_whether_it_names_a_value) {
                 Some((name, true)) => (name, true),
@@ -1832,6 +1832,7 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "array_length" | "array_upper" | "array_lower" | "array_subscript" => {
             &[None, Some(SqlType::Integer)]
         }
+        "array_slice" => &[None, Some(SqlType::Integer), Some(SqlType::Integer)],
         "array_ndims" | "cardinality" => &[None],
         name if crate::pg_catalog::is_privilege_inquiry(name) => &[None, None, None, None],
         "btrim" | "ltrim" | "rtrim" => &[Some(SqlType::Text), Some(SqlType::Text)],

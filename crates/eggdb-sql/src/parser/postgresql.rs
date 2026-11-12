@@ -205,15 +205,31 @@ impl Parser<'_> {
     pub(super) fn subscript(&mut self, array: Expr) -> SqlResult<Expr> {
         let position = array.position;
         self.expect(&TokenKind::LeftBracket)?;
-        if self.peek_kind() == &TokenKind::Colon {
-            return Err(self.not_supported("array slices"));
+        let low = if self.peek_kind() == &TokenKind::Colon {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+        if !self.take(&TokenKind::Colon) {
+            let Some(index) = low else {
+                return Err(self.unexpected());
+            };
+            self.expect(&TokenKind::RightBracket)?;
+            return Ok(function("array_subscript", vec![array, index], position));
         }
-        let index = self.expression()?;
-        if self.peek_kind() == &TokenKind::Colon {
-            return Err(self.not_supported("array slices"));
-        }
+        let high = if self.peek_kind() == &TokenKind::RightBracket {
+            None
+        } else {
+            Some(self.expression()?)
+        };
         self.expect(&TokenKind::RightBracket)?;
-        Ok(function("array_subscript", vec![array, index], position))
+        let first_dimension = || Expr {
+            kind: ExprKind::Literal(crate::ast::Literal::Integer(1)),
+            position,
+        };
+        let low = low.unwrap_or_else(|| function("array_lower", vec![array.clone(), first_dimension()], position));
+        let high = high.unwrap_or_else(|| function("array_upper", vec![array.clone(), first_dimension()], position));
+        Ok(function("array_slice", vec![array, low, high], position))
     }
 
     pub(super) fn array_constructor(&mut self) -> SqlResult<Expr> {

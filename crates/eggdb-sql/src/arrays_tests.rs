@@ -674,3 +674,15 @@ fn any_with_a_parameter_on_the_left_keeps_the_general_form() {
         .unwrap();
     assert_eq!(outputs, vec!["a|b\nt|t\nSELECT 1".to_owned()]);
 }
+
+#[test]
+fn slices_take_a_range_of_elements_clamped_to_the_array() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TABLE series (id int PRIMARY KEY, points int[])").unwrap();
+    run(&mut session, "INSERT INTO series VALUES (1, ARRAY[10, 20, 30, 40])").unwrap();
+    assert_eq!(run(&mut session, "SELECT points[2:3] FROM series").unwrap(), "points\n{20,30}\nSELECT 1");
+    assert_eq!(run(&mut session, "SELECT points[:2] AS head, points[3:] AS tail FROM series").unwrap(), "head|tail\n{10,20}|{30,40}\nSELECT 1");
+    assert_eq!(run(&mut session, "SELECT points[0:9] AS whole, points[5:6] AS outside FROM series").unwrap(), "whole|outside\n{10,20,30,40}|{}\nSELECT 1");
+    assert_eq!(run(&mut session, "SELECT points[NULL:2] IS NULL AS nothing FROM series").unwrap(), "nothing\nt\nSELECT 1");
+}

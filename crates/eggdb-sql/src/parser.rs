@@ -395,6 +395,7 @@ const INTERNAL_FUNCTIONS: [&str; 35] = [
     "array_constructor",
     "array_element_cast",
     "array_subscript",
+    "array_slice",
     "array_any",
     "array_all",
     "string_agg_arguments",
