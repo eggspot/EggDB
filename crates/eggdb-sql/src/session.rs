@@ -2240,6 +2240,7 @@ impl<'s> Session<'s> {
             );
             self.enter_sequences(flags.uses_sequences);
             self.extra_results.clear();
+            drop(take_notices_before_error());
             crate::deferred_checks::enter(&self.deferred.modes);
             let leftover_changes = crate::routine_settings::take_for_session(true);
             let leftover_applied = self.apply_routine_setting_changes(leftover_changes);
