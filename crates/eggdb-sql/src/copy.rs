@@ -1,5 +1,6 @@
 mod binary;
 mod encodings;
+mod single_byte;
 mod format;
 
 pub(crate) use encodings::{CopyEncoding, EncodingName};

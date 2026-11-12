@@ -11,6 +11,7 @@ pub(crate) enum CopyEncoding {
     Utf16,
     Utf16Le,
     Utf16Be,
+    SingleByte(&'static super::single_byte::SingleByteEncoding),
 }
 
 pub(crate) enum EncodingName {
@@ -20,20 +21,8 @@ pub(crate) enum EncodingName {
 }
 
 const POSTGRESQL_ONLY_ENCODINGS: &[&str] = &[
-    "abc",
-    "alt",
     "big5",
-    "cp1250",
-    "cp1251",
     "cp1252",
-    "cp1253",
-    "cp1254",
-    "cp1255",
-    "cp1256",
-    "cp1257",
-    "cp1258",
-    "cp866",
-    "cp874",
     "cp932",
     "cp936",
     "cp949",
@@ -45,64 +34,17 @@ const POSTGRESQL_ONLY_ENCODINGS: &[&str] = &[
     "euctw",
     "gb18030",
     "gbk",
-    "iso88592",
-    "iso88593",
-    "iso88594",
-    "iso88595",
-    "iso88596",
-    "iso88597",
-    "iso88598",
-    "iso88599",
-    "iso885910",
-    "iso885913",
-    "iso885914",
-    "iso885916",
     "johab",
-    "koi8",
-    "koi8r",
-    "koi8u",
-    "latin10",
-    "latin2",
-    "latin3",
-    "latin4",
-    "latin5",
-    "latin6",
-    "latin7",
-    "latin8",
     "mskanji",
     "muleinternal",
     "shiftjis",
     "shiftjis2004",
     "sjis",
-    "tcvn",
-    "tcvn5712",
     "uhc",
-    "vscii",
-    "win",
-    "win1250",
-    "win1251",
-    "win1253",
-    "win1254",
-    "win1255",
-    "win1256",
-    "win1257",
-    "win1258",
-    "win866",
-    "win874",
     "win932",
     "win936",
     "win949",
     "win950",
-    "windows1250",
-    "windows1251",
-    "windows1253",
-    "windows1254",
-    "windows1255",
-    "windows1256",
-    "windows1257",
-    "windows1258",
-    "windows866",
-    "windows874",
     "windows932",
     "windows936",
     "windows949",
@@ -138,6 +80,12 @@ fn normalized(name: &str) -> String {
 impl CopyEncoding {
     pub(crate) fn named(name: &str) -> EncodingName {
         let normalized = normalized(name);
+        if let Some(table) = super::single_byte::SINGLE_BYTE_ENCODINGS
+            .iter()
+            .find(|table| table.aliases.contains(&normalized.as_str()))
+        {
+            return EncodingName::Supported(Self::SingleByte(table));
+        }
         let encoding = match normalized.as_str() {
             "utf8" | "unicode" | "sqlascii" => Self::Utf8,
             "latin1" | "iso88591" => Self::Latin1,
@@ -163,6 +111,7 @@ impl CopyEncoding {
             Self::Utf16 => "UTF16",
             Self::Utf16Le => "UTF16LE",
             Self::Utf16Be => "UTF16BE",
+            Self::SingleByte(table) => table.name,
         }
     }
 
@@ -173,6 +122,7 @@ impl CopyEncoding {
     fn decoded_byte(self, byte: u8) -> Option<char> {
         let code = match (self, byte) {
             (Self::Win1252, 0x80..=0x9F) => WIN1252_HIGH[usize::from(byte - 0x80)],
+            (Self::SingleByte(table), 0x80..=0xFF) => table.high[usize::from(byte - 0x80)],
             (Self::Latin9, _) => LATIN9_CHANGES
                 .iter()
                 .find(|(changed, _)| *changed == byte)
@@ -197,6 +147,10 @@ impl CopyEncoding {
                 0x80..=0x9F => None,
                 0..=0xFF => u8::try_from(code).ok(),
                 _ => high(&WIN1252_HIGH).and_then(|at| u8::try_from(0x80 + at).ok()),
+            },
+            Self::SingleByte(table) => match code {
+                0..=0x7F => u8::try_from(code).ok(),
+                _ => high(&table.high).and_then(|at| u8::try_from(0x80 + at).ok()),
             },
             Self::Latin9 => {
                 if let Some((byte, _)) = LATIN9_CHANGES
@@ -490,6 +444,29 @@ mod tests {
             channel.write_copy_data(row.as_bytes())?;
         }
         Ok(inner.written)
+    }
+
+    fn supported(name: &str) -> CopyEncoding {
+        match CopyEncoding::named(name) {
+            EncodingName::Supported(encoding) => encoding,
+            _ => panic!("{name} is not supported"),
+        }
+    }
+
+    #[test]
+    fn cyrillic_greek_and_central_european_tables_round_trip() {
+        let win1251 = supported("WIN1251");
+        assert_eq!(win1251.name(), "WIN1251");
+        assert_eq!(decoded(win1251, b"\xcf\xf0\xe8\xe2\xe5\xf2\n", 3).unwrap(), "Привет\n");
+        assert_eq!(encoded(win1251, &["Привет\n"]).unwrap(), b"\xcf\xf0\xe8\xe2\xe5\xf2\n");
+        assert_eq!(decoded(supported("koi8-r"), b"\xf0\xd2\xc9\xd7\xc5\xd4", 1).unwrap(), "Привет");
+        assert_eq!(decoded(supported("ISO-8859-5"), b"\xbf\xe0\xd8", 1).unwrap(), "При");
+        assert_eq!(decoded(supported("cp866"), b"\x8f\xe0\xa8", 2).unwrap(), "При");
+        assert_eq!(decoded(supported("ISO_8859_7"), b"\xe1\xe2", 1).unwrap(), "αβ");
+        assert_eq!(encoded(supported("LATIN2"), &["Łódź"]).unwrap(), b"\xa3\xf3d\xbc");
+        assert_eq!(supported("TCVN").name(), "WIN1258");
+        assert!(decoded(win1251, b"\x98", 1).is_err());
+        assert!(encoded(win1251, &["€\u{3042}"]).is_err());
     }
 
     #[test]

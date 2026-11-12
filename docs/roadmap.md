@@ -555,7 +555,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Server's collation names mapped onto it (D30, D233). Check: the collation conformance test.
 - Collation keys in indexes, and locale-aware `upper` and `lower` (D233).
 - Every legacy encoding the supported databases accept, listed per dialect, on the wire and in
-  `COPY` (D30).
+  `COPY` (D30). PostgreSQL's single-byte encodings in `COPY ... ENCODING`: **code written, unbuilt** (code-only mode,
+  2026-11-12, D830). Left: the multi-byte East Asian encodings, client encodings on the wire, and the other dialects'
+  lists.
 - WebAssembly functions: floating point and the rest of the 1.0 instruction set (D232). Check: the
   official spec test suite in CI. Floating point, `call_indirect` with a function table, the start function,
   non-trapping float-to-integer conversions and `memory.copy`/`memory.fill`: **code written, unbuilt** (code-only
