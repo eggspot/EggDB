@@ -44,6 +44,7 @@ mod mcp;
 mod measure;
 mod net;
 mod page_cache;
+mod retrieval;
 mod sql_bulk_write;
 mod sql_order;
 mod tls;
@@ -60,7 +61,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 type Counted = fn(&CountingAllocator) -> Result<Vec<Metric>, String>;
 type Uncounted = fn() -> Result<Vec<Metric>, String>;
 
-const COUNTED: [(&str, Counted); 43] = [
+const COUNTED: [(&str, Counted); 44] = [
     (page_cache::HIT, page_cache::hit),
     (page_cache::MISS, page_cache::miss),
     (page_cache::COMMIT, page_cache::commit),
@@ -110,6 +111,7 @@ const COUNTED: [(&str, Counted); 43] = [
     (sql_bulk_write::SQLITE, sql_bulk_write::sqlite),
     (sql_bulk_write::ORACLE, sql_bulk_write::oracle),
     (sql_bulk_write::SQLSERVER, sql_bulk_write::sqlserver),
+    (retrieval::HYBRID, retrieval::hybrid),
 ];
 
 const FOOTPRINT: [(&str, Uncounted); 4] = [

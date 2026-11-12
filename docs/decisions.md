@@ -1030,3 +1030,4 @@ its full title with its status.
 - [D1003](decisions/D1003.md) Code-only batch 651 (M11): writing Apache Iceberg tables
 - [D1004](decisions/D1004.md) Code-only batch 652 (M12): SQL Server's geometry and geography types with their methods
 - [D1005](decisions/D1005.md) Code-only batch 653 (M12): agent memory as MCP tools and eggdb memory
+- [D1006](decisions/D1006.md) Code-only batch 654 (M12): an end-to-end retrieval benchmark
