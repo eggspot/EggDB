@@ -720,7 +720,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A GraphQL API generated from the schema, in Hasura's style (D37). Queries, aggregates, relationships from
   foreign keys and mutations over `POST /graphql`: **code written, unbuilt** (code-only mode, 2026-11-12, D875).
   Introspection (`__schema`, `__type`): **code written, unbuilt** (code-only mode, 2026-11-12, D876); subscriptions
-  over Server-Sent Events (D878). Left: nested inserts.
+  over Server-Sent Events (D878); nested inserts one relationship deep: **code written, unbuilt** (code-only mode,
+  2026-11-12, D909). Left: nested inserts deeper than one relationship, and `on_conflict` with them.
 - gRPC and OData APIs generated from the schema, OData for Excel, Power BI and SAP (D37). The OData v4 service
   (`$metadata`, entity sets with `$filter`/`$select`/`$orderby`/`$top`/`$skip`/`$count`, keys, writes): **code
   written, unbuilt** (code-only mode, 2026-11-12, D877). Left: gRPC, and OData's `$expand` and batches.

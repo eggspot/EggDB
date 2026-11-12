@@ -933,3 +933,4 @@ its full title with its status.
 - [D906](decisions/D906.md) Code-only batch 554 (M12): OGC API Tiles on WorldCRS84Quad
 - [D907](decisions/D907.md) Code-only batch 555 (M5): SQL Server logon triggers and Oracle BEFORE LOGOFF
 - [D908](decisions/D908.md) Code-only batch 556 (M5): WebAssembly imported functions and host functions
+- [D909](decisions/D909.md) Code-only batch 557 (M6a): GraphQL nested inserts

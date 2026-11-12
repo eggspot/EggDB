@@ -3,8 +3,10 @@
 //! `insert_<table>`, `insert_<table>_one`, `update_<table>`, `update_<table>_by_pk`,
 //! `delete_<table>` and `delete_<table>_by_pk` on the mutation root, with `where`,
 //! `order_by`, `limit`, `offset` and `distinct_on`, and relationships named after the tables
-//! a foreign key joins. Each root field becomes one SQL statement that builds its JSON with
-//! `json_build_object` and `json_agg`, run as the signed-in user. Hasura is a trademark of
+//! a foreign key joins, and nested inserts through those relationships (`{data: ...}`). Each
+//! root field becomes one SQL statement that builds its JSON with `json_build_object` and
+//! `json_agg`, run as the signed-in user; a nested insert becomes a few, in the same
+//! transaction. Hasura is a trademark of
 //! its owners; EggDB is compatible with its query conventions.
 
 use crate::graphql::{self, Directive, Field, Fragment, GqlValue, OperationKind, Selection};
@@ -17,6 +19,8 @@ use eggdb_sql::{KeyValueStore, QueryResult, Value};
 use std::collections::HashMap;
 
 const MAX_FRAGMENT_DEPTH: usize = 32;
+const INSERTED_ROWS: &str = "eggdb_graphql_inserted";
+const NEW_ROW: &str = "eggdb_graphql_new";
 
 pub(crate) const AGGREGATE_FUNCTIONS: [&str; 10] = [
     "sum",
@@ -696,12 +700,110 @@ impl Context<'_> {
         Ok(assignments)
     }
 
+    fn nests(&self, table: &str, object: &GqlValue) -> bool {
+        let GqlValue::Object(fields) = object else {
+            return false;
+        };
+        fields
+            .iter()
+            .any(|(name, value)| value.field("data").is_some() && self.relationship(table, name).is_some())
+    }
+
+    fn values_insert(&self, table: &str, object: &GqlValue, links: &[(String, String)]) -> Result<String, String> {
+        let GqlValue::Object(fields) = object else {
+            return Err("expected objects to insert".to_owned());
+        };
+        if self.nests(table, object) {
+            return Err("nested inserts go one relationship deep".to_owned());
+        }
+        let mut columns = Vec::new();
+        let mut values = Vec::new();
+        for (name, value) in fields {
+            columns.push(identifier(name).ok_or_else(|| format!("field '{name}' is not a column name"))?);
+            values.push(sql_literal(value)?);
+        }
+        for (column, value) in links {
+            columns.push(column.clone());
+            values.push(value.clone());
+        }
+        let head = if columns.is_empty() {
+            "DEFAULT VALUES".to_owned()
+        } else {
+            format!("({}) VALUES ({})", columns.join(", "), values.join(", "))
+        };
+        Ok(format!("INSERT INTO {} {head} RETURNING *", self.target(table)?))
+    }
+
+    fn links(key: &ForeignKey, from: &[String], to: &[String], source: &str) -> Result<Vec<(String, String)>, String> {
+        from.iter()
+            .zip(to)
+            .map(|(target, origin)| {
+                let target = identifier(target).ok_or_else(|| format!("'{target}' is not a column name"))?;
+                let origin = identifier(origin).ok_or_else(|| format!("'{origin}' is not a column name"))?;
+                Ok((target, format!("(SELECT {origin} FROM {source})")))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .and_then(|links| if links.is_empty() { Err(format!("the relationship to '{}' has no columns", key.parent)) } else { Ok(links) })
+    }
+
+    fn nested_object_sql(&mut self, table: &str, object: &GqlValue) -> Result<String, String> {
+        let GqlValue::Object(fields) = object else {
+            return Err("expected objects to insert".to_owned());
+        };
+        let mut steps: Vec<String> = Vec::new();
+        let mut own = Vec::new();
+        let mut links = Vec::new();
+        let mut children = Vec::new();
+        for (name, value) in fields {
+            match (value.field("data"), self.relationship(table, name)) {
+                (Some(data), Some(Relationship::Object(key))) => {
+                    let step = format!("eggdb_graphql_parent_{}", steps.len());
+                    steps.push(format!("{step} AS ({})", self.values_insert(&key.parent, data, &[])?));
+                    links.extend(Self::links(&key, &key.child_columns, &key.parent_columns, &step)?);
+                }
+                (Some(data), Some(Relationship::Array(key))) => children.push((key, data.clone())),
+                _ => own.push((name.clone(), value.clone())),
+            }
+        }
+        steps.push(format!("{NEW_ROW} AS ({})", self.values_insert(table, &GqlValue::Object(own), &links)?));
+        for (key, data) in children {
+            let items = match data {
+                GqlValue::List(items) => items,
+                single => vec![single],
+            };
+            let child_links = Self::links(&key, &key.child_columns, &key.parent_columns, NEW_ROW)?;
+            for item in &items {
+                let step = format!("eggdb_graphql_child_{}", steps.len());
+                steps.push(format!("{step} AS ({})", self.values_insert(&key.child, item, &child_links)?));
+            }
+        }
+        Ok(format!("WITH {} INSERT INTO {INSERTED_ROWS} SELECT * FROM {NEW_ROW}", steps.join(", ")))
+    }
+
+    fn nested_insert_sql(&mut self, table: &str, field: &Field, single: bool, objects: &[GqlValue]) -> Result<String, String> {
+        if self.argument(field, "on_conflict").is_some() {
+            return Err("on_conflict does not go with nested inserts yet".to_owned());
+        }
+        let alias = identifier(table).ok_or_else(|| format!("'{table}' is not a table name"))?;
+        let mut statements = vec![format!("CREATE TEMPORARY TABLE {INSERTED_ROWS} (LIKE {})", self.target(table)?)];
+        for object in objects {
+            statements.push(self.nested_object_sql(table, object)?);
+        }
+        let returning = self.returning_object(table, &alias, field, single)?;
+        statements.push(format!("SELECT {returning} FROM {INSERTED_ROWS} AS {alias}"));
+        statements.push(format!("DROP TABLE {INSERTED_ROWS}"));
+        Ok(statements.join("; "))
+    }
+
     fn insert_sql(&mut self, table: &str, field: &Field, single: bool) -> Result<String, String> {
         let objects = match self.argument(field, if single { "object" } else { "objects" }) {
             Some(GqlValue::List(items)) => items,
             Some(object @ GqlValue::Object(_)) => vec![object],
             _ => return Err(format!("missing required field '{}'", if single { "object" } else { "objects" })),
         };
+        if objects.iter().any(|object| self.nests(table, object)) {
+            return self.nested_insert_sql(table, field, single, &objects);
+        }
         let alias = identifier(table).ok_or_else(|| format!("'{table}' is not a table name"))?;
         let mut columns: Vec<String> = Vec::new();
         for object in &objects {

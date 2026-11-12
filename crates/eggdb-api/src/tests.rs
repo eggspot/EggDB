@@ -428,6 +428,37 @@ fn graphql_reads_and_writes_tables_with_relationships() {
 }
 
 #[test]
+fn graphql_nested_inserts_follow_relationships() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE authors (id integer PRIMARY KEY, name text NOT NULL)",
+        "CREATE TABLE books (id integer PRIMARY KEY, title text NOT NULL, author_id integer REFERENCES authors (id))",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let with_books = graphql(
+        &endpoint,
+        "mutation { insert_authors_one(object: {id: 1, name: \"Ada\", books: {data: [{id: 10, title: \"Engines\"}, {id: 11, title: \"Notes\"}]}}) { name books(order_by: {id: asc}) { title } } }",
+        "{}",
+    );
+    assert!(
+        with_books.contains("\"insert_authors_one\":{\"name\":\"Ada\",\"books\":[{\"title\":\"Engines\"},{\"title\":\"Notes\"}]}"),
+        "{with_books}"
+    );
+    let with_author = graphql(
+        &endpoint,
+        "mutation { insert_books(objects: [{id: 12, title: \"C\", author: {data: {id: 2, name: \"Brian\"}}}]) { affected_rows returning { title author { name } } } }",
+        "{}",
+    );
+    assert!(with_author.contains("\"affected_rows\":1"), "{with_author}");
+    assert!(with_author.contains("\"author\":{\"name\":\"Brian\"}"), "{with_author}");
+    let counted = graphql(&endpoint, "{ books_aggregate { aggregate { count } } }", "{}");
+    assert!(counted.contains("\"count\":3"), "{counted}");
+}
+
+#[test]
 fn odata_serves_metadata_sets_keys_and_writes() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
