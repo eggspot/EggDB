@@ -30,6 +30,7 @@ eggdb-memcached = { path = "../eggdb-memcached" }
 eggdb-zookeeper = { path = "../eggdb-zookeeper" }
 eggdb-esrest = { path = "../eggdb-esrest" }
 eggdb-kafka = { path = "../eggdb-kafka" }
+eggdb-bson = { path = "../eggdb-bson" }
 eggdb-documents = { path = "../eggdb-documents" }
 eggdb-mongowire = { path = "../eggdb-mongowire" }
 eggdb-mqtt = { path = "../eggdb-mqtt" }

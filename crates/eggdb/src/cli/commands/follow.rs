@@ -698,11 +698,14 @@ impl Session<'_> {
         if source.starts_with("sqlserver://") {
             return self.follow_sql_server();
         }
+        if source.starts_with("mongodb://") || source.starts_with("mongodb+srv://") {
+            return self.follow_mongo();
+        }
         let usage = |message: String| Failure::usage(message, Some(CommandName::Follow));
         if !source.starts_with("postgres://") && !source.starts_with("postgresql://") {
             let scheme = source.split("://").next().unwrap_or(&source);
             return Err(usage(format!(
-                "the source must be postgres:// or sqlserver://, not '{scheme}://'"
+                "the source must be postgres://, sqlserver:// or mongodb://, not '{scheme}://'"
             )));
         }
         if self.request.follow.poll_seconds.is_some() {

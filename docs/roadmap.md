@@ -1245,7 +1245,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `mongorestore` inputs: `--gzip`, `--archive`, unique indexes, and a smoke-test sample dump
   (D197) `--gzip` and `--archive`: **code written,
   unbuilt** (code-only mode, 2026-11-10, D413).
-- Following a live MongoDB through its change streams for a switch with no downtime (D13).
+- Following a live MongoDB through its change streams for a switch with no downtime (D13). **Code written,
+  unbuilt** (code-only mode, 2026-11-13, D988).
 - A benchmark against MongoDB (D7, D197). Check: YCSB. **Code written, unbuilt** (code-only mode, 2026-11-13, D987).
 - The Firestore API, after D58's legal check (D48).
 - Cosmos DB's NoSQL API in gateway mode, after D58's legal check (D48).

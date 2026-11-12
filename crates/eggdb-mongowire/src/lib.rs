@@ -6,6 +6,7 @@
 //! protocol. No MongoDB code is used or read.
 
 mod aggregate;
+pub mod client;
 mod change_streams;
 mod commands;
 mod compression;

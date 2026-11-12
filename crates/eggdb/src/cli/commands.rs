@@ -21,6 +21,7 @@ mod csv_import;
 mod expiry;
 mod explain;
 mod follow;
+mod follow_mongo;
 mod follow_sql_server;
 mod follow_state;
 mod foreign;

@@ -17,6 +17,6 @@ eggdb-content = { path = "../eggdb-content" }
 eggdb-documents = { path = "../eggdb-documents" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
 eggdb-platform = { path = "../eggdb-platform" }
-
-[dev-dependencies]
 eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-tls = { path = "../eggdb-tls" }
+

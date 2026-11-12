@@ -1425,9 +1425,20 @@ Copies a running PostgreSQL or SQL Server database into the file and keeps the f
 it until it is stopped, so applications can move to EggDB with no downtime
 ([migrate.md](migrate.md), D162). The source is `postgres://user@host[:port]/database` with
 libpq's `sslmode` and `sslrootcert`, or `sqlserver://user@host[:port]/database` with
-`encrypt=yes|strict|no` and `trustServerCertificate` or `sslrootcert`. The password comes from
-`PGPASSWORD` or `SQLCMDPASSWORD`, or from `--password-file`; one written in the URL is refused,
-because process listings show it.
+`encrypt=yes|strict|no` and `trustServerCertificate` or `sslrootcert`, or
+`mongodb://user@host[:port][,more hosts][/database]` with `tls`, `tlsCAFile`, `tlsInsecure` and
+`authSource`. The password comes from `PGPASSWORD`, `SQLCMDPASSWORD` or `MONGODB_PASSWORD`, or
+from `--password-file`; one written in the URL is refused, because process listings show it.
+
+A MongoDB source must be a replica set or a sharded cluster, since only those have change
+streams. The command opens a change stream on the whole cluster, copies every collection (with
+its indexes) of every database but `admin`, `config` and `local` (or only the databases
+`--schema` lists) into the file's MongoDB-compatible store, then applies the stream's inserts,
+updates, replaces, deletes, drops and renames from the position taken before the copy; each
+document is written as the source holds it (`fullDocument: updateLookup`), so changes made during
+the copy end up applied once. Each batch of changes and the stream's resume token are written in
+one transaction, as the document `mongodb` of `eggdb_follow.state` in that store, and running the
+command again resumes from it.
 
 | Option | Meaning |
 |--------|---------|
