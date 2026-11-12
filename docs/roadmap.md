@@ -1390,8 +1390,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-12, D573), and writing `.arrow` files too; reading dictionary-encoded columns:
   **code written, unbuilt** (code-only mode, 2026-11-12, D640); reading compressed batches (`LZ4_FRAME`,
   `ZSTD`): **code written, unbuilt** (code-only mode, 2026-11-12, D641); list, large list and struct columns read as
-  JSON text: **code written, unbuilt** (code-only mode, 2026-11-12, D835). Left: maps, unions, fixed-size lists and
-  dictionary-encoded values inside nested columns.
+  JSON text: **code written, unbuilt** (code-only mode, 2026-11-12, D835); maps and fixed-size lists: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D860). Left: unions and dictionary-encoded values inside nested columns.
 - Arrow Flight SQL and ADBC (D29).
 - NDJSON, ORC and Avro (D29). NDJSON: **code written, unbuilt** (code-only mode, 2026-11-11, D505).
   Avro: **code written, unbuilt** (code-only mode, 2026-11-11, D509). ORC (`read_orc`, flat columns): **code

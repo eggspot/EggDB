@@ -21,6 +21,9 @@ const TYPE_LARGE_UTF8: u8 = 20;
 const TYPE_LIST: u8 = 12;
 const TYPE_STRUCT: u8 = 13;
 const TYPE_LARGE_LIST: u8 = 21;
+const TYPE_FIXED_SIZE_LIST: u8 = 16;
+const TYPE_MAP: u8 = 17;
+const MOST_FIXED_LIST_SIZE: i32 = 1 << 20;
 const MOST_NESTING: usize = 32;
 const DAYS_FROM_0000_TO_1970: i64 = 719_468;
 const MILLIS_PER_DAY: i64 = 86_400_000;
@@ -245,6 +248,8 @@ fn kind_of(field: &Table<'_>) -> Result<Kind, String> {
 enum Shape {
     Leaf(Kind),
     List { large: bool, item: Box<Shape> },
+    FixedList { size: usize, item: Box<Shape> },
+    Map { text_keys: bool, key: Box<Shape>, value: Box<Shape> },
     Struct(Vec<(String, Shape)>),
 }
 
@@ -275,6 +280,41 @@ fn shape_of(field: &Table<'_>, depth: usize) -> Result<Shape, String> {
                 item: Box::new(shape_of(item, depth + 1)?),
             })
         }
+        TYPE_FIXED_SIZE_LIST => {
+            let [item] = children.as_slice() else {
+                return Err(damaged("a fixed-size list type has other than one child"));
+            };
+            if item.table(4).is_some() {
+                return Err("dictionary-encoded values inside lists are not supported yet".to_owned());
+            }
+            let size = field.table(3).map_or(0, |details| details.i32(0, 0));
+            if !(0..=MOST_FIXED_LIST_SIZE).contains(&size) {
+                return Err(damaged("a fixed-size list has a size out of range"));
+            }
+            Ok(Shape::FixedList {
+                size: usize::try_from(size).unwrap_or(0),
+                item: Box::new(shape_of(item, depth + 1)?),
+            })
+        }
+        TYPE_MAP => {
+            let [entries] = children.as_slice() else {
+                return Err(damaged("a map type has other than one child"));
+            };
+            let pair = entries.tables(5).unwrap_or_default();
+            let [key, value] = pair.as_slice() else {
+                return Err(damaged("a map's entries are not a key and a value"));
+            };
+            if key.table(4).is_some() || value.table(4).is_some() {
+                return Err("dictionary-encoded values inside maps are not supported yet".to_owned());
+            }
+            let key = shape_of(key, depth + 2)?;
+            let text_keys = matches!(key, Shape::Leaf(Kind::Text { .. }));
+            Ok(Shape::Map {
+                text_keys,
+                key: Box::new(key),
+                value: Box::new(shape_of(value, depth + 2)?),
+            })
+        }
         TYPE_STRUCT => {
             if children.is_empty() {
                 return Err(damaged("a struct type has no fields"));
@@ -288,7 +328,9 @@ fn shape_of(field: &Table<'_>, depth: usize) -> Result<Shape, String> {
             }
             Ok(Shape::Struct(fields))
         }
-        _ if !children.is_empty() => Err("this nested Arrow type is not supported yet (lists and structs are)".to_owned()),
+        _ if !children.is_empty() => {
+            Err("this nested Arrow type is not supported yet (lists, maps and structs are)".to_owned())
+        }
         _ => kind_of(field).map(Shape::Leaf),
     }
 }
@@ -395,6 +437,75 @@ fn decode_json(shape: &Shape, batch: &mut Batch<'_>, rows: usize) -> Result<Vec<
                 let end = offset_at(offsets, index + 1, *large)?;
                 let slice = items.get(start..end).ok_or_else(|| damaged("a list's offsets lie outside its values"))?;
                 out.push(format!("[{}]", slice.join(",")));
+            }
+            Ok(out)
+        }
+        Shape::FixedList { size, item } => {
+            let total = rows
+                .checked_mul(*size)
+                .filter(|total| u64::try_from(*total).unwrap_or(u64::MAX) <= MAX_ROWS)
+                .ok_or_else(|| damaged("a fixed-size list holds too many values"))?;
+            let items = decode_json(item, batch, total)?;
+            let mut out = Vec::with_capacity(rows);
+            for index in 0..rows {
+                if !present(index) {
+                    out.push("null".to_owned());
+                    continue;
+                }
+                let slice = items
+                    .get(index * size..(index + 1) * size)
+                    .ok_or_else(|| damaged("a fixed-size list's values are short"))?;
+                out.push(format!("[{}]", slice.join(",")));
+            }
+            Ok(out)
+        }
+        Shape::Map { text_keys, key, value } => {
+            let offsets_buffer = batch.buffer()?;
+            let offsets: &[u8] = &offsets_buffer;
+            let first = if rows == 0 { 0 } else { offset_at(offsets, 0, false)? };
+            let last = if rows == 0 { 0 } else { offset_at(offsets, rows, false)? };
+            if first > last || u64::try_from(last).unwrap_or(u64::MAX) > MAX_ROWS {
+                return Err(damaged("a map's offsets run backwards or too far"));
+            }
+            let (entries, _) = *batch
+                .nodes
+                .get(batch.next_node)
+                .ok_or_else(|| damaged("a batch has too few field nodes"))?;
+            batch.next_node += 1;
+            if usize::try_from(entries).ok() != Some(last) {
+                return Err(damaged("a map's entries differ from its offsets"));
+            }
+            batch.buffer()?;
+            let keys = decode_json(key, batch, last)?;
+            let values = decode_json(value, batch, last)?;
+            let mut out = Vec::with_capacity(rows);
+            for index in 0..rows {
+                if !present(index) {
+                    out.push("null".to_owned());
+                    continue;
+                }
+                let start = offset_at(offsets, index, false)?;
+                let end = offset_at(offsets, index + 1, false)?;
+                if start > end || end > last {
+                    return Err(damaged("a map's offsets lie outside its entries"));
+                }
+                if *text_keys && keys[start..end].iter().any(|key| key == "null") {
+                    return Err(damaged("a map key is null"));
+                }
+                let pairs: Vec<String> = (start..end)
+                    .map(|at| {
+                        if *text_keys {
+                            format!("{}:{}", keys[at], values[at])
+                        } else {
+                            format!("[{},{}]", keys[at], values[at])
+                        }
+                    })
+                    .collect();
+                out.push(if *text_keys {
+                    format!("{{{}}}", pairs.join(","))
+                } else {
+                    format!("[{}]", pairs.join(","))
+                });
             }
             Ok(out)
         }

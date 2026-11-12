@@ -400,3 +400,133 @@ fn list_columns_read_as_json_arrays() {
     damaged.truncate(length - 20);
     assert!(read(&damaged).is_err());
 }
+
+fn leaf_field(
+    builder: &mut crate::flatbuffer::Builder,
+    name: &str,
+    type_id: u8,
+    details: &[Option<crate::flatbuffer::Field>],
+) -> crate::flatbuffer::Offset {
+    use crate::flatbuffer::Field;
+    let name = builder.string(name);
+    let type_table = builder.table(details);
+    let no_children = builder.offsets(&[]);
+    builder.table(&[
+        Some(Field::Offset(name)),
+        Some(Field::Bool(true)),
+        Some(Field::U8(type_id)),
+        Some(Field::Offset(type_table)),
+        None,
+        Some(Field::Offset(no_children)),
+    ])
+}
+
+fn parent_field(
+    builder: &mut crate::flatbuffer::Builder,
+    name: &str,
+    type_id: u8,
+    details: &[Option<crate::flatbuffer::Field>],
+    children: &[crate::flatbuffer::Offset],
+) -> crate::flatbuffer::Offset {
+    use crate::flatbuffer::Field;
+    let name = builder.string(name);
+    let type_table = builder.table(details);
+    let children = builder.offsets(children);
+    builder.table(&[
+        Some(Field::Offset(name)),
+        Some(Field::Bool(true)),
+        Some(Field::U8(type_id)),
+        Some(Field::Offset(type_table)),
+        None,
+        Some(Field::Offset(children)),
+    ])
+}
+
+fn one_column_stream(
+    build_field: impl FnOnce(&mut crate::flatbuffer::Builder) -> crate::flatbuffer::Offset,
+    rows: usize,
+    nodes: &[[i64; 2]],
+    buffers: &[&[u8]],
+) -> Vec<u8> {
+    use crate::flatbuffer::{Builder, Field};
+    let mut builder = Builder::new();
+    let field = build_field(&mut builder);
+    let fields = builder.offsets(&[field]);
+    let schema = builder.table(&[Some(Field::I16(0)), Some(Field::Offset(fields))]);
+    let mut out = Vec::new();
+    crate::frame(&crate::message(builder, crate::HEADER_SCHEMA, schema, 0), &[], &mut out);
+    let mut body = crate::Body {
+        bytes: Vec::new(),
+        buffers: Vec::new(),
+    };
+    for buffer in buffers {
+        body.push(buffer);
+    }
+    let mut builder = Builder::new();
+    let batch = batch_table(&mut builder, rows, nodes, &body);
+    let metadata = crate::message(builder, crate::HEADER_RECORD_BATCH, batch, body.bytes.len() as i64);
+    crate::frame(&metadata, &body.bytes, &mut out);
+    out.extend_from_slice(&crate::CONTINUATION);
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out
+}
+
+#[test]
+fn fixed_size_list_columns_read_as_json_arrays() {
+    use crate::flatbuffer::Field;
+    let stream = one_column_stream(
+        |builder| {
+            let item = leaf_field(builder, "item", 2, &[Some(Field::I32(32)), Some(Field::Bool(true))]);
+            parent_field(builder, "pair", 16, &[Some(Field::I32(2))], &[item])
+        },
+        2,
+        &[[2, 0], [4, 0]],
+        &[&[], &[], &[10, 0, 0, 0, 20, 0, 0, 0, 30, 0, 0, 0, 40, 0, 0, 0]],
+    );
+    let columns = read(&stream).expect("the stream reads");
+    assert_eq!(
+        columns[0].cells,
+        vec![Cell::Bytes(b"[10,20]".to_vec()), Cell::Bytes(b"[30,40]".to_vec())]
+    );
+    let short = one_column_stream(
+        |builder| {
+            let item = leaf_field(builder, "item", 2, &[Some(Field::I32(32)), Some(Field::Bool(true))]);
+            parent_field(builder, "pair", 16, &[Some(Field::I32(2))], &[item])
+        },
+        2,
+        &[[2, 0], [3, 0]],
+        &[&[], &[], &[10, 0, 0, 0, 20, 0, 0, 0, 30, 0, 0, 0]],
+    );
+    assert!(read(&short).is_err());
+}
+
+#[test]
+fn map_columns_read_as_json_objects_keyed_by_text() {
+    use crate::flatbuffer::Field;
+    let stream = one_column_stream(
+        |builder| {
+            let key = leaf_field(builder, "key", 5, &[]);
+            let value = leaf_field(builder, "value", 2, &[Some(Field::I32(32)), Some(Field::Bool(true))]);
+            let entries = parent_field(builder, "entries", 13, &[], &[key, value]);
+            parent_field(builder, "counts", 17, &[Some(Field::Bool(false))], &[entries])
+        },
+        2,
+        &[[2, 0], [2, 0], [2, 0], [2, 0]],
+        &[
+            &[],
+            &[0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0],
+            &[],
+            &[],
+            &[0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0],
+            b"ab",
+            &[],
+            &[1, 0, 0, 0, 2, 0, 0, 0],
+        ],
+    );
+    let columns = read(&stream).expect("the stream reads");
+    assert_eq!(columns[0].column_type, ColumnType::Text);
+    assert_eq!(
+        columns[0].cells,
+        vec![Cell::Bytes(b"{\"a\":1,\"b\":2}".to_vec()), Cell::Bytes(b"{}".to_vec())]
+    );
+}
