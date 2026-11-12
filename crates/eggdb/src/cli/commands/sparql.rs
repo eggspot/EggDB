@@ -8,6 +8,46 @@ const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MOST_LOADED_BYTES: usize = 256 << 20;
 const LOAD_ACCEPT: &str = "text/turtle, application/n-triples, application/n-quads, application/trig;q=0.9, */*;q=0.1";
 
+const SERVICE_VARIABLE: &str = "EGGDB_SPARQL_SERVICE";
+const MOST_SERVICE_BYTES: usize = 256 << 20;
+
+fn percent_encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => char::from(byte).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// Lets SPARQL's `SERVICE` query the endpoints under the comma-separated URL prefixes in
+/// `EGGDB_SPARQL_SERVICE`, over the SPARQL protocol, asking for tab-separated results; with
+/// none set, `SERVICE` is refused.
+pub(super) fn allow_service_from_environment() {
+    let Ok(text) = std::env::var(SERVICE_VARIABLE) else {
+        return;
+    };
+    let allowed: Vec<String> = text.split(',').map(str::trim).filter(|entry| !entry.is_empty()).map(str::to_owned).collect();
+    if allowed.is_empty() {
+        return;
+    }
+    eggdb_rdf::set_remote_query(Box::new(move |endpoint, query| {
+        if !allowed.iter().any(|entry| super::foreign::web_allowed(entry, endpoint)) {
+            return Err(format!("{endpoint} is not under a prefix {SERVICE_VARIABLE} allows"));
+        }
+        let target = eggdb_http::parse_http_url(endpoint)?;
+        let separator = if target.path.contains('?') { '&' } else { '?' };
+        let path = format!("{}{separator}query={}", target.path, percent_encoded(query));
+        let headers = vec![("Accept".to_owned(), "text/tab-separated-values".to_owned())];
+        let response = eggdb_http::request(&target, "GET", &path, &headers, &[], LOAD_TIMEOUT, MOST_SERVICE_BYTES)
+            .map_err(|error| format!("cannot reach it: {error}"))?;
+        if response.status != 200 {
+            return Err(format!("the endpoint answered HTTP {}", response.status));
+        }
+        String::from_utf8(response.body).map_err(|_| "the results are not UTF-8".to_owned())
+    }));
+}
+
 /// Lets SPARQL's `LOAD` fetch the `http://` and `https://` documents under the
 /// comma-separated URL prefixes in `EGGDB_SPARQL_LOAD`; with none set, `LOAD` is refused.
 pub(super) fn allow_load_from_environment() {
@@ -107,6 +147,11 @@ impl Session<'_> {
 #[cfg(test)]
 mod tests {
     use super::is_query;
+
+    #[test]
+    fn service_queries_are_percent_encoded() {
+        assert_eq!(super::percent_encoded("SELECT * {?s ?p ?o}"), "SELECT%20%2A%20%7B%3Fs%20%3Fp%20%3Fo%7D");
+    }
 
     #[test]
     fn queries_and_updates_are_told_apart_after_the_prologue() {

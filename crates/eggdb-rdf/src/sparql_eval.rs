@@ -105,6 +105,7 @@ fn collect_variables(pattern: &GraphPattern, out: &mut Vec<String>) {
             add(name);
         }
         GraphPattern::Values(names, _) => names.iter().for_each(|name| add(name)),
+        GraphPattern::Service { inner, .. } => collect_variables(inner, out),
         GraphPattern::Graph(node, inner) => {
             if let Node::Variable(name) = node {
                 add(name);
@@ -358,6 +359,11 @@ impl<'r, 'k> Evaluator<'r, 'k> {
                 }
                 extended
             }
+            GraphPattern::Service { endpoint, query, silent, .. } => match crate::remote_solutions(endpoint, query) {
+                Ok(solutions) => solutions,
+                Err(_) if *silent => vec![Solution::new()],
+                Err(error) => return Err(error),
+            },
             GraphPattern::Values(names, rows) => rows
                 .iter()
                 .map(|row| {

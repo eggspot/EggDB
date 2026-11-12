@@ -265,6 +265,7 @@ fn tokens(text: &str) -> RdfResult<Vec<(Token, usize)>> {
 }
 
 struct Parser {
+    text: String,
     tokens: Vec<(Token, usize)>,
     at: usize,
     base: String,
@@ -730,7 +731,31 @@ impl Parser {
                 let inner = self.group_graph_pattern()?;
                 pattern = Self::join(pattern, GraphPattern::Graph(name, Box::new(inner)));
             } else if self.take_word("service") {
-                return Err(RdfError::not_supported("SERVICE"));
+                let silent = self.take_word("silent");
+                let endpoint = self.iri()?;
+                let start = self.position();
+                let inner = self.group_graph_pattern()?;
+                let end = if self.at < self.tokens.len() { self.position() } else { self.text.len() };
+                let body = self.text.get(start..end).unwrap_or_default().trim();
+                let mut query = String::new();
+                if !self.base.is_empty() {
+                    query.push_str(&format!("BASE <{}>\n", self.base));
+                }
+                let mut prefixes: Vec<(&String, &String)> = self.prefixes.iter().collect();
+                prefixes.sort();
+                for (prefix, namespace) in prefixes {
+                    query.push_str(&format!("PREFIX {prefix}: <{namespace}>\n"));
+                }
+                query.push_str(&format!("SELECT * WHERE {body}"));
+                pattern = Self::join(
+                    pattern,
+                    GraphPattern::Service {
+                        endpoint,
+                        query,
+                        silent,
+                        inner: Box::new(inner),
+                    },
+                );
             } else if self.take_word("filter") {
                 filters.push(self.constraint()?);
             } else if self.take_word("bind") {
@@ -1483,6 +1508,7 @@ impl Parser {
 
 fn parser(text: &str, base: &str) -> RdfResult<Parser> {
     Ok(Parser {
+        text: text.to_owned(),
         tokens: tokens(text)?,
         at: 0,
         base: base.to_owned(),
@@ -1583,10 +1609,23 @@ mod tests {
             "SELECT * WHERE { ?a <http://b> \"open }",
             "SELECT ?x WHERE { } LIMIT x",
             "SELECT * WHERE { ?a <http://b> ?c } garbage",
-            "SELECT * WHERE { SERVICE <http://x> { } }",
         ] {
             assert!(parse_query(text, "").is_err(), "{text}");
         }
+        let service = parse_query("PREFIX ex: <http://ex/> SELECT * WHERE { ?a ex:b ?c SERVICE SILENT <http://remote/sparql> { ?c ex:d ?e } }", "").unwrap();
+        let mut found = None;
+        let mut waiting = vec![&service.pattern];
+        while let Some(pattern) = waiting.pop() {
+            match pattern {
+                GraphPattern::Service { query, silent, .. } => found = Some((query.clone(), *silent)),
+                GraphPattern::Join(left, right) => waiting.extend([&**left, &**right]),
+                _ => {}
+            }
+        }
+        let (query, silent) = found.expect("a SERVICE pattern");
+        assert!(silent);
+        assert!(query.starts_with("PREFIX ex: <http://ex/>\nSELECT * WHERE {"), "{query}");
+        assert!(query.ends_with("?c ex:d ?e }"), "{query}");
         let deep = format!("SELECT * WHERE {}{}", "{ ".repeat(200), "}".repeat(200));
         assert!(parse_query(&deep, "").is_err());
         let deep_expression = format!("ASK {{ FILTER({}1{}) }}", "(".repeat(200), ")".repeat(200));

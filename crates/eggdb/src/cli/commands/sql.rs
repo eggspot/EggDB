@@ -19,6 +19,7 @@ impl Session<'_> {
         super::foreign::allow_from_environment();
         super::model_endpoints::allow_from_environment();
         super::sparql::allow_load_from_environment();
+        super::sparql::allow_service_from_environment();
         if let Some(url) = self
             .request
             .file

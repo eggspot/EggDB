@@ -84,6 +84,7 @@ impl Session<'_> {
         super::foreign::allow_from_environment();
         super::model_endpoints::allow_from_environment();
         super::sparql::allow_load_from_environment();
+        super::sparql::allow_service_from_environment();
         audit_server_events_from_environment(&self.request.file)
             .map_err(|message| Failure::usage(message, Some(CommandName::Serve)))?;
         let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));

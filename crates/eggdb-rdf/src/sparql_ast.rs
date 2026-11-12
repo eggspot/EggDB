@@ -101,6 +101,12 @@ pub(crate) enum GraphPattern {
     Values(Vec<String>, Vec<Vec<Option<Term>>>),
     Graph(Node, Box<GraphPattern>),
     Select(Box<Query>),
+    Service {
+        endpoint: String,
+        query: String,
+        silent: bool,
+        inner: Box<GraphPattern>,
+    },
 }
 
 impl GraphPattern {

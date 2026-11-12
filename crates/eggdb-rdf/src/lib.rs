@@ -34,6 +34,65 @@ pub fn set_remote_fetch(fetch: Box<RemoteFetch>) {
     let _ = REMOTE.set(fetch);
 }
 
+/// What runs a `SERVICE` pattern's query on a remote endpoint: called with the endpoint IRI
+/// and the query text, it returns the SPARQL 1.1 Query Results TSV it answered, or why not.
+pub type RemoteQuery = dyn Fn(&str, &str) -> Result<String, String> + Send + Sync;
+
+static REMOTE_QUERY: std::sync::OnceLock<Box<RemoteQuery>> = std::sync::OnceLock::new();
+
+/// Lets `SERVICE` patterns query remote endpoints through `query`, which decides what it may
+/// reach; the first call wins. Without it `SERVICE` fails (or, with `SILENT`, matches once
+/// with nothing bound).
+pub fn set_remote_query(query: Box<RemoteQuery>) {
+    let _ = REMOTE_QUERY.set(query);
+}
+
+fn tsv_term(cell: &str, row: usize) -> RdfResult<Option<Term>> {
+    if cell.is_empty() {
+        return Ok(None);
+    }
+    let quads = parse(&format!("<urn:eggdb:s> <urn:eggdb:p> {cell} ."), Format::Turtle, "")
+        .map_err(|_| RdfError::invalid(format!("the SERVICE results hold a value that is not a term on row {row}")))?;
+    let object = quads.into_iter().next().map(|quad| quad.object);
+    Ok(object.map(|term| match term {
+        Term::Blank(label) => Term::Blank(format!("service_{label}")),
+        other => other,
+    }))
+}
+
+pub(crate) fn remote_solutions(endpoint: &str, query: &str) -> RdfResult<Vec<sparql_eval::Solution>> {
+    let run = REMOTE_QUERY.get().ok_or_else(|| {
+        RdfError::not_supported("SERVICE here: the server queries no endpoints unless it was started to (EGGDB_SPARQL_SERVICE)")
+    })?;
+    let answered = run(endpoint, query).map_err(|message| RdfError::invalid(format!("SERVICE <{endpoint}>: {message}")))?;
+    let mut lines = answered.lines();
+    let variables: Vec<String> = lines
+        .next()
+        .unwrap_or_default()
+        .split('\t')
+        .map(|name| name.trim().trim_start_matches(['?', '$']).to_owned())
+        .collect();
+    let mut solutions = Vec::new();
+    for (row, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        if solutions.len() >= MOST_SERVICE_ROWS {
+            return Err(RdfError::invalid(format!("SERVICE <{endpoint}> answered more than {MOST_SERVICE_ROWS} rows")));
+        }
+        let mut solution = sparql_eval::Solution::new();
+        for (name, cell) in variables.iter().zip(line.split('\t')) {
+            if let Some(term) = tsv_term(cell.trim(), row + 1)? {
+                solution.insert(name.clone(), term);
+            }
+        }
+        solutions.push(solution);
+    }
+    Ok(solutions)
+}
+
+const MOST_SERVICE_ROWS: usize = 1_000_000;
+
 pub(crate) fn fetch_remote(iri: &str) -> RdfResult<(String, String)> {
     let fetch = REMOTE.get().ok_or_else(|| {
         RdfError::not_supported("LOAD here: the server fetches no documents unless it was started to (EGGDB_SPARQL_LOAD)")
