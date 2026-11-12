@@ -963,3 +963,4 @@ its full title with its status.
 - [D936](decisions/D936.md) Code-only batch 584 (M4): key-value transactions and collections in the PHP driver
 - [D937](decisions/D937.md) Code-only batch 585 (M4): key-value transactions and collections in the Java driver
 - [D938](decisions/D938.md) Code-only batch 586 (M4): key-value transactions and collections in the Kotlin driver
+- [D939](decisions/D939.md) Code-only batch 587 (M4): key-value transactions and collections in the Swift package
