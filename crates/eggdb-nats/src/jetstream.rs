@@ -115,6 +115,9 @@ struct ConsumerConfig {
     max_deliver: i64,
     max_ack_pending: i64,
     filter_subject: Option<String>,
+    idle_heartbeat: i64,
+    flow_control: bool,
+    headers_only: bool,
     created: i64,
 }
 
@@ -561,6 +564,9 @@ impl ConsumerConfig {
                 most => most,
             },
             filter_subject,
+            idle_heartbeat: integer(config, "idle_heartbeat", 0).max(0),
+            flow_control: flag(config, "flow_control"),
+            headers_only: flag(config, "headers_only"),
             created,
         })
     }
@@ -593,6 +599,15 @@ impl ConsumerConfig {
         fields.push(format!("\"max_ack_pending\":{}", self.max_ack_pending));
         if let Some(filter) = &self.filter_subject {
             fields.push(format!("\"filter_subject\":{}", quote(filter)));
+        }
+        if self.idle_heartbeat > 0 {
+            fields.push(format!("\"idle_heartbeat\":{}", self.idle_heartbeat));
+        }
+        if self.flow_control {
+            fields.push("\"flow_control\":true".to_owned());
+        }
+        if self.headers_only {
+            fields.push("\"headers_only\":true".to_owned());
         }
         fields.push("\"replay_policy\":\"instant\"".to_owned());
         fields.push("\"num_replicas\":0".to_owned());
@@ -770,8 +785,24 @@ fn consumer_info_json(kind: &str, stream: &str, config: &ConsumerConfig, state: 
         state.ack_floor_stream_seq,
         state.pending.len(),
         state.redelivered,
-        stream_state.last_seq.saturating_sub(state.delivered_stream_seq)
+        unsent(state, stream_state)
     )
+}
+
+fn unsent(state: &ConsumerState, stream_state: &StreamState) -> u64 {
+    stream_state.last_seq.saturating_sub(state.delivered_stream_seq)
+        + state.pending.iter().filter(|pending| pending.deliveries == 0).count() as u64
+}
+
+fn headers_only(headers: Vec<u8>, size: usize) -> Vec<u8> {
+    let mut text = String::from_utf8(headers).unwrap_or_default();
+    if text.is_empty() {
+        text.push_str("NATS/1.0\r\n");
+    } else if let Some(stripped) = text.strip_suffix("\r\n\r\n") {
+        text = format!("{stripped}\r\n");
+    }
+    text.push_str(&format!("Nats-Msg-Size: {size}\r\n\r\n"));
+    text.into_bytes()
 }
 
 fn ack_subject(stream: &str, consumer: &str, pending: &Pending, time: i64, left: u64) -> String {
@@ -788,11 +819,12 @@ pub(crate) struct JetStream<'k> {
     waiting: Mutex<Vec<WaitingPull>>,
     subjects: Mutex<Option<Vec<(String, Vec<String>)>>>,
     pending_push: Mutex<Vec<Outgoing>>,
+    last_push: Mutex<std::collections::BTreeMap<(String, String), Instant>>,
 }
 
 impl<'k> JetStream<'k> {
     pub(crate) fn new(keyspace: &'k (dyn Keyspace + Sync)) -> Self {
-        Self { keyspace, waiting: Mutex::new(Vec::new()), subjects: Mutex::new(None), pending_push: Mutex::new(Vec::new()) }
+        Self { keyspace, waiting: Mutex::new(Vec::new()), subjects: Mutex::new(None), pending_push: Mutex::new(Vec::new()), last_push: Mutex::new(std::collections::BTreeMap::new()) }
     }
 
     /// Whether the subject is one JetStream answers instead of the subscribers.
@@ -1315,14 +1347,24 @@ impl<'k> JetStream<'k> {
             }
             state.settle_floor();
             keys.put(&key(CONSUMER_STATE, &[stream.as_bytes(), name.as_bytes()]), &state.encode())?;
-            let left = stream_state.last_seq.saturating_sub(state.delivered_stream_seq);
+            let after = unsent(&state, &stream_state);
+            let count = chosen.len() as u64;
             Ok(chosen
                 .into_iter()
-                .map(|(pending, message)| Outgoing {
-                    subject: to.to_owned(),
-                    reply: Some(ack_subject(stream, name, &pending, message.time, left)),
-                    headers: message.headers,
-                    payload: message.payload,
+                .enumerate()
+                .map(|(at, (pending, message))| {
+                    let left = after + count - 1 - at as u64;
+                    let (headers, payload) = if config.headers_only {
+                        (headers_only(message.headers, message.payload.len()), Vec::new())
+                    } else {
+                        (message.headers, message.payload)
+                    };
+                    Outgoing {
+                        subject: to.to_owned(),
+                        reply: Some(ack_subject(stream, name, &pending, message.time, left)),
+                        headers,
+                        payload,
+                    }
                 })
                 .collect())
         })
@@ -1373,10 +1415,77 @@ impl<'k> JetStream<'k> {
 
     fn deliver_push(&self, stream: &str, name: &str) -> Vec<Outgoing> {
         let target = read(self.keyspace, |keys| Ok(consumer(keys, stream, name)?.and_then(|(config, _)| config.deliver_subject))).ok().flatten();
-        match target {
+        let delivered = match target {
             Some(target) => self.next_messages(stream, name, PUSH_BATCH, &target).unwrap_or_default(),
             None => Vec::new(),
+        };
+        if !delivered.is_empty() {
+            self.last_push
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert((stream.to_owned(), name.to_owned()), Instant::now());
         }
+        delivered
+    }
+
+    /// What JetStream sends as time passes, called about once a second: a `408` to each pull
+    /// whose wait ran out, push deliveries whose acknowledgement wait ran out, and idle
+    /// heartbeats to push consumers that asked for them and got nothing in that time.
+    pub(crate) fn tick(&self) -> Vec<Outgoing> {
+        let now = Instant::now();
+        let mut out: Vec<Outgoing> = Vec::new();
+        {
+            let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+            for pull in waiting.iter().filter(|pull| pull.deadline <= now) {
+                out.push(Outgoing {
+                    subject: pull.reply.clone(),
+                    reply: None,
+                    headers: format!("NATS/1.0 408 Request Timeout\r\nNats-Pending-Messages: {}\r\nNats-Pending-Bytes: 0\r\n\r\n", pull.remaining).into_bytes(),
+                    payload: Vec::new(),
+                });
+            }
+            waiting.retain(|pull| pull.deadline > now);
+        }
+        let push: Vec<(String, ConsumerConfig, ConsumerState)> = read(self.keyspace, |keys| {
+            let mut found = Vec::new();
+            for stream in stream_names(keys)? {
+                for name in consumer_names(keys, &stream)? {
+                    if let Some((config, state)) = consumer(keys, &stream, &name)?
+                        && config.deliver_subject.is_some()
+                    {
+                        found.push((stream.clone(), config, state));
+                    }
+                }
+            }
+            Ok(found)
+        })
+        .unwrap_or_default();
+        for (stream, config, state) in push {
+            let delivered = self.deliver_push(&stream, &config.name);
+            if !delivered.is_empty() || config.idle_heartbeat <= 0 {
+                out.extend(delivered);
+                continue;
+            }
+            let interval = Duration::from_nanos(config.idle_heartbeat as u64);
+            let mut last_push = self.last_push.lock().unwrap_or_else(PoisonError::into_inner);
+            let last = last_push.entry((stream.clone(), config.name.clone())).or_insert(now);
+            if now.duration_since(*last) >= interval
+                && let Some(target) = &config.deliver_subject
+            {
+                *last = now;
+                out.push(Outgoing {
+                    subject: target.clone(),
+                    reply: None,
+                    headers: format!(
+                        "NATS/1.0 100 Idle Heartbeat\r\nNats-Last-Consumer: {}\r\nNats-Last-Stream: {}\r\n\r\n",
+                        state.consumer_seq, state.delivered_stream_seq
+                    )
+                    .into_bytes(),
+                    payload: Vec::new(),
+                });
+            }
+        }
+        out
     }
 
     fn serve_waiting(&self, stream: &str) -> Vec<Outgoing> {

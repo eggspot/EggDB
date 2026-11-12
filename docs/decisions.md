@@ -748,3 +748,4 @@ its full title with its status.
 - [D721](decisions/D721.md) Code-only batch 369 (M13): Cypher temporal arithmetic, `duration.between` and `point.distance`
 - [D722](decisions/D722.md) Code-only batch 370 (M16): NATS JetStream streams and durable consumers kept in the database
 - [D723](decisions/D723.md) Code-only batch 371 (M16): JetStream per-subject limits, rollups, filtered purges, `last_per_subject` and direct gets for key-value buckets
+- [D724](decisions/D724.md) Code-only batch 372 (M16): JetStream timers for push redelivery, idle heartbeats and pull timeouts, and pending counts for watches

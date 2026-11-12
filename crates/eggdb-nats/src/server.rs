@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
+const JETSTREAM_TICK: Duration = Duration::from_secs(1);
 const READ_POLL: Duration = Duration::from_millis(200);
 const WRITE_LIMIT: Duration = Duration::from_secs(5);
 const CONNECT_WAIT: Duration = Duration::from_secs(10);
@@ -555,8 +556,19 @@ fn serve_broker(
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
     let active = AtomicUsize::new(0);
+    let broker = &broker;
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {
+        if let Some(jetstream) = &broker.jetstream {
+            let _ = std::thread::Builder::new()
+                .name("eggdb-nats-jetstream".to_owned())
+                .spawn_scoped(scope, move || {
+                    while !stop() {
+                        std::thread::sleep(JETSTREAM_TICK);
+                        broker.send_all(jetstream.tick(), &config.memory_budget);
+                    }
+                });
+        }
         while !stop() {
             let stream = match eggdb_platform::accept_tcp(listener) {
                 Ok((stream, _)) => stream,
@@ -577,7 +589,7 @@ fn serve_broker(
                 continue;
             }
             let id = next_id.fetch_add(1, Ordering::Relaxed);
-            let (broker, active) = (&broker, &active);
+            let active = &active;
             let spawned = std::thread::Builder::new()
                 .name("eggdb-nats".to_owned())
                 .spawn_scoped(scope, move || {
