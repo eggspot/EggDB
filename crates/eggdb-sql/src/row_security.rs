@@ -9,6 +9,9 @@ use crate::types::Value;
 pub(crate) const POLICY_SPACE: u8 = 0x13;
 pub(crate) const ROW_SECURITY_SPACE: u8 = 0x14;
 const RECORD_VERSION: u8 = 1;
+/// The marker a stored condition wraps an Oracle VPD predicate in, so it is read in the Oracle
+/// dialect it was written in.
+pub(crate) const ORACLE_PREDICATE: &str = "eggdb_oracle_predicate";
 const ENABLED: u8 = 1;
 const FORCED: u8 = 2;
 
@@ -591,12 +594,18 @@ pub(crate) fn condition_expression(text: &str, settings: &Settings) -> SqlResult
         crate::lexer::tokenize_in(text, crate::Dialect::PostgreSql).map_err(|_| corrupt())?;
     let mut parser = crate::parser::Parser::new(text, &tokens)
         .with_context(crate::parser::Parameters::Absent, settings)
-        .in_dialect(crate::Dialect::PostgreSql);
+        .in_dialect(crate::Dialect::PostgreSql)
+        .reading_stored_conditions();
     let expr = parser.expression().map_err(|_| corrupt())?;
     if !parser.at_end() {
         return Err(corrupt());
     }
     Ok(expr)
+}
+
+/// An Oracle VPD predicate as a stored row-security condition.
+pub(crate) fn oracle_condition(predicate: &str) -> String {
+    format!("{ORACLE_PREDICATE}('{}')", predicate.replace('\'', "''"))
 }
 
 pub(crate) fn restricted(filter: Option<Expr>, condition: Expr) -> Expr {

@@ -47,7 +47,7 @@ impl SchedulerCall {
     }
 }
 
-fn split_arguments(text: &str) -> Vec<(Option<String>, String)> {
+pub(super) fn split_arguments(text: &str) -> Vec<(Option<String>, String)> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut depth = 0usize;

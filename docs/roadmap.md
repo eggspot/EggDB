@@ -754,7 +754,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-11, D484).
 - Oracle VPD and SQL Server's security predicates (D186). SQL Server's security policies with filter predicates: **code written, unbuilt**
   (code-only mode, 2026-11-12, D822); block predicates `AFTER INSERT` and `AFTER UPDATE`: **code written, unbuilt**
-  (code-only mode, 2026-11-12, D850). Left: `BEFORE UPDATE` and `BEFORE DELETE` block predicates, and Oracle VPD.
+  (code-only mode, 2026-11-12, D850); Oracle VPD static policies through `DBMS_RLS`: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D851). Left: `BEFORE UPDATE` and `BEFORE DELETE` block predicates, and VPD's dynamic
+  and context-sensitive policies, column-level VPD and policy groups.
 - Dynamic data masking: SQL Server's `MASKED WITH` and Oracle's redaction, after its decision
   (D22, D285).
 - Redis ACLs, MongoDB roles, Elasticsearch roles and Cassandra roles mapped onto the one role

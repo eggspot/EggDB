@@ -1459,6 +1459,26 @@ impl<'t> Parser<'t> {
         Ok(oracle_function(internal, vec![subject, set], name.position))
     }
 
+    pub(super) fn stored_oracle_predicate(&mut self) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let predicate = match self.peek_kind() {
+            TokenKind::String(text) => text.to_string(),
+            _ => return Err(self.unexpected()),
+        };
+        self.at += 1;
+        self.expect(&TokenKind::RightParen)?;
+        let tokens = crate::lexer::tokenize_in(&predicate, crate::Dialect::Oracle)?;
+        let mut parser = Parser::new(&predicate, &tokens).in_dialect(crate::Dialect::Oracle);
+        if let Some(settings) = self.settings {
+            parser = parser.with_context(super::Parameters::Absent, settings);
+        }
+        let expr = parser.expression()?;
+        if !parser.at_end() {
+            return Err(parser.unexpected());
+        }
+        Ok(expr)
+    }
+
     pub(super) fn oracle_function(&mut self, name: &Name) -> SqlResult<Option<Expr>> {
         let position = name.position;
         if name.text == "trim" {

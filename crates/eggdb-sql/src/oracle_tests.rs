@@ -945,3 +945,69 @@ fn scheduler_jobs_take_their_action_from_a_program_and_their_timing_from_a_sched
             .is_err()
     );
 }
+
+#[test]
+fn static_vpd_policies_filter_and_check_rows_for_every_user() {
+    let store = MemoryStore::default();
+    crate::memory_store::use_seeded_random_bytes();
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE TABLE notes (id integer PRIMARY KEY, owner text, body text)",
+        "INSERT INTO notes VALUES (1, 'ADA', 'a1'), (2, 'GRACE', 'g1'), (3, 'ADA', 'a2')",
+        "CREATE USER ada LOGIN",
+        "CREATE USER grace LOGIN",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON notes TO ada, grace",
+    ] {
+        values(&mut admin, sql);
+    }
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut oracle,
+        "CREATE OR REPLACE FUNCTION own_rows(schema_name IN VARCHAR2, table_name IN VARCHAR2) RETURN VARCHAR2 IS\nBEGIN\n  RETURN 'owner = SYS_CONTEXT(''USERENV'', ''SESSION_USER'')';\nEND;",
+    );
+    failure(
+        &mut oracle,
+        "BEGIN DBMS_RLS.ADD_POLICY(object_name => 'NOTES', policy_name => 'OWN', policy_function => 'OWN_ROWS'); END;",
+    );
+    values(
+        &mut oracle,
+        "BEGIN DBMS_RLS.ADD_POLICY(object_name => 'NOTES', policy_name => 'OWN', policy_function => 'OWN_ROWS', statement_types => 'SELECT, INSERT, UPDATE, DELETE', update_check => TRUE, policy_type => DBMS_RLS.STATIC); END;",
+    );
+    failure(
+        &mut oracle,
+        "BEGIN DBMS_RLS.ADD_POLICY(object_name => 'NOTES', policy_name => 'OWN', policy_function => 'OWN_ROWS', static_policy => TRUE); END;",
+    );
+    let as_user = |user: &str| {
+        let mut session = Session::with_dialect(&store, Dialect::Oracle);
+        session.identify_role(user, "eggdb").unwrap();
+        session
+    };
+    let mut ada = as_user("ada");
+    assert_eq!(
+        values(&mut ada, "SELECT id FROM notes ORDER BY id"),
+        vec![vec![Value::Integer(1)], vec![Value::Integer(3)]]
+    );
+    failure(&mut ada, "INSERT INTO notes VALUES (4, 'GRACE', 'g2')");
+    values(&mut ada, "INSERT INTO notes VALUES (5, 'ADA', 'a3')");
+    let mut grace = as_user("grace");
+    assert_eq!(
+        values(&mut grace, "SELECT id FROM notes ORDER BY id"),
+        vec![vec![Value::Integer(2)]]
+    );
+    values(
+        &mut oracle,
+        "BEGIN DBMS_RLS.ENABLE_POLICY(object_name => 'NOTES', policy_name => 'OWN', enable => FALSE); END;",
+    );
+    let mut grace = as_user("grace");
+    assert_eq!(values(&mut grace, "SELECT count(*) FROM notes"), vec![vec![number(4)]]);
+    values(
+        &mut oracle,
+        "BEGIN DBMS_RLS.ENABLE_POLICY(object_name => 'NOTES', policy_name => 'OWN', enable => TRUE); END;",
+    );
+    let mut grace = as_user("grace");
+    assert_eq!(values(&mut grace, "SELECT count(*) FROM notes"), vec![vec![number(1)]]);
+    values(&mut oracle, "BEGIN DBMS_RLS.DROP_POLICY(NULL, 'NOTES', 'OWN'); END;");
+    failure(&mut oracle, "BEGIN DBMS_RLS.DROP_POLICY(NULL, 'NOTES', 'OWN'); END;");
+    let mut ada = as_user("ada");
+    assert_eq!(values(&mut ada, "SELECT count(*) FROM notes"), vec![vec![number(4)]]);
+}

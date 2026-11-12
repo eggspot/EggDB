@@ -446,6 +446,7 @@ pub(crate) struct Parser<'t> {
     vector_dimensions: Option<u32>,
     geometry_typmod: Option<(String, Option<i64>)>,
     rowversion_column: Option<String>,
+    stored_conditions: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -580,6 +581,7 @@ impl<'t> Parser<'t> {
             vector_dimensions: None,
             geometry_typmod: None,
             rowversion_column: None,
+            stored_conditions: false,
         }
     }
 
@@ -594,6 +596,13 @@ impl<'t> Parser<'t> {
 
     pub(crate) fn in_dialect(mut self, dialect: Dialect) -> Self {
         self.dialect = dialect;
+        self
+    }
+
+    /// Reads a row-security condition stored by EggDB, where an Oracle VPD predicate keeps the
+    /// Oracle dialect it was written in.
+    pub(crate) fn reading_stored_conditions(mut self) -> Self {
+        self.stored_conditions = true;
         self
     }
 
@@ -5397,6 +5406,9 @@ impl<'t> Parser<'t> {
     }
 
     fn function_call(&mut self, name: Name) -> SqlResult<Expr> {
+        if self.stored_conditions && name.text == crate::row_security::ORACLE_PREDICATE {
+            return self.stored_oracle_predicate();
+        }
         if let Some(expr) = self.grouping_operation(&name)? {
             return Ok(expr);
         }

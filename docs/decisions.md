@@ -875,3 +875,4 @@ its full title with its status.
 - [D848](decisions/D848.md) Code-only batch 496 (M6a): restoring roles and privileges (`restore --roles`)
 - [D849](decisions/D849.md) Code-only batch 497 (M10): T-SQL cursor variables
 - [D850](decisions/D850.md) Code-only batch 498 (M6b): SQL Server block predicates AFTER INSERT and AFTER UPDATE
+- [D851](decisions/D851.md) Code-only batch 499 (M6b): Oracle VPD static policies through DBMS_RLS
