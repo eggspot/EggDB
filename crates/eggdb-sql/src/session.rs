@@ -2715,6 +2715,7 @@ impl<'s> Session<'s> {
             "eggdb_marketplace" => ("eggdb_marketplace", crate::marketplace::MARKETPLACE_SCRIPT),
             "eggdb_sheets" => ("eggdb_sheets", crate::sheets::SHEETS_SCRIPT),
             "eggdb_streams" => ("eggdb_streams", crate::streams::STREAMS_SCRIPT),
+            "eggdb_etl" => ("eggdb_etl", crate::etl::ETL_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

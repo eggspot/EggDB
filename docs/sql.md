@@ -4090,14 +4090,37 @@ SELECT count(*) FROM eggdb_foreign('file:/data/lake/events-2026-10.parquet', '*'
 ```
 
 A `postgresql://` source is another EggDB server or a PostgreSQL server, asked the query as it is
-(the password from `PGPASSWORD`); a `file:...parquet` source is read whole (`'*'`). Nothing is
+(the password from `PGPASSWORD`); a `sqlserver://user@host[:port]/database` source is SQL Server, asked the query with
+`FOR JSON PATH, INCLUDE_NULL_VALUES` added (the password from `SQLCMDPASSWORD`, D769); a `file:...parquet` or
+`file:...csv` source is read whole (`'*'`), a CSV file's first line naming the columns and every value read as text. Nothing is
 reachable until the operator allows it: `eggdb sql` and `eggdb serve` read the comma-separated
 entries of `EGGDB_FOREIGN_SOURCES` (for example `postgresql://reports@10.0.0.7,file:/data/lake/`).
-A PostgreSQL entry allows exactly that user on that host and port (and only its database when it
+A PostgreSQL or SQL Server entry allows exactly that user on that host and port (and only its database when it
 names one, and a source's `sslrootcert` only when the entry gives the same one); a `file:` entry
 allows the files under that directory once both paths are made absolute, so `..` cannot leave it.
 A source outside them is refused with SQLSTATE `HV000`, and only a superuser may call the
 function (`42501`). With none set, the function answers `0A000`.
+
+## Scheduled copies (eggdb_etl)
+
+`CREATE EXTENSION eggdb_etl` copies data from `eggdb_foreign`'s sources into tables on a schedule (D769):
+
+```sql
+CREATE EXTENSION eggdb_etl;
+SELECT eggdb_etl.define_copy('crm orders', 'postgresql://reader@crm.internal/sales',
+    'SELECT id, total, updated_at FROM orders WHERE updated_at > ''{last_value}''', 'orders',
+    'incremental', 'updated_at', '1970-01-01', '*/15 * * * *');
+SELECT eggdb_etl.run('crm orders');
+SELECT * FROM eggdb_etl.runs ORDER BY run_id DESC LIMIT 5;
+```
+
+`define_copy(name, source, query, target [, mode, cursor_column, start_value, schedule])` defines a copy; `mode` is
+`replace` (the default: the target's rows are replaced in the same transaction), `append`, or `incremental`, whose
+query has `{last_value}` where the last copied value of `cursor_column` goes. A schedule (pg_cron's syntax) runs it
+through `cron.schedule`. `run(name)` copies the rows in batches with `jsonb_populate_recordset` into the target,
+which must exist with the columns the source returns, records the run in `eggdb_etl.runs` with its row count, and on
+any error rolls the copy back, records `failed` with the error and returns NULL. Like `eggdb_foreign`, it needs a
+superuser and an allowed source.
 
 ## Scheduled jobs (pg_cron)
 

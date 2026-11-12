@@ -2,6 +2,8 @@ use crate::cli::render::json_string;
 use eggdb_parquet::{Cell, Column, ColumnType};
 
 const VARIABLE: &str = "EGGDB_FOREIGN_SOURCES";
+const SQL_SERVER_PASSWORD: &str = "SQLCMDPASSWORD";
+const MOST_CSV_BYTES: u64 = 1 << 30;
 const MICROS_PER_MS: i64 = 1000;
 const MS_PER_DAY: i64 = 86_400_000;
 
@@ -140,6 +142,103 @@ fn read_postgresql(
     Ok(())
 }
 
+fn read_sql_server(
+    url: &str,
+    query: &str,
+    row: &mut dyn FnMut(String) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut options = eggdb_tdswire::client::parse_sql_server_url(url)?;
+    if options.password.is_none() {
+        options.password = std::env::var(SQL_SERVER_PASSWORD).ok();
+    }
+    let mut client = eggdb_tdswire::client::TdsClient::connect(&options).map_err(|error| error.to_string())?;
+    let statement = format!("{} FOR JSON PATH, INCLUDE_NULL_VALUES", query.trim().trim_end_matches(';'));
+    let results = client.batch(&statement).map_err(|error| error.to_string())?;
+    let mut joined = String::new();
+    for rows in &results {
+        for values in rows {
+            if let Some(Some(text)) = values.first() {
+                joined.push_str(text);
+            }
+        }
+    }
+    if joined.trim().is_empty() {
+        return Ok(());
+    }
+    let document = eggdb_sql::json::parse_document(&joined).map_err(|error| format!("SQL Server's FOR JSON answer: {}", error.message))?;
+    let eggdb_sql::json::Json::Array(items) = document.value else {
+        return Err("SQL Server's FOR JSON answer is not an array".to_owned());
+    };
+    for item in items {
+        let text = joined.get(item.start..item.end).ok_or_else(|| "SQL Server's FOR JSON answer is cut".to_owned())?;
+        row(text.to_owned())?;
+    }
+    Ok(())
+}
+
+fn csv_fields(line: &str, fields: &mut Vec<String>, field: &mut String, quoted: &mut bool) -> bool {
+    let mut characters = line.chars().peekable();
+    while let Some(character) = characters.next() {
+        match (character, *quoted) {
+            ('"', true) if characters.peek() == Some(&'"') => {
+                field.push('"');
+                characters.next();
+            }
+            ('"', true) => *quoted = false,
+            ('"', false) if field.is_empty() => *quoted = true,
+            (',', false) => fields.push(std::mem::take(field)),
+            (other, _) => field.push(other),
+        }
+    }
+    if *quoted {
+        field.push('\n');
+        return false;
+    }
+    fields.push(std::mem::take(field));
+    true
+}
+
+fn read_csv(
+    path: &std::path::Path,
+    query: &str,
+    row: &mut dyn FnMut(String) -> Result<(), String>,
+) -> Result<(), String> {
+    use std::io::{BufRead, Read};
+    if !query.trim().is_empty() && query.trim() != "*" {
+        return Err("a CSV source reads every column: give '*' as the query".to_owned());
+    }
+    let file = std::fs::File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let reader = std::io::BufReader::new(file.take(MOST_CSV_BYTES));
+    let mut names: Option<Vec<String>> = None;
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    for line in reader.lines() {
+        let line = line.map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        let line = line.strip_suffix('\r').unwrap_or(&line);
+        if !csv_fields(line, &mut fields, &mut field, &mut quoted) {
+            continue;
+        }
+        let record = std::mem::take(&mut fields);
+        match &names {
+            None => names = Some(record),
+            Some(header) => {
+                if record.len() == 1 && record[0].is_empty() {
+                    continue;
+                }
+                row(object(header, header.iter().enumerate().map(|(index, _)| {
+                    record.get(index).map_or_else(|| "null".to_owned(), |value| json_string(value))
+                })))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_sql_server(source: &str) -> bool {
+    source.starts_with("sqlserver://")
+}
+
 fn read(
     prefixes: &[String],
     source: &str,
@@ -154,6 +253,18 @@ fn read(
     }
     if source.starts_with("postgresql://") || source.starts_with("postgres://") {
         return read_postgresql(source, query, row);
+    }
+    if is_sql_server(source) {
+        return read_sql_server(source, query, row);
+    }
+    if let Some(path) = file_path(source)
+        && path.ends_with(".csv")
+    {
+        let checked = prefixes
+            .iter()
+            .find_map(|allowed| allowed_file(allowed, source))
+            .ok_or_else(|| format!("{} is not among the sources {VARIABLE} allows", shown_source(source)))?;
+        return read_csv(&checked, query, row);
     }
     if let Some(path) = source
         .strip_prefix("file://")
@@ -172,7 +283,7 @@ fn read(
         return read_parquet(&checked, query, row);
     }
     Err(format!(
-        "{}: give a postgresql:// URL (EggDB or PostgreSQL) or a file:...parquet path",
+        "{}: give a postgresql:// URL (EggDB or PostgreSQL), a sqlserver:// URL, or a file:...parquet or file:...csv path",
         shown_source(source)
     ))
 }
@@ -205,6 +316,20 @@ fn names_database(url: &str) -> bool {
 }
 
 fn allows(allowed: &str, source: &str) -> bool {
+    if is_sql_server(allowed) && is_sql_server(source) {
+        let (Ok(entry), Ok(wanted)) = (
+            eggdb_tdswire::client::parse_sql_server_url(allowed),
+            eggdb_tdswire::client::parse_sql_server_url(source),
+        ) else {
+            return false;
+        };
+        return entry.host.eq_ignore_ascii_case(&wanted.host)
+            && entry.port == wanted.port
+            && entry.user == wanted.user
+            && (!names_database(allowed) || entry.database == wanted.database)
+            && (entry.trust_server_certificate || !wanted.trust_server_certificate)
+            && (wanted.root_certificate.is_none() || wanted.root_certificate == entry.root_certificate);
+    }
     if is_postgresql(allowed) && is_postgresql(source) {
         let (Ok(entry), Ok(wanted)) = (
             eggdb_pgwire::client::parse_postgres_url(allowed),
@@ -230,7 +355,7 @@ fn allowed_file(allowed: &str, source: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{allows, decimal_text, read};
+    use super::{allows, csv_fields, decimal_text, read};
 
     #[test]
     fn database_entries_allow_only_their_own_host_port_and_user() {
@@ -311,5 +436,20 @@ mod tests {
         assert_eq!(decimal_text(12_345, 2), "123.45");
         assert_eq!(decimal_text(-5, 3), "-0.005");
         assert_eq!(decimal_text(7, 0), "7");
+    }
+
+    #[test]
+    fn sql_server_entries_and_csv_records() {
+        let entry = "sqlserver://reader@mssql.internal:1433/sales";
+        assert!(allows(entry, "sqlserver://reader@mssql.internal:1433/sales"));
+        assert!(!allows(entry, "sqlserver://reader@mssql.internal:1433/hr"));
+        assert!(!allows(entry, "sqlserver://sa@mssql.internal:1433/sales"));
+        assert!(!allows(entry, "sqlserver://reader@mssql.internal:1433/sales?trustServerCertificate=true"));
+        let mut fields = Vec::new();
+        let mut field = String::new();
+        let mut quoted = false;
+        assert!(!csv_fields("1,\"two, \"\"quoted\"\"", &mut fields, &mut field, &mut quoted));
+        assert!(csv_fields("lines\",3", &mut fields, &mut field, &mut quoted));
+        assert_eq!(fields, vec!["1".to_owned(), "two, \"quoted\"\nlines".to_owned(), "3".to_owned()]);
     }
 }
