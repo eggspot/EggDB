@@ -979,3 +979,4 @@ its full title with its status.
 - [D952](decisions/D952.md) Code-only batch 600 (M4): on-disk overhead per row and per index entry with targets
 - [D953](decisions/D953.md) Code-only batch 601 (M4): a speedtest1-style workload in the compare job
 - [D954](decisions/D954.md) Code-only batch 602 (M4): YCSB workloads against SQLite and Redis
+- [D955](decisions/D955.md) Code-only batch 603 (M5): Oracle's AFTER STARTUP and BEFORE SHUTDOWN triggers

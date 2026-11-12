@@ -10,12 +10,10 @@ pub(crate) const DDL_EVENTS: [&str; 9] =
     ["create", "alter", "drop", "truncate", "rename", "grant", "revoke", "comment", "ddl"];
 
 /// The database events EggDB fires.
-pub(crate) const DATABASE_EVENTS: [&str; 3] = ["logon", "servererror", "logoff"];
+pub(crate) const DATABASE_EVENTS: [&str; 5] = ["logon", "servererror", "logoff", "startup", "shutdown"];
 
 /// Database events Oracle has that EggDB does not fire yet.
-pub(crate) const UNSUPPORTED_EVENTS: [&str; 9] = [
-    "startup",
-    "shutdown",
+pub(crate) const UNSUPPORTED_EVENTS: [&str; 7] = [
     "suspend",
     "db_role_change",
     "clone",
@@ -248,7 +246,7 @@ mod tests {
         run(&mut session, "DROP TABLE emp");
         run(&mut session, "DROP TRIGGER no_drops");
         run(&mut session, "DROP TRIGGER log_ddl");
-        let unsupported = session.execute("CREATE TRIGGER at_start AFTER STARTUP ON DATABASE BEGIN NULL; END;", &mut |_| {});
+        let unsupported = session.execute("CREATE TRIGGER at_suspend AFTER SUSPEND ON DATABASE BEGIN NULL; END;", &mut |_| {});
         assert!(unsupported.is_err());
     }
 
@@ -263,5 +261,21 @@ mod tests {
         let mut next = crate::Session::with_dialect(&store, crate::Dialect::Oracle);
         let logged = run(&mut next, "SELECT event FROM sign_outs");
         assert!(logged.contains("LOGOFF"), "{logged}");
+    }
+
+    #[test]
+    fn startup_and_shutdown_triggers_run_when_the_server_starts_and_stops() {
+        let store = crate::memory_store::MemoryStore::default();
+        let mut session = crate::Session::with_dialect(&store, crate::Dialect::Oracle);
+        run(&mut session, "CREATE TABLE instance_events (event VARCHAR2(30))");
+        run(&mut session, "CREATE TRIGGER at_start AFTER STARTUP ON DATABASE BEGIN INSERT INTO instance_events VALUES (ora_sysevent); END;");
+        run(&mut session, "CREATE TRIGGER at_stop BEFORE SHUTDOWN ON DATABASE BEGIN INSERT INTO instance_events VALUES (ora_sysevent); END;");
+        assert!(session.execute("CREATE TRIGGER early BEFORE STARTUP ON DATABASE BEGIN NULL; END;", &mut |_| {}).is_err());
+        assert!(session.execute("CREATE TRIGGER late AFTER SHUTDOWN ON DATABASE BEGIN NULL; END;", &mut |_| {}).is_err());
+        assert!(session.execute("CREATE TRIGGER mine AFTER STARTUP ON SCHEMA BEGIN NULL; END;", &mut |_| {}).is_err());
+        session.fire_startup_triggers().unwrap();
+        session.fire_shutdown_triggers().unwrap();
+        let logged = run(&mut session, "SELECT event FROM instance_events");
+        assert!(logged.contains("STARTUP") && logged.contains("SHUTDOWN"), "{logged}");
     }
 }

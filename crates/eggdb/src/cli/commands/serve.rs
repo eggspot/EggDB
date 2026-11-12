@@ -881,6 +881,7 @@ impl Session<'_> {
             read_only,
             others: directory,
         });
+        self.fire_instance_triggers(&store, InstanceEvent::Startup);
         let (events, received) = std::sync::mpsc::channel::<String>();
         let mysql_events = events.clone();
         let tds_events = events.clone();
@@ -1547,11 +1548,26 @@ impl Session<'_> {
                 self.out.text("stopped\n");
             }
         }
+        self.fire_instance_triggers(&store, InstanceEvent::Shutdown);
         for other in served_databases.into_databases() {
             self.close_database(other)?;
         }
         self.close(db)?;
         Ok(Exit::Done)
+    }
+
+    fn fire_instance_triggers(&mut self, store: &DatabaseStore<'_>, event: InstanceEvent) {
+        let mut session = eggdb_sql::Session::with_dialect(store, eggdb_sql::Dialect::Oracle);
+        let (fired, name) = match event {
+            InstanceEvent::Startup => (session.fire_startup_triggers(), "STARTUP"),
+            InstanceEvent::Shutdown => (session.fire_shutdown_triggers(), "SHUTDOWN"),
+        };
+        if let Err(error) = fired {
+            self.out.text(&format!(
+                "warning: an Oracle {name} trigger failed and was rolled back: {error}\n"
+            ));
+        }
+        let _ = session.close();
     }
 
     fn turn_on_tcp_keep_alives<'l>(
@@ -2050,6 +2066,12 @@ pub(super) struct Sockets {
     mysql: Option<std::path::PathBuf>,
     mysql_pipe: Option<String>,
     tds_pipe: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InstanceEvent {
+    Startup,
+    Shutdown,
 }
 
 impl Session<'_> {

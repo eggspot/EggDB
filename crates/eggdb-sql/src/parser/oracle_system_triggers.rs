@@ -49,7 +49,19 @@ impl Parser<'_> {
         if timing == SystemTiming::After && events.iter().any(|event| event == "logoff") {
             return Err(self.not_supported("AFTER LOGOFF"));
         }
+        if timing == SystemTiming::Before && events.iter().any(|event| event == "startup") {
+            return Err(self.not_supported("BEFORE STARTUP"));
+        }
+        if timing == SystemTiming::After && events.iter().any(|event| event == "shutdown") {
+            return Err(self.not_supported("AFTER SHUTDOWN"));
+        }
+        let instance_event = events
+            .iter()
+            .any(|event| matches!(event.as_str(), "startup" | "shutdown"));
         self.expect_word("on")?;
+        if instance_event && !self.is_word("database") && !self.is_word("pluggable") {
+            return Err(self.not_supported("STARTUP and SHUTDOWN triggers on a schema"));
+        }
         let scope = if self.take_word("database") {
             SystemScope::Database
         } else if self.take_word("pluggable") {

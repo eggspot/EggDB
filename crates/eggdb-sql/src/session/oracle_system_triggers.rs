@@ -286,6 +286,49 @@ impl Session<'_> {
         let _ = self.run_system_trigger_bodies(&triggers, event);
     }
 
+    /// Fires the `AFTER STARTUP ON DATABASE` triggers, as Oracle does when an instance opens
+    /// its database; `eggdb serve` calls it once it is ready to accept connections. The triggers
+    /// run in one transaction, committed when they all succeed; the first error stops the rest,
+    /// rolls their changes back and is returned, for the caller to log, as Oracle writes it to
+    /// its alert log and opens anyway.
+    pub fn fire_startup_triggers(&mut self) -> SqlResult<()> {
+        self.fire_instance_triggers("AFTER", "startup", "STARTUP")
+    }
+
+    /// Fires the `BEFORE SHUTDOWN ON DATABASE` triggers, as Oracle does on a clean shutdown;
+    /// `eggdb serve` calls it once its connections have ended, before it closes the database.
+    /// The triggers run in one transaction as for startup; errors are returned for the caller
+    /// to log, and the shutdown goes on.
+    pub fn fire_shutdown_triggers(&mut self) -> SqlResult<()> {
+        self.fire_instance_triggers("BEFORE", "shutdown", "SHUTDOWN")
+    }
+
+    fn fire_instance_triggers(
+        &mut self,
+        timing: &str,
+        event: &str,
+        sysevent: &str,
+    ) -> SqlResult<()> {
+        if !self.system_triggers_stored() {
+            return Ok(());
+        }
+        let triggers = self.triggers_for(timing, event)?;
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let data = SystemEvent {
+            sysevent: sysevent.to_owned(),
+            login_user: self.oracle_login_user(),
+            ..SystemEvent::default()
+        };
+        let outcome = self.run_system_trigger_bodies(&triggers, data);
+        if self.in_block() {
+            let finish = if outcome.is_ok() { "COMMIT" } else { "ROLLBACK" };
+            self.in_trigger_dialect(Dialect::PostgreSql, |session| session.run_quietly(finish))?;
+        }
+        outcome
+    }
+
     /// Fires `AFTER LOGON` triggers once an Oracle-dialect connection has authenticated; an
     /// error from one fails the login, as Oracle's do for users without `ADMINISTER DATABASE
     /// TRIGGER`.
