@@ -3801,6 +3801,30 @@ indexes, so `WHERE email_index = eggdb_blind_index($1, :'index_key')` finds a ro
 column reveals neither the value nor, with few bits, whether two rare values are the same. Normalize values (case,
 spaces) before indexing them.
 
+## Bitemporal tables (eggdb_temporal)
+
+`CREATE EXTENSION eggdb_temporal` keeps two periods on each row of a table (D755): when a fact is true (`valid_from`,
+`valid_to`, set by the application) and when the database knew it (`recorded_from`, `recorded_to`, set by a trigger):
+
+```sql
+CREATE EXTENSION eggdb_temporal;
+CREATE TABLE prices (sku text NOT NULL, price numeric NOT NULL);
+SELECT eggdb_temporal.enable('public', 'prices', ARRAY['sku']);
+SELECT eggdb_temporal.update_period('public', 'prices', '{"sku": "egg"}', '2026-01-01', '2026-02-01', '{"price": 12}');
+SELECT * FROM eggdb_temporal.as_of('public', 'prices', '2026-01-15');
+SELECT * FROM prices_versions WHERE sku = 'egg' ORDER BY recorded_from, valid_from;
+```
+
+- `enable(schema, table, key_columns)` adds the four columns (existing rows are valid always), creates
+  `<table>_history` and the view `<table>_versions`, and a trigger that copies each updated or deleted row into the
+  history with `recorded_to = now()`. Rows with the same key may not have overlapping valid periods (SQLSTATE 23P01),
+  so the primary key, if any, must include `valid_from`.
+- `update_period(schema, table, key, start, end, changes)` and `delete_period(schema, table, key, start, end)` change a
+  fact for part of its valid time only: rows crossing `start` or `end` are split there first. Both return the rows
+  changed.
+- `as_of(schema, table, valid_at [, recorded_at])` returns, as `jsonb`, the rows true at `valid_at` as known at
+  `recorded_at` (now by default); `history(schema, table, key)` returns every version of a key.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

@@ -779,3 +779,4 @@ its full title with its status.
 - [D752](decisions/D752.md) Code-only batch 400 (M6b): `eggdb_blind_index`, HMAC blind indexes for searching sealed columns
 - [D753](decisions/D753.md) Code-only batch 401 (M6c): a schema registry with compatibility modes and data contracts in `eggdb_catalog`
 - [D754](decisions/D754.md) Code-only batch 402 (M6b): `eggdb_ledger.protect` on a table that already has rows
+- [D755](decisions/D755.md) Code-only batch 403 (M11): bitemporal tables, `CREATE EXTENSION eggdb_temporal`
