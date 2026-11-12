@@ -168,6 +168,13 @@ const KNOWN: &[Known] = &[
         description: "Shows whether the session's user is a superuser.",
     },
     Known {
+        name: "role",
+        default: fixed_text!("none"),
+        change: Change::Fixed,
+        reported: false,
+        description: "Shows the role SET ROLE chose, or none.",
+    },
+    Known {
         name: "lock_timeout",
         default: fixed_text!("0"),
         change: Change::Free,
