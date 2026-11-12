@@ -985,3 +985,4 @@ its full title with its status.
 - [D958](decisions/D958.md) Code-only batch 606 (M6f): a Sequel adapter for the Ruby driver
 - [D959](decisions/D959.md) Code-only batch 607 (M6f): Drizzle and Knex adapters for the Node.js driver
 - [D960](decisions/D960.md) Code-only batch 608 (M6f): a sqlite3-compatible module for TypeORM and Sequelize
+- [D961](decisions/D961.md) Code-only batch 609 (M6f): a Prisma driver adapter for the Node.js driver

@@ -90,3 +90,18 @@ test('TypeORM runs on its SQLite driver over EggDB', { skip: !available('typeorm
   assert.deepStrictEqual(found.map((egg) => egg.colour), ['brown']);
   await source.destroy();
 });
+
+test('the Prisma adapter answers raw queries with column names and types', { skip: !available('@prisma/driver-adapter-utils') }, async () => {
+  const { PrismaEggDb } = require('../prisma.js');
+  const { ColumnTypeEnum } = require('@prisma/driver-adapter-utils');
+  const adapter = await new PrismaEggDb({ url: 'file::memory:' }).connect();
+  await adapter.executeScript('CREATE TABLE eggs (id INTEGER PRIMARY KEY, colour TEXT, weight REAL)');
+  const transaction = await adapter.startTransaction();
+  assert.strictEqual(await transaction.executeRaw({ sql: 'INSERT INTO eggs (colour, weight) VALUES (?, ?)', args: ['brown', 61.5] }), 1);
+  await transaction.commit();
+  const answer = await adapter.queryRaw({ sql: 'SELECT id, colour, weight FROM eggs', args: [] });
+  assert.deepStrictEqual(answer.columnNames, ['id', 'colour', 'weight']);
+  assert.deepStrictEqual(answer.columnTypes, [ColumnTypeEnum.Int64, ColumnTypeEnum.Text, ColumnTypeEnum.Double]);
+  assert.deepStrictEqual(answer.rows, [[1, 'brown', 61.5]]);
+  await adapter.dispose();
+});
