@@ -29,7 +29,7 @@
 use crate::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
 use eggdb_sql::StoreFailure;
 pub use eggdb_sql::{
-    CancelSignal, NewFileWriter, ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck,
+    CancelSignal, FileReader, NewFileWriter, ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck,
     IndexColumnOrder, IndexSchema, Interval, IntervalFields, Numeric, NumericModifier,
     OneStatementError, OneStatementRefusal, OutputColumn, Parameter, QueryResult,
     RESERVED_KEY_PREFIX, Session, SqlError, SqlResult, SqlState, SqlType, TableSchema,
@@ -59,6 +59,17 @@ pub struct LocalFiles;
 
 /// The [`LocalFiles`] writer, to hand to [`Session::set_new_file_writer`].
 pub static LOCAL_FILES: LocalFiles = LocalFiles;
+
+impl FileReader for LocalFiles {
+    fn read_file(&self, path: &str, most_bytes: usize) -> Result<Vec<u8>, String> {
+        let target = std::path::Path::new(path);
+        let size = std::fs::metadata(target).map_err(|error| format!("cannot read {}: {error}", target.display()))?.len();
+        if size > most_bytes as u64 {
+            return Err(format!("{} is larger than {most_bytes} bytes", target.display()));
+        }
+        std::fs::read(target).map_err(|error| format!("cannot read {}: {error}", target.display()))
+    }
+}
 
 impl NewFileWriter for LocalFiles {
     fn write_new_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {

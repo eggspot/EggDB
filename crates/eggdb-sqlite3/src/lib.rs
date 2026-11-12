@@ -199,6 +199,7 @@ pub unsafe extern "C" fn sqlite3_open_v2(
     let store_ref: &'static Store<'static> = unsafe { &*Arc::as_ptr(&store) };
     let mut session = store_ref.session(Dialect::Sqlite);
     session.set_new_file_writer(&eggdb::sql::LOCAL_FILES);
+    session.set_file_reader(&eggdb::sql::LOCAL_FILES);
     let mut connection = Box::new(Sqlite3 {
         session,
         error: c"not an error".to_owned(),

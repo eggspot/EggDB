@@ -579,6 +579,7 @@ pub struct Session<'s> {
     trigger_transaction: bool,
     served_databases: Option<&'s dyn crate::served_databases::ServedDatabases>,
     new_file_writer: Option<&'s dyn crate::new_files::NewFileWriter>,
+    file_reader: Option<&'static dyn crate::new_files::FileReader>,
     database_switch: Option<String>,
     database_listing_version: Option<u64>,
     protocol: Option<&'static str>,
@@ -667,6 +668,7 @@ impl<'s> Session<'s> {
             trigger_transaction: false,
             served_databases: None,
             new_file_writer: None,
+            file_reader: None,
             database_switch: None,
             database_listing_version: None,
             protocol: None,
@@ -980,6 +982,12 @@ impl<'s> Session<'s> {
     /// `VACUUM INTO`; without it those statements are refused.
     pub fn set_new_file_writer(&mut self, writer: &'s dyn crate::new_files::NewFileWriter) {
         self.new_file_writer = Some(writer);
+    }
+
+    /// Lets this session's SQL read files on this machine, as `read_parquet` does, through
+    /// `reader`. Embedded use gives it one; servers never do.
+    pub fn set_file_reader(&mut self, reader: &'static dyn crate::new_files::FileReader) {
+        self.file_reader = Some(reader);
     }
 
     /// Gives the session the server's databases: `CREATE DATABASE` and `DROP DATABASE` run
@@ -1885,6 +1893,17 @@ impl<'s> Session<'s> {
     }
 
     fn run_text(
+        &mut self,
+        text: &str,
+        parameters: Parameters<'_>,
+        on_result: &mut dyn FnMut(QueryResult) -> bool,
+        client: &mut Client<'_>,
+    ) -> SqlResult<()> {
+        let reader = self.file_reader;
+        crate::new_files::with_reader(reader, || self.run_text_with_reader(text, parameters, on_result, client))
+    }
+
+    fn run_text_with_reader(
         &mut self,
         text: &str,
         parameters: Parameters<'_>,

@@ -727,3 +727,4 @@ its full title with its status.
 - [D700](decisions/D700.md) Code-only batch 348 (M10): MySQL `SET` member checks
 - [D701](decisions/D701.md) Code-only batch 349 (M16): `sparkplug_decode` for Sparkplug B payloads
 - [D702](decisions/D702.md) Code-only batch 350 (M16): `icalendar_parse` and `vcard_parse` into jCal and jCard
+- [D703](decisions/D703.md) Code-only batch 351 (M11): SQL reads files only through an embedded session's `FileReader`; `read_parquet` with a column definition list

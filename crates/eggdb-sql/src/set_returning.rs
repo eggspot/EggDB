@@ -18,7 +18,8 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 40] = [
+const FUNCTIONS: [SetReturningFunction; 41] = [
+    to_records("read_parquet"),
     to_records("json_to_record"),
     to_records("jsonb_to_record"),
     to_records("json_to_recordset"),
