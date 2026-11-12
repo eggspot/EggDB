@@ -1052,7 +1052,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Prisma, TypeORM, Drizzle, Sequelize and Knex adapters for Node.js (D16, D182).
 - The GORM dialect, with sqlc checked (D16, D182).
 - A PDO driver with Laravel/Eloquent and Doctrine (D16, D182).
-- ActiveRecord and Sequel for Ruby (D16, D182).
+- ActiveRecord and Sequel for Ruby (D16, D182). The Sequel adapter (`adapter: :eggdb`): **code written, unbuilt** (code-only
+  mode, 2026-11-13, D958). Left: ActiveRecord.
 - The Swift and Dart/Flutter drivers with their mobile frameworks (D16).
 - An ODBC driver (D12, D46).
 - The `compatibility` job with DataGrip, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana,

@@ -982,3 +982,4 @@ its full title with its status.
 - [D955](decisions/D955.md) Code-only batch 603 (M5): Oracle's AFTER STARTUP and BEFORE SHUTDOWN triggers
 - [D956](decisions/D956.md) Code-only batch 604 (M5): SQL Server's server-level DDL events and security events
 - [D957](decisions/D957.md) Code-only batch 605 (M6f): a SQLAlchemy dialect and asyncio support for the Python driver
+- [D958](decisions/D958.md) Code-only batch 606 (M6f): a Sequel adapter for the Ruby driver
