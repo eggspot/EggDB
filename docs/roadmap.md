@@ -756,7 +756,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-12, D804); the X25519MLKEM768 hybrid group, preferred in TLS 1.3 on both sides: **code written,
   unbuilt** (code-only mode, 2026-11-12, D805). Left: NIST's ML-KEM known-answer vectors and a constant-time review.
 - Server events (logins, privilege and schema changes, chosen tables' reads) in the hash-chained
-  audit log, with anchored digests and retention (D26, D231).
+  audit log, with anchored digests and retention (D26, D231). Logins over the PostgreSQL protocol and schema and privilege changes from
+  every protocol, with `EGGDB_AUDIT=1`: **code written, unbuilt** (code-only mode, 2026-11-12, D815). Left: MySQL and
+  TDS logins, chosen tables' reads, anchored digests and retention.
 - Crypto-shredding: per-subject keys whose deletion makes data unreadable in the file, history
   and every backup, with holds that override it (D26, D53, D231, D246). **Code written, unbuilt** (code-only mode,
   2026-11-12, D773), in `eggdb_shredding`, for values sealed with it.

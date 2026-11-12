@@ -2221,6 +2221,14 @@ impl<'s> Session<'s> {
                     .map(|shown| shown.trim().trim_end_matches(';').trim_end().to_owned());
             }
             let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
+            let audited = crate::audit_events::wanted()
+                .then(|| crate::audit_events::statement_kind(&statement))
+                .flatten();
+            let audited_text = audited.map(|_| {
+                let end = tokens.get(resume.0).map_or(text.len(), |token| token.start);
+                text.get(self.statement_start..end)
+                    .map_or_else(String::new, |shown| shown.trim().trim_end_matches(';').trim_end().to_owned())
+            });
             let scan_plan = self.scan_stats_plan(&statement);
             let result = match &scan_plan {
                 Some(plan) => {
@@ -2235,6 +2243,17 @@ impl<'s> Session<'s> {
             };
             let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
             self.record_statement(statement_tokens, text, started, &result);
+            if let (Some(kind), Some(shown)) = (audited, &audited_text) {
+                let user = self.settings.get("session_authorization").unwrap_or_default();
+                crate::audit_events::record(&crate::audit_events::AuditEvent {
+                    kind,
+                    user: &user,
+                    database: &self.settings.database,
+                    protocol: self.protocol(),
+                    detail: shown,
+                    succeeded: result.is_ok(),
+                });
+            }
             self.portals = crate::portals::take();
             if matches!(self.block, Block::None) {
                 self.portals.close_at_transaction_end();

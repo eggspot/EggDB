@@ -19,6 +19,7 @@
 //! repository.
 
 pub mod activity;
+pub mod audit_events;
 mod advisory_locks;
 mod aggregate;
 mod alter;

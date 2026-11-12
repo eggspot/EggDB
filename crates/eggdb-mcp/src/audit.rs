@@ -233,6 +233,40 @@ pub(crate) struct ServerStarted<'a> {
     pub(crate) call_gap: Duration,
 }
 
+/// A server event as one audit record: `{"event":"server_event","time":...,"kind":...,
+/// "user":...,"database":...,"protocol":...,"detail":...}`, with `"error_code":"refused"` for a
+/// refused login or `"failed"` for a statement that failed.
+pub fn server_event_record(
+    kind: &str,
+    user: &str,
+    database: &str,
+    protocol: &str,
+    detail: &str,
+    succeeded: bool,
+) -> String {
+    let mut out = JsonOut::new();
+    out.begin_object()
+        .key("event")
+        .string("server_event")
+        .key("time")
+        .string(&now_rfc3339())
+        .key("kind")
+        .string(kind)
+        .key("user")
+        .string(user)
+        .key("database")
+        .string(database)
+        .key("protocol")
+        .string(protocol)
+        .key("detail")
+        .string(detail);
+    if !succeeded {
+        out.key("error_code").string(if kind == "login" { "refused" } else { "failed" });
+    }
+    out.end_object();
+    out.finish()
+}
+
 pub(crate) fn server_started_record(started: &ServerStarted<'_>) -> String {
     let mut out = JsonOut::new();
     out.begin_object()
@@ -398,6 +432,9 @@ pub enum AuditEvent {
     CallStarted,
     /// A call ran past its time limit and the server exited.
     TimeLimitExceeded,
+    /// A server event from `eggdb serve`: a login, a schema change or a privilege change,
+    /// with its kind in `tool`, the user in `role` and the statement or client in `arguments`.
+    ServerEvent,
 }
 
 /// One record of the audit file, with the fields `eggdb audit` shows.
@@ -598,7 +635,7 @@ pub fn read_audit(
                             continue;
                         }
                     }
-                    AuditEvent::ServerStarted | AuditEvent::TimeLimitExceeded => {}
+                    AuditEvent::ServerStarted | AuditEvent::TimeLimitExceeded | AuditEvent::ServerEvent => {}
                 }
                 AuditLine::Record {
                     number,
@@ -724,6 +761,7 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
         "call" => AuditEvent::Call,
         "call_started" => AuditEvent::CallStarted,
         "time_limit_exceeded" => AuditEvent::TimeLimitExceeded,
+        "server_event" => AuditEvent::ServerEvent,
         _ => return None,
     };
     let client = match member(&members, "client") {
@@ -739,12 +777,12 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
         }
         _ => None,
     };
-    let tool = text_of(&members, "tool");
+    let tool = text_of(&members, "tool").or_else(|| text_of(&members, "kind"));
     let entry = AuditEntry {
         event,
         time: text_of(&members, "time")?,
         client,
-        arguments: arguments_shown(&members, tool.as_deref()),
+        arguments: text_of(&members, "detail").or_else(|| arguments_shown(&members, tool.as_deref())),
         tool,
         error_code: text_of(&members, "error_code"),
         sqlstate: text_of(&members, "sqlstate"),
@@ -765,7 +803,7 @@ fn record_of(line: &str) -> Option<(String, AuditEntry)> {
         tables: texts_of(&members, "tables"),
         call_gap_ms: number_of(&members, "call_gap_ms"),
         outcome_unknown: false,
-        role: text_of(&members, "role"),
+        role: text_of(&members, "role").or_else(|| text_of(&members, "user")),
     };
     Some((ascii.finish(), entry))
 }
@@ -862,6 +900,19 @@ mod tests {
         })
         .unwrap()?;
         Some((lines, totals))
+    }
+
+    #[test]
+    fn server_events_read_back_with_their_kind_user_and_detail() {
+        let line = server_event_record("schema_change", "alice", "shop", "postgresql", "CREATE TABLE t (a int)", true);
+        let (_, entry) = record_of(&line).expect("a record");
+        assert_eq!(entry.event, AuditEvent::ServerEvent);
+        assert_eq!(entry.tool.as_deref(), Some("schema_change"));
+        assert_eq!(entry.role.as_deref(), Some("alice"));
+        assert_eq!(entry.arguments.as_deref(), Some("CREATE TABLE t (a int)"));
+        assert_eq!(entry.error_code, None);
+        let refused = server_event_record("login", "mallory", "shop", "postgresql", "client=10.0.0.9 method=scram-sha-256", false);
+        assert_eq!(record_of(&refused).expect("a record").1.error_code.as_deref(), Some("refused"));
     }
 
     #[test]

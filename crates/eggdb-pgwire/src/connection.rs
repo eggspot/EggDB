@@ -1053,6 +1053,7 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
         _ => eggdb_auth::AuthMethod::ScramSha256,
     };
     let is_stored_role = !own_user;
+    let method_name = method.name();
     let outcome = match method {
         eggdb_auth::AuthMethod::ScramSha256 => {
             let stored_role = (!own_user)
@@ -1064,9 +1065,17 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
             authenticate_externally(&mut wire, shared, &startup.user, &external, roles_store)
         }
     };
-    match outcome {
-        AuthenticationOutcome::Authenticated => {}
-        AuthenticationOutcome::Refused => return,
+    let accepted = matches!(outcome, AuthenticationOutcome::Authenticated);
+    eggdb_sql::audit_events::record_login(
+        &startup.user,
+        &startup.database,
+        "postgresql",
+        &wire.peer(),
+        method_name,
+        accepted,
+    );
+    if !accepted {
+        return;
     }
     let Some(_connection) = take_slot(&shared.connections, shared.config.max_connections) else {
         (shared.log)(&format!(

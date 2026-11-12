@@ -83,6 +83,7 @@ impl Session<'_> {
     pub(super) fn serve(&mut self) -> Result<Exit, Failure> {
         super::foreign::allow_from_environment();
         super::model_endpoints::allow_from_environment();
+        audit_server_events_from_environment(&self.request.file);
         let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
         let options = self.request.serve.clone();
         if let Some(url) = &options.restore_from
@@ -1854,4 +1855,27 @@ impl Session<'_> {
             LocalBindError::Io(error) => Failure::database(format!("cannot listen on {}: {error}", path.display()), Exit::DatabaseError),
         })
     }
+}
+
+const AUDIT_VARIABLE: &str = "EGGDB_AUDIT";
+
+fn audit_server_events_from_environment(database: &std::path::Path) {
+    let wanted = std::env::var(AUDIT_VARIABLE).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
+    if !wanted {
+        return;
+    }
+    let log = eggdb_mcp::audit::AuditLog::new(eggdb_mcp::audit::audit_path_for(database));
+    eggdb_sql::audit_events::set_audit_sink(Box::new(move |event| {
+        let record = eggdb_mcp::audit::server_event_record(
+            event.kind.name(),
+            event.user,
+            event.database,
+            event.protocol,
+            event.detail,
+            event.succeeded,
+        );
+        if let Err(failure) = log.append(&record) {
+            eprintln!("eggdb serve: the audit record was not written: {failure}");
+        }
+    }));
 }

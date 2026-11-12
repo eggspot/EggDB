@@ -144,6 +144,17 @@ impl Session<'_> {
                 self.out.styled(Style::Dim, &cut(&sentence));
                 self.out.text("\n");
             }
+            AuditEvent::ServerEvent => {
+                let sentence = format!(
+                    "{time}  {}{} by {}: {}",
+                    printable(entry.tool.as_deref().unwrap_or("server event")).replace('_', " "),
+                    entry.error_code.as_deref().map(|code| format!(" ({})", printable(code))).unwrap_or_default(),
+                    printable(entry.role.as_deref().unwrap_or("?")),
+                    printable(entry.arguments.as_deref().unwrap_or(""))
+                );
+                self.out.text(&cut(&sentence));
+                self.out.text("\n");
+            }
             AuditEvent::Call | AuditEvent::CallStarted => self.call_line(&time, entry),
         }
     }

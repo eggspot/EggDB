@@ -59,6 +59,19 @@ pub enum AuthMethod {
 }
 
 impl AuthMethod {
+    /// The method's name as a rule file writes it: `scram-sha-256`, `ldap`, `jwt`, `oauth`,
+    /// `cert` or `reject`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::ScramSha256 => "scram-sha-256",
+            Self::Ldap(_) => "ldap",
+            Self::Jwt { .. } => "jwt",
+            Self::OAuthBearer { .. } => "oauth",
+            Self::Certificate => "cert",
+            Self::Reject => "reject",
+        }
+    }
+
     /// Whether the method has the client send its password or token in clear text, so it is
     /// allowed only over TLS or a local socket.
     pub fn sends_secret_in_clear(&self) -> bool {
