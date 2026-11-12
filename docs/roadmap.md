@@ -1312,7 +1312,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MySQL's `JSON_VALUE` and `JSON_TABLE` with MySQL's path language (D289). **Code written, unbuilt**
   (code-only mode, 2026-11-11, D425); MySQL's error numbers for them: **code written, unbuilt** (code-only
   mode, 2026-11-12, D599).
-- Following a live MySQL through its binlog for a switch with no downtime (D13).
+- Following a live MySQL through its binlog for a switch with no downtime (D13). **Code written, unbuilt**
+  (code-only mode, 2026-11-13, D993).
 - MySQL's own test suite run from outside the repo, with its pass rate published (D1, D10, D45).
 - MySQL and TDS clients refused an infinite `numeric` or date written by a PostgreSQL session, as
   the dialect's out-of-range error, instead of sent as text (D290). **Code written, unbuilt** (code-only mode,

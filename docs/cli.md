@@ -1427,7 +1427,8 @@ it until it is stopped, so applications can move to EggDB with no downtime
 libpq's `sslmode` and `sslrootcert`, or `sqlserver://user@host[:port]/database` with
 `encrypt=yes|strict|no` and `trustServerCertificate` or `sslrootcert`, or
 `mongodb://user@host[:port][,more hosts][/database]` with `tls`, `tlsCAFile`, `tlsInsecure` and
-`authSource`. The password comes from `PGPASSWORD`, `SQLCMDPASSWORD` or `MONGODB_PASSWORD`, or
+`authSource`, or `mysql://user@host[:port]`. The password comes from `PGPASSWORD`, `SQLCMDPASSWORD`,
+`MYSQL_PWD` or `MONGODB_PASSWORD`, or
 from `--password-file`; one written in the URL is refused, because process listings show it.
 
 A MongoDB source must be a replica set or a sharded cluster, since only those have change
@@ -1439,6 +1440,14 @@ document is written as the source holds it (`fullDocument: updateLookup`), so ch
 the copy end up applied once. Each batch of changes and the stream's resume token are written in
 one transaction, as the document `mongodb` of `eggdb_follow.state` in that store, and running the
 command again resumes from it.
+
+A MySQL source needs `log_bin` on, `binlog_format=ROW` and `binlog_row_image=FULL`, and a primary
+key on every followed table; the user needs `REPLICATION SLAVE`, `REPLICATION CLIENT` and `SELECT`.
+The command notes the binary log position, copies every table of every database but the system
+ones (or the databases `--schema` lists) with its `SHOW CREATE TABLE` definition, then reads the
+binary log from that position as a replica would and applies each transaction's row changes as
+`REPLACE` and `DELETE` statements by primary key, with the position, in one transaction. A
+schema change on a followed database stops the follow (exit 3) and names it.
 
 | Option | Meaning |
 |--------|---------|

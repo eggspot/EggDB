@@ -22,6 +22,7 @@
 //! The guide is "Connecting with mysql" in `docs/sql.md` in the repository.
 
 mod auth;
+pub mod binlog;
 pub mod client;
 mod connection;
 mod local_infile;

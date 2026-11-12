@@ -24,6 +24,7 @@ const CLIENT_PLUGIN_AUTH: u32 = 0x8_0000;
 const SERVER_MORE_RESULTS_EXISTS: u16 = 0x8;
 const UTF8MB4_GENERAL_CI: u8 = 45;
 const COM_QUERY: u8 = 0x03;
+const COM_BINLOG_DUMP: u8 = 0x12;
 
 /// Where and how to connect, read from a `mysql://` URL. Its `Debug` output shows whether a
 /// password is set, never the password.
@@ -379,6 +380,44 @@ impl MySqlClient {
                 },
                 _ => return Err(protocol("the server answered the sign-in with an unknown packet")),
             }
+        }
+    }
+
+    /// How long a read waits; `None` waits for ever.
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), MySqlClientError> {
+        Ok(self.stream.set_read_timeout(timeout)?)
+    }
+
+    /// Asks the server to stream its binary log from `file` at `position`, as a replica with
+    /// `server_id`, with checksums kept and a heartbeat every `heartbeat` so a quiet log still
+    /// sends something.
+    pub fn start_binlog_dump(
+        &mut self,
+        server_id: u32,
+        file: &str,
+        position: u32,
+        heartbeat: Duration,
+    ) -> Result<(), MySqlClientError> {
+        self.query("SET @master_binlog_checksum = @@global.binlog_checksum, @source_binlog_checksum = @@global.binlog_checksum")?;
+        self.query(&format!("SET @master_heartbeat_period = {}", heartbeat.as_nanos()))?;
+        self.sequence = 0;
+        let mut payload = vec![COM_BINLOG_DUMP];
+        payload.extend_from_slice(&position.to_le_bytes());
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&server_id.to_le_bytes());
+        payload.extend_from_slice(file.as_bytes());
+        self.write_packet(&payload)
+    }
+
+    /// The next event of a binary log dump (without the packet's leading byte), or `None`
+    /// when the server ends the dump.
+    pub fn next_binlog_event(&mut self) -> Result<Option<Vec<u8>>, MySqlClientError> {
+        let packet = self.read_packet()?;
+        match packet.split_first() {
+            Some((0x00, event)) => Ok(Some(event.to_vec())),
+            Some((0xFE, _)) if packet.len() < 9 => Ok(None),
+            Some((0xFF, _)) => Err(server_error(&packet)),
+            _ => Err(protocol("the binary log dump sent an unknown packet")),
         }
     }
 
