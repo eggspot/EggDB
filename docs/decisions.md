@@ -874,3 +874,4 @@ its full title with its status.
 - [D847](decisions/D847.md) Code-only batch 495 (M5): one-argument GROUPING in SQL Server and Oracle
 - [D848](decisions/D848.md) Code-only batch 496 (M6a): restoring roles and privileges (`restore --roles`)
 - [D849](decisions/D849.md) Code-only batch 497 (M10): T-SQL cursor variables
+- [D850](decisions/D850.md) Code-only batch 498 (M6b): SQL Server block predicates AFTER INSERT and AFTER UPDATE

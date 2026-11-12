@@ -3,9 +3,36 @@
 
 use crate::ast::Name;
 
-/// One `ADD FILTER PREDICATE fn(columns) ON table`.
+/// What a security predicate does: filter the rows a query sees, or block writes whose new
+/// rows fail it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PredicateKind {
+    Filter,
+    BlockAfterInsert,
+    BlockAfterUpdate,
+}
+
+impl PredicateKind {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Filter => "filter",
+            Self::BlockAfterInsert => "block_insert",
+            Self::BlockAfterUpdate => "block_update",
+        }
+    }
+
+    pub(crate) fn from_code(code: &str) -> Option<Self> {
+        [Self::Filter, Self::BlockAfterInsert, Self::BlockAfterUpdate]
+            .into_iter()
+            .find(|kind| kind.code() == code)
+    }
+}
+
+/// One `ADD FILTER PREDICATE fn(columns) ON table` or `ADD BLOCK PREDICATE ... AFTER INSERT |
+/// AFTER UPDATE`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FilterPredicate {
+    pub(crate) kind: PredicateKind,
     pub(crate) function: Name,
     pub(crate) arguments: Vec<Name>,
     pub(crate) table: Name,
@@ -22,7 +49,7 @@ pub(crate) enum SecurityPolicyCommand {
     Alter {
         name: Name,
         added: Vec<FilterPredicate>,
-        dropped: Vec<Name>,
+        dropped: Vec<(PredicateKind, Name)>,
         state_on: Option<bool>,
     },
     Drop {
@@ -33,7 +60,7 @@ pub(crate) enum SecurityPolicyCommand {
 
 pub(crate) const POLICIES_TABLE: &str = "eggdb_internal.sqlserver_security_predicates";
 
-pub(crate) const CREATE_POLICIES_TABLE: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_security_predicates (policy_name text NOT NULL, table_name text NOT NULL, function_name text NOT NULL, arguments text NOT NULL, enabled boolean NOT NULL, PRIMARY KEY (policy_name, table_name))";
+pub(crate) const CREATE_POLICIES_TABLE: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; CREATE TABLE IF NOT EXISTS eggdb_internal.sqlserver_security_predicates (policy_name text NOT NULL, table_name text NOT NULL, kind text NOT NULL, function_name text NOT NULL, arguments text NOT NULL, enabled boolean NOT NULL, PRIMARY KEY (policy_name, table_name, kind))";
 
 pub(crate) fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -51,8 +78,8 @@ pub(crate) fn qualified(name: &str) -> String {
 }
 
 /// The row-security policy a predicate becomes on its table.
-pub(crate) fn row_policy_name(policy: &str) -> String {
-    format!("sqlserver_policy_{}", crate::schemas::base_name(policy))
+pub(crate) fn row_policy_name(policy: &str, kind: PredicateKind) -> String {
+    format!("sqlserver_policy_{}_{}", crate::schemas::base_name(policy), kind.code())
 }
 
 /// The `USING` condition: the predicate function returns a row for the rows that may be seen.
@@ -71,7 +98,8 @@ mod tests {
             using_condition("fn_rep", &["SalesRep".to_owned()]),
             "EXISTS (SELECT 1 FROM \"public\".\"fn_rep\"(\"SalesRep\"))"
         );
-        assert_eq!(row_policy_name("SalesFilter"), "sqlserver_policy_SalesFilter");
+        assert_eq!(row_policy_name("SalesFilter", PredicateKind::Filter), "sqlserver_policy_SalesFilter_filter");
+        assert_eq!(PredicateKind::from_code("block_update"), Some(PredicateKind::BlockAfterUpdate));
     }
 
     fn rows(session: &mut crate::Session<'_>, sql: &str) -> String {
@@ -102,8 +130,9 @@ mod tests {
         rows(&mut admin, "ALTER SECURITY POLICY SalesFilter WITH (STATE = ON)");
         rows(&mut admin, "DROP SECURITY POLICY SalesFilter");
         rows(&mut admin, "DROP SECURITY POLICY IF EXISTS SalesFilter");
+        rows(&mut admin, "CREATE SECURITY POLICY Blocker ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales AFTER INSERT");
         let refused = admin.execute(
-            "CREATE SECURITY POLICY Blocker ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales AFTER INSERT",
+            "CREATE SECURITY POLICY Before ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales BEFORE DELETE",
             &mut |_| {},
         );
         assert!(refused.is_err());

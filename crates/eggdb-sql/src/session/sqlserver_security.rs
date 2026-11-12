@@ -3,12 +3,13 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::QueryResult;
 use crate::sqlserver_security::{
-    CREATE_POLICIES_TABLE, FilterPredicate, POLICIES_TABLE, SecurityPolicyCommand, identifier, literal, qualified,
-    row_policy_name, using_condition,
+    CREATE_POLICIES_TABLE, FilterPredicate, POLICIES_TABLE, PredicateKind, SecurityPolicyCommand, identifier,
+    literal, qualified, row_policy_name, using_condition,
 };
 
 struct StoredPredicate {
     table: String,
+    kind: PredicateKind,
     function: String,
     arguments: Vec<String>,
 }
@@ -49,11 +50,12 @@ impl Session<'_> {
                 }
                 let enabled = self.policy_enabled(&name.text)?;
                 self.switch_policy(&name.text, false)?;
-                for table in dropped {
+                for (kind, table) in dropped {
                     self.policy_sql(&format!(
-                        "DELETE FROM {POLICIES_TABLE} WHERE policy_name = {} AND table_name = {}",
+                        "DELETE FROM {POLICIES_TABLE} WHERE policy_name = {} AND table_name = {} AND kind = {}",
                         literal(&name.text),
-                        literal(&table.text)
+                        literal(&table.text),
+                        literal(kind.code())
                     ))?;
                 }
                 for predicate in added {
@@ -97,9 +99,10 @@ impl Session<'_> {
     fn store_predicate(&mut self, policy: &str, predicate: &FilterPredicate, enabled: bool) -> SqlResult<()> {
         let arguments: Vec<&str> = predicate.arguments.iter().map(|argument| argument.text.as_str()).collect();
         self.policy_sql(&format!(
-            "INSERT INTO {POLICIES_TABLE} VALUES ({}, {}, {}, {}, {enabled})",
+            "INSERT INTO {POLICIES_TABLE} VALUES ({}, {}, {}, {}, {}, {enabled})",
             literal(policy),
             literal(&predicate.table.text),
+            literal(predicate.kind.code()),
             literal(&predicate.function.text),
             literal(&arguments.join("\n"))
         ))
@@ -108,7 +111,7 @@ impl Session<'_> {
 
     fn stored_predicates(&mut self, policy: &str) -> SqlResult<Vec<StoredPredicate>> {
         let results = self.policy_sql(&format!(
-            "SELECT table_name, function_name, arguments FROM {POLICIES_TABLE} WHERE policy_name = {} ORDER BY table_name",
+            "SELECT table_name, kind, function_name, arguments FROM {POLICIES_TABLE} WHERE policy_name = {} ORDER BY table_name, kind",
             literal(policy)
         ))?;
         let text = |value: &crate::Value| match value {
@@ -121,11 +124,14 @@ impl Session<'_> {
                 result
                     .rows
                     .iter()
-                    .filter(|row| row.len() == 3)
-                    .map(|row| StoredPredicate {
-                        table: text(&row[0]),
-                        function: text(&row[1]),
-                        arguments: text(&row[2]).split('\n').filter(|part| !part.is_empty()).map(str::to_owned).collect(),
+                    .filter(|row| row.len() == 4)
+                    .filter_map(|row| {
+                        Some(StoredPredicate {
+                            table: text(&row[0]),
+                            kind: PredicateKind::from_code(&text(&row[1]))?,
+                            function: text(&row[2]),
+                            arguments: text(&row[3]).split('\n').filter(|part| !part.is_empty()).map(str::to_owned).collect(),
+                        })
                     })
                     .collect()
             })
@@ -144,17 +150,22 @@ impl Session<'_> {
     }
 
     fn switch_policy(&mut self, policy: &str, on: bool) -> SqlResult<()> {
-        let row_policy = identifier(&row_policy_name(policy));
         for predicate in self.stored_predicates(policy)? {
+            let row_policy = identifier(&row_policy_name(policy, predicate.kind));
             let table = qualified(&predicate.table);
+            let condition = using_condition(&predicate.function, &predicate.arguments);
+            let restrictive = match predicate.kind {
+                PredicateKind::Filter => format!("USING ({condition}) WITH CHECK (true)"),
+                PredicateKind::BlockAfterInsert => format!("FOR INSERT WITH CHECK ({condition})"),
+                PredicateKind::BlockAfterUpdate => format!("FOR UPDATE USING (true) WITH CHECK ({condition})"),
+            };
             let text = if on {
                 format!(
                     "ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; \
                      DROP POLICY IF EXISTS eggdb_sqlserver_base ON {table}; \
                      CREATE POLICY eggdb_sqlserver_base ON {table} AS PERMISSIVE USING (true) WITH CHECK (true); \
                      DROP POLICY IF EXISTS {row_policy} ON {table}; \
-                     CREATE POLICY {row_policy} ON {table} AS RESTRICTIVE USING ({}) WITH CHECK (true)",
-                    using_condition(&predicate.function, &predicate.arguments)
+                     CREATE POLICY {row_policy} ON {table} AS RESTRICTIVE {restrictive}"
                 )
             } else {
                 format!("DROP POLICY IF EXISTS {row_policy} ON {table}")

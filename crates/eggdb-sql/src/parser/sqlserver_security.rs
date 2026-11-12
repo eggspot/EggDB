@@ -2,7 +2,7 @@ use super::Parser;
 use crate::ast::{SqlServerStatement, Statement};
 use crate::error::SqlResult;
 use crate::lexer::TokenKind;
-use crate::sqlserver_security::{FilterPredicate, SecurityPolicyCommand};
+use crate::sqlserver_security::{FilterPredicate, PredicateKind, SecurityPolicyCommand};
 
 impl Parser<'_> {
     pub(super) fn at_security_policy(&self) -> bool {
@@ -52,10 +52,12 @@ impl Parser<'_> {
                     if self.take_word("add") {
                         added.push(self.filter_predicate()?);
                     } else if self.take_word("drop") {
-                        self.predicate_kind()?;
+                        let block = self.predicate_kind()?;
                         self.expect_word("predicate")?;
                         self.expect_word("on")?;
-                        dropped.push(self.table_name()?);
+                        let table = self.table_name()?;
+                        let kind = if block { self.block_operation()? } else { PredicateKind::Filter };
+                        dropped.push((kind, table));
                     } else {
                         return Err(self.not_supported("ALTER ... PREDICATE in a security policy"));
                     }
@@ -76,18 +78,30 @@ impl Parser<'_> {
         Ok(Statement::SqlServer(SqlServerStatement::SecurityPolicy(Box::new(command))))
     }
 
-    fn predicate_kind(&mut self) -> SqlResult<()> {
+    fn predicate_kind(&mut self) -> SqlResult<bool> {
         if self.take_word("filter") {
-            return Ok(());
+            return Ok(false);
         }
-        if self.is_word("block") {
-            return Err(self.not_supported("BLOCK PREDICATE"));
+        if self.take_word("block") {
+            return Ok(true);
         }
         Err(self.unexpected())
     }
 
+    fn block_operation(&mut self) -> SqlResult<PredicateKind> {
+        if self.take_word("after") {
+            if self.take_word("insert") {
+                return Ok(PredicateKind::BlockAfterInsert);
+            }
+            if self.take_word("update") {
+                return Ok(PredicateKind::BlockAfterUpdate);
+            }
+        }
+        Err(self.not_supported("BLOCK PREDICATE other than AFTER INSERT or AFTER UPDATE"))
+    }
+
     fn filter_predicate(&mut self) -> SqlResult<FilterPredicate> {
-        self.predicate_kind()?;
+        let block = self.predicate_kind()?;
         self.expect_word("predicate")?;
         let function = self.table_name()?;
         self.expect(&TokenKind::LeftParen)?;
@@ -103,7 +117,9 @@ impl Parser<'_> {
         }
         self.expect_word("on")?;
         let table = self.table_name()?;
+        let kind = if block { self.block_operation()? } else { PredicateKind::Filter };
         Ok(FilterPredicate {
+            kind,
             function,
             arguments,
             table,
