@@ -984,3 +984,4 @@ its full title with its status.
 - [D957](decisions/D957.md) Code-only batch 605 (M6f): a SQLAlchemy dialect and asyncio support for the Python driver
 - [D958](decisions/D958.md) Code-only batch 606 (M6f): a Sequel adapter for the Ruby driver
 - [D959](decisions/D959.md) Code-only batch 607 (M6f): Drizzle and Knex adapters for the Node.js driver
+- [D960](decisions/D960.md) Code-only batch 608 (M6f): a sqlite3-compatible module for TypeORM and Sequelize
