@@ -551,6 +551,7 @@ impl<'t> Parser<'t> {
             "eggdb_pipelines",
             "eggdb_secrets",
             "eggdb_temporal",
+            "eggdb_finance",
         ]
         .into_iter()
         .find(|bundled| *bundled == name.text)
@@ -566,7 +567,7 @@ impl<'t> Parser<'t> {
                 "extension \"{}\" is not supported",
                 name.text
             ))
-            .with_hint("EggDB accepts CREATE EXTENSION plpgsql, pg_cron, eggdb_cdc, eggdb_tenancy, eggdb_ledger, eggdb_console, eggdb_bi, eggdb_catalog, eggdb_privacy, eggdb_retention, eggdb_coordination, eggdb_migration, timescaledb, eggdb_ai, eggdb_features, eggdb_pipelines, eggdb_secrets, eggdb_temporal, vector, postgis, citext and hstore only; other extensions are not available yet.")
+            .with_hint("EggDB accepts CREATE EXTENSION plpgsql, pg_cron, eggdb_cdc, eggdb_tenancy, eggdb_ledger, eggdb_console, eggdb_bi, eggdb_catalog, eggdb_privacy, eggdb_retention, eggdb_coordination, eggdb_migration, timescaledb, eggdb_ai, eggdb_features, eggdb_pipelines, eggdb_secrets, eggdb_temporal, eggdb_finance, vector, postgis, citext and hstore only; other extensions are not available yet.")
             .at(name.position));
         }
         self.skip_statement();

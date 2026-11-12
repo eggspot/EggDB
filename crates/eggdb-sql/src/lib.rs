@@ -108,6 +108,7 @@ mod features;
 mod pipelines;
 mod secrets;
 mod temporal_tables;
+mod finance;
 mod report_pdf;
 mod zarr;
 mod new_files;

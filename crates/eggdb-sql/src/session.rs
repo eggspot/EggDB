@@ -2708,6 +2708,7 @@ impl<'s> Session<'s> {
             "eggdb_pipelines" => ("eggdb_pipelines", crate::pipelines::PIPELINES_SCRIPT),
             "eggdb_secrets" => ("eggdb_secrets", crate::secrets::SECRETS_SCRIPT),
             "eggdb_temporal" => ("eggdb_temporal", crate::temporal_tables::TEMPORAL_SCRIPT),
+            "eggdb_finance" => ("eggdb_finance", crate::finance::FINANCE_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

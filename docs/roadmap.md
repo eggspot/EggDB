@@ -1294,7 +1294,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Left: window joins.
 - Bitemporal tables (D50). **Code written, unbuilt** (code-only mode, 2026-11-12, D755).
 - Order-book and double-entry ledger primitives, with microsecond tail-latency targets in the
-  benchmarks (D50).
+  benchmarks (D50). The primitives (`CREATE EXTENSION eggdb_finance`): **code written, unbuilt** (code-only mode,
+  2026-11-12, D756). Left: the latency targets.
 - Parquet: nested columns, GZIP (on D249's DEFLATE) and ZSTD, statistics and dictionaries when
   writing, several row groups, streaming (D202). Check: a benchmark against DuckDB's reader.
   Statistics and several row groups when writing: **code written, unbuilt** (code-only mode,

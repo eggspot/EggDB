@@ -3825,6 +3825,29 @@ SELECT * FROM prices_versions WHERE sku = 'egg' ORDER BY recorded_from, valid_fr
 - `as_of(schema, table, valid_at [, recorded_at])` returns, as `jsonb`, the rows true at `valid_at` as known at
   `recorded_at` (now by default); `history(schema, table, key)` returns every version of a key.
 
+## Ledgers and order books (eggdb_finance)
+
+`CREATE EXTENSION eggdb_finance` adds double-entry bookkeeping and a limit order book (D756):
+
+```sql
+CREATE EXTENSION eggdb_finance;
+INSERT INTO eggdb_finance.accounts (account, kind) VALUES ('cash', 'asset'), ('sales', 'income');
+SELECT eggdb_finance.post('Egg sale', '[{"account": "cash", "amount": 30}, {"account": "sales", "amount": -30}]');
+SELECT * FROM eggdb_finance.trial_balance();
+SELECT eggdb_finance.place_order('EGG', 'sell', 5, 100);
+SELECT eggdb_finance.place_order('EGG', 'buy', 8, 100.5);
+SELECT * FROM eggdb_finance.book('EGG');
+```
+
+- `post(description, lines)` writes an entry whose postings (debits positive, credits negative) must sum to zero per
+  currency (SQLSTATE 23514). Posted entries never change (55000); `reverse(entry)` posts the opposite entry.
+  `balance(account [, at])` and `trial_balance([at])` read the books as of a time.
+- `place_order(instrument, side, quantity [, price, owner, time_in_force])` matches the order against the book by best
+  price, then by arrival, records each trade in `eggdb_finance.trades` at the resting price, and returns the order's
+  id. Without a price it is a market order; `time_in_force` is `gtc` (rest stays on the book), `ioc` (rest cancelled)
+  or `fok` (all or nothing). `cancel_order(order)` takes an order off the book and `book(instrument [, depth])` shows
+  each side's price levels.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,
