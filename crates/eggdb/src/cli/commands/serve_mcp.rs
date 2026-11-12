@@ -150,6 +150,31 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
     Ok(tokens)
 }
 
+fn admin_response(answer: &str) -> eggdb_http::Response {
+    use eggdb_sql::json::{Json, parse_document};
+    let Ok(document) = parse_document(answer) else {
+        return json_error(500, "the admin call answered something other than JSON");
+    };
+    let Json::Object(members) = &document.value else {
+        return json_error(500, "the admin call answered something other than an object");
+    };
+    let found = |name: &str| members.iter().find(|(key, _)| key == name).map(|(_, node)| node);
+    let (status, node) = match (found("result"), found("error")) {
+        (Some(result), _) => {
+            let failed = matches!(&result.value, Json::Object(fields) if fields.iter().any(|(key, value)| key == "isError" && value.value == Json::Boolean(true)));
+            (if failed { 422 } else { 200 }, result)
+        }
+        (None, Some(error)) => (400, error),
+        (None, None) => return json_error(500, "the admin call answered neither a result nor an error"),
+    };
+    eggdb_http::Response {
+        status,
+        content_type: "application/json".to_owned(),
+        body: answer.get(node.start..node.end).unwrap_or("{}").as_bytes().to_vec(),
+        headers: Vec::new(),
+    }
+}
+
 fn json_error(status: u16, message: &str) -> eggdb_http::Response {
     eggdb_http::Response {
         status,
@@ -255,7 +280,53 @@ impl<'d> McpEndpoint<'d> {
         (!id.is_empty()).then_some((id, server))
     }
 
+    fn admin(&self, request: &eggdb_http::Request, rest: &str) -> eggdb_http::Response {
+        if request.header("origin").is_some() {
+            return eggdb_http::Response::text(403, "requests from web pages are refused");
+        }
+        let Some(index) = self.agent_index(request) else {
+            return eggdb_http::Response::text(401, "a Bearer token is required")
+                .with_header("WWW-Authenticate", "Bearer");
+        };
+        if let Some(wait) = self.over_quota(index) {
+            return json_error(429, "this agent's calls_per_minute quota is spent")
+                .with_header("Retry-After", &wait.to_string());
+        }
+        let (method, params) = match (request.method.as_str(), rest.trim_start_matches('/')) {
+            ("GET", "") => ("tools/list".to_owned(), "{}".to_owned()),
+            ("POST", name) if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') => {
+                let body = std::str::from_utf8(&request.body).unwrap_or_default().trim();
+                let arguments = if body.is_empty() { "{}" } else { body };
+                if !arguments.starts_with('{') {
+                    return json_error(400, "the body is the tool's arguments as a JSON object");
+                }
+                ("tools/call".to_owned(), format!("{{\"name\":\"{name}\",\"arguments\":{arguments}}}"))
+            }
+            ("GET" | "POST", _) => return eggdb_http::Response::text(404, "GET /admin/tools lists the tools; POST /admin/tools/<name> calls one"),
+            _ => {
+                return eggdb_http::Response::text(405, "the admin API takes GET and POST").with_header("Allow", "GET, POST");
+            }
+        };
+        let role = self.tokens[index].role.clone();
+        let Some((_, mut server)) = self.new_session(role) else {
+            return json_error(500, "the admin call could not start");
+        };
+        let initialize = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"{}\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"eggdb-admin-api\"}}}}}}",
+            eggdb_mcp::PROTOCOL_VERSIONS[0]
+        );
+        let _ = server.handle(initialize.as_bytes());
+        let call = format!("{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"{method}\",\"params\":{params}}}");
+        let Some(answer) = server.handle(call.as_bytes()) else {
+            return json_error(500, "the admin call gave no answer");
+        };
+        admin_response(&answer)
+    }
+
     pub(super) fn answer(&self, request: &eggdb_http::Request) -> eggdb_http::Response {
+        if let Some(rest) = request.path.strip_prefix("/admin/tools") {
+            return self.admin(request, rest);
+        }
         if request.path != "/mcp" {
             return eggdb_http::Response::text(404, "not found; MCP is at /mcp");
         }

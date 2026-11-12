@@ -852,7 +852,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - An index and plan advisor, and automatic tuning of indexes and configuration (D25, D31). The index advisor
   (`eggdb_advisor`): **code written, unbuilt** (code-only mode, 2026-11-12, D780). Left: plan advice and configuration
   tuning.
-- An admin API, with the same actions as MCP tools (D11, D25).
+- An admin API, with the same actions as MCP tools (D11, D25). `GET /admin/tools` and `POST /admin/tools/<name>` beside `/mcp`: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D840).
 - A Kubernetes operator in Rust (D25, D45).
 - A Terraform provider in Rust on Terraform's published plugin protocol (D25, D46).
 - A metering API (usage per tenant, database and query) with hooks for billing, and chargeback
