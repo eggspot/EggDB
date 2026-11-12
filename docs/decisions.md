@@ -997,3 +997,4 @@ its full title with its status.
 - [D970](decisions/D970.md) Code-only batch 618 (M10): MySQL SET values stored in member order
 - [D971](decisions/D971.md) Code-only batch 619 (M10): MySQL's two-digit YEAR values
 - [D972](decisions/D972.md) Code-only batch 620 (M6f): SQLTables and SQLColumns in the ODBC driver
+- [D973](decisions/D973.md) Code-only batch 621 (M6f): the ODBC driver's wide-character entry points

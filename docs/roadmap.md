@@ -1070,7 +1070,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-13, D966).
 - An ODBC driver (D12, D46). `eggdb-odbc` (`libeggdb_odbc`, the core ODBC 3 calls on an embedded file): **code
   written, unbuilt** (code-only mode, 2026-11-13, D968); `SQLTables` and `SQLColumns`: **code written, unbuilt**
-  (code-only mode, 2026-11-13, D972). Left: the other catalog functions, the wide-character entry points,
+  (code-only mode, 2026-11-13, D972); the `W` entry points: **code written, unbuilt** (code-only mode, 2026-11-13,
+  D973). Left: the other catalog functions,
   `SQLGetInfo`'s full list, server connections and the installer files for driver managers.
 - The `compatibility` job with DataGrip, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana,
   Grafana, Metabase, Superset, Power BI, Airbyte, Liquibase and Alembic (D12, D239).

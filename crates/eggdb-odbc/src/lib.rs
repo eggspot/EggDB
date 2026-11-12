@@ -8,14 +8,15 @@
 //! or prepared, with `?` parameters bound by `SQLBindParameter`; reads rows with `SQLFetch`,
 //! `SQLGetData` (in pieces for long values) and `SQLBindCol`; describes columns; commits and
 //! rolls back with autocommit off; answers diagnostics and the first `SQLGetInfo` types; and
-//! lists tables and columns with `SQLTables` and `SQLColumns` from `information_schema`. The
-//! wide-character entry points come next.
+//! lists tables and columns with `SQLTables` and `SQLColumns` from `information_schema`. Each
+//! text-taking call also has its `W` form, for Unicode applications.
 
 mod api;
 mod handles;
 mod memory;
 mod native;
 mod values;
+mod wide;
 
 pub use api::{
     SQLAllocHandle, SQLBindCol, SQLBindParameter, SQLCloseCursor, SQLColAttribute, SQLColumns,
@@ -24,4 +25,8 @@ pub use api::{
     SQLFetch, SQLFreeHandle, SQLFreeStmt, SQLGetConnectAttr, SQLGetData, SQLGetDiagRec,
     SQLGetEnvAttr, SQLGetInfo, SQLNumParams, SQLNumResultCols, SQLPrepare, SQLRowCount,
     SQLSetConnectAttr, SQLSetEnvAttr, SQLSetStmtAttr, SQLTables,
+};
+pub use wide::{
+    SQLColAttributeW, SQLColumnsW, SQLConnectW, SQLDescribeColW, SQLDriverConnectW,
+    SQLExecDirectW, SQLGetDiagRecW, SQLGetInfoW, SQLPrepareW, SQLTablesW,
 };
