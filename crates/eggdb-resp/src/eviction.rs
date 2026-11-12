@@ -316,6 +316,14 @@ impl Keyspace for EvictingKeyspace<'_> {
         })?;
         self.evict()
     }
+
+    fn read_record(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.inner.read_record(name)
+    }
+
+    fn write_record(&self, name: &[u8], value: Option<&[u8]>) -> Result<(), String> {
+        self.inner.write_record(name, value)
+    }
 }
 
 #[cfg(test)]

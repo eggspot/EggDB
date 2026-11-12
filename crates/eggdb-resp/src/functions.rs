@@ -5,6 +5,126 @@ use eggdb_lua::RegisteredFunction;
 
 const ENGINE: &str = "LUA";
 const NO_WRITES: &str = "no-writes";
+const SAVED_LIBRARIES: &[u8] = b"function-libraries";
+const PAYLOAD_MAGIC: &[u8] = b"EGGDBFN\x01";
+const MOST_PAYLOAD_LIBRARIES: usize = 100_000;
+
+fn checksum(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// The bytes `FUNCTION DUMP` answers and the server keeps: every library's code, with a magic
+/// prefix and a checksum so `FUNCTION RESTORE` refuses damaged or foreign payloads.
+fn payload(libraries: &[&Library]) -> Vec<u8> {
+    let mut out = PAYLOAD_MAGIC.to_vec();
+    out.extend_from_slice(&u32::try_from(libraries.len()).unwrap_or(u32::MAX).to_le_bytes());
+    for library in libraries {
+        out.extend_from_slice(&u32::try_from(library.code.len()).unwrap_or(u32::MAX).to_le_bytes());
+        out.extend_from_slice(&library.code);
+    }
+    let sum = checksum(&out);
+    out.extend_from_slice(&sum.to_le_bytes());
+    out
+}
+
+fn codes_of(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let damaged = || "ERR DUMP payload version or checksum are wrong".to_owned();
+    let body_end = bytes.len().checked_sub(8).ok_or_else(damaged)?;
+    let (body, sum) = bytes.split_at(body_end);
+    let mut word = [0u8; 8];
+    word.copy_from_slice(sum);
+    if !body.starts_with(PAYLOAD_MAGIC) || checksum(body) != u64::from_le_bytes(word) {
+        return Err(damaged());
+    }
+    let mut at = PAYLOAD_MAGIC.len();
+    let mut take = |count: usize| -> Result<&[u8], String> {
+        let end = at.checked_add(count).filter(|end| *end <= body.len()).ok_or_else(damaged)?;
+        let taken = &body[at..end];
+        at = end;
+        Ok(taken)
+    };
+    let length = |bytes: &[u8]| {
+        let mut word = [0u8; 4];
+        word.copy_from_slice(bytes);
+        u32::from_le_bytes(word) as usize
+    };
+    let count = length(take(4)?);
+    if count > MOST_PAYLOAD_LIBRARIES {
+        return Err(damaged());
+    }
+    let mut codes = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let size = length(take(4)?);
+        codes.push(take(size)?.to_vec());
+    }
+    if at != body.len() {
+        return Err(damaged());
+    }
+    Ok(codes)
+}
+
+fn save(context: &Context<'_>, scripts: &Scripts) -> Result<(), String> {
+    let libraries = scripts
+        .libraries
+        .lock()
+        .map_err(|_| "ERR the function libraries are unavailable".to_owned())?;
+    if libraries.is_empty() {
+        return context.keyspace.write_record(SAVED_LIBRARIES, None);
+    }
+    let listed: Vec<&Library> = libraries.values().collect();
+    context.keyspace.write_record(SAVED_LIBRARIES, Some(&payload(&listed)))
+}
+
+/// Loads the libraries a server kept in `keyspace` into `scripts`, at start; a library that no
+/// longer loads is skipped and named in the returned messages.
+pub(crate) fn restore_saved(scripts: &Scripts, keyspace: &dyn crate::Keyspace) -> Vec<String> {
+    let saved = match keyspace.read_record(SAVED_LIBRARIES) {
+        Ok(Some(saved)) => saved,
+        Ok(None) => return Vec::new(),
+        Err(error) => return vec![format!("the saved function libraries could not be read: {error}")],
+    };
+    let codes = match codes_of(&saved) {
+        Ok(codes) => codes,
+        Err(error) => return vec![format!("the saved function libraries are damaged: {error}")],
+    };
+    codes
+        .iter()
+        .filter_map(|code| load(scripts, code, true).err())
+        .map(|error| format!("a saved function library did not load: {error}"))
+        .collect()
+}
+
+fn restore(scripts: &Scripts, bytes: &[u8], policy: &str) -> Result<(), String> {
+    let codes = codes_of(bytes)?;
+    let mut incoming = Vec::with_capacity(codes.len());
+    for code in &codes {
+        let (name, _) = parse_metadata(code)?;
+        incoming.push(name);
+    }
+    match policy {
+        "flush" => {
+            if let Ok(mut libraries) = scripts.libraries.lock() {
+                libraries.clear();
+            }
+        }
+        "append" => {
+            let libraries = scripts
+                .libraries
+                .lock()
+                .map_err(|_| "ERR the function libraries are unavailable".to_owned())?;
+            if let Some(taken) = incoming.iter().find(|name| libraries.contains_key(*name)) {
+                return Err(format!("ERR Library {taken} already exists"));
+            }
+        }
+        _ => {}
+    }
+    for code in &codes {
+        load(scripts, code, true)?;
+    }
+    Ok(())
+}
 
 /// A function library `FUNCTION LOAD` registered: its name, its whole code (with the `#!lua`
 /// line), the code the interpreter runs, and the functions it registers.
@@ -166,7 +286,17 @@ fn flush_mode_valid(rest: &[Vec<u8>]) -> bool {
     }
 }
 
-fn function_subcommand(scripts: &Scripts, args: &[Vec<u8>]) -> Reply {
+fn saved(context: &Context<'_>, scripts: &Scripts, reply: Reply) -> Reply {
+    if matches!(reply, Reply::Error(_)) {
+        return reply;
+    }
+    match save(context, scripts) {
+        Ok(()) => reply,
+        Err(error) => Reply::Error(format!("ERR the function libraries could not be kept: {error}")),
+    }
+}
+
+fn function_subcommand(context: &Context<'_>, scripts: &Scripts, args: &[Vec<u8>]) -> Reply {
     let Some((subcommand, rest)) = args.split_first() else {
         return Reply::Error("ERR wrong number of arguments for 'function' command".to_owned());
     };
@@ -177,18 +307,20 @@ fn function_subcommand(scripts: &Scripts, args: &[Vec<u8>]) -> Reply {
                 [flag, code] if flag.eq_ignore_ascii_case(b"replace") => (true, code),
                 _ => return Reply::Error("ERR wrong number of arguments for 'function|load' command".to_owned()),
             };
-            match load(scripts, code, replace) {
+            let reply = match load(scripts, code, replace) {
                 Ok(name) => bulk(&name),
                 Err(error) => Reply::Error(error),
-            }
+            };
+            saved(context, scripts, reply)
         }
         "delete" => match rest {
             [name] => {
                 let name = String::from_utf8_lossy(name).into_owned();
-                match scripts.libraries.lock() {
+                let reply = match scripts.libraries.lock() {
                     Ok(mut libraries) if libraries.remove(&name).is_some() => Reply::ok(),
                     _ => Reply::Error("ERR Library not found".to_owned()),
-                }
+                };
+                saved(context, scripts, reply)
             }
             _ => Reply::Error("ERR wrong number of arguments for 'function|delete' command".to_owned()),
         },
@@ -196,7 +328,33 @@ fn function_subcommand(scripts: &Scripts, args: &[Vec<u8>]) -> Reply {
             if let Ok(mut libraries) = scripts.libraries.lock() {
                 libraries.clear();
             }
-            Reply::ok()
+            saved(context, scripts, Reply::ok())
+        }
+        "dump" if rest.is_empty() => match scripts.libraries.lock() {
+            Ok(libraries) => {
+                let listed: Vec<&Library> = libraries.values().collect();
+                Reply::bulk(payload(&listed))
+            }
+            Err(_) => Reply::Error("ERR the function libraries are unavailable".to_owned()),
+        },
+        "restore" => {
+            let (bytes, policy) = match rest {
+                [bytes] => (bytes, "append".to_owned()),
+                [bytes, policy] => (bytes, String::from_utf8_lossy(policy).to_ascii_lowercase()),
+                _ => {
+                    return Reply::Error(
+                        "ERR wrong number of arguments for 'function|restore' command".to_owned(),
+                    );
+                }
+            };
+            if !matches!(policy.as_str(), "append" | "replace" | "flush") {
+                return Reply::Error("ERR Wrong restore policy given, value should be either FLUSH, APPEND or REPLACE.".to_owned());
+            }
+            let reply = match restore(scripts, bytes, &policy) {
+                Ok(()) => Reply::ok(),
+                Err(error) => Reply::Error(error),
+            };
+            saved(context, scripts, reply)
         }
         "flush" => Reply::Error("ERR FUNCTION FLUSH only supports SYNC|ASYNC option".to_owned()),
         "list" => list(scripts, rest),
@@ -243,7 +401,35 @@ pub(crate) fn command(context: &Context<'_>, client: &mut Client, name: &str, ar
         return Some(Reply::Error("ERR functions are not available here".to_owned()));
     };
     Some(match name {
-        "function" => function_subcommand(scripts, args),
+        "function" => function_subcommand(context, scripts, args),
         _ => call(context, client, scripts, args, name == "fcall_ro"),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Library, codes_of, payload};
+
+    fn library(name: &str) -> Library {
+        Library {
+            name: name.to_owned(),
+            code: format!("#!lua name={name}\nredis.register_function('{name}_f', function() return 1 end)").into_bytes(),
+            body: Vec::new(),
+            functions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_dump_payload_round_trips_and_damage_is_refused() {
+        let first = library("one");
+        let second = library("two");
+        let bytes = payload(&[&first, &second]);
+        assert_eq!(codes_of(&bytes).unwrap(), vec![first.code.clone(), second.code.clone()]);
+        let mut flipped = bytes.clone();
+        flipped[12] ^= 1;
+        assert!(codes_of(&flipped).is_err());
+        assert!(codes_of(&bytes[..bytes.len() - 1]).is_err());
+        assert!(codes_of(b"short").is_err());
+    }
+}
+

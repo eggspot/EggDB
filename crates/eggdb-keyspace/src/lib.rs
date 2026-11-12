@@ -90,12 +90,27 @@ pub trait Keyspace {
         db: u32,
         body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
     ) -> Result<(), String>;
+
+    /// The protocol's own record `name`, kept apart from every database's keys (such as a key-value
+    /// server's function libraries); `None` where none was kept or none can be.
+    fn read_record(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let _ = name;
+        Ok(None)
+    }
+
+    /// Keeps the protocol's own record `name`, or removes it when `value` is `None`. A keyspace
+    /// that keeps no records accepts and forgets it.
+    fn write_record(&self, name: &[u8], value: Option<&[u8]>) -> Result<(), String> {
+        let _ = (name, value);
+        Ok(())
+    }
 }
 
 /// A keyspace in memory, for tests and for servers that keep no file.
 #[derive(Debug, Default)]
 pub struct MemoryKeyspace {
     databases: Mutex<BTreeMap<u32, Database>>,
+    records: Mutex<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 struct MemoryKeys<'a> {
@@ -189,6 +204,30 @@ impl Keyspace for MemoryKeyspace {
         let mut changed = current.clone();
         body(&mut MemoryKeys { map: &mut changed })?;
         *current = changed;
+        Ok(())
+    }
+
+    fn read_record(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| "the keyspace failed".to_owned())?;
+        Ok(records.get(name).cloned())
+    }
+
+    fn write_record(&self, name: &[u8], value: Option<&[u8]>) -> Result<(), String> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| "the keyspace failed".to_owned())?;
+        match value {
+            Some(value) => {
+                records.insert(name.to_vec(), value.to_vec());
+            }
+            None => {
+                records.remove(name);
+            }
+        }
         Ok(())
     }
 }

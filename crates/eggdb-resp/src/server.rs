@@ -197,6 +197,14 @@ impl Keyspace for NotifyingKeyspace<'_> {
         }
         Ok(())
     }
+
+    fn read_record(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.inner.read_record(name)
+    }
+
+    fn write_record(&self, name: &[u8], value: Option<&[u8]>) -> Result<(), String> {
+        self.inner.write_record(name, value)
+    }
 }
 
 struct Connection<'s> {
@@ -555,6 +563,9 @@ pub fn serve(
     let clients = Clients::default();
     let notifications = Notifications::default();
     let scripts = Scripts::default();
+    for message in crate::functions::restore_saved(&scripts, keyspace) {
+        log(&message);
+    }
     let shared = Shared {
         hub: &hub,
         waiters: &waiters,

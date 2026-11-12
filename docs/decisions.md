@@ -823,3 +823,4 @@ its full title with its status.
 - [D796](decisions/D796.md) Code-only batch 444 (M12): a stored `vector` type with binary I/O and a catalog entry
 - [D797](decisions/D797.md) Code-only batch 445 (M10): SQL Server's `hierarchyid` with its static and instance methods
 - [D798](decisions/D798.md) Code-only batch 446 (M10): SQL Server's `rowversion` stamped by every write
+- [D799](decisions/D799.md) Code-only batch 447 (M7): Redis Functions kept across restarts, `FUNCTION DUMP` and `RESTORE`

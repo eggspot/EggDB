@@ -212,4 +212,47 @@ impl Keyspace for DatabaseKeyspace<'_> {
             }
         }
     }
+
+    fn read_record(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let transaction = self.db.begin_read().map_err(|error| failed(&error))?;
+        match transaction.collection(&records_collection(self.prefix)) {
+            Ok(collection) => collection.get(name).map_err(|error| failed(&error)),
+            Err(error) if error.kind() == ErrorKind::CollectionNotFound => Ok(None),
+            Err(error) => Err(failed(&error)),
+        }
+    }
+
+    fn write_record(&self, name: &[u8], value: Option<&[u8]>) -> Result<(), String> {
+        let mut transaction = self.db.begin_write().map_err(|error| failed(&error))?;
+        let collection_name = records_collection(self.prefix);
+        let outcome = transaction
+            .create_collection(&collection_name)
+            .map_err(|error| failed(&error))
+            .and_then(|_| {
+                let mut collection = transaction
+                    .collection(&collection_name)
+                    .map_err(|error| failed(&error))?;
+                match value {
+                    Some(value) => collection.put(name, value).map_err(|error| failed(&error)),
+                    None => collection
+                        .delete(name)
+                        .map(|_| ())
+                        .map_err(|error| failed(&error)),
+                }
+            });
+        match outcome {
+            Ok(()) => transaction
+                .commit()
+                .map(|_| ())
+                .map_err(|error| failed(&error)),
+            Err(error) => {
+                let _ = transaction.rollback();
+                Err(error)
+            }
+        }
+    }
+}
+
+fn records_collection(prefix: &str) -> String {
+    format!("{prefix}_records")
 }
