@@ -803,3 +803,4 @@ its full title with its status.
 - [D776](decisions/D776.md) Code-only batch 424 (M16): an in-process inbox for embedded consumers with a redelivery limit, `eggdb::inbox`
 - [D777](decisions/D777.md) Code-only batch 425 (M12): opt-in remote embedding and language-model providers, `eggdb_remote_embed` and `eggdb_remote_complete`
 - [D778](decisions/D778.md) Code-only batch 426 (M12): reranking in hybrid search through remote rerank models, `eggdb_remote_rerank`
+- [D779](decisions/D779.md) Code-only batch 427 (M6d): text-to-SQL through a language model, checked with `EXPLAIN`, `eggdb_ai.text_to_sql`

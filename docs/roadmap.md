@@ -842,7 +842,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Backup, restore and administration tools (D11).
 - Tools that query documents, search indexes, vectors, graphs and keys in their own query
   languages (D10, D11).
-- Text-to-SQL in every dialect through the MCP server (D31, D205).
+- Text-to-SQL in every dialect through the MCP server (D31, D205). `eggdb_ai.text_to_sql`: **code written, unbuilt**
+  (code-only mode, 2026-11-12, D779). Left: an MCP tool of its own.
 
 ### M6e The GUI client and the console
 - Issue #29 (the client track) is the GUI bullets below; it closes when they are done (#29).

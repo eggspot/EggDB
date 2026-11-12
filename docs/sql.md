@@ -3329,7 +3329,11 @@ documents' order (D778): rerank the top fused candidates with `ORDER BY (scores 
 max_distance])` return a cached answer whose prompt is within the cosine distance (0.1 by default) of the new one;
 `eggdb_ai.remember(agent, content [, embedding, metadata])`, `recall(agent, query [, k, embedding])` and `forget`
 keep an agent's memories and recall them by reciprocal rank fusion of embedding distance and full-text rank. Without
-an embedding, `eggdb_embed` makes one.
+an embedding, `eggdb_embed` makes one. `eggdb_ai.text_to_sql(endpoint, model, question [, dialect, api_key, schema])`
+turns a question into SQL through a chat-completions model (D779): it sends the schema's tables and columns and the
+question, asks for one read-only query in the dialect (`postgresql`, `mysql`, `sqlserver`, `oracle` or `sqlite`),
+and returns `{"sql", "dialect", "checked", "problem"}`, a PostgreSQL query being checked with `EXPLAIN` first. It
+never runs the query; an MCP client runs it through `run_sql`, under that tool's read-only rules.
 
 Nearest-neighbour queries are exact for now: they read every row. Not yet: `vector(n)` as its
 own stored type (it is text, and its dimensions are not checked on insert), HNSW and IVFFlat
