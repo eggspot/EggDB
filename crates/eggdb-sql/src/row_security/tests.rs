@@ -778,3 +778,21 @@ fn row_security_filters_table_subqueries_and_executed_statements() {
         "visible\n2\nSELECT 1"
     );
 }
+
+#[test]
+fn a_role_with_bypassrls_reads_every_row_and_loses_it_with_nobypassrls() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    run(&mut admin, "CREATE USER auditor LOGIN BYPASSRLS").unwrap();
+    run(&mut admin, "GRANT SELECT ON notes TO auditor").unwrap();
+    assert_eq!(
+        run(&mut admin, "SELECT rolbypassrls FROM pg_roles WHERE rolname = 'auditor'").unwrap(),
+        "rolbypassrls\nt\nSELECT 1"
+    );
+    let mut auditor = as_role(&store, "auditor");
+    assert_eq!(run(&mut auditor, "SELECT count(*) FROM notes").unwrap(), "count\n3\nSELECT 1");
+    run(&mut admin, "ALTER ROLE auditor NOBYPASSRLS").unwrap();
+    let mut auditor = as_role(&store, "auditor");
+    assert_eq!(run(&mut auditor, "SELECT count(*) FROM notes").unwrap(), "count\n0\nSELECT 1");
+}

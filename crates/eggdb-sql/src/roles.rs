@@ -15,6 +15,7 @@ const RECORD_VERSION: u8 = 1;
 const LOGIN: u8 = 1;
 const SUPERUSER: u8 = 2;
 const CREATE_DATABASE: u8 = 4;
+const BYPASS_ROW_SECURITY: u8 = 8;
 const SCRAM_ITERATIONS: u32 = 4096;
 const SCRAM_SALT_BYTES: usize = 16;
 const MAX_MEMBERSHIP_DEPTH: usize = 32;
@@ -66,6 +67,7 @@ pub(crate) struct RoleOptions {
     pub(crate) login: Option<bool>,
     pub(crate) superuser: Option<bool>,
     pub(crate) create_database: Option<bool>,
+    pub(crate) bypass_row_security: Option<bool>,
     pub(crate) password: Option<Option<String>>,
     pub(crate) member_of: Vec<String>,
 }
@@ -165,6 +167,8 @@ pub struct StoredRole {
     pub superuser: bool,
     /// Whether the role may create databases (`CREATEDB`).
     pub create_database: bool,
+    /// Whether row security policies leave the role's reads and writes alone (`BYPASSRLS`).
+    pub bypass_row_security: bool,
     /// The SCRAM-SHA-256 verifier in PostgreSQL's `pg_authid.rolpassword` form
     /// (`SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`), when the role has a password.
     pub scram_verifier: Option<String>,
@@ -180,6 +184,7 @@ impl std::fmt::Debug for StoredRole {
             .field("login", &self.login)
             .field("superuser", &self.superuser)
             .field("create_database", &self.create_database)
+            .field("bypass_row_security", &self.bypass_row_security)
             .field(
                 "scram_verifier",
                 &self.scram_verifier.as_ref().map(|_| HIDDEN_SECRET),
@@ -266,6 +271,11 @@ fn encode_role(role: &StoredRole) -> Vec<u8> {
                 CREATE_DATABASE
             } else {
                 0
+            }
+            | if role.bypass_row_security {
+                BYPASS_ROW_SECURITY
+            } else {
+                0
             },
     );
     put_text(&mut out, role.scram_verifier.as_deref().unwrap_or(""));
@@ -317,6 +327,7 @@ fn decode_role(name: &str, bytes: &[u8]) -> SqlResult<StoredRole> {
         login: flags & LOGIN != 0,
         superuser: flags & SUPERUSER != 0,
         create_database: flags & CREATE_DATABASE != 0,
+        bypass_row_security: flags & BYPASS_ROW_SECURITY != 0,
         scram_verifier: (!verifier.is_empty()).then_some(verifier),
         member_of,
     })
@@ -423,6 +434,9 @@ fn apply_options(role: &mut StoredRole, options: &RoleOptions) -> SqlResult<()> 
     if let Some(create_database) = options.create_database {
         role.create_database = create_database;
     }
+    if let Some(bypass) = options.bypass_row_security {
+        role.bypass_row_security = bypass;
+    }
     if let Some(password) = &options.password {
         role.scram_verifier = password.as_deref().map(scram_verifier_text).transpose()?;
     }
@@ -469,6 +483,7 @@ pub(crate) fn run(
                 login: false,
                 superuser: false,
                 create_database: false,
+                bypass_row_security: false,
                 scram_verifier: None,
                 member_of: Vec::new(),
             };

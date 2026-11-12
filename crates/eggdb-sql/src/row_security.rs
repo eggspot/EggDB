@@ -397,6 +397,9 @@ fn applicable(
     let Some(user) = settings.checked_role.as_deref() else {
         return Ok(None);
     };
+    if crate::roles::stored_role(reader, user)?.is_some_and(|role| role.bypass_row_security) {
+        return Ok(None);
+    }
     if !is_enabled(reader, table)? {
         return Ok(None);
     }

@@ -1233,6 +1233,7 @@ mod tests {
             login: true,
             superuser: false,
             create_database: false,
+            bypass_row_security: false,
             scram_verifier: None,
             member_of: member_of
                 .iter()

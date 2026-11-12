@@ -126,6 +126,10 @@ impl Parser<'_> {
                 options.create_database = Some(true);
             } else if self.take_word("nocreatedb") {
                 options.create_database = Some(false);
+            } else if self.take_word("bypassrls") {
+                options.bypass_row_security = Some(true);
+            } else if self.take_word("nobypassrls") {
+                options.bypass_row_security = Some(false);
             } else if [
                 "createrole",
                 "nocreaterole",
@@ -133,8 +137,6 @@ impl Parser<'_> {
                 "noinherit",
                 "replication",
                 "noreplication",
-                "bypassrls",
-                "nobypassrls",
             ]
             .iter()
             .any(|word| self.is_word(word))

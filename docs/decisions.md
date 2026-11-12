@@ -1003,3 +1003,4 @@ its full title with its status.
 - [D976](decisions/D976.md) Code-only batch 624 (M5): a weekly sqllogictest job publishing EggDB's pass rate
 - [D977](decisions/D977.md) Code-only batch 625 (M5): PostgreSQL's array slices
 - [D978](decisions/D978.md) Code-only batch 626 (M6b): eggdb serve --tls-client-ca
+- [D979](decisions/D979.md) Code-only batch 627 (M6b): roles with BYPASSRLS

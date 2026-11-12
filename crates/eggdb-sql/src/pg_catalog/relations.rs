@@ -1692,7 +1692,7 @@ fn role_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("rolreplication", flag(false))
                 .set("rolconnlimit", int(-1))
                 .set("rolpassword", text("********"))
-                .set("rolbypassrls", flag(role.superuser))
+                .set("rolbypassrls", flag(role.superuser || role.bypass_row_security))
                 .set("oid", oid(oid_of_role))
                 .done(),
         );
