@@ -592,6 +592,257 @@ pub(crate) fn graph_tables(text: &str) -> SqlResult<Vec<(std::ops::Range<usize>,
     Ok(spans)
 }
 
+const MOST_ALGORITHM_ROWS: usize = 1_000_000;
+
+/// A graph algorithm a `GRAPH_TABLE (graph CALL procedure(arguments))` runs (D1008).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AlgorithmCall {
+    pub(crate) procedure: &'static str,
+    pub(crate) arguments: Vec<eggdb_graph::Value>,
+}
+
+fn argument_value(tokens: &[Token<'_>], at: &mut usize) -> SqlResult<eggdb_graph::Value> {
+    let negative = matches!(tokens.get(*at).map(|token| &token.kind), Some(TokenKind::Operator("-")));
+    if negative {
+        *at += 1;
+    }
+    let token = tokens.get(*at).ok_or_else(|| invalid("a graph algorithm's arguments are not closed"))?;
+    *at += 1;
+    let sign = if negative { -1.0 } else { 1.0 };
+    match &token.kind {
+        TokenKind::Integer(digits) => digits
+            .parse::<i64>()
+            .map(|number| eggdb_graph::Value::Integer(if negative { -number } else { number }))
+            .map_err(|_| invalid(format!("the argument {digits} is out of range"))),
+        TokenKind::Decimal(digits) => digits
+            .parse::<f64>()
+            .map(|number| eggdb_graph::Value::Float(sign * number))
+            .map_err(|_| invalid(format!("the argument {digits} is not a number"))),
+        TokenKind::String(text) if !negative => Ok(eggdb_graph::Value::String(text.to_string())),
+        TokenKind::Word(word) if !negative && word.eq_ignore_ascii_case("true") => Ok(eggdb_graph::Value::Boolean(true)),
+        TokenKind::Word(word) if !negative && word.eq_ignore_ascii_case("false") => Ok(eggdb_graph::Value::Boolean(false)),
+        TokenKind::Word(word) if !negative && word.eq_ignore_ascii_case("null") => Ok(eggdb_graph::Value::Null),
+        _ => Err(invalid("a graph algorithm's arguments are numbers, strings, true, false or null")),
+    }
+}
+
+/// The algorithm a `GRAPH_TABLE` body (`graph CALL procedure(arguments)`) runs, when it is one.
+pub(crate) fn algorithm_call(body: &str) -> SqlResult<Option<AlgorithmCall>> {
+    let tokens = tokenize_in(body, Dialect::PostgreSql)?;
+    let mut reader = Reader { tokens: &tokens, at: 0 };
+    if !reader.take_word("call") {
+        return Ok(None);
+    }
+    let name = reader.name()?;
+    let wanted = name.strip_prefix("eggdb.").unwrap_or(&name);
+    let procedure = eggdb_graph::PROCEDURES
+        .iter()
+        .copied()
+        .find(|procedure| procedure.strip_prefix("eggdb.").is_some_and(|short| short.eq_ignore_ascii_case(wanted)))
+        .ok_or_else(|| {
+            SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("there is no graph algorithm {name}; EggDB has {}", eggdb_graph::PROCEDURES.join(", ")),
+            )
+        })?;
+    let mut arguments = Vec::new();
+    if reader.take(&TokenKind::LeftParen) && !reader.take(&TokenKind::RightParen) {
+        loop {
+            arguments.push(argument_value(&tokens, &mut reader.at)?);
+            if reader.take(&TokenKind::RightParen) {
+                break;
+            }
+            reader.expect(&TokenKind::Comma, ", or )")?;
+        }
+    }
+    if !matches!(tokens.get(reader.at).map(|token| &token.kind), None | Some(TokenKind::End)) {
+        return Err(invalid("GRAPH_TABLE ... CALL takes one procedure call"));
+    }
+    Ok(Some(AlgorithmCall { procedure, arguments }))
+}
+
+/// The SQL that reads one element table for an algorithm: its name, and a query returning one
+/// row of text values per vertex (its identity) or per edge (its source's identity, then its
+/// destination's).
+pub(crate) struct ElementQuery {
+    pub(crate) vertex_from: String,
+    pub(crate) vertex_to: String,
+    pub(crate) source_columns: usize,
+    pub(crate) query: String,
+}
+
+fn as_text(alias: &str, columns: &[String]) -> String {
+    columns.iter().map(|column| format!("CAST({alias}.{column} AS text)")).collect::<Vec<_>>().join(", ")
+}
+
+impl PropertyGraph {
+    fn identity(&self, vertex: &ElementTable) -> SqlResult<Vec<String>> {
+        if !vertex.key.is_empty() {
+            return Ok(vertex.key.clone());
+        }
+        self.edges
+            .iter()
+            .flat_map(|edge| [&edge.source, &edge.destination])
+            .flatten()
+            .find(|reference| self.vertex(&reference.vertex).is_some_and(|found| found.alias == vertex.alias))
+            .map(|reference| reference.vertex_columns.clone())
+            .ok_or_else(|| {
+                SqlError::new(
+                    SqlState::FEATURE_NOT_SUPPORTED,
+                    format!("the vertex table {} needs a KEY to run graph algorithms", vertex.alias),
+                )
+            })
+    }
+
+    /// The queries that read the graph's vertices and edges for an algorithm.
+    pub(crate) fn algorithm_queries(&self) -> SqlResult<(Vec<ElementQuery>, Vec<ElementQuery>)> {
+        let limit = MOST_ALGORITHM_ROWS + 1;
+        let mut vertices = Vec::new();
+        for vertex in &self.vertices {
+            let identity = self.identity(vertex)?;
+            vertices.push(ElementQuery {
+                vertex_from: vertex.alias.clone(),
+                vertex_to: vertex.alias.clone(),
+                source_columns: identity.len(),
+                query: format!("SELECT {} FROM {} AS v LIMIT {limit}", as_text("v", &identity), vertex.table),
+            });
+        }
+        let mut edges = Vec::new();
+        for edge in &self.edges {
+            let (Some(source), Some(destination)) = (&edge.source, &edge.destination) else {
+                continue;
+            };
+            let mut ends = Vec::new();
+            for reference in [source, destination] {
+                let vertex = self.vertex(&reference.vertex).ok_or_else(|| invalid(format!("no vertex table {}", reference.vertex)))?;
+                if self.identity(vertex)? != reference.vertex_columns {
+                    return Err(SqlError::new(
+                        SqlState::FEATURE_NOT_SUPPORTED,
+                        format!("the edge table {} references columns of {} other than its key", edge.alias, vertex.alias),
+                    ));
+                }
+                ends.push(vertex.alias.clone());
+            }
+            edges.push(ElementQuery {
+                vertex_from: ends[0].clone(),
+                vertex_to: ends[1].clone(),
+                source_columns: source.columns.len(),
+                query: format!(
+                    "SELECT {}, {} FROM {} AS e LIMIT {limit}",
+                    as_text("e", &source.columns),
+                    as_text("e", &destination.columns),
+                    edge.table
+                ),
+            });
+        }
+        Ok((vertices, edges))
+    }
+}
+
+/// A vertex's name in an algorithm's output: its vertex table's alias and its key values.
+pub(crate) fn vertex_name(alias: &str, key: &[String]) -> String {
+    format!("{alias}:{}", key.join(","))
+}
+
+pub(crate) fn too_many_rows(rows: usize) -> SqlResult<()> {
+    if rows > MOST_ALGORITHM_ROWS {
+        return Err(SqlError::new(
+            SqlState::PROGRAM_LIMIT_EXCEEDED,
+            format!("graph algorithms over tables read at most {MOST_ALGORITHM_ROWS} rows of each vertex and edge table"),
+        ));
+    }
+    Ok(())
+}
+
+fn output_column(name: &str) -> (&'static str, &'static str) {
+    match name {
+        "nodeId" => ("node", "text"),
+        "node1" => ("node1", "text"),
+        "node2" => ("node2", "text"),
+        "nodeIds" => ("nodes", "text"),
+        "componentId" => ("component", "text"),
+        "communityId" => ("community", "text"),
+        "coreNumber" => ("core_number", "bigint"),
+        "triangles" => ("triangles", "bigint"),
+        "hops" => ("hops", "bigint"),
+        "embedding" => ("embedding", "text"),
+        "similarity" => ("similarity", "double precision"),
+        "totalCost" => ("total_cost", "double precision"),
+        _ => ("score", "double precision"),
+    }
+}
+
+fn json_text(text: &str) -> String {
+    let mut out = String::from("\"");
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            character if u32::from(character) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(character))),
+            character => out.push(character),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn output_value(column: &str, value: &eggdb_graph::Value, names: &[String]) -> String {
+    let node = |value: &eggdb_graph::Value| match value {
+        eggdb_graph::Value::Integer(id) => usize::try_from(*id).ok().and_then(|id| names.get(id)).cloned(),
+        _ => None,
+    };
+    let text = |text: &str| crate::sqlserver_security::literal(text);
+    match (output_column(column).1, value) {
+        (_, eggdb_graph::Value::Null) => "NULL".to_owned(),
+        ("text", eggdb_graph::Value::List(items)) if column == "nodeIds" => text(&format!(
+            "[{}]",
+            items.iter().filter_map(node).map(|name| json_text(&name)).collect::<Vec<_>>().join(",")
+        )),
+        ("text", eggdb_graph::Value::List(items)) => text(&format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|item| match item {
+                    eggdb_graph::Value::Float(number) if number.is_finite() => number.to_string(),
+                    eggdb_graph::Value::Integer(number) => number.to_string(),
+                    _ => "null".to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        )),
+        ("text", value) => node(value).map_or_else(|| "NULL".to_owned(), |name| text(&name)),
+        ("bigint", eggdb_graph::Value::Integer(number)) => format!("CAST({number} AS bigint)"),
+        ("double precision", eggdb_graph::Value::Float(number)) => format!("CAST('{number}' AS double precision)"),
+        ("double precision", eggdb_graph::Value::Integer(number)) => format!("CAST({number} AS double precision)"),
+        _ => "NULL".to_owned(),
+    }
+}
+
+/// The relation an algorithm's records stand for: its columns renamed for SQL, and node ids
+/// written back as vertex names (`alias:key`).
+pub(crate) fn algorithm_relation(columns: &[&str], records: &[Vec<eggdb_graph::Value>], names: &[String]) -> String {
+    let named: Vec<(&str, &str)> = columns.iter().map(|column| output_column(column)).collect();
+    if records.is_empty() {
+        let empty = named.iter().map(|(name, kind)| format!("CAST(NULL AS {kind}) AS {name}")).collect::<Vec<_>>().join(", ");
+        return format!("(SELECT {empty} WHERE 1 = 0)");
+    }
+    let rows = records
+        .iter()
+        .map(|record| {
+            let values = columns
+                .iter()
+                .zip(record)
+                .map(|(column, value)| output_value(column, value, names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({values})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let names = named.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
+    format!("(SELECT * FROM (VALUES {rows}) AS eggdb_graph_algorithm ({names}))")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,5 +868,28 @@ mod tests {
         let spans = graph_tables("SELECT * FROM GRAPH_TABLE (social MATCH (a) COLUMNS (a.id)) AS g").unwrap();
         assert_eq!(spans[0].1, "social");
         assert_eq!(graph_command("create property graph g vertex tables (t)"), Some(true));
+    }
+
+    #[test]
+    fn an_algorithm_call_names_a_procedure_and_its_records_become_a_relation() {
+        let call = algorithm_call(" CALL pagerank(20, 0.85)").unwrap().unwrap();
+        assert_eq!(call.procedure, "eggdb.pageRank");
+        assert_eq!(call.arguments, vec![eggdb_graph::Value::Integer(20), eggdb_graph::Value::Float(0.85)]);
+        assert!(algorithm_call(" MATCH (a) COLUMNS (a.id)").unwrap().is_none());
+        assert!(algorithm_call(" CALL nothing()").is_err());
+        let names = vec![vertex_name("person", &["1".to_owned()]), vertex_name("person", &["2".to_owned()])];
+        let relation = algorithm_relation(
+            &["nodeId", "score"],
+            &[vec![eggdb_graph::Value::Integer(1), eggdb_graph::Value::Float(0.5)]],
+            &names,
+        );
+        assert_eq!(
+            relation,
+            "(SELECT * FROM (VALUES ('person:2', CAST('0.5' AS double precision))) AS eggdb_graph_algorithm (node, score))"
+        );
+        assert_eq!(
+            algorithm_relation(&["nodeId", "triangles"], &[], &names),
+            "(SELECT CAST(NULL AS text) AS node, CAST(NULL AS bigint) AS triangles WHERE 1 = 0)"
+        );
     }
 }

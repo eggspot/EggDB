@@ -7,11 +7,13 @@ use crate::centrality::{
     weighted_shortest_path_in,
 };
 use crate::store::GraphRead;
+use crate::topology::Topology;
 use crate::{GraphError, GraphResult, Value};
 
 type Records = (Vec<&'static str>, Vec<Vec<Value>>);
 
-const PROCEDURES: [&str; 13] = [
+/// The graph algorithm procedures, by their `CALL` names.
+pub const PROCEDURES: [&str; 13] = [
     "eggdb.fastRP",
     "eggdb.pageRank",
     "eggdb.connectedComponents",
@@ -88,8 +90,49 @@ pub(crate) fn call(
     procedure: &str,
     arguments: &[Value],
 ) -> GraphResult<Records> {
+    if procedure == "eggdb.weightedShortestPath" {
+        if arguments.len() > 4 {
+            return Err(argument_error(format!(
+                "{procedure} takes at most 4 arguments"
+            )));
+        }
+        let from = node_argument(arguments.first(), "the start")?;
+        let to = node_argument(arguments.get(1), "the end")?;
+        let property = match arguments.get(2) {
+            None => "weight".to_owned(),
+            Some(Value::String(name)) => name.clone(),
+            Some(_) => return Err(argument_error("the weight property must be a string")),
+        };
+        let directed = direction_argument(arguments.get(3), true)?;
+        let records = weighted_shortest_path_in(graph, from, to, &property, directed)?
+            .map(|(path, cost)| {
+                vec![
+                    Value::List(path.iter().map(|node| id(*node)).collect()),
+                    Value::Float(cost),
+                ]
+            })
+            .into_iter()
+            .collect();
+        return Ok((vec!["nodeIds", "totalCost"], records));
+    }
+    call_on(graph, procedure, arguments)
+}
+
+/// Runs a graph algorithm procedure over any [`Topology`]: its column names and its records.
+/// `eggdb.weightedShortestPath` reads relationship properties, so it runs only on EggDB's own
+/// property graph.
+pub fn call_on(
+    graph: &dyn Topology,
+    procedure: &str,
+    arguments: &[Value],
+) -> GraphResult<Records> {
+    if procedure == "eggdb.weightedShortestPath" {
+        return Err(argument_error(
+            "eggdb.weightedShortestPath reads relationship properties, which only EggDB's own property graph keeps",
+        ));
+    }
     let most = match procedure {
-        "eggdb.pageRank" | "eggdb.shortestPath" | "eggdb.weightedShortestPath" => 4,
+        "eggdb.pageRank" | "eggdb.shortestPath" => 4,
         "eggdb.labelPropagation" | "eggdb.betweenness" | "eggdb.closeness" | "eggdb.louvain"
         | "eggdb.leiden" => 1,
         "eggdb.fastRP" => 2,
@@ -178,26 +221,6 @@ pub(crate) fn call(
             "communityId",
             leiden_in(graph, count_argument(arguments.first(), 10, "maxLevels")?)?,
         ),
-        "eggdb.weightedShortestPath" => {
-            let from = node_argument(arguments.first(), "the start")?;
-            let to = node_argument(arguments.get(1), "the end")?;
-            let property = match arguments.get(2) {
-                None => "weight".to_owned(),
-                Some(Value::String(name)) => name.clone(),
-                Some(_) => return Err(argument_error("the weight property must be a string")),
-            };
-            let directed = direction_argument(arguments.get(3), true)?;
-            let records = weighted_shortest_path_in(graph, from, to, &property, directed)?
-                .map(|(path, cost)| {
-                    vec![
-                        Value::List(path.iter().map(|node| id(*node)).collect()),
-                        Value::Float(cost),
-                    ]
-                })
-                .into_iter()
-                .collect();
-            (vec!["nodeIds", "totalCost"], records)
-        }
         "eggdb.nodeSimilarity" => (
             vec!["node1", "node2", "similarity"],
             node_similarity_in(graph)?

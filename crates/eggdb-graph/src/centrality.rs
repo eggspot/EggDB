@@ -1,4 +1,5 @@
 use crate::store::GraphRead;
+use crate::topology::Topology;
 use crate::{GraphError, GraphResult, Value};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
@@ -18,30 +19,17 @@ fn too_large(what: &str) -> GraphError {
     )
 }
 
-fn indexed(graph: &GraphRead<'_>, directed: bool) -> GraphResult<Indexed> {
+fn indexed(graph: &dyn Topology, directed: bool) -> GraphResult<Indexed> {
     let ids = graph.node_ids()?;
     let position: HashMap<u64, usize> = ids.iter().enumerate().map(|(at, id)| (*id, at)).collect();
     let mut neighbours = vec![Vec::new(); ids.len()];
     for (at, node) in ids.iter().enumerate() {
-        let mut seen = Vec::new();
-        for relationship in graph.touching(*node, true)? {
-            if let Some(found) = graph.relationship(relationship)?
-                && let Some(&end) = position.get(&found.end)
-                && end != at
-            {
-                seen.push(end);
-            }
-        }
-        if !directed {
-            for relationship in graph.touching(*node, false)? {
-                if let Some(found) = graph.relationship(relationship)?
-                    && let Some(&start) = position.get(&found.start)
-                    && start != at
-                {
-                    seen.push(start);
-                }
-            }
-        }
+        let mut seen: Vec<usize> = graph
+            .neighbours(*node, directed)?
+            .into_iter()
+            .filter_map(|next| position.get(&next).copied())
+            .filter(|next| *next != at)
+            .collect();
         seen.sort_unstable();
         seen.dedup();
         neighbours[at] = seen;
@@ -51,7 +39,7 @@ fn indexed(graph: &GraphRead<'_>, directed: bool) -> GraphResult<Indexed> {
 
 /// Each node's betweenness centrality (Brandes' algorithm over unweighted shortest paths); in an
 /// undirected graph each path is counted once.
-pub(crate) fn betweenness_in(graph: &GraphRead<'_>, directed: bool) -> GraphResult<Vec<(u64, f64)>> {
+pub(crate) fn betweenness_in(graph: &dyn Topology, directed: bool) -> GraphResult<Vec<(u64, f64)>> {
     let Indexed { ids, neighbours } = indexed(graph, directed)?;
     if ids.len() > MAX_ALL_PAIRS_NODES {
         return Err(too_large("betweenness"));
@@ -107,7 +95,7 @@ pub(crate) fn betweenness_in(graph: &GraphRead<'_>, directed: bool) -> GraphResu
 
 /// Each node's closeness centrality, Wasserman and Faust's form for graphs that are not
 /// connected: the reachable share of the graph over the mean distance to the reached nodes.
-pub(crate) fn closeness_in(graph: &GraphRead<'_>, directed: bool) -> GraphResult<Vec<(u64, f64)>> {
+pub(crate) fn closeness_in(graph: &dyn Topology, directed: bool) -> GraphResult<Vec<(u64, f64)>> {
     let Indexed { ids, neighbours } = indexed(graph, directed)?;
     if ids.len() > MAX_ALL_PAIRS_NODES {
         return Err(too_large("closeness"));
@@ -145,7 +133,7 @@ pub(crate) fn closeness_in(graph: &GraphRead<'_>, directed: bool) -> GraphResult
 
 /// Each node's core number: the largest k for which it belongs to the graph's k-core (the part
 /// where every node has at least k neighbours), relationships read without direction.
-pub(crate) fn k_core_in(graph: &GraphRead<'_>) -> GraphResult<Vec<(u64, u64)>> {
+pub(crate) fn k_core_in(graph: &dyn Topology) -> GraphResult<Vec<(u64, u64)>> {
     let Indexed { ids, neighbours } = indexed(graph, false)?;
     let count = ids.len();
     let mut degree: Vec<usize> = neighbours.iter().map(Vec::len).collect();
@@ -349,7 +337,7 @@ fn aggregated(level: &Level, community: &[usize]) -> (Level, Vec<usize>) {
 /// Each node's community by the Louvain method (modularity, relationships read without
 /// direction and weight 1), at most `max_levels` aggregation levels; a community is named by its
 /// smallest node id. Nodes are visited in id order, so the result is deterministic.
-pub(crate) fn louvain_in(graph: &GraphRead<'_>, max_levels: usize) -> GraphResult<Vec<(u64, u64)>> {
+pub(crate) fn louvain_in(graph: &dyn Topology, max_levels: usize) -> GraphResult<Vec<(u64, u64)>> {
     let Indexed { ids, neighbours } = indexed(graph, false)?;
     let mut level = Level {
         links: neighbours
@@ -442,7 +430,7 @@ fn refined(level: &Level, community: &[usize]) -> Vec<usize> {
 /// sub-community of its own community only when it is well connected to that community and the
 /// move gains modularity), and aggregation by the refined partition, so no community comes out
 /// disconnected. Deterministic, like [`louvain_in`]; a community is named by its smallest id.
-pub(crate) fn leiden_in(graph: &GraphRead<'_>, max_levels: usize) -> GraphResult<Vec<(u64, u64)>> {
+pub(crate) fn leiden_in(graph: &dyn Topology, max_levels: usize) -> GraphResult<Vec<(u64, u64)>> {
     let Indexed { ids, neighbours } = indexed(graph, false)?;
     let mut level = Level {
         links: neighbours
@@ -513,7 +501,7 @@ fn normalized(mut vector: Vec<f64>) -> Vec<f64> {
 /// is repeatable), then `iterations` rounds of averaging over neighbours (relationships read
 /// without direction), the normalized rounds summed and the sum normalized.
 pub(crate) fn fast_rp_in(
-    graph: &GraphRead<'_>,
+    graph: &dyn Topology,
     dimension: usize,
     iterations: usize,
 ) -> GraphResult<Vec<(u64, Vec<f64>)>> {

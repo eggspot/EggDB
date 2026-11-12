@@ -1,4 +1,5 @@
 use crate::store::GraphRead;
+use crate::topology::Topology;
 use crate::{GraphError, GraphResult};
 use eggdb_keyspace::Keyspace;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -28,27 +29,10 @@ fn with_graph<T>(
     })
 }
 
-fn neighbours(graph: &GraphRead<'_>, node: u64, directed: bool) -> GraphResult<Vec<u64>> {
-    let mut out = Vec::new();
-    for relationship in graph.touching(node, true)? {
-        if let Some(found) = graph.relationship(relationship)? {
-            out.push(found.end);
-        }
-    }
-    if !directed {
-        for relationship in graph.touching(node, false)? {
-            if let Some(found) = graph.relationship(relationship)? {
-                out.push(found.start);
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn undirected_sets(graph: &GraphRead<'_>) -> GraphResult<BTreeMap<u64, BTreeSet<u64>>> {
+fn undirected_sets(graph: &dyn Topology) -> GraphResult<BTreeMap<u64, BTreeSet<u64>>> {
     let mut sets = BTreeMap::new();
     for node in graph.node_ids()? {
-        let set: BTreeSet<u64> = neighbours(graph, node, false)?
+        let set: BTreeSet<u64> = graph.neighbours(node, false)?
             .into_iter()
             .filter(|next| *next != node)
             .collect();
@@ -72,7 +56,7 @@ pub fn shortest_path(
 }
 
 pub(crate) fn shortest_path_in(
-    graph: &GraphRead<'_>,
+    graph: &dyn Topology,
     from: u64,
     to: u64,
     directed: bool,
@@ -95,7 +79,7 @@ pub(crate) fn shortest_path_in(
         if hops == max_hops {
             continue;
         }
-        for next in neighbours(graph, node, directed)? {
+        for next in graph.neighbours(node, directed)? {
             if let std::collections::hash_map::Entry::Vacant(slot) = previous.entry(next) {
                 slot.insert(node);
                 queue.push_back((next, hops + 1));
@@ -107,10 +91,10 @@ pub(crate) fn shortest_path_in(
 
 /// Each node with the smallest node id of its weakly connected component.
 pub fn connected_components(keyspace: &dyn Keyspace) -> GraphResult<Vec<(u64, u64)>> {
-    with_graph(keyspace, connected_components_in)
+    with_graph(keyspace, |graph| connected_components_in(graph))
 }
 
-pub(crate) fn connected_components_in(graph: &GraphRead<'_>) -> GraphResult<Vec<(u64, u64)>> {
+pub(crate) fn connected_components_in(graph: &dyn Topology) -> GraphResult<Vec<(u64, u64)>> {
     let nodes = graph.node_ids()?;
     let mut component: HashMap<u64, u64> = HashMap::new();
     for &start in &nodes {
@@ -121,7 +105,7 @@ pub(crate) fn connected_components_in(graph: &GraphRead<'_>) -> GraphResult<Vec<
         let mut queue = VecDeque::from([start]);
         component.insert(start, start);
         while let Some(node) = queue.pop_front() {
-            for next in neighbours(graph, node, false)? {
+            for next in graph.neighbours(node, false)? {
                 if let std::collections::hash_map::Entry::Vacant(e) = component.entry(next) {
                     e.insert(start);
                     members.push(next);
@@ -150,7 +134,7 @@ pub fn pagerank(
 }
 
 pub(crate) fn pagerank_in(
-    graph: &GraphRead<'_>,
+    graph: &dyn Topology,
     iterations: usize,
     damping: f64,
 ) -> GraphResult<Vec<(u64, f64)>> {
@@ -162,7 +146,7 @@ pub(crate) fn pagerank_in(
     let mut outgoing: Vec<Vec<usize>> = Vec::with_capacity(nodes.len());
     for &node in &nodes {
         outgoing.push(
-            neighbours(graph, node, true)?
+            graph.neighbours(node, true)?
                 .into_iter()
                 .filter_map(|next| index.get(&next).copied())
                 .collect(),
@@ -201,7 +185,7 @@ pub fn label_propagation(
 }
 
 pub(crate) fn label_propagation_in(
-    graph: &GraphRead<'_>,
+    graph: &dyn Topology,
     iterations: usize,
 ) -> GraphResult<Vec<(u64, u64)>> {
     let sets = undirected_sets(graph)?;
@@ -242,10 +226,10 @@ pub(crate) fn label_propagation_in(
 
 /// How many triangles each node is part of, over the undirected graph.
 pub fn triangle_count(keyspace: &dyn Keyspace) -> GraphResult<Vec<(u64, u64)>> {
-    with_graph(keyspace, triangle_count_in)
+    with_graph(keyspace, |graph| triangle_count_in(graph))
 }
 
-pub(crate) fn triangle_count_in(graph: &GraphRead<'_>) -> GraphResult<Vec<(u64, u64)>> {
+pub(crate) fn triangle_count_in(graph: &dyn Topology) -> GraphResult<Vec<(u64, u64)>> {
     let sets = undirected_sets(graph)?;
     Ok(sets
         .iter()
@@ -266,10 +250,10 @@ pub(crate) fn triangle_count_in(graph: &GraphRead<'_>) -> GraphResult<Vec<(u64, 
 /// Jaccard similarity of the neighbour sets of every pair of nodes that share at least one
 /// neighbour, highest first, then by node ids.
 pub fn node_similarity(keyspace: &dyn Keyspace) -> GraphResult<Vec<(u64, u64, f64)>> {
-    with_graph(keyspace, node_similarity_in)
+    with_graph(keyspace, |graph| node_similarity_in(graph))
 }
 
-pub(crate) fn node_similarity_in(graph: &GraphRead<'_>) -> GraphResult<Vec<(u64, u64, f64)>> {
+pub(crate) fn node_similarity_in(graph: &dyn Topology) -> GraphResult<Vec<(u64, u64, f64)>> {
     let sets = undirected_sets(graph)?;
     let mut pairs: BTreeSet<(u64, u64)> = BTreeSet::new();
     for set in sets.values() {

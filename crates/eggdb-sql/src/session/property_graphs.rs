@@ -2,9 +2,10 @@ use super::{QueryResult, Session};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::property_graphs::{
-    CREATE_GRAPHS_TABLE, GRAPHS_TABLE, PropertyGraph, dropped_graph, graph_command, graph_table_query, graph_tables,
-    parse_definition,
+    AlgorithmCall, CREATE_GRAPHS_TABLE, GRAPHS_TABLE, PropertyGraph, algorithm_call, algorithm_relation, dropped_graph,
+    graph_command, graph_table_query, graph_tables, parse_definition, too_many_rows, vertex_name,
 };
+use std::collections::HashMap;
 use crate::sqlserver_security::literal;
 use crate::types::Value;
 
@@ -45,6 +46,64 @@ impl Session<'_> {
             .filter(|result| result.columns.is_some())
             .flat_map(|result| result.rows.iter())
             .find_map(|row| row.first().and_then(Value::to_text))
+    }
+
+    fn graph_rows(&mut self, text: &str) -> SqlResult<Vec<Vec<String>>> {
+        Ok(self
+            .graph_sql(text)?
+            .iter()
+            .filter(|result| result.columns.is_some())
+            .flat_map(|result| result.rows.iter())
+            .map(|row| row.iter().map(|value| value.to_text().unwrap_or_default()).collect())
+            .collect())
+    }
+
+    fn graph_algorithm(&mut self, graph: &PropertyGraph, mut call: AlgorithmCall) -> SqlResult<String> {
+        let (vertices, edges) = graph.algorithm_queries()?;
+        let mut names: Vec<String> = Vec::new();
+        let mut ids: HashMap<String, u64> = HashMap::new();
+        for vertex in &vertices {
+            let rows = self.graph_rows(&vertex.query)?;
+            too_many_rows(rows.len())?;
+            for row in rows {
+                let name = vertex_name(&vertex.vertex_from, &row);
+                if !ids.contains_key(&name) {
+                    ids.insert(name.clone(), names.len() as u64);
+                    names.push(name);
+                }
+            }
+        }
+        let mut pairs = Vec::new();
+        for edge in &edges {
+            let rows = self.graph_rows(&edge.query)?;
+            too_many_rows(rows.len())?;
+            for row in rows {
+                let split = edge.source_columns.min(row.len());
+                let from = ids.get(&vertex_name(&edge.vertex_from, &row[..split]));
+                let to = ids.get(&vertex_name(&edge.vertex_to, &row[split..]));
+                if let (Some(from), Some(to)) = (from, to) {
+                    pairs.push((*from, *to));
+                }
+            }
+        }
+        if call.procedure == "eggdb.shortestPath" {
+            for argument in call.arguments.iter_mut().take(2) {
+                let eggdb_graph::Value::String(name) = argument else {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_PARAMETER_VALUE,
+                        "shortestPath names its start and end vertices as 'vertex table:key'",
+                    ));
+                };
+                let id = ids.get(name.as_str()).copied().ok_or_else(|| {
+                    SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("the graph {} has no vertex {name}", graph.name))
+                })?;
+                *argument = eggdb_graph::Value::Integer(i64::try_from(id).unwrap_or(i64::MAX));
+            }
+        }
+        let topology = eggdb_graph::EdgeList::new(0..names.len() as u64, pairs);
+        let (columns, records) = eggdb_graph::call_procedure(&topology, call.procedure, &call.arguments)
+            .map_err(|error| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, error.message))?;
+        Ok(algorithm_relation(&columns, &records, &names))
     }
 
     fn property_graph(&mut self, name: &str) -> SqlResult<PropertyGraph> {
@@ -109,7 +168,10 @@ impl Session<'_> {
         let mut rewritten = text.to_owned();
         for (range, name, body) in spans.into_iter().rev() {
             let graph = self.property_graph(&name)?;
-            let mut query = graph_table_query(&graph, &body)?;
+            let mut query = match algorithm_call(&body)? {
+                Some(call) => self.graph_algorithm(&graph, call)?,
+                None => graph_table_query(&graph, &body)?,
+            };
             if !has_alias(&text[range.end..]) {
                 query.push_str(" AS graph_table");
             }

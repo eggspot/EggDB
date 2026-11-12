@@ -11,18 +11,22 @@ dependencies = [
  "eggdb-arrow",
  "eggdb-auth",
  "eggdb-bolt",
+ "eggdb-bson",
  "eggdb-clickhouse",
  "eggdb-commands",
  "eggdb-content",
  "eggdb-cql",
  "eggdb-crypto",
+ "eggdb-dav",
  "eggdb-documents",
  "eggdb-dynamodb",
  "eggdb-esrest",
+ "eggdb-flight",
  "eggdb-http",
  "eggdb-kafka",
  "eggdb-keyspace",
  "eggdb-kql",
+ "eggdb-mail",
  "eggdb-mcp",
  "eggdb-memcached",
  "eggdb-mongowire",
@@ -34,6 +38,7 @@ dependencies = [
  "eggdb-pgwire",
  "eggdb-platform",
  "eggdb-queues",
+ "eggdb-rdf",
  "eggdb-resp",
  "eggdb-s3",
  "eggdb-sql",
@@ -45,6 +50,16 @@ dependencies = [
  "eggdb-tls",
  "eggdb-trino",
  "eggdb-ui",
+ "eggdb-zookeeper",
+]
+
+[[package]]
+name = "eggdb-adbc"
+version = "0.5.0"
+dependencies = [
+ "eggdb",
+ "eggdb-flight",
+ "eggdb-parquet",
 ]
 
 [[package]]
@@ -81,6 +96,7 @@ name = "eggdb-arrow"
 version = "0.5.0"
 dependencies = [
  "eggdb-parquet",
+ "eggdb-storage",
 ]
 
 [[package]]
@@ -88,6 +104,7 @@ name = "eggdb-auth"
 version = "0.5.0"
 dependencies = [
  "eggdb-crypto",
+ "eggdb-tls",
 ]
 
 [[package]]
@@ -120,6 +137,7 @@ name = "eggdb-capi"
 version = "0.5.0"
 dependencies = [
  "eggdb",
+ "eggdb-mysqlwire",
  "eggdb-pgwire",
 ]
 
@@ -166,6 +184,15 @@ name = "eggdb-crypto"
 version = "0.5.0"
 
 [[package]]
+name = "eggdb-dav"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-http",
+ "eggdb-keyspace",
+]
+
+[[package]]
 name = "eggdb-documents"
 version = "0.5.0"
 dependencies = [
@@ -200,8 +227,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "eggdb-flight"
+version = "0.5.0"
+dependencies = [
+ "eggdb-arrow",
+ "eggdb-crypto",
+ "eggdb-http2",
+ "eggdb-parquet",
+ "eggdb-platform",
+ "eggdb-sql",
+]
+
+[[package]]
 name = "eggdb-format"
 version = "0.5.0"
+
+[[package]]
+name = "eggdb-fuzz"
+version = "0.5.0"
+dependencies = [
+ "eggdb-arrow",
+ "eggdb-bson",
+ "eggdb-parquet",
+ "eggdb-sqlite-format",
+ "eggdb-storage",
+]
 
 [[package]]
 name = "eggdb-geo"
@@ -230,7 +280,12 @@ version = "0.5.0"
 dependencies = [
  "eggdb-content",
  "eggdb-platform",
+ "eggdb-tls",
 ]
+
+[[package]]
+name = "eggdb-http2"
+version = "0.5.0"
 
 [[package]]
 name = "eggdb-kafka"
@@ -248,6 +303,23 @@ version = "0.5.0"
 [[package]]
 name = "eggdb-kql"
 version = "0.5.0"
+
+[[package]]
+name = "eggdb-lua"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+]
+
+[[package]]
+name = "eggdb-mail"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-http",
+ "eggdb-keyspace",
+ "eggdb-platform",
+]
 
 [[package]]
 name = "eggdb-mcp"
@@ -280,6 +352,7 @@ dependencies = [
  "eggdb-documents",
  "eggdb-keyspace",
  "eggdb-platform",
+ "eggdb-tls",
 ]
 
 [[package]]
@@ -307,6 +380,7 @@ name = "eggdb-nats"
 version = "0.5.0"
 dependencies = [
  "eggdb-crypto",
+ "eggdb-keyspace",
  "eggdb-platform",
  "eggdb-sql",
 ]
@@ -320,6 +394,22 @@ dependencies = [
  "eggdb-http",
  "eggdb-platform",
  "eggdb-sql",
+ "eggdb-tls",
+]
+
+[[package]]
+name = "eggdb-odbc"
+version = "0.5.0"
+dependencies = [
+ "eggdb-capi",
+]
+
+[[package]]
+name = "eggdb-operator"
+version = "0.5.0"
+dependencies = [
+ "eggdb-http",
+ "eggdb-sql",
 ]
 
 [[package]]
@@ -327,6 +417,8 @@ name = "eggdb-parquet"
 version = "0.5.0"
 dependencies = [
  "eggdb-columnar",
+ "eggdb-content",
+ "eggdb-storage",
 ]
 
 [[package]]
@@ -352,6 +444,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "eggdb-rdf"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-http",
+ "eggdb-keyspace",
+]
+
+[[package]]
 name = "eggdb-replication"
 version = "0.5.0"
 
@@ -361,6 +462,7 @@ version = "0.5.0"
 dependencies = [
  "eggdb-crypto",
  "eggdb-keyspace",
+ "eggdb-lua",
  "eggdb-platform",
 ]
 
@@ -383,13 +485,20 @@ name = "eggdb-sql"
 version = "0.5.0"
 dependencies = [
  "eggdb-ai",
+ "eggdb-arrow",
  "eggdb-auth",
+ "eggdb-columnar",
  "eggdb-content",
  "eggdb-crypto",
  "eggdb-geo",
+ "eggdb-graph",
+ "eggdb-parquet",
  "eggdb-search",
+ "eggdb-sqlite-format",
+ "eggdb-storage",
  "eggdb-text",
  "eggdb-vector",
+ "eggdb-wasm-vm",
 ]
 
 [[package]]
@@ -401,6 +510,14 @@ name = "eggdb-sqlite3"
 version = "0.5.0"
 dependencies = [
  "eggdb",
+]
+
+[[package]]
+name = "eggdb-sqllogictest"
+version = "0.5.0"
+dependencies = [
+ "eggdb",
+ "eggdb-crypto",
 ]
 
 [[package]]
@@ -498,3 +615,11 @@ dependencies = [
 [[package]]
 name = "eggdb-wasm-vm"
 version = "0.5.0"
+
+[[package]]
+name = "eggdb-zookeeper"
+version = "0.5.0"
+dependencies = [
+ "eggdb-keyspace",
+ "eggdb-platform",
+]
