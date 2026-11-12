@@ -842,3 +842,4 @@ its full title with its status.
 - [D815](decisions/D815.md) Code-only batch 463 (M6b): server events (logins, schema and privilege changes) in the audit log
 - [D816](decisions/D816.md) Code-only batch 464 (M6b): MySQL and TDS logins in the audit log
 - [D817](decisions/D817.md) Code-only batch 465 (M6b): audited reads of chosen tables
+- [D818](decisions/D818.md) Code-only batch 466 (M6b): anchored audit digests

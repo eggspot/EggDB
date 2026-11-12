@@ -8,6 +8,7 @@ use eggdb_mcp::audit::{
 };
 
 const LINE_COLUMNS: usize = 120;
+const AUDIT_ANCHOR_VARIABLE: &str = "EGGDB_AUDIT_ANCHOR";
 const TIME_COLUMNS: usize = 23;
 const TOOL_COLUMNS: usize = 14;
 const OUTCOME_COLUMNS: usize = 19;
@@ -322,7 +323,8 @@ fn summary(totals: &AuditTotals, shown_calls: u64) -> String {
 
 impl Session<'_> {
     fn verify_audit(&mut self, path: &std::path::Path, shown: &str) -> Result<Exit, Failure> {
-        let report = eggdb_mcp::audit::verify_chain(path).map_err(|error| {
+        let anchor = std::env::var(AUDIT_ANCHOR_VARIABLE).ok().filter(|anchor| !anchor.is_empty());
+        let report = eggdb_mcp::audit::verify_chain_to_anchor(path, anchor.as_deref()).map_err(|error| {
             Failure::database(format!("cannot read {shown}: {error}"), Exit::DatabaseError)
         })?;
         if let Some(line) = report.first_break {
@@ -330,6 +332,18 @@ impl Session<'_> {
                 "audit_changed",
                 format!(
                     "{shown} was changed at line {line}: that record does not link to the one before it"
+                ),
+                Exit::DatabaseError,
+            ));
+        }
+        if let Some(anchor) = &anchor
+            && report.anchor_line.is_none()
+        {
+            return Err(Failure::coded(
+                "audit_truncated",
+                format!(
+                    "{shown} no longer holds the record {AUDIT_ANCHOR_VARIABLE} names ({}): records were cut off the end or the file was rewritten",
+                    printable(anchor)
                 ),
                 Exit::DatabaseError,
             ));
@@ -348,11 +362,13 @@ impl Session<'_> {
                     .number("chained", report.chained)
                     .number("unchained", report.unchained)
                     .boolean("intact", true)
+                    .string("newest_digest", &report.newest_digest)
                     .line(),
             ),
             _ => self.out.text(&format!(
-                "{shown}: {} records, each linked to the one before{older}; intact\n",
-                render::count(report.chained)
+                "{shown}: {} records, each linked to the one before{older}; intact\nnewest digest: {} (keep it elsewhere; {AUDIT_ANCHOR_VARIABLE}=<digest> checks a later file still holds it)\n",
+                render::count(report.chained),
+                report.newest_digest
             )),
         }
         Ok(Exit::Done)

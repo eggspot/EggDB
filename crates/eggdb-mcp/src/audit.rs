@@ -66,14 +66,21 @@ impl AuditLog {
     /// Appends `record`, one JSON object without a line break, and syncs it to the disk,
     /// waiting up to five seconds for another server's lock on the file.
     pub fn append(&self, record: &str) -> Result<(), AuditFailure> {
+        self.append_waiting(record, LOCK_WAIT).map(drop)
+    }
+
+    /// Appends `record` as [`AuditLog::append`] does and returns the SHA-256 (hex) of the line
+    /// written, the chain's newest digest: kept outside the file, it shows later whether
+    /// records were cut off the end ([`verify_chain_to_anchor`]).
+    pub fn append_with_digest(&self, record: &str) -> Result<String, AuditFailure> {
         self.append_waiting(record, LOCK_WAIT)
     }
 
     pub(crate) fn append_promptly(&self, record: &str) -> Result<(), AuditFailure> {
-        self.append_waiting(record, PROMPT_LOCK_WAIT)
+        self.append_waiting(record, PROMPT_LOCK_WAIT).map(drop)
     }
 
-    fn append_waiting(&self, record: &str, wait: Duration) -> Result<(), AuditFailure> {
+    fn append_waiting(&self, record: &str, wait: Duration) -> Result<String, AuditFailure> {
         let failure = |error: io::Error| AuditFailure {
             reason: describe(&error),
         };
@@ -102,7 +109,8 @@ impl AuditLog {
         line.extend_from_slice(chained.as_bytes());
         line.push(b'\n');
         file.write_all(&line).map_err(failure)?;
-        file.sync_data().map_err(failure)
+        file.sync_data().map_err(failure)?;
+        Ok(hex(&eggdb_crypto::sha256(chained.as_bytes())))
     }
 }
 
@@ -140,6 +148,12 @@ pub struct ChainReport {
     /// The line number (from 1) of the first record whose link does not match the line before
     /// it, or that has no link after the chain began: the file was changed there.
     pub first_break: Option<u64>,
+    /// The SHA-256 (hex) of the last line, the chain's newest digest; all zeros for an empty
+    /// file. Kept elsewhere, it is an anchor for a later check.
+    pub newest_digest: String,
+    /// The line number of the record whose digest is the anchor checked, when one was given
+    /// and found.
+    pub anchor_line: Option<u64>,
 }
 
 fn prev_of(line: &[u8]) -> Option<&str> {
@@ -154,7 +168,18 @@ fn prev_of(line: &[u8]) -> Option<&str> {
 /// Records cut off the end, and a file rewritten whole with a new chain, still verify: compare
 /// the last record's digest with a copy kept elsewhere to catch those.
 pub fn verify_chain(path: &Path) -> io::Result<ChainReport> {
-    let mut report = ChainReport::default();
+    verify_chain_to_anchor(path, None)
+}
+
+/// [`verify_chain`], also finding the record whose digest is `anchor` (a newest digest kept
+/// from an earlier run): when the anchor is given and [`ChainReport::anchor_line`] is `None`,
+/// that record and maybe others after it were cut off or the file was rewritten.
+pub fn verify_chain_to_anchor(path: &Path, anchor: Option<&str>) -> io::Result<ChainReport> {
+    let mut report = ChainReport {
+        newest_digest: GENESIS.to_owned(),
+        ..ChainReport::default()
+    };
+    let anchor = anchor.map(str::to_ascii_lowercase);
     let Some(mut reader) = open_audit(path)? else {
         return Ok(report);
     };
@@ -177,7 +202,11 @@ pub fn verify_chain(path: &Path) -> io::Result<ChainReport> {
             }
         }
         previous = hex(&eggdb_crypto::sha256(&line));
+        if anchor.as_deref() == Some(previous.as_str()) {
+            report.anchor_line.get_or_insert(number);
+        }
     }
+    report.newest_digest = previous;
     Ok(report)
 }
 
@@ -1126,6 +1155,27 @@ mod chain_tests {
         std::fs::write(&path, text.replace("\"n\":1", "\"n\":9")).unwrap();
         assert_eq!(verify_chain(&path).unwrap().first_break, Some(4));
         assert!(log.append("not json").is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+    #[test]
+    fn an_anchor_kept_elsewhere_finds_its_record_until_the_end_is_cut_off() {
+        let directory =
+            std::env::temp_dir().join(format!("eggdb-audit-anchor-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("app.eggdb.mcp-audit.jsonl");
+        let log = AuditLog::new(path.clone());
+        log.append("{\"event\":\"call\",\"n\":0}").unwrap();
+        let anchor = log.append_with_digest("{\"event\":\"call\",\"n\":1}").unwrap();
+        log.append("{\"event\":\"call\",\"n\":2}").unwrap();
+        let report = verify_chain_to_anchor(&path, Some(&anchor)).unwrap();
+        assert_eq!(report.anchor_line, Some(2));
+        assert_ne!(report.newest_digest, anchor);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let kept: Vec<&str> = text.lines().take(1).collect();
+        std::fs::write(&path, format!("{}\n", kept.join("\n"))).unwrap();
+        let cut = verify_chain_to_anchor(&path, Some(&anchor)).unwrap();
+        assert_eq!((cut.first_break, cut.anchor_line), (None, None));
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }

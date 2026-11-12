@@ -1859,6 +1859,8 @@ impl Session<'_> {
 
 const AUDIT_VARIABLE: &str = "EGGDB_AUDIT";
 const AUDIT_TABLES_VARIABLE: &str = "EGGDB_AUDIT_TABLES";
+const AUDIT_DIGEST_EVERY: u64 = 1000;
+static AUDIT_RECORDS_WRITTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn audit_server_events_from_environment(database: &std::path::Path) {
     let wanted = std::env::var(AUDIT_VARIABLE).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
@@ -1878,8 +1880,14 @@ fn audit_server_events_from_environment(database: &std::path::Path) {
             event.detail,
             event.succeeded,
         );
-        if let Err(failure) = log.append(&record) {
-            eprintln!("eggdb serve: the audit record was not written: {failure}");
+        match log.append_with_digest(&record) {
+            Ok(digest) => {
+                let written = AUDIT_RECORDS_WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if written % AUDIT_DIGEST_EVERY == 0 {
+                    eprintln!("eggdb serve: audit digest after {written} records: {digest}");
+                }
+            }
+            Err(failure) => eprintln!("eggdb serve: the audit record was not written: {failure}"),
         }
     }));
 }
