@@ -1551,6 +1551,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::pg_catalog::monitoring_function(name, &values) {
             return result;
         }
+        if name == crate::sqlserver_security::BLOCK_VIOLATION_FUNCTION {
+            return crate::sqlserver_security::block_violation(&values);
+        }
         if let Some(result) = crate::ranges::function(name, &values) {
             return result;
         }

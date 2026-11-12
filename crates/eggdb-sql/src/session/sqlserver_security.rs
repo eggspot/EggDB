@@ -4,7 +4,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::QueryResult;
 use crate::sqlserver_security::{
     CREATE_POLICIES_TABLE, FilterPredicate, POLICIES_TABLE, PredicateKind, SecurityPolicyCommand, identifier,
-    literal, qualified, row_policy_name, using_condition,
+    literal, qualified, using_condition,
 };
 
 struct StoredPredicate {
@@ -151,24 +151,29 @@ impl Session<'_> {
 
     fn switch_policy(&mut self, policy: &str, on: bool) -> SqlResult<()> {
         for predicate in self.stored_predicates(policy)? {
-            let row_policy = identifier(&row_policy_name(policy, predicate.kind));
             let table = qualified(&predicate.table);
-            let condition = using_condition(&predicate.function, &predicate.arguments);
-            let restrictive = match predicate.kind {
-                PredicateKind::Filter => format!("USING ({condition}) WITH CHECK (true)"),
-                PredicateKind::BlockAfterInsert => format!("FOR INSERT WITH CHECK ({condition})"),
-                PredicateKind::BlockAfterUpdate => format!("FOR UPDATE USING (true) WITH CHECK ({condition})"),
-            };
             let text = if on {
-                format!(
+                let condition = using_condition(&predicate.function, &predicate.arguments);
+                let mut text = format!(
                     "ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; \
                      DROP POLICY IF EXISTS eggdb_sqlserver_base ON {table}; \
-                     CREATE POLICY eggdb_sqlserver_base ON {table} AS PERMISSIVE USING (true) WITH CHECK (true); \
-                     DROP POLICY IF EXISTS {row_policy} ON {table}; \
-                     CREATE POLICY {row_policy} ON {table} AS RESTRICTIVE {restrictive}"
-                )
+                     CREATE POLICY eggdb_sqlserver_base ON {table} AS PERMISSIVE USING (true) WITH CHECK (true)"
+                );
+                for (name, clause) in predicate.kind.row_policies(policy, &condition, &predicate.table) {
+                    let name = identifier(&name);
+                    text.push_str(&format!(
+                        "; DROP POLICY IF EXISTS {name} ON {table}; CREATE POLICY {name} ON {table} AS RESTRICTIVE {clause}"
+                    ));
+                }
+                text
             } else {
-                format!("DROP POLICY IF EXISTS {row_policy} ON {table}")
+                predicate
+                    .kind
+                    .row_policy_names(policy)
+                    .iter()
+                    .map(|name| format!("DROP POLICY IF EXISTS {} ON {table}", identifier(name)))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             };
             self.policy_sql(&text)?;
         }

@@ -3,14 +3,26 @@
 
 use crate::ast::Name;
 
-/// What a security predicate does: filter the rows a query sees, or block writes whose new
-/// rows fail it.
+/// What a security predicate does: filter the rows a query sees, block writes whose new rows
+/// fail it, or block updates and deletes of existing rows that fail it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PredicateKind {
     Filter,
     BlockAfterInsert,
     BlockAfterUpdate,
+    BlockBeforeUpdate,
+    BlockBeforeDelete,
+    BlockAll,
 }
+
+const ALL_KINDS: [PredicateKind; 6] = [
+    PredicateKind::Filter,
+    PredicateKind::BlockAfterInsert,
+    PredicateKind::BlockAfterUpdate,
+    PredicateKind::BlockBeforeUpdate,
+    PredicateKind::BlockBeforeDelete,
+    PredicateKind::BlockAll,
+];
 
 impl PredicateKind {
     pub(crate) fn code(self) -> &'static str {
@@ -18,18 +30,87 @@ impl PredicateKind {
             Self::Filter => "filter",
             Self::BlockAfterInsert => "block_insert",
             Self::BlockAfterUpdate => "block_update",
+            Self::BlockBeforeUpdate => "block_before_update",
+            Self::BlockBeforeDelete => "block_delete",
+            Self::BlockAll => "block_all",
         }
     }
 
     pub(crate) fn from_code(code: &str) -> Option<Self> {
-        [Self::Filter, Self::BlockAfterInsert, Self::BlockAfterUpdate]
+        ALL_KINDS.into_iter().find(|kind| kind.code() == code)
+    }
+
+    /// The operations a predicate without one stands for: SQL Server applies a block predicate
+    /// with no operation to all four.
+    fn operations(self) -> Vec<Self> {
+        match self {
+            Self::BlockAll => vec![
+                Self::BlockAfterInsert,
+                Self::BlockAfterUpdate,
+                Self::BlockBeforeUpdate,
+                Self::BlockBeforeDelete,
+            ],
+            kind => vec![kind],
+        }
+    }
+
+    /// Each restrictive row-security policy the predicate becomes, as the policy's name and
+    /// the text after `AS RESTRICTIVE`. `condition` is the predicate as SQL, `table` the
+    /// table it guards.
+    pub(crate) fn row_policies(self, policy: &str, condition: &str, table: &str) -> Vec<(String, String)> {
+        self.operations()
             .into_iter()
-            .find(|kind| kind.code() == code)
+            .map(|operation| {
+                let clause = match operation {
+                    Self::Filter => format!("USING ({condition}) WITH CHECK (true)"),
+                    Self::BlockAfterInsert => format!("FOR INSERT WITH CHECK ({condition})"),
+                    Self::BlockAfterUpdate => format!("FOR UPDATE USING (true) WITH CHECK ({condition})"),
+                    Self::BlockBeforeUpdate => {
+                        format!("FOR UPDATE USING ({}) WITH CHECK (true)", raising_condition(condition, table))
+                    }
+                    _ => format!("FOR DELETE USING ({})", raising_condition(condition, table)),
+                };
+                (row_policy_name(policy, operation), clause)
+            })
+            .collect()
+    }
+
+    pub(crate) fn row_policy_names(self, policy: &str) -> Vec<String> {
+        self.operations()
+            .into_iter()
+            .map(|operation| row_policy_name(policy, operation))
+            .collect()
     }
 }
 
-/// One `ADD FILTER PREDICATE fn(columns) ON table` or `ADD BLOCK PREDICATE ... AFTER INSERT |
-/// AFTER UPDATE`.
+/// The function a `BEFORE UPDATE` or `BEFORE DELETE` predicate calls on an existing row it
+/// rejects: SQL Server fails the statement there, where row security would skip the row.
+pub(crate) const BLOCK_VIOLATION_FUNCTION: &str = "eggdb_sqlserver_block_predicate_violation";
+
+fn raising_condition(condition: &str, table: &str) -> String {
+    format!(
+        "CASE WHEN {condition} THEN true ELSE {BLOCK_VIOLATION_FUNCTION}({}) END",
+        literal(table)
+    )
+}
+
+/// The value of [`BLOCK_VIOLATION_FUNCTION`]: always error 33504.
+pub(crate) fn block_violation(values: &[crate::types::Value]) -> crate::error::SqlResult<crate::types::Value> {
+    let table = match values.first() {
+        Some(crate::types::Value::Text(table)) => crate::schemas::display(table),
+        _ => String::new(),
+    };
+    Err(crate::error::SqlError::new(
+        crate::error::SqlState::INSUFFICIENT_PRIVILEGE,
+        format!(
+            "The attempted operation failed because the target object '{table}' has a block predicate that conflicts with this operation. If the operation is performed on a view, the block predicate might be enforced on the underlying table. Modify the operation to target only the rows that are allowed by the block predicate."
+        ),
+    )
+    .with_sqlserver_code(33504))
+}
+
+/// One `ADD FILTER PREDICATE fn(columns) ON table` or `ADD BLOCK PREDICATE ... [AFTER INSERT |
+/// AFTER UPDATE | BEFORE UPDATE | BEFORE DELETE]`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FilterPredicate {
     pub(crate) kind: PredicateKind,
@@ -77,8 +158,8 @@ pub(crate) fn qualified(name: &str) -> String {
     format!("{}.{}", identifier(schema), identifier(crate::schemas::base_name(name)))
 }
 
-/// The row-security policy a predicate becomes on its table.
-pub(crate) fn row_policy_name(policy: &str, kind: PredicateKind) -> String {
+/// The row-security policy one operation of a predicate becomes on its table.
+fn row_policy_name(policy: &str, kind: PredicateKind) -> String {
     format!("sqlserver_policy_{}_{}", crate::schemas::base_name(policy), kind.code())
 }
 
@@ -100,6 +181,23 @@ mod tests {
         );
         assert_eq!(row_policy_name("SalesFilter", PredicateKind::Filter), "sqlserver_policy_SalesFilter_filter");
         assert_eq!(PredicateKind::from_code("block_update"), Some(PredicateKind::BlockAfterUpdate));
+        assert_eq!(PredicateKind::from_code("block_delete"), Some(PredicateKind::BlockBeforeDelete));
+    }
+
+    #[test]
+    fn a_block_predicate_without_an_operation_guards_all_four() {
+        let policies = PredicateKind::BlockAll.row_policies("Guard", "ok", "Sales");
+        let names: Vec<&str> = policies.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "sqlserver_policy_Guard_block_insert",
+                "sqlserver_policy_Guard_block_update",
+                "sqlserver_policy_Guard_block_before_update",
+                "sqlserver_policy_Guard_block_delete",
+            ]
+        );
+        assert!(policies[3].1.starts_with("FOR DELETE USING (CASE WHEN ok THEN true ELSE eggdb_sqlserver_block_predicate_violation('Sales') END)"));
     }
 
     fn rows(session: &mut crate::Session<'_>, sql: &str) -> String {
@@ -131,10 +229,20 @@ mod tests {
         rows(&mut admin, "DROP SECURITY POLICY SalesFilter");
         rows(&mut admin, "DROP SECURITY POLICY IF EXISTS SalesFilter");
         rows(&mut admin, "CREATE SECURITY POLICY Blocker ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales AFTER INSERT");
+        rows(&mut admin, "CREATE SECURITY POLICY Before ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales BEFORE DELETE");
+        rows(&mut admin, "ALTER SECURITY POLICY Before ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales BEFORE UPDATE");
+        rows(&mut admin, "ALTER SECURITY POLICY Before DROP BLOCK PREDICATE ON dbo.Sales BEFORE DELETE");
+        rows(&mut admin, "CREATE SECURITY POLICY Everything ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales");
         let refused = admin.execute(
-            "CREATE SECURITY POLICY Before ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales BEFORE DELETE",
+            "CREATE SECURITY POLICY Later ADD BLOCK PREDICATE dbo.fn_rep(SalesRep) ON dbo.Sales AFTER DELETE",
             &mut |_| {},
         );
         assert!(refused.is_err());
+    }
+
+    #[test]
+    fn the_violation_function_answers_error_33504() {
+        let error = block_violation(&[crate::types::Value::Text("Sales".to_owned())]).unwrap_err();
+        assert!(error.to_string().contains("has a block predicate that conflicts"), "{error}");
     }
 }

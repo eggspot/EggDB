@@ -96,8 +96,18 @@ impl Parser<'_> {
             if self.take_word("update") {
                 return Ok(PredicateKind::BlockAfterUpdate);
             }
+            return Err(self.unexpected());
         }
-        Err(self.not_supported("BLOCK PREDICATE other than AFTER INSERT or AFTER UPDATE"))
+        if self.take_word("before") {
+            if self.take_word("update") {
+                return Ok(PredicateKind::BlockBeforeUpdate);
+            }
+            if self.take_word("delete") {
+                return Ok(PredicateKind::BlockBeforeDelete);
+            }
+            return Err(self.unexpected());
+        }
+        Ok(PredicateKind::BlockAll)
     }
 
     fn filter_predicate(&mut self) -> SqlResult<FilterPredicate> {

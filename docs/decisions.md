@@ -895,3 +895,4 @@ its full title with its status.
 - [D868](decisions/D868.md) Code-only batch 516 (M6c): OTLP export over HTTPS
 - [D869](decisions/D869.md) Code-only batch 517 (M16): CDC webhooks over HTTPS
 - [D870](decisions/D870.md) Code-only batch 518 (M6c): EXPLAIN ANALYZE in JSON, YAML and XML
+- [D871](decisions/D871.md) Code-only batch 519 (M6b): SQL Server BEFORE UPDATE and BEFORE DELETE block predicates
