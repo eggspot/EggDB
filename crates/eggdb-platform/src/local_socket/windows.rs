@@ -7,12 +7,14 @@ use std::io;
 use std::net::Shutdown;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{
-    AsRawHandle, AsRawSocket, AsSocket, BorrowedSocket, FromRawHandle, FromRawSocket, OwnedHandle,
-    OwnedSocket, RawHandle, RawSocket,
+    AsRawHandle, AsRawSocket, FromRawHandle, FromRawSocket, OwnedHandle, OwnedSocket, RawHandle,
+    RawSocket,
 };
 use std::ptr;
 use std::sync::OnceLock;
 use std::time::Duration;
+
+mod pipe;
 
 const AF_UNIX: i32 = 1;
 const SOCK_STREAM: i32 = 1;
@@ -139,13 +141,26 @@ mod sys {
     }
 }
 
-/// A listening Unix domain socket: Windows' `AF_UNIX` socket, Windows 10 version 1803 and later.
+/// A listening local endpoint: Windows' `AF_UNIX` socket (Windows 10 version 1803 and later), or
+/// a named pipe from [`super::bind_named_pipe`].
 #[derive(Debug)]
-pub struct LocalListener(OwnedSocket);
+pub struct LocalListener(Listening);
+
+#[derive(Debug)]
+enum Listening {
+    Socket(OwnedSocket),
+    Pipe(pipe::PipeListener),
+}
 
 /// A connection accepted on a [`LocalListener`], or made with [`LocalStream::connect`].
 #[derive(Debug)]
-pub struct LocalStream(OwnedSocket);
+pub struct LocalStream(Connection);
+
+#[derive(Debug)]
+enum Connection {
+    Socket(OwnedSocket),
+    Pipe(pipe::PipeStream),
+}
 
 impl LocalListener {
     /// Binds a socket at `path` and listens on it, failing when anything is already there.
@@ -157,25 +172,43 @@ impl LocalListener {
         // SAFETY: `socket` is an open, bound stream socket.
         let listening = unsafe { sys::listen(raw(&socket), LISTEN_BACKLOG) };
         check(listening)?;
-        Ok(Self(socket))
+        Ok(Self(Listening::Socket(socket)))
     }
 
-    /// Accepts a connection. Windows does not report the peer's address on these sockets, so
+    /// Accepts a connection. Windows reports no peer address on these sockets and pipes, so
     /// the second value is `()`.
     pub fn accept(&self) -> io::Result<(LocalStream, ())> {
-        // SAFETY: a null address and length ask Winsock for no peer address.
-        let accepted = unsafe { sys::accept(raw(&self.0), ptr::null_mut(), ptr::null_mut()) };
-        Ok((LocalStream(owned(accepted)?), ()))
+        match &self.0 {
+            Listening::Socket(socket) => {
+                // SAFETY: a null address and length ask Winsock for no peer address.
+                let accepted =
+                    unsafe { sys::accept(raw(socket), ptr::null_mut(), ptr::null_mut()) };
+                Ok((LocalStream(Connection::Socket(owned(accepted)?)), ()))
+            }
+            Listening::Pipe(listener) => Ok((LocalStream(Connection::Pipe(listener.accept()?)), ())),
+        }
     }
 
     /// Sets non-blocking accepts; accepted connections start in the same mode.
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        set_nonblocking(&self.0, nonblocking)
+        match &self.0 {
+            Listening::Socket(socket) => set_nonblocking(socket, nonblocking),
+            Listening::Pipe(listener) => {
+                listener.set_nonblocking(nonblocking);
+                Ok(())
+            }
+        }
     }
 
-    /// Opens a second handle to the same socket.
+    /// Opens a second handle to the same socket; a named pipe's listener has only one.
     pub fn try_clone(&self) -> io::Result<Self> {
-        self.0.try_clone().map(Self)
+        match &self.0 {
+            Listening::Socket(socket) => socket.try_clone().map(|socket| Self(Listening::Socket(socket))),
+            Listening::Pipe(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a named pipe's listener cannot be cloned",
+            )),
+        }
     }
 }
 
@@ -188,45 +221,81 @@ impl LocalStream {
         let connected =
             unsafe { sys::connect(raw(&socket), (&raw const address).cast(), ADDRESS_LEN) };
         check(connected)?;
-        Ok(Self(socket))
+        Ok(Self(Connection::Socket(socket)))
     }
 
     /// Sets how long a read waits; `None` waits forever.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        set_timeout(&self.0, SO_RCVTIMEO, timeout)
+        match &self.0 {
+            Connection::Socket(socket) => set_timeout(socket, SO_RCVTIMEO, timeout),
+            Connection::Pipe(pipe) => {
+                pipe.set_read_timeout(timeout_milliseconds(timeout)?);
+                Ok(())
+            }
+        }
     }
 
     /// Sets how long a write waits; `None` waits forever.
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        set_timeout(&self.0, SO_SNDTIMEO, timeout)
+        match &self.0 {
+            Connection::Socket(socket) => set_timeout(socket, SO_SNDTIMEO, timeout),
+            Connection::Pipe(pipe) => {
+                pipe.set_write_timeout(timeout_milliseconds(timeout)?);
+                Ok(())
+            }
+        }
     }
 
     /// Sets non-blocking reads and writes.
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        set_nonblocking(&self.0, nonblocking)
+        match &self.0 {
+            Connection::Socket(socket) => set_nonblocking(socket, nonblocking),
+            Connection::Pipe(pipe) => {
+                pipe.set_nonblocking(nonblocking);
+                Ok(())
+            }
+        }
     }
 
-    /// Shuts down one or both directions.
+    /// Shuts down one or both directions. On a named pipe, shutting down reads does nothing,
+    /// writes end when the last handle closes, and both disconnects the client at once,
+    /// dropping what it has not read.
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        let socket = match &self.0 {
+            Connection::Socket(socket) => socket,
+            Connection::Pipe(pipe) => {
+                return match how {
+                    Shutdown::Both => pipe.disconnect(),
+                    Shutdown::Read | Shutdown::Write => Ok(()),
+                };
+            }
+        };
         let how = match how {
             Shutdown::Read => SD_RECEIVE,
             Shutdown::Write => SD_SEND,
             Shutdown::Both => SD_BOTH,
         };
-        // SAFETY: `self.0` is an open socket and `how` one of the SD_ values.
-        let done = unsafe { sys::shutdown(raw(&self.0), how) };
+        // SAFETY: `socket` is an open socket and `how` one of the SD_ values.
+        let done = unsafe { sys::shutdown(raw(socket), how) };
         check(done)
     }
 
     /// Opens a second handle to the same connection.
     pub fn try_clone(&self) -> io::Result<Self> {
-        self.0.try_clone().map(Self)
+        match &self.0 {
+            Connection::Socket(socket) => socket.try_clone().map(|socket| Self(Connection::Socket(socket))),
+            Connection::Pipe(pipe) => pipe.try_clone().map(|pipe| Self(Connection::Pipe(pipe))),
+        }
     }
 
     fn receive(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        let socket = match &self.0 {
+            Connection::Socket(socket) => socket,
+            Connection::Pipe(pipe) => return pipe.receive(buffer),
+        };
         let len = i32::try_from(buffer.len()).unwrap_or(i32::MAX);
         // SAFETY: `buffer` is writable for at least `len` bytes for the whole call.
-        let received = unsafe { sys::recv(raw(&self.0), buffer.as_mut_ptr(), len, 0) };
+        let received = unsafe { sys::recv(raw(socket), buffer.as_mut_ptr(), len, 0) };
         if received == SOCKET_ERROR {
             let error = last_error();
             return if error.raw_os_error() == Some(WSAESHUTDOWN) {
@@ -239,25 +308,17 @@ impl LocalStream {
     }
 
     fn transmit(&self, buffer: &[u8]) -> io::Result<usize> {
+        let socket = match &self.0 {
+            Connection::Socket(socket) => socket,
+            Connection::Pipe(pipe) => return pipe.transmit(buffer),
+        };
         let len = i32::try_from(buffer.len()).unwrap_or(i32::MAX);
         // SAFETY: `buffer` is readable for at least `len` bytes for the whole call.
-        let sent = unsafe { sys::send(raw(&self.0), buffer.as_ptr(), len, 0) };
+        let sent = unsafe { sys::send(raw(socket), buffer.as_ptr(), len, 0) };
         if sent == SOCKET_ERROR {
             return Err(last_error());
         }
         Ok(usize::try_from(sent).unwrap_or(0))
-    }
-}
-
-impl AsSocket for LocalListener {
-    fn as_socket(&self) -> BorrowedSocket<'_> {
-        self.0.as_socket()
-    }
-}
-
-impl AsSocket for LocalStream {
-    fn as_socket(&self) -> BorrowedSocket<'_> {
-        self.0.as_socket()
     }
 }
 
@@ -290,6 +351,14 @@ impl io::Write for &LocalStream {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+pub(super) fn bind_named_pipe(name: &str) -> Result<LocalListener, LocalBindError> {
+    match pipe::PipeListener::bind(name) {
+        Ok(listener) => Ok(LocalListener(Listening::Pipe(listener))),
+        Err(pipe::PipeBindError::InUse) => Err(LocalBindError::InUse),
+        Err(pipe::PipeBindError::Io(error)) => Err(LocalBindError::Io(error)),
     }
 }
 
@@ -370,33 +439,47 @@ fn existing_entry(path: &Path) -> io::Result<Entry> {
     })
 }
 
+struct OwnerOnlyAcl([u32; ACL_BUFFER_WORDS]);
+
+impl OwnerOnlyAcl {
+    fn for_current_user() -> io::Result<Self> {
+        let mut user = [0u64; TOKEN_USER_WORDS];
+        let sid = current_user_sid(&mut user)?;
+        // SAFETY: `sid` points at the valid SID GetTokenInformation wrote into `user`, which is
+        // not moved while `sid` is used.
+        let sid_len = unsafe { sys::GetLengthSid(sid) };
+        let acl_len = ACL_HEADER_LEN + ACCESS_ALLOWED_ACE_LEN_WITHOUT_SID + sid_len;
+        let mut acl = Self([0u32; ACL_BUFFER_WORDS]);
+        if !usize::try_from(acl_len).is_ok_and(|len| len <= size_of_val(&acl.0)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the current user's security identifier is too long",
+            ));
+        }
+        let acl_pointer = acl.as_mut_ptr();
+        // SAFETY: `acl` is DWORD-aligned writable memory of at least `acl_len` bytes.
+        let initialised = unsafe { sys::InitializeAcl(acl_pointer, acl_len, ACL_REVISION) };
+        if initialised == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `acl` was initialised above with room for exactly this one ACE, and `sid` is
+        // the valid SID inside `user`, which the ACE copies.
+        let added =
+            unsafe { sys::AddAccessAllowedAce(acl_pointer, ACL_REVISION, FILE_ALL_ACCESS, sid) };
+        if added == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(acl)
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut c_void {
+        self.0.as_mut_ptr().cast()
+    }
+}
+
 fn restrict_to_owner(path: &Path) -> io::Result<()> {
-    let mut user = [0u64; TOKEN_USER_WORDS];
-    let sid = current_user_sid(&mut user)?;
-    // SAFETY: `sid` points at the valid SID GetTokenInformation wrote into `user`, which is not
-    // moved while `sid` is used.
-    let sid_len = unsafe { sys::GetLengthSid(sid) };
-    let acl_len = ACL_HEADER_LEN + ACCESS_ALLOWED_ACE_LEN_WITHOUT_SID + sid_len;
-    let mut acl = [0u32; ACL_BUFFER_WORDS];
-    if !usize::try_from(acl_len).is_ok_and(|len| len <= size_of_val(&acl)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the current user's security identifier is too long",
-        ));
-    }
-    let acl_pointer: *mut c_void = acl.as_mut_ptr().cast();
-    // SAFETY: `acl` is DWORD-aligned writable memory of at least `acl_len` bytes.
-    let initialised = unsafe { sys::InitializeAcl(acl_pointer, acl_len, ACL_REVISION) };
-    if initialised == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `acl` was initialised above with room for exactly this one ACE, and `sid` is the
-    // valid SID inside `user`.
-    let added =
-        unsafe { sys::AddAccessAllowedAce(acl_pointer, ACL_REVISION, FILE_ALL_ACCESS, sid) };
-    if added == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let mut acl = OwnerOnlyAcl::for_current_user()?;
+    let acl_pointer = acl.as_mut_ptr();
     let file = std::fs::OpenOptions::new()
         .access_mode(READ_CONTROL | WRITE_DAC)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
@@ -577,6 +660,40 @@ mod tests {
         client.read_to_end(&mut answer).unwrap();
         assert_eq!(answer, b"hello");
         echo.join().unwrap();
+    }
+
+    #[test]
+    fn an_echo_round_trips_through_a_named_pipe_and_a_second_bind_is_refused() {
+        let name = format!("eggdb-pipe-echo-{}", std::process::id());
+        let listener = bind_named_pipe(&name).unwrap();
+        assert!(matches!(bind_named_pipe(&name), Err(LocalBindError::InUse)));
+        let echo = std::thread::spawn(move || {
+            let (accepted, ()) = listener.accept().unwrap();
+            accepted
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = accepted.try_clone().unwrap();
+            let mut received = [0u8; 5];
+            reader.read_exact(&mut received).unwrap();
+            let mut writer: &LocalStream = &accepted;
+            writer.write_all(&received).unwrap();
+            listener
+        });
+        let mut client = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(format!(r"\\.\pipe\{name}"))
+            .unwrap();
+        client.write_all(b"hello").unwrap();
+        let mut answer = [0u8; 5];
+        client.read_exact(&mut answer).unwrap();
+        assert_eq!(&answer, b"hello");
+        let listener = echo.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]

@@ -965,3 +965,4 @@ its full title with its status.
 - [D938](decisions/D938.md) Code-only batch 586 (M4): key-value transactions and collections in the Kotlin driver
 - [D939](decisions/D939.md) Code-only batch 587 (M4): key-value transactions and collections in the Swift package
 - [D940](decisions/D940.md) Code-only batch 588 (M4): key-value transactions and collections in the Dart package
+- [D941](decisions/D941.md) Code-only batch 589 (M1): Windows named pipes in the platform layer and eggdb serve --mysql-pipe

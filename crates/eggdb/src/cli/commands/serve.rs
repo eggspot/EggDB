@@ -683,6 +683,17 @@ impl Session<'_> {
                     .to_owned(),
             ));
         }
+        if options.mysql_pipe.is_some() && options.mysql_listen.is_none() {
+            return Err(usage(
+                "--mysql-pipe needs --mysql-listen: the pipe serves the same MySQL server"
+                    .to_owned(),
+            ));
+        }
+        if options.mysql_pipe.is_some() && options.mysql_socket.is_some() {
+            return Err(usage(
+                "--mysql-pipe and --mysql-socket cannot be used together; pick one".to_owned(),
+            ));
+        }
         let socket_path = options.socket_dir.as_ref().map(|directory| {
             eggdb_platform::local_socket::postgresql_socket_path(directory, bound.port())
         });
@@ -690,9 +701,10 @@ impl Session<'_> {
             Some(path) => Some(self.local_listener(path, "--socket-dir")?),
             None => None,
         };
-        let mysql_local_listener = match &options.mysql_socket {
-            Some(path) => Some(self.local_listener(path, "--mysql-socket")?),
-            None => None,
+        let mysql_local_listener = match (&options.mysql_socket, &options.mysql_pipe) {
+            (Some(path), _) => Some(self.local_listener(path, "--mysql-socket")?),
+            (None, Some(name)) => Some(self.named_pipe_listener(name)?),
+            (None, None) => None,
         };
         let mysql_bound = match &mysql_listener {
             Some(listener) => Some(listener.local_addr().map_err(|error| {
@@ -800,6 +812,7 @@ impl Session<'_> {
         let sockets = Sockets {
             postgresql: socket_path.clone(),
             mysql: options.mysql_socket.clone(),
+            mysql_pipe: options.mysql_pipe.clone(),
         };
         let bound = Bound {
             postgresql: bound,
@@ -1759,6 +1772,7 @@ impl Session<'_> {
                             .map(|path| path.display().to_string())
                             .as_deref(),
                     )
+                    .string_if_any("mysql_pipe", sockets.mysql_pipe.as_deref())
                     .boolean("loopback_only", tls.is_none());
                 if let Some(setup) = tls {
                     let certificate = match &setup.source {
@@ -1852,6 +1866,11 @@ impl Session<'_> {
                 if let Some(path) = &sockets.mysql {
                     socket_lines
                         .push_str(&format!("  mysql socket {} (owner only)\n", path.display()));
+                }
+                if let Some(name) = &sockets.mysql_pipe {
+                    socket_lines.push_str(&format!(
+                        "  mysql pipe   \\\\.\\pipe\\{name} (owner only, this machine only)\n"
+                    ));
                 }
                 self.out.text(&format!(
                     "listening on {bound} (PostgreSQL protocol; {transport})\n  database     {} ({}, open {})\n  user         {} (SCRAM-SHA-256), up to {} connections\n{socket_lines}{tls_lines}  connect      {connect}\n{mysql_line}{tds_line}  stop         Ctrl-C\n",
@@ -2011,9 +2030,37 @@ fn missing_socket_directory(options: &crate::cli::args::ServeOptions) -> Option<
 pub(super) struct Sockets {
     postgresql: Option<std::path::PathBuf>,
     mysql: Option<std::path::PathBuf>,
+    mysql_pipe: Option<String>,
 }
 
 impl Session<'_> {
+    fn named_pipe_listener(
+        &self,
+        name: &str,
+    ) -> Result<eggdb_platform::local_socket::LocalListener, Failure> {
+        use eggdb_platform::local_socket::{LocalBindError, bind_named_pipe};
+        bind_named_pipe(name).map_err(|error| match error {
+            LocalBindError::InUse => Failure::database(
+                format!(
+                    "cannot listen on pipe {name}: another server already has it (often MySQL itself). Stop it, or pick another --mysql-pipe name"
+                ),
+                Exit::DatabaseError,
+            ),
+            LocalBindError::Unsupported => Failure::usage(
+                "--mysql-pipe is only available on Windows; use --mysql-socket here".to_owned(),
+                Some(CommandName::Serve),
+            ),
+            LocalBindError::MissingDirectory(_) | LocalBindError::NotASocket => Failure::database(
+                format!("cannot listen on pipe {name}"),
+                Exit::DatabaseError,
+            ),
+            LocalBindError::Io(error) => Failure::database(
+                format!("cannot listen on pipe {name}: {error}"),
+                Exit::DatabaseError,
+            ),
+        })
+    }
+
     fn local_listener(
         &self,
         path: &Path,

@@ -292,6 +292,28 @@ pub fn bind_local(path: &Path) -> Result<LocalListener, LocalBindError> {
     imp::bind(path)
 }
 
+/// Whether this OS has named pipes for local clients ([`bind_named_pipe`]): Windows only.
+pub const NAMED_PIPES_SUPPORTED: bool = cfg!(windows);
+
+/// The pipe the mysql client opens on Windows when given `--protocol=PIPE` without a name.
+pub const MYSQL_DEFAULT_PIPE: &str = "MySQL";
+
+/// Listens on the Windows named pipe `\\.\pipe\<name>`, the way the mysql client and SQL
+/// Server's clients reach a local server on Windows. Only the current user may connect and
+/// remote clients are refused; a pipe of that name that already exists answers
+/// [`LocalBindError::InUse`]. Other OSes answer [`LocalBindError::Unsupported`].
+pub fn bind_named_pipe(name: &str) -> Result<LocalListener, LocalBindError> {
+    #[cfg(windows)]
+    {
+        windows::bind_named_pipe(name)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        Err(LocalBindError::Unsupported)
+    }
+}
+
 /// The socket file a PostgreSQL client looks for in `directory` for `port`.
 pub fn postgresql_socket_path(directory: &Path, port: u16) -> PathBuf {
     directory.join(format!(".s.PGSQL.{port}"))

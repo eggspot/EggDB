@@ -289,6 +289,7 @@ impl CommandName {
             | OptionName::TcpKeepalive
             | OptionName::SocketDir
             | OptionName::MysqlSocket
+            | OptionName::MysqlPipe
             | OptionName::TlsCertificate
             | OptionName::AuthRules
             | OptionName::TlsKey
@@ -502,6 +503,7 @@ enum OptionName {
     TcpKeepalive,
     SocketDir,
     MysqlSocket,
+    MysqlPipe,
     TlsCertificate,
     AuthRules,
     TlsKey,
@@ -641,6 +643,7 @@ impl OptionName {
             b"tcp-keepalive" => Self::TcpKeepalive,
             b"socket-dir" => Self::SocketDir,
             b"mysql-socket" => Self::MysqlSocket,
+            b"mysql-pipe" => Self::MysqlPipe,
             b"tls-certificate" => Self::TlsCertificate,
             b"auth-rules" => Self::AuthRules,
             b"tls-key" => Self::TlsKey,
@@ -982,6 +985,7 @@ pub(crate) struct ServeOptions {
     pub(crate) statement_statistics: Option<usize>,
     pub(crate) socket_dir: Option<PathBuf>,
     pub(crate) mysql_socket: Option<PathBuf>,
+    pub(crate) mysql_pipe: Option<String>,
     pub(crate) tls_certificate: Option<PathBuf>,
     pub(crate) auth_rules: Option<PathBuf>,
     pub(crate) tls_key: Option<PathBuf>,
@@ -1681,6 +1685,23 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 } else {
                     request.serve.mysql_socket = Some(PathBuf::from(value));
                 }
+            }
+            OptionName::MysqlPipe => {
+                if !eggdb_platform::local_socket::NAMED_PIPES_SUPPORTED {
+                    return Err(usage(format!(
+                        "{} is only available on Windows; use --mysql-socket here",
+                        option.spelled
+                    )));
+                }
+                let name = parse_name(&option.spelled, value).map_err(usage)?;
+                if name.contains('\\') {
+                    return Err(usage(format!(
+                        "{} needs a pipe name without a backslash, such as {}",
+                        option.spelled,
+                        eggdb_platform::local_socket::MYSQL_DEFAULT_PIPE
+                    )));
+                }
+                request.serve.mysql_pipe = Some(name);
             }
             OptionName::TlsCertificate => {
                 request.serve.tls_certificate = Some(PathBuf::from(value))
