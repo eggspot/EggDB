@@ -740,6 +740,27 @@ fn enforce_limits(keys: &mut dyn KeysWrite, config: &StreamConfig, state: &mut S
     }
 }
 
+fn acknowledged_by_all(keys: &dyn KeysRead, stream: &str, seq: u64, subject: &str) -> Result<bool, String> {
+    for name in consumer_names(keys, stream)? {
+        if let Some((config, state)) = consumer(keys, stream, &name)?
+            && config.wants(subject)
+            && (state.delivered_stream_seq < seq || state.pending.iter().any(|pending| pending.stream_seq == seq))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn interested(keys: &dyn KeysRead, stream: &str, subject: &str) -> Result<bool, String> {
+    for name in consumer_names(keys, stream)? {
+        if consumer(keys, stream, &name)?.is_some_and(|(config, _)| config.wants(subject)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn header_value<'h>(headers: &'h [u8], name: &str) -> Option<&'h str> {
     std::str::from_utf8(headers).ok()?.lines().skip(1).find_map(|line| {
         let (key, value) = line.split_once(':')?;
@@ -1604,6 +1625,9 @@ impl<'k> JetStream<'k> {
                 keys.put(&key(DEDUPLICATION, &[stream.as_bytes(), id.as_bytes()]), &value)?;
             }
             enforce_limits(keys, &config, &mut state, now)?;
+            if config.retention == Retention::Interest && !interested(&*keys, &stream, subject)? {
+                remove_message(keys, &stream, seq, &mut state)?;
+            }
             keys.put(&key(STREAM_STATE, &[stream.as_bytes()]), &state.encode())?;
             Ok(Ok((seq, false)))
         });
@@ -1647,13 +1671,13 @@ impl<'k> JetStream<'k> {
             let Some((config, mut state)) = consumer(&*keys, stream, name)? else {
                 return Ok(false);
             };
+            let mut settled: Vec<u64> = Vec::new();
             match verb {
                 "" | "+ACK" | "+NXT" | "+TERM" => {
-                    if config.ack_policy == AckPolicy::All && verb != "+TERM" {
-                        state.pending.retain(|pending| pending.stream_seq > stream_seq);
-                    } else {
-                        state.pending.retain(|pending| pending.stream_seq != stream_seq);
-                    }
+                    let all = config.ack_policy == AckPolicy::All && verb != "+TERM";
+                    let covered = |pending: &Pending| if all { pending.stream_seq <= stream_seq } else { pending.stream_seq == stream_seq };
+                    settled.extend(state.pending.iter().filter(|pending| covered(pending)).map(|pending| pending.stream_seq));
+                    state.pending.retain(|pending| !covered(pending));
                     if verb != "+TERM"
                         && let Some(stream_config) = stream_config(&*keys, stream)?
                         && stream_config.retention == Retention::WorkQueue
@@ -1680,6 +1704,21 @@ impl<'k> JetStream<'k> {
             }
             state.settle_floor();
             keys.put(&key(CONSUMER_STATE, &[stream.as_bytes(), name.as_bytes()]), &state.encode())?;
+            if !settled.is_empty()
+                && let Some(stream_config) = stream_config(&*keys, stream)?
+                && stream_config.retention == Retention::Interest
+            {
+                let mut stream_state = stream_state(&*keys, stream)?;
+                for seq in settled {
+                    let subject = keys.get(&message_key(stream, seq))?.and_then(|raw| StoredMessage::decode(&raw)).map(|message| message.subject);
+                    if let Some(subject) = subject
+                        && acknowledged_by_all(&*keys, stream, seq, &subject)?
+                    {
+                        remove_message(keys, stream, seq, &mut stream_state)?;
+                    }
+                }
+                keys.put(&key(STREAM_STATE, &[stream.as_bytes()]), &stream_state.encode())?;
+            }
             Ok(config.deliver_subject.is_some())
         });
         let mut out = Vec::new();

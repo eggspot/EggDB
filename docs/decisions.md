@@ -749,3 +749,4 @@ its full title with its status.
 - [D722](decisions/D722.md) Code-only batch 370 (M16): NATS JetStream streams and durable consumers kept in the database
 - [D723](decisions/D723.md) Code-only batch 371 (M16): JetStream per-subject limits, rollups, filtered purges, `last_per_subject` and direct gets for key-value buckets
 - [D724](decisions/D724.md) Code-only batch 372 (M16): JetStream timers for push redelivery, idle heartbeats and pull timeouts, and pending counts for watches
+- [D725](decisions/D725.md) Code-only batch 373 (M16): JetStream `interest` retention
