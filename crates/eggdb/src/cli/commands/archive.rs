@@ -329,21 +329,26 @@ fn upload_copy(
     let verified = eggdb::Database::open_with(staging, eggdb::Options::default().read_only(true))
         .and_then(|copy| copy.check())
         .map_err(|error| format!("the copy of {shown} does not verify: {error}"))?;
-    let bytes =
-        std::fs::read(staging).map_err(|error| format!("cannot read back the copy: {error}"))?;
-    let sha256: String = eggdb_crypto::sha256(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    match locked_until_ms {
-        Some(until) => location.bucket.put_locked(&location.key(name), &bytes, &rfc3339(until))?,
-        None => location.bucket.put(&location.key(name), &bytes)?,
+    let size = std::fs::metadata(staging)
+        .map_err(|error| format!("cannot read back the copy: {error}"))?
+        .len();
+    let sha256 = file_sha256(staging).map_err(|error| format!("cannot read back the copy: {error}"))?;
+    let retain_until = locked_until_ms.map(rfc3339);
+    if size > eggdb_s3::client::PART_BYTES as u64 {
+        let mut file = std::fs::File::open(staging).map_err(|error| format!("cannot read back the copy: {error}"))?;
+        location.bucket.put_from(&location.key(name), &mut file, retain_until.as_deref())?;
+    } else {
+        let bytes = std::fs::read(staging).map_err(|error| format!("cannot read back the copy: {error}"))?;
+        match &retain_until {
+            Some(until) => location.bucket.put_locked(&location.key(name), &bytes, until)?,
+            None => location.bucket.put(&location.key(name), &bytes)?,
+        }
     }
     let mut line = JsonObject::new()
         .string("file", name)
         .string("taken_at", &rfc3339(taken_at_ms))
         .number("taken_at_ms", u64::try_from(taken_at_ms).unwrap_or(0))
-        .number("bytes", bytes.len() as u64)
+        .number("bytes", size)
         .number("entries", verified.entries)
         .string("sha256", &sha256)
         .boolean("verified", true);

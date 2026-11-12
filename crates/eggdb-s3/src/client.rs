@@ -5,6 +5,38 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_LIST_BODY: usize = 16 << 20;
+/// The size of each part of a multipart upload, and the largest object [`Bucket::put_from`]
+/// would rather send in one `PUT`.
+pub const PART_BYTES: usize = 64 << 20;
+const MOST_PARTS: usize = 10_000;
+
+fn read_full(reader: &mut dyn std::io::Read, buffer: &mut [u8]) -> Result<usize, String> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match reader.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(format!("cannot read what to upload: {error}")),
+        }
+    }
+    Ok(filled)
+}
+
+fn xml_text(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn lock_headers(retain_until: Option<&str>) -> Vec<(String, String)> {
+    retain_until
+        .map(|until| {
+            vec![
+                ("x-amz-object-lock-mode".to_owned(), "COMPLIANCE".to_owned()),
+                ("x-amz-object-lock-retain-until-date".to_owned(), until.to_owned()),
+            ]
+        })
+        .unwrap_or_default()
+}
 
 /// One bucket of an S3-compatible service reached over `http://`, every request signed with
 /// AWS Signature Version 4.
@@ -182,17 +214,87 @@ impl Bucket {
     /// RFC 3339 time): until then nobody, the account's root included, can delete or
     /// overwrite that version. The bucket must have Object Lock enabled.
     pub fn put_locked(&self, key: &str, body: &[u8], retain_until: &str) -> Result<(), String> {
-        let extra = vec![
-            ("content-md5".to_owned(), eggdb_crypto::base64_encode(&eggdb_crypto::md5_checksum(body))),
-            ("x-amz-object-lock-mode".to_owned(), "COMPLIANCE".to_owned()),
-            ("x-amz-object-lock-retain-until-date".to_owned(), retain_until.to_owned()),
-        ];
+        let mut extra = vec![("content-md5".to_owned(), eggdb_crypto::base64_encode(&eggdb_crypto::md5_checksum(body)))];
+        extra.extend(lock_headers(Some(retain_until)));
         let response = self.call("PUT", key, "", body, 1 << 20, &extra)?;
         if response.status / 100 == 2 {
             Ok(())
         } else {
             Err(Self::refused(&response, &format!("storing {key} under a lock")))
         }
+    }
+
+    /// Stores what `reader` gives as `key` with S3's multipart upload, in parts of
+    /// [`PART_BYTES`], so the object may be larger than memory and than S3's 5 GiB limit for one
+    /// `PUT`; with `retain_until`, under Object Lock as [`Bucket::put_locked`] stores. An upload
+    /// that fails part-way is aborted, so no parts are left behind.
+    pub fn put_from(&self, key: &str, reader: &mut dyn std::io::Read, retain_until: Option<&str>) -> Result<(), String> {
+        let started = self.call("POST", key, "uploads=", b"", 1 << 20, &lock_headers(retain_until))?;
+        if started.status / 100 != 2 {
+            return Err(Self::refused(&started, &format!("starting the upload of {key}")));
+        }
+        let text = String::from_utf8_lossy(&started.body).into_owned();
+        let upload = elements(&text, "UploadId")?
+            .first()
+            .map(|id| unescape(id))
+            .transpose()?
+            .ok_or_else(|| format!("starting the upload of {key} gave no upload id"))?;
+        let upload_query = format!("uploadId={}", uri_encode(upload.as_bytes(), false));
+        let finished = self
+            .upload_parts(key, &upload, reader, retain_until.is_some())
+            .and_then(|parts| self.complete_upload(key, &upload_query, &parts));
+        if finished.is_err() {
+            let _ = self.call("DELETE", key, &upload_query, b"", 1 << 20, &[]);
+        }
+        finished
+    }
+
+    fn upload_parts(&self, key: &str, upload: &str, reader: &mut dyn std::io::Read, locked: bool) -> Result<Vec<(usize, String)>, String> {
+        let mut parts = Vec::new();
+        let mut buffer = vec![0u8; PART_BYTES];
+        loop {
+            let filled = read_full(reader, &mut buffer)?;
+            if filled == 0 && !parts.is_empty() {
+                return Ok(parts);
+            }
+            if parts.len() >= MOST_PARTS {
+                return Err(format!("{key} needs more than {MOST_PARTS} parts"));
+            }
+            let number = parts.len() + 1;
+            let body = &buffer[..filled];
+            let extra = if locked {
+                vec![("content-md5".to_owned(), eggdb_crypto::base64_encode(&eggdb_crypto::md5_checksum(body)))]
+            } else {
+                Vec::new()
+            };
+            let query = format!("partNumber={number}&uploadId={}", uri_encode(upload.as_bytes(), false));
+            let response = self.call("PUT", key, &query, body, 1 << 20, &extra)?;
+            if response.status / 100 != 2 {
+                return Err(Self::refused(&response, &format!("storing part {number} of {key}")));
+            }
+            let tag = response
+                .header("etag")
+                .ok_or_else(|| format!("part {number} of {key} came back without an ETag"))?
+                .to_owned();
+            parts.push((number, tag));
+            if filled < PART_BYTES {
+                return Ok(parts);
+            }
+        }
+    }
+
+    fn complete_upload(&self, key: &str, upload_query: &str, parts: &[(usize, String)]) -> Result<(), String> {
+        let mut body = String::from("<CompleteMultipartUpload>");
+        for (number, tag) in parts {
+            body.push_str(&format!("<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>", xml_text(tag)));
+        }
+        body.push_str("</CompleteMultipartUpload>");
+        let response = self.call("POST", key, upload_query, body.as_bytes(), 1 << 20, &[])?;
+        let text = String::from_utf8_lossy(&response.body).into_owned();
+        if response.status / 100 != 2 || !elements(&text, "Error")?.is_empty() {
+            return Err(Self::refused(&response, &format!("completing the upload of {key}")));
+        }
+        Ok(())
     }
 
     /// The object `key`, or `None` when there is none.
