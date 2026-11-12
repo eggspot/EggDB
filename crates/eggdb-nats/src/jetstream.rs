@@ -77,8 +77,51 @@ struct StreamConfig {
     allow_rollup: bool,
     deny_delete: bool,
     deny_purge: bool,
+    mirror: Option<Origin>,
+    sources: Vec<Origin>,
     created: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Origin {
+    name: String,
+    filter: Option<String>,
+    start_seq: u64,
+}
+
+impl Origin {
+    fn from_node(node: &Node) -> Result<Self, (u16, u32, &'static str)> {
+        let name = text(node, "name").filter(|name| valid_name(name)).ok_or(BAD_REQUEST)?;
+        let filter = text(node, "filter_subject").map(str::to_owned);
+        if filter.as_deref().is_some_and(|filter| !valid_subject(filter, true)) {
+            return Err(BAD_REQUEST);
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            filter,
+            start_seq: integer(node, "opt_start_seq", 0).max(0) as u64,
+        })
+    }
+
+    fn json(&self) -> String {
+        let mut out = format!("{{\"name\":{}", quote(&self.name));
+        if let Some(filter) = &self.filter {
+            out.push_str(&format!(",\"filter_subject\":{}", quote(filter)));
+        }
+        if self.start_seq > 0 {
+            out.push_str(&format!(",\"opt_start_seq\":{}", self.start_seq));
+        }
+        out.push('}');
+        out
+    }
+
+    fn takes(&self, seq: u64, subject: &str) -> bool {
+        seq >= self.start_seq && self.filter.as_deref().is_none_or(|filter| subject_matches(filter, subject))
+    }
+}
+
+const MOST_SOURCES: usize = 32;
+const MOST_SOURCE_HOPS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct StreamState {
@@ -442,8 +485,23 @@ impl StreamConfig {
         if text(node, "name").is_some_and(|given| given != name) || !valid_name(name) {
             return Err(BAD_REQUEST);
         }
+        let mirror = member_node(node, "mirror").filter(|mirror| mirror.value != Json::Null).map(Origin::from_node).transpose()?;
+        let sources = match member(node, "sources") {
+            Some(Json::Array(items)) => items.iter().map(Origin::from_node).collect::<Result<Vec<_>, _>>()?,
+            _ => Vec::new(),
+        };
+        if sources.len() > MOST_SOURCES
+            || (mirror.is_some() && !sources.is_empty())
+            || mirror.as_ref().is_some_and(|mirror| mirror.name == name)
+            || sources.iter().any(|source| source.name == name)
+        {
+            return Err(BAD_REQUEST);
+        }
         let mut subjects = strings(node, "subjects");
-        if subjects.is_empty() {
+        if mirror.is_some() && !subjects.is_empty() {
+            return Err(BAD_REQUEST);
+        }
+        if subjects.is_empty() && mirror.is_none() && sources.is_empty() {
             subjects.push(name.to_owned());
         }
         if subjects.iter().any(|subject| !valid_subject(subject, true) || subject.starts_with("$JS.")) {
@@ -474,6 +532,8 @@ impl StreamConfig {
                 window => window,
             },
             memory: text(node, "storage") == Some("memory"),
+            mirror,
+            sources,
             created,
         })
     }
@@ -501,6 +561,25 @@ impl StreamConfig {
             self.deny_delete,
             self.deny_purge
         )
+        .trim_end_matches('}')
+        .to_owned()
+            + &self.origins_json()
+            + "}"
+    }
+
+    fn origins_json(&self) -> String {
+        let mut out = String::new();
+        if let Some(mirror) = &self.mirror {
+            out.push_str(&format!(",\"mirror\":{}", mirror.json()));
+        }
+        if !self.sources.is_empty() {
+            out.push_str(&format!(",\"sources\":[{}]", self.sources.iter().map(Origin::json).collect::<Vec<_>>().join(",")));
+        }
+        out
+    }
+
+    fn origins(&self) -> impl Iterator<Item = &Origin> {
+        self.mirror.iter().chain(&self.sources)
     }
 
     fn stored(&self) -> String {
@@ -779,6 +858,17 @@ fn interested(keys: &dyn KeysRead, stream: &str, subject: &str) -> Result<bool, 
     Ok(false)
 }
 
+fn with_header(headers: &[u8], name: &str, value: &str) -> Vec<u8> {
+    let text = std::str::from_utf8(headers).unwrap_or_default();
+    let mut lines: Vec<&str> = text.split("\r\n").filter(|line| !line.is_empty()).collect();
+    if lines.is_empty() {
+        lines.push("NATS/1.0");
+    }
+    let mut out = lines.join("\r\n");
+    out.push_str(&format!("\r\n{name}: {value}\r\n\r\n"));
+    out.into_bytes()
+}
+
 fn header_value<'h>(headers: &'h [u8], name: &str) -> Option<&'h str> {
     std::str::from_utf8(headers).ok()?.lines().skip(1).find_map(|line| {
         let (key, value) = line.split_once(':')?;
@@ -998,6 +1088,9 @@ impl<'k> JetStream<'k> {
             stream_info_json(kind, &config, &state, consumers, &*keys)
         });
         self.forget_subjects();
+        if !update && answer.as_ref().is_ok_and(|text| !text.contains("\"error\"")) {
+            self.backfill(name);
+        }
         answer
     }
 
@@ -1588,6 +1681,75 @@ impl<'k> JetStream<'k> {
         let Some(stream) = self.stream_for(subject) else {
             return Vec::new();
         };
+        self.store_in(stream, subject, reply, headers, payload, 0)
+    }
+
+    fn followers(&self, origin: &str) -> Vec<(String, Origin, bool)> {
+        read(self.keyspace, |keys| {
+            let mut found = Vec::new();
+            for name in stream_names(keys)? {
+                if let Some(config) = stream_config(keys, &name)? {
+                    let mirrored = config.mirror.is_some();
+                    for taken in config.origins().filter(|taken| taken.name == origin) {
+                        found.push((name.clone(), taken.clone(), mirrored));
+                    }
+                }
+            }
+            Ok(found)
+        })
+        .unwrap_or_default()
+    }
+
+    fn copy_to_followers(&self, origin: &str, seq: u64, message: &StoredMessage, hops: usize) -> Vec<Outgoing> {
+        if hops >= MOST_SOURCE_HOPS {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (follower, taken, mirrored) in self.followers(origin) {
+            if !taken.takes(seq, &message.subject) {
+                continue;
+            }
+            let headers = if mirrored {
+                message.headers.clone()
+            } else {
+                with_header(&message.headers, "Nats-Stream-Source", &format!("{origin} {seq}"))
+            };
+            out.extend(self.store_in(follower, &message.subject, None, &headers, &message.payload, hops + 1));
+        }
+        out
+    }
+
+    fn backfill(&self, follower: &str) -> Vec<Outgoing> {
+        let Ok(Some(config)) = read(self.keyspace, |keys| stream_config(keys, follower)) else {
+            return Vec::new();
+        };
+        let mirrored = config.mirror.is_some();
+        let mut out = Vec::new();
+        for taken in config.origins() {
+            let messages = read(self.keyspace, |keys| {
+                Ok(keys
+                    .scan(&message_prefix(&taken.name))?
+                    .into_iter()
+                    .filter_map(|(found, raw)| Some((seq_at_end(&found), StoredMessage::decode(&raw)?)))
+                    .collect::<Vec<_>>())
+            })
+            .unwrap_or_default();
+            for (seq, message) in messages {
+                if !taken.takes(seq, &message.subject) {
+                    continue;
+                }
+                let headers = if mirrored {
+                    message.headers.clone()
+                } else {
+                    with_header(&message.headers, "Nats-Stream-Source", &format!("{} {seq}", taken.name))
+                };
+                out.extend(self.store_in(follower.to_owned(), &message.subject, None, &headers, &message.payload, 1));
+            }
+        }
+        out
+    }
+
+    fn store_in(&self, stream: String, subject: &str, reply: Option<&str>, headers: &[u8], payload: &[u8], hops: usize) -> Vec<Outgoing> {
         let now = now_nanos();
         let message_id = header_value(headers, "Nats-Msg-Id").map(str::to_owned);
         let expected_stream = header_value(headers, "Nats-Expected-Stream").map(str::to_owned);
@@ -1676,13 +1838,15 @@ impl<'k> JetStream<'k> {
             };
             out.push(Outgoing::json(reply, answer));
         }
-        if matches!(stored, Ok(Ok((_, false)))) {
+        if let Ok(Ok((seq, false))) = stored {
             for (consumer, push) in self.stream_consumers(&stream) {
                 if push {
                     out.extend(self.deliver_push(&stream, &consumer));
                 }
             }
             out.extend(self.serve_waiting(&stream));
+            let message = StoredMessage { time: now, subject: subject.to_owned(), headers: headers.to_vec(), payload: payload.to_vec() };
+            out.extend(self.copy_to_followers(&stream, seq, &message, hops));
         }
         out
     }
@@ -1839,6 +2003,34 @@ mod tests {
         assert!(String::from_utf8_lossy(&meta[0].payload).contains("\"nuid\":\"second\""));
         let info = answer(&jetstream, "$JS.API.STREAM.INFO.OBJ_files", "");
         assert!(info.contains("\"messages\":3"), "{info}");
+    }
+
+    #[test]
+    fn mirrors_and_sources_copy_what_their_origins_store() {
+        let keyspace = MemoryKeyspace::default();
+        let jetstream = JetStream::new(&keyspace);
+        answer(&jetstream, "$JS.API.STREAM.CREATE.ORDERS", r#"{"name":"ORDERS","subjects":["orders.>"]}"#);
+        jetstream.store("orders.eu.1", None, b"", b"first");
+        jetstream.store("orders.us.1", None, b"", b"second");
+        let mirror = answer(&jetstream, "$JS.API.STREAM.CREATE.BACKUP", r#"{"name":"BACKUP","mirror":{"name":"ORDERS"}}"#);
+        assert!(mirror.contains("\"mirror\":{\"name\":\"ORDERS\"}"), "{mirror}");
+        answer(
+            &jetstream,
+            "$JS.API.STREAM.CREATE.EU",
+            r#"{"name":"EU","sources":[{"name":"ORDERS","filter_subject":"orders.eu.>"}],"allow_direct":true}"#,
+        );
+        jetstream.store("orders.eu.2", None, b"", b"third");
+        let backup = answer(&jetstream, "$JS.API.STREAM.INFO.BACKUP", "");
+        assert!(backup.contains("\"messages\":3"), "{backup}");
+        let europe = answer(&jetstream, "$JS.API.STREAM.INFO.EU", "");
+        assert!(europe.contains("\"messages\":2"), "{europe}");
+        let copied = jetstream.request("$JS.API.DIRECT.GET.EU.orders.eu.2", Some("_INBOX.8"), b"");
+        assert_eq!(copied[0].payload, b"third");
+        assert!(String::from_utf8_lossy(&copied[0].headers).contains("Nats-Stream-Source: ORDERS 3"));
+        let refused = answer(&jetstream, "$JS.API.STREAM.CREATE.BAD", r#"{"name":"BAD","subjects":["bad.>"],"mirror":{"name":"ORDERS"}}"#);
+        assert!(refused.contains("\"error\""), "{refused}");
+        let looped = answer(&jetstream, "$JS.API.STREAM.CREATE.SELF", r#"{"name":"SELF","sources":[{"name":"SELF"}]}"#);
+        assert!(looped.contains("\"error\""), "{looped}");
     }
 
     #[test]
