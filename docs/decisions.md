@@ -787,3 +787,4 @@ its full title with its status.
 - [D760](decisions/D760.md) Code-only batch 408 (M6c): a metering API with chargeback and showback, `CREATE EXTENSION eggdb_metering`
 - [D761](decisions/D761.md) Code-only batch 409 (M6b): evidence reports for SOC 2, HIPAA and PCI DSS, `CREATE EXTENSION eggdb_compliance`
 - [D762](decisions/D762.md) Code-only batch 410 (M6b): row-level legal holds, records schedules and EDRM eDiscovery export in `eggdb_retention`
+- [D763](decisions/D763.md) Code-only batch 411 (M6b): marketplace listings of shared data, `CREATE EXTENSION eggdb_marketplace`

@@ -3949,6 +3949,29 @@ SELECT control, title, status, evidence FROM eggdb_compliance.evidence('PCI DSS'
 The controls table can be extended with an organization's own control numbers. Being certified stays the deploying
 organization's job; the report is the database's part of the evidence.
 
+## Data marketplace (eggdb_marketplace)
+
+`CREATE EXTENSION eggdb_marketplace` lists shared tables and views inside one EggDB for other roles to find and ask
+for, with no payments and no outside account (D763):
+
+```sql
+CREATE EXTENSION eggdb_marketplace;
+SELECT eggdb_marketplace.publish('egg-prices', 'Daily egg prices', ARRAY['public.prices'],
+    'Wholesale prices by SKU', 'Internal use only');
+SELECT * FROM eggdb_marketplace.catalog;
+SELECT eggdb_marketplace.request_access('egg-prices', 'pricing model', true);
+SELECT eggdb_marketplace.decide(1, true);
+```
+
+- `publish(listing, title, objects [, description, terms, approval])` lists tables or views (`schema.name`, `public`
+  by default); `approval` is `manual` (the default: the provider decides each request) or `automatic`.
+- `request_access(listing, purpose, accept_terms)` records a request by the current role, which must accept the
+  listing's terms. `decide(request, approve)` by the provider (or a superuser) grants `USAGE` on the schemas and
+  `SELECT` on the listed objects, or refuses. `revoke_access(request)` takes the grants back, and `withdraw(listing)`
+  removes a listing, revoking every grant and refusing pending requests.
+- `eggdb_marketplace.catalog` shows the offered listings with their objects and subscriber counts;
+  `eggdb_marketplace.requests` keeps every request and decision.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,
