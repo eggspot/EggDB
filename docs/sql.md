@@ -3520,6 +3520,23 @@ the queue at least once, oldest first, to `http://` targets allowed by
 the entry's). It sends nothing when that is unset, and drops a
 message whose target is not allowed.
 
+## Time-series policies (timescaledb)
+
+`CREATE EXTENSION timescaledb` gives TimescaleDB's policy functions on the pg_cron scheduler (D736):
+
+```sql
+CREATE EXTENSION timescaledb;
+SELECT create_hypertable('conditions', 'time');
+SELECT add_retention_policy('conditions', INTERVAL '30 days');
+CREATE MATERIALIZED VIEW conditions_hourly WITH (timescaledb.continuous) AS
+  SELECT time_bucket('1 hour', time) AS bucket, avg(temperature) FROM conditions GROUP BY 1;
+SELECT add_continuous_aggregate_policy('conditions_hourly', INTERVAL '1 day', INTERVAL '1 hour', INTERVAL '1 hour');
+```
+
+A hypertable keeps its rows in the table (there are no chunks), `drop_chunks` deletes the rows older than its
+interval and returns how many, and a continuous aggregate is a materialized view its policy refreshes whole.
+`timescaledb_information.hypertables`, `dimensions` and `jobs` list them.
+
 ## Data catalog, quality rules and lineage (eggdb_catalog)
 
 `CREATE EXTENSION eggdb_catalog` keeps a business glossary, data quality rules and lineage in
