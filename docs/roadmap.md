@@ -1322,7 +1322,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `render`, percentiles and a Kusto-compatible REST endpoint (D49, D242).
 - Splunk's SPL, with HTTP Event Collector ingest, after D58's legal check (D49).
 - OLAP cubes and semantic models with MDX, DAX and XMLA, after D34's legal check (D38).
-- A semantic layer of metrics and dimensions, defined once and used by BI and OLAP (D46, D238).
+- A semantic layer of metrics and dimensions, defined once and used by BI and OLAP (D46, D238). Models, dimensions and
+  metrics in `eggdb_bi`: **code written, unbuilt** (code-only mode, 2026-11-12, D745). Left: OLAP use.
 - BI dashboards and charts, designed by Claude Fable (D46, D238).
 - Interactive reports with filters and drill-down, in CSV, HTML and PDF (D46, D238).
 - Reports sent to `https://` targets and by email through the operator's mail server, shared and

@@ -44,6 +44,66 @@ BEGIN
     RETURN row_count;
 END
 $$;
+CREATE TABLE eggdb_bi.models (model_name text PRIMARY KEY, source text NOT NULL, description text);
+CREATE TABLE eggdb_bi.dimensions (model_name text NOT NULL REFERENCES eggdb_bi.models (model_name) ON DELETE CASCADE, dimension_name text NOT NULL, expression text NOT NULL, description text, PRIMARY KEY (model_name, dimension_name));
+CREATE TABLE eggdb_bi.metrics (model_name text NOT NULL REFERENCES eggdb_bi.models (model_name) ON DELETE CASCADE, metric_name text NOT NULL, expression text NOT NULL, description text, PRIMARY KEY (model_name, metric_name));
+CREATE FUNCTION eggdb_bi.metric_sql(model text, metric_names text[], dimension_names text[] DEFAULT '{}', filter text DEFAULT NULL, order_by text DEFAULT NULL, row_limit integer DEFAULT NULL) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    model_source text;
+    chosen text[] := '{}';
+    grouped text[] := '{}';
+    wanted text;
+    found text;
+    built text;
+BEGIN
+    SELECT m.source INTO model_source FROM eggdb_bi.models m WHERE m.model_name = model;
+    IF model_source IS NULL THEN
+        RAISE EXCEPTION 'no model is named %', model USING ERRCODE = '42704';
+    END IF;
+    IF coalesce(array_length(metric_names, 1), 0) = 0 THEN
+        RAISE EXCEPTION 'name at least one metric of %', model USING ERRCODE = '22023';
+    END IF;
+    FOR i IN 1..coalesce(array_length(dimension_names, 1), 0) LOOP
+        wanted := dimension_names[i];
+        SELECT d.expression INTO found FROM eggdb_bi.dimensions d WHERE d.model_name = model AND d.dimension_name = wanted;
+        IF found IS NULL THEN
+            RAISE EXCEPTION 'model % has no dimension %', model, wanted USING ERRCODE = '42703';
+        END IF;
+        chosen := chosen || format('%s AS %I', found, wanted);
+        grouped := grouped || i::text;
+    END LOOP;
+    FOR i IN 1..array_length(metric_names, 1) LOOP
+        wanted := metric_names[i];
+        SELECT m.expression INTO found FROM eggdb_bi.metrics m WHERE m.model_name = model AND m.metric_name = wanted;
+        IF found IS NULL THEN
+            RAISE EXCEPTION 'model % has no metric %', model, wanted USING ERRCODE = '42703';
+        END IF;
+        chosen := chosen || format('%s AS %I', found, wanted);
+    END LOOP;
+    built := 'SELECT ' || array_to_string(chosen, ', ') || ' FROM (' || model_source || ') AS ' || quote_ident(model);
+    IF filter IS NOT NULL THEN
+        built := built || ' WHERE ' || filter;
+    END IF;
+    IF coalesce(array_length(grouped, 1), 0) > 0 THEN
+        built := built || ' GROUP BY ' || array_to_string(grouped, ', ');
+    END IF;
+    IF order_by IS NOT NULL THEN
+        built := built || ' ORDER BY ' || order_by;
+    END IF;
+    IF row_limit IS NOT NULL THEN
+        built := built || ' LIMIT ' || row_limit;
+    END IF;
+    RETURN built;
+END
+$$;
+CREATE FUNCTION eggdb_bi.metric_query(model text, metric_names text[], dimension_names text[] DEFAULT '{}', filter text DEFAULT NULL, order_by text DEFAULT NULL, row_limit integer DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE
+    found_rows jsonb;
+BEGIN
+    EXECUTE format('SELECT coalesce(jsonb_agg(to_jsonb(q)), ''[]''::jsonb) FROM (%s) q', eggdb_bi.metric_sql(model, metric_names, dimension_names, filter, order_by, row_limit)) INTO found_rows;
+    RETURN found_rows;
+END
+$$;
 ";
 
 /// Hands at most `limit` queued report messages, oldest first, to `deliver` as the target URL

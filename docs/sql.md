@@ -3529,6 +3529,21 @@ the queue at least once, oldest first, to `http://` targets allowed by
 the entry's). It sends nothing when that is unset, and drops a
 message whose target is not allowed.
 
+### Semantic layer: metrics and dimensions
+
+`eggdb_bi` also keeps a semantic layer (D745): a model is a table or query, with named dimensions and metrics (SQL
+expressions, metrics being aggregates) defined once in `eggdb_bi.models`, `dimensions` and `metrics`.
+`eggdb_bi.metric_sql(model, metrics, dimensions [, filter, order_by, row_limit])` writes the grouped query and
+`metric_query(...)` runs it and returns its rows as a `jsonb` array, so every dashboard and report computes
+`revenue` the same way:
+
+```sql
+INSERT INTO eggdb_bi.models VALUES ('orders', 'SELECT * FROM orders', NULL);
+INSERT INTO eggdb_bi.dimensions VALUES ('orders', 'month', 'date_trunc(''month'', ordered_at)', NULL);
+INSERT INTO eggdb_bi.metrics VALUES ('orders', 'revenue', 'sum(amount)', NULL);
+SELECT eggdb_bi.metric_query('orders', ARRAY['revenue'], ARRAY['month'], order_by => '1');
+```
+
 ## Time-series policies (timescaledb)
 
 `CREATE EXTENSION timescaledb` gives TimescaleDB's policy functions on the pg_cron scheduler (D736):
