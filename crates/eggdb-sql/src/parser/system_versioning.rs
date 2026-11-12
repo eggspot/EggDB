@@ -81,8 +81,11 @@ impl Parser<'_> {
                     if !(self.take_word("on") || self.take_word("off")) {
                         return Err(self.unexpected());
                     }
-                } else if self.is_word("history_retention_period") {
-                    return Err(self.not_supported("HISTORY_RETENTION_PERIOD"));
+                } else if self.take_word("history_retention_period") {
+                    if !self.take_operator("=") {
+                        return Err(self.unexpected());
+                    }
+                    self.system_versioning_retention = self.history_retention()?;
                 } else {
                     return Err(self.unexpected());
                 }
@@ -94,6 +97,31 @@ impl Parser<'_> {
         }
         self.system_versioning_on = Some(history);
         Ok(true)
+    }
+
+    fn history_retention(&mut self) -> SqlResult<Option<String>> {
+        if self.take_word("infinite") {
+            return Ok(None);
+        }
+        let TokenKind::Integer(digits) = self.kind() else {
+            return Err(self.unexpected());
+        };
+        let Some(count) = digits.parse::<u32>().ok().filter(|count| *count > 0) else {
+            return Err(self.unexpected());
+        };
+        self.advance();
+        let unit = match self.peek_kind() {
+            TokenKind::Word(word) => match word.as_str() {
+                "day" | "days" => "days",
+                "week" | "weeks" => "weeks",
+                "month" | "months" => "months",
+                "year" | "years" => "years",
+                _ => return Err(self.unexpected()),
+            },
+            _ => return Err(self.unexpected()),
+        };
+        self.advance();
+        Ok(Some(format!("{count} {unit}")))
     }
 
     fn history_table_name(&mut self) -> SqlResult<Name> {
@@ -110,8 +138,15 @@ impl Parser<'_> {
 
     pub(super) fn take_system_versioning(&mut self) -> SqlResult<Option<SystemVersioning>> {
         let period = self.system_period.take();
+        let retention = self.system_versioning_retention.take();
         let Some(history) = self.system_versioning_on.take() else {
-            return Ok(None);
+            return Ok(period.map(|(start, end)| SystemVersioning {
+                start,
+                end,
+                history: None,
+                on: false,
+                retention: None,
+            }));
         };
         let (start, end) = match period {
             Some(pair) => pair,
@@ -122,6 +157,8 @@ impl Parser<'_> {
             start,
             end,
             history,
+            on: true,
+            retention,
         }))
     }
 
@@ -138,6 +175,8 @@ impl Parser<'_> {
             start: IMPLICIT_START.to_owned(),
             end: IMPLICIT_END.to_owned(),
             history: None,
+            on: true,
+            retention: None,
         })));
         true
     }
@@ -153,18 +192,22 @@ impl Parser<'_> {
             return Ok(false);
         }
         self.at += 2;
-        let position = self.position();
         self.sqlserver_system_versioning_option()?;
         self.expect(&TokenKind::RightParen)?;
+        let retention = self.system_versioning_retention.take();
         match self.system_versioning_on.take() {
             None => actions.push(AlterAction::SystemVersioning(None)),
-            Some(_) => {
-                return Err(self
-                    .not_supported(
-                        "SYSTEM_VERSIONING = ON in ALTER TABLE (declare the PERIOD FOR SYSTEM_TIME and SYSTEM_VERSIONING in CREATE TABLE)",
-                    )
-                    .at(position));
-            }
+            Some(history) => actions.push(AlterAction::SystemVersioningOn { history, retention }),
+        }
+        Ok(true)
+    }
+
+    pub(super) fn sqlserver_add_system_period(&mut self, actions: &mut Vec<AlterAction>) -> SqlResult<bool> {
+        if !self.system_time_period()? {
+            return Ok(false);
+        }
+        if let Some((start, end)) = self.system_period.take() {
+            actions.push(AlterAction::SystemPeriod { start, end });
         }
         Ok(true)
     }

@@ -960,6 +960,14 @@ pub(crate) struct AlterTable {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AlterAction {
     SystemVersioning(Option<SystemVersioning>),
+    SystemPeriod {
+        start: String,
+        end: String,
+    },
+    SystemVersioningOn {
+        history: Option<Name>,
+        retention: Option<String>,
+    },
     AddColumn {
         column: ColumnDefinition,
         if_not_exists: bool,
@@ -1529,6 +1537,8 @@ pub(crate) struct SystemVersioning {
     pub(crate) start: String,
     pub(crate) end: String,
     pub(crate) history: Option<Name>,
+    pub(crate) on: bool,
+    pub(crate) retention: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

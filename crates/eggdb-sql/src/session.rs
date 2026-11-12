@@ -3545,7 +3545,14 @@ impl<'s> Session<'s> {
                         if alter
                             .actions
                             .iter()
-                            .any(|action| matches!(action, crate::ast::AlterAction::SystemVersioning(_))) =>
+                            .any(|action| {
+                                matches!(
+                                    action,
+                                    crate::ast::AlterAction::SystemVersioning(_)
+                                        | crate::ast::AlterAction::SystemPeriod { .. }
+                                        | crate::ast::AlterAction::SystemVersioningOn { .. }
+                                )
+                            }) =>
                     {
                         let table = alter.name.text.clone();
                         self.apply_system_versioning_actions(&table, &alter.actions)

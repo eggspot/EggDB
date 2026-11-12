@@ -322,5 +322,40 @@ mod tests {
         .unwrap_err();
         assert_eq!(refused.vendor_code(), Some(13510));
     }
+
+    #[test]
+    fn sql_server_alter_table_turns_versioning_on_over_a_declared_period() {
+        let store = MemoryStore::default();
+        let mut sqlserver = Session::with_dialect(&store, crate::Dialect::SqlServer);
+        run(&mut sqlserver, "CREATE TABLE orders (id INT PRIMARY KEY, status VARCHAR(10))").unwrap();
+        let refused = run(&mut sqlserver, "ALTER TABLE orders SET (SYSTEM_VERSIONING = ON)").unwrap_err();
+        assert_eq!(refused.vendor_code(), Some(13510));
+        for sql in [
+            "ALTER TABLE orders ADD \
+             SysStart DATETIME2 GENERATED ALWAYS AS ROW START HIDDEN NOT NULL DEFAULT SYSUTCDATETIME(), \
+             SysEnd DATETIME2 GENERATED ALWAYS AS ROW END HIDDEN NOT NULL DEFAULT '9999-12-31 23:59:59.9999999', \
+             PERIOD FOR SYSTEM_TIME (SysStart, SysEnd)",
+            "ALTER TABLE orders SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.OrdersHistory, HISTORY_RETENTION_PERIOD = 6 MONTHS))",
+            "INSERT INTO orders (id, status) VALUES (1, 'new')",
+            "UPDATE orders SET status = 'paid' WHERE id = 1",
+        ] {
+            run(&mut sqlserver, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert!(run(&mut sqlserver, "SELECT COUNT(*) AS kept FROM OrdersHistory").unwrap().contains('1'));
+        let mut postgresql = Session::new(&store);
+        assert_eq!(
+            run(&mut postgresql, "SELECT keep FROM eggdb_temporal.history_retention").unwrap(),
+            "keep\n6 mons\nSELECT 1"
+        );
+        run(&mut sqlserver, "ALTER TABLE orders SET (SYSTEM_VERSIONING = ON (HISTORY_RETENTION_PERIOD = INFINITE))").unwrap();
+        assert_eq!(
+            run(&mut postgresql, "SELECT count(*) AS rules FROM eggdb_temporal.history_retention").unwrap(),
+            "rules\n0\nSELECT 1"
+        );
+        run(&mut sqlserver, "ALTER TABLE orders SET (SYSTEM_VERSIONING = OFF)").unwrap();
+        run(&mut sqlserver, "ALTER TABLE orders SET (SYSTEM_VERSIONING = ON)").unwrap();
+        run(&mut sqlserver, "UPDATE orders SET status = 'sent' WHERE id = 1").unwrap();
+        assert!(run(&mut sqlserver, "SELECT COUNT(*) AS kept FROM orders_history").unwrap().contains('1'));
+    }
 }
 

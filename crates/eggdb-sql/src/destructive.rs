@@ -1148,6 +1148,8 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::AddIndex(_)
             | AlterAction::RenameIndex { .. }
             | AlterAction::SystemVersioning(_)
+            | AlterAction::SystemPeriod { .. }
+            | AlterAction::SystemVersioningOn { .. }
             | AlterAction::Accepted => continue,
         };
         match &mut found {

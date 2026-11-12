@@ -311,7 +311,10 @@ impl AlteredTexts {
         let mut column_renames: Vec<(&str, &str)> = Vec::new();
         for action in actions {
             match action {
-                AlterAction::Accepted | AlterAction::SystemVersioning(_) => {}
+                AlterAction::Accepted
+                | AlterAction::SystemVersioning(_)
+                | AlterAction::SystemPeriod { .. }
+                | AlterAction::SystemVersioningOn { .. } => {}
                 AlterAction::AddColumn {
                     sqlite_text: Some(column),
                     ..

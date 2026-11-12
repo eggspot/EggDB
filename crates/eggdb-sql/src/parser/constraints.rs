@@ -709,6 +709,9 @@ impl Parser<'_> {
     }
 
     fn sqlserver_add_item(&mut self, actions: &mut Vec<AlterAction>) -> SqlResult<()> {
+        if self.sqlserver_add_system_period(actions)? {
+            return Ok(());
+        }
         let position = self.position();
         let named_default = self.is_word("constraint") && self.is_word_at(2, "default");
         if !named_default && !self.is_word("default") {
