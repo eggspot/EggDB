@@ -1053,7 +1053,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (`eggdb/knex`): **code written, unbuilt** (code-only mode, 2026-11-13, D959). TypeORM and Sequelize through a
   `sqlite3`-compatible module (`eggdb/sqlite3`): **code written, unbuilt** (code-only mode, 2026-11-13, D960).
   Prisma's driver adapter (`eggdb/prisma`): **code written, unbuilt** (code-only mode, 2026-11-13, D961).
-- The GORM dialect, with sqlc checked (D16, D182).
+- The GORM dialect, with sqlc checked (D16, D182). `drivers/go/gorm` (`eggdbgorm.Open`): **code written, unbuilt**
+  (code-only mode, 2026-11-13, D962). Left: a dialector of our own that does not link go-sqlite3, and the sqlc check.
 - A PDO driver with Laravel/Eloquent and Doctrine (D16, D182).
 - ActiveRecord and Sequel for Ruby (D16, D182). The Sequel adapter (`adapter: :eggdb`): **code written, unbuilt** (code-only
   mode, 2026-11-13, D958). Left: ActiveRecord.
