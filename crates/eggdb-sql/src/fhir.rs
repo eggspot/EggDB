@@ -229,7 +229,7 @@ impl Validator {
             }
             match key.as_str() {
                 "contained" => self.resources(value, &child, depth),
-                "resource" if owner == "Bundle" || path.ends_with(".entry") => self.resource(value, &child, depth + 1),
+                "resource" if matches!(owner, "entry" | "parameter") => self.resource(value, &child, depth + 1),
                 "extension" | "modifierExtension" => self.extensions(value, &child, depth),
                 _ => self.element(key, value, &child, owner, depth),
             }
