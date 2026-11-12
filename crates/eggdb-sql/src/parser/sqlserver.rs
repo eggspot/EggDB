@@ -1366,7 +1366,9 @@ impl<'t> Parser<'t> {
             "xml" => return Err(not_supported("Typed xml (an XML schema collection)").at(position)),
             "hierarchyid" => SqlServerType::VarBinary(Length::Given(HIERARCHYID_BYTES)),
             "rowversion" | "timestamp" if !in_cast => SqlServerType::Binary(Length::Given(8)),
-            "rowversion" | "timestamp" | "sql_variant" | "geography" | "geometry" => {
+            "geometry" => SqlServerType::Spatial { geography: false },
+            "geography" => SqlServerType::Spatial { geography: true },
+            "rowversion" | "timestamp" | "sql_variant" => {
                 return Err(not_supported(&format!("The data type {word}")).at(position));
             }
             _ => return Err(unknown_type(&word, position)),

@@ -1338,6 +1338,11 @@ pub(crate) fn convert(
             sized_bytes(to_styled_bytes(&value, style)?, length, false)
         }
         SqlServerType::Image => to_styled_bytes(&value, style).map(Value::Bytea),
+        SqlServerType::Spatial { .. } => crate::types::convert(
+            value,
+            SqlType::Defined(crate::types::DefinedType::GEOMETRY),
+            crate::types::Conversion::Explicit,
+        ),
         SqlServerType::UniqueIdentifier => to_guid(&value).map(Value::Uuid),
         _ => Ok(value),
     }

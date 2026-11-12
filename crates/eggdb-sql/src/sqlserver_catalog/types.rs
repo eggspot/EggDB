@@ -405,6 +405,7 @@ impl SqlServerColumnType {
             SqlServerType::Image => plain(SqlServerTypeName::Image),
             SqlServerType::UniqueIdentifier => plain(SqlServerTypeName::UniqueIdentifier),
             SqlServerType::Xml => plain(SqlServerTypeName::Xml),
+            SqlServerType::Spatial { .. } => sized(SqlServerTypeName::VarBinary, Length::Max),
         }
     }
 

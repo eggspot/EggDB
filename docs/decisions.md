@@ -1028,3 +1028,4 @@ its full title with its status.
 - [D1001](decisions/D1001.md) Code-only batch 649 (M11): EggDB's ADBC driver
 - [D1002](decisions/D1002.md) Code-only batch 650 (M11): reading Apache Iceberg tables
 - [D1003](decisions/D1003.md) Code-only batch 651 (M11): writing Apache Iceberg tables
+- [D1004](decisions/D1004.md) Code-only batch 652 (M12): SQL Server's geometry and geography types with their methods

@@ -41,6 +41,7 @@ pub(crate) enum SqlServerType {
     Image,
     UniqueIdentifier,
     Xml,
+    Spatial { geography: bool },
 }
 
 fn stored_scale(scale: u8) -> Option<u8> {
@@ -89,6 +90,7 @@ impl SqlServerType {
             | Self::Xml => SqlType::Text,
             Self::Binary(_) | Self::VarBinary(_) | Self::Image => SqlType::Bytea,
             Self::UniqueIdentifier => SqlType::Uuid,
+            Self::Spatial { .. } => SqlType::Defined(crate::types::DefinedType::GEOMETRY),
         }
     }
 
@@ -121,6 +123,8 @@ impl SqlServerType {
             Self::Image => "image",
             Self::UniqueIdentifier => "uniqueidentifier",
             Self::Xml => "xml",
+            Self::Spatial { geography: false } => "geometry",
+            Self::Spatial { geography: true } => "geography",
         }
     }
 
@@ -151,6 +155,7 @@ impl SqlServerType {
             | Self::Xml => TypeFamily::Character,
             Self::Binary(_) | Self::VarBinary(_) | Self::Image => TypeFamily::Binary,
             Self::UniqueIdentifier => TypeFamily::Guid,
+            Self::Spatial { .. } => TypeFamily::Other,
         }
     }
 }

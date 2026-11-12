@@ -5169,6 +5169,24 @@ impl<'t> Parser<'t> {
             return self.function(name);
         }
         if self.sqlserver()
+            && crate::sqlserver_spatial::is_spatial_type(&first.text)
+            && self.take(&TokenKind::DoubleColon)
+        {
+            let method = self.name()?;
+            self.expect(&TokenKind::LeftParen)?;
+            let mut arguments = Vec::new();
+            if !self.take(&TokenKind::RightParen) {
+                loop {
+                    arguments.push(self.expression()?);
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RightParen)?;
+            }
+            return crate::sqlserver_spatial::static_call(&first.text, &method.text, arguments, method.position);
+        }
+        if self.sqlserver()
             && first.text.eq_ignore_ascii_case("hierarchyid")
             && self.take(&TokenKind::DoubleColon)
         {
@@ -5218,6 +5236,44 @@ impl<'t> Parser<'t> {
                 return Err(self.not_supported("a qualified * outside the select list"));
             }
             let column = self.name()?;
+            if self.sqlserver()
+                && !first.text.eq_ignore_ascii_case("dbo")
+                && let Some(function) = if self.peek_kind() == &TokenKind::LeftParen {
+                    crate::sqlserver_spatial::method_function(&column.text)
+                } else {
+                    None
+                }
+            {
+                let target = Expr {
+                    kind: ExprKind::Column {
+                        qualifier: None,
+                        name: first.text,
+                    },
+                    position: first.position,
+                };
+                return self.hierarchy_method(target, function, column.position);
+            }
+            if self.sqlserver()
+                && self.peek_kind() != &TokenKind::LeftParen
+                && self.peek_kind() != &TokenKind::Dot
+                && matches!(column.text.to_ascii_lowercase().as_str(), "stx" | "sty" | "stsrid")
+                && let Some(function) = crate::sqlserver_spatial::property_function(&column.text)
+            {
+                let target = Expr {
+                    kind: ExprKind::Column {
+                        qualifier: None,
+                        name: first.text,
+                    },
+                    position: first.position,
+                };
+                return Ok(Expr {
+                    kind: ExprKind::Function {
+                        name: function.to_owned(),
+                        arguments: vec![target],
+                    },
+                    position: column.position,
+                });
+            }
             if self.sqlserver()
                 && self.peek_kind() == &TokenKind::LeftParen
                 && !first.text.eq_ignore_ascii_case("dbo")
@@ -5328,6 +5384,37 @@ impl<'t> Parser<'t> {
                         name: column.text,
                     },
                     position: first.position,
+                });
+            }
+            if self.sqlserver()
+                && self.peek_kind() == &TokenKind::Dot
+                && let TokenKind::Word(word) = self.peek_kind_at(1)
+                && let Some(function) = if self.peek_kind_at(2) == &TokenKind::LeftParen {
+                    crate::sqlserver_spatial::method_function(word.as_ref())
+                } else if matches!(word.to_ascii_lowercase().as_str(), "stx" | "sty" | "stsrid") {
+                    crate::sqlserver_spatial::property_function(word.as_ref())
+                } else {
+                    None
+                }
+            {
+                let with_arguments = self.peek_kind_at(2) == &TokenKind::LeftParen;
+                self.at += 2;
+                let target = Expr {
+                    kind: ExprKind::Column {
+                        qualifier: Some(first.text),
+                        name: column.text,
+                    },
+                    position: first.position,
+                };
+                if with_arguments {
+                    return self.hierarchy_method(target, function, column.position);
+                }
+                return Ok(Expr {
+                    kind: ExprKind::Function {
+                        name: function.to_owned(),
+                        arguments: vec![target],
+                    },
+                    position: column.position,
                 });
             }
             if self.sqlserver()

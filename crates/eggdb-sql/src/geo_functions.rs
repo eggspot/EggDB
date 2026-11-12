@@ -3,8 +3,12 @@ use crate::json::{Json, Node, parse_document};
 use crate::types::{SqlType, Value};
 use eggdb_geo::{Coord, Geometry, Spatial};
 
+const GEOGRAPHY_SRID: i32 = 4326;
+
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 66] = [
+pub(crate) const FUNCTIONS: [&str; 68] = [
+    "sqlserver_stdistance",
+    "sqlserver_stgeometrytype",
     "st_linelocatepoint",
     "st_lineinterpolatepoint",
     "st_linesubstring",
@@ -79,7 +83,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "st_asbinary" | "st_asewkb" => SqlType::Bytea,
         "s2_cellidfrompoint" => SqlType::BigInt,
         "s2_cellidtotoken" => SqlType::Text,
-        "st_x" | "st_y" | "st_distance" | "st_area" | "st_length" | "st_distancesphere"
+        "st_x" | "st_y" | "st_distance" | "sqlserver_stdistance" | "st_area" | "st_length" | "st_distancesphere"
         | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" | "st_linelocatepoint" => SqlType::Double,
         "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" => {
             SqlType::Integer
@@ -480,6 +484,18 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
             Value::Integer(i32::try_from(spatial(0)?.geometry.coords().len()).unwrap_or(i32::MAX))
         }
         ("st_geometrytype", [_]) => Value::Text(spatial(0)?.geometry.type_name().to_owned()),
+        ("sqlserver_stgeometrytype", [_]) => {
+            let name = spatial(0)?.geometry.type_name().to_owned();
+            Value::Text(name.strip_prefix("ST_").unwrap_or(&name).to_owned())
+        }
+        ("sqlserver_stdistance", [_, _]) => {
+            let (left, right) = pair()?;
+            if left.srid == Some(GEOGRAPHY_SRID) {
+                Value::Double(eggdb_geo::sphere_distance(&left.geometry, &right.geometry).map_err(geo_error)?)
+            } else {
+                eggdb_geo::distance(&left.geometry, &right.geometry).map_or(Value::Null, Value::Double)
+            }
+        }
         ("st_isempty", [_]) => Value::Boolean(spatial(0)?.geometry.is_empty()),
         ("st_transform", [_, target]) => {
             let source = spatial(0)?;
