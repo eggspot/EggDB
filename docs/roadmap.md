@@ -998,8 +998,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Dutch: **code written, unbuilt** (code-only mode, 2026-11-12, D654); Portuguese: **code written, unbuilt**
   (code-only mode, 2026-11-12, D655); French: **code written, unbuilt** (code-only mode, 2026-11-12, D656);
   Finnish: **code written, unbuilt** (code-only mode, 2026-11-12, D673); Hungarian: **code written, unbuilt**
-  (code-only mode, 2026-11-12, D674); Indonesian: **code written, unbuilt** (code-only mode, 2026-11-12, D687).
-  Left: Turkish and the others, and word segmentation.
+  (code-only mode, 2026-11-12, D674); Indonesian: **code written, unbuilt** (code-only mode, 2026-11-12, D687); Romanian: **code
+  written, unbuilt** (code-only mode, 2026-11-12, D718). Left: Turkish and the others, and word segmentation.
 - Synonyms, stop words, and fuzzy and phonetic matching (D30). Fuzzy and phonetic functions:
   **code written, unbuilt** (code-only mode, 2026-11-11, D470).
 - MySQL's `MATCH ... AGAINST` with `FULLTEXT` keys, SQL Server's `CONTAINS` and `FREETEXT`, and
