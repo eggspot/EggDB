@@ -1852,7 +1852,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Sync of SQL tables through change capture (D210, D228).
 - Sync log compaction, partial sync, per-field merges and CRDTs, and end-to-end encryption (D228).
 - CouchDB's replication protocol (D48).
-- Foreign tables with declared columns and filter pushdown (D29, D229).
+- Foreign tables with declared columns and filter pushdown (D29, D229). `CREATE SERVER` and `CREATE FOREIGN TABLE`
+  with declared columns, as views over `eggdb_foreign`: **code written, unbuilt** (code-only mode, 2026-11-12, D916).
+  Left: filter pushdown and `IMPORT FOREIGN SCHEMA`.
 - Foreign sources: MySQL, SQL Server, HTTP, S3 and Parquet over object storage (D29, D229). SQL Server: **code
   written, unbuilt** (code-only mode, 2026-11-12, D769); CSV and Parquet objects in S3-compatible storage: **code
   written, unbuilt** (code-only mode, 2026-11-12, D913); MySQL: **code written, unbuilt** (code-only mode, 2026-11-12,

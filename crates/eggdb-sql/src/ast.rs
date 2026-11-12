@@ -128,6 +128,7 @@ pub(crate) enum Statement {
     Synonym(SynonymCommand),
     OracleContext(OracleContextCommand),
     OracleSystemTrigger(Box<crate::oracle_system_triggers::CreateSystemTrigger>),
+    ForeignData(Box<crate::foreign_tables::ForeignDataCommand>),
     CreatePackage(Box<CreatePackage>),
     DropPackage(DropPackage),
     AlterPackage(AlterPackage),

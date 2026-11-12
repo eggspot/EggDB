@@ -940,3 +940,4 @@ its full title with its status.
 - [D913](decisions/D913.md) Code-only batch 561 (M16): foreign sources and copies from object storage
 - [D914](decisions/D914.md) Code-only batch 562 (M16): a MySQL client, and MySQL as a foreign source
 - [D915](decisions/D915.md) Code-only batch 563 (M18): HTTP foreign sources
+- [D916](decisions/D916.md) Code-only batch 564 (M18): foreign servers and foreign tables with declared columns

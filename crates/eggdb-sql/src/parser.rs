@@ -1,4 +1,5 @@
 mod asof;
+mod foreign_tables;
 mod sqlserver_security;
 mod sqlserver_ddl_triggers;
 mod qualify;
@@ -1889,6 +1890,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("policy") {
             return self.create_policy();
         }
+        if self.postgresql() && self.at_foreign_data_definition() {
+            return self.create_foreign_data();
+        }
         if self.sqlserver()
             && let Some(refused) = self.sqlserver_special_index()
         {
@@ -2973,6 +2977,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("policy") {
             return self.drop_policy();
+        }
+        if self.postgresql() && self.at_foreign_data_definition() {
+            return self.drop_foreign_data();
         }
         if self.is_word("index") {
             return self.drop_index();

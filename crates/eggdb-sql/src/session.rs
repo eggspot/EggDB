@@ -3,6 +3,7 @@ mod cursors;
 pub(crate) mod database_switch;
 mod event_triggers;
 mod system_versioning;
+mod foreign_tables;
 mod rowversion;
 mod mysql;
 pub(crate) mod mysql_events;
@@ -3839,6 +3840,7 @@ impl<'s> Session<'s> {
             }),
             Statement::OracleContext(command) => self.run_oracle_context(&command),
             Statement::OracleSystemTrigger(create) => self.create_system_trigger(&create),
+            Statement::ForeignData(command) => self.run_foreign_data(&command),
             Statement::Synonym(command) => {
                 let tag = match command {
                     crate::ast::SynonymCommand::Create { .. } => "CREATE SYNONYM",

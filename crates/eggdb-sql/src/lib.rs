@@ -59,6 +59,7 @@ mod eval;
 mod execute;
 mod explain;
 mod foreign;
+mod foreign_tables;
 mod fuzzy_functions;
 mod generated_columns;
 #[cfg(test)]
