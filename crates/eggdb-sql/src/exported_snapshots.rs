@@ -63,9 +63,9 @@ pub(crate) fn take_exported() -> Vec<String> {
 fn not_exportable() -> SqlError {
     SqlError::new(
         SqlState::FEATURE_NOT_SUPPORTED,
-        "pg_export_snapshot() needs a READ ONLY transaction block in EggDB",
+        "pg_export_snapshot() needs a transaction block in EggDB",
     )
-    .with_hint("Start the transaction with BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY.")
+    .with_hint("Start the transaction with BEGIN ISOLATION LEVEL REPEATABLE READ.")
 }
 
 pub(crate) fn export() -> SqlResult<String> {

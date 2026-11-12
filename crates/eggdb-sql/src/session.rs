@@ -523,6 +523,7 @@ enum Block<'s> {
 pub struct Session<'s> {
     store: &'s dyn crate::store::ErasedStore,
     block: Block<'s>,
+    writer_snapshot: Option<crate::exported_snapshots::ExportingRead<'s>>,
     tables: TableCache,
     settings: Arc<Settings>,
     dialect: Dialect,
@@ -615,6 +616,7 @@ impl<'s> Session<'s> {
         Self {
             store,
             block: Block::None,
+            writer_snapshot: None,
             tables: TableCache::default(),
             settings: Arc::new(Settings::default()),
             dialect,
@@ -1982,8 +1984,29 @@ impl<'s> Session<'s> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
+        self.prepare_writer_snapshot(text)?;
         let reader = self.file_reader;
         crate::new_files::with_reader(reader, || self.run_text_with_reader(text, parameters, on_result, client))
+    }
+
+    fn prepare_writer_snapshot(&mut self, text: &str) -> SqlResult<()> {
+        if !matches!(self.block, Block::Writing(_)) {
+            self.writer_snapshot = None;
+            return Ok(());
+        }
+        if self.writer_snapshot.is_some()
+            || !text
+                .to_ascii_lowercase()
+                .contains(crate::exported_snapshots::EXPORT_FUNCTION)
+        {
+            return Ok(());
+        }
+        let reader = self.store.begin_boxed_read()?;
+        self.writer_snapshot = Some(crate::exported_snapshots::ExportingRead {
+            inner: reader,
+            ids: Vec::new(),
+        });
+        Ok(())
     }
 
     fn run_text_with_reader(
@@ -4060,17 +4083,28 @@ impl<'s> Session<'s> {
         let store_id = self.store.erased_store_id();
         let tables = &mut self.tables;
         let objects = &self.temporary;
+        let writer_snapshot = &mut self.writer_snapshot;
         let (result, exported) = match &self.block {
-            Block::Writing(writer) => (
-                body(
+            Block::Writing(writer) => {
+                let handle = writer_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.snapshot_handle());
+                let scope = handle.map(|handle| crate::exported_snapshots::enter(store_id, Some(handle)));
+                let result = body(
                     &crate::temporary::TemporaryRead {
                         inner: writer,
                         objects,
                     },
                     tables,
-                ),
-                Vec::new(),
-            ),
+                );
+                if scope.is_some()
+                    && let Some(snapshot) = writer_snapshot.as_mut()
+                {
+                    snapshot.ids.extend(crate::exported_snapshots::take_exported());
+                }
+                drop(scope);
+                (result, Vec::new())
+            }
             Block::Reading(reader) => {
                 let scope = crate::exported_snapshots::enter(store_id, reader.snapshot_handle());
                 let result = body(
@@ -4521,6 +4555,7 @@ impl<'s> Session<'s> {
     }
 
     fn commit(&mut self) -> SqlResult<QueryResult> {
+        self.writer_snapshot = None;
         self.save_points.clear();
         if self.savepoints.aborted {
             self.savepoints.clear();
@@ -4573,6 +4608,7 @@ impl<'s> Session<'s> {
     }
 
     fn rollback(&mut self) -> SqlResult<QueryResult> {
+        self.writer_snapshot = None;
         self.notifications.rollback();
         crate::activity::rolled_back();
         self.deferred.clear();

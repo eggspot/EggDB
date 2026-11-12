@@ -455,8 +455,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Server's dialects, measuring statement-level rollback's extra read per key (D317). **Code written,
   unbuilt** (code-only mode, 2026-11-13, D949).
 - PostgreSQL's exported snapshots: `pg_export_snapshot()` and `SET TRANSACTION SNAPSHOT` (D318).
-  **Code written, unbuilt** (code-only mode, 2026-11-10, D369). Left: exporting from a read-write
-  block.
+  **Code written, unbuilt** (code-only mode, 2026-11-10, D369). Exporting from a read-write block:
+  **code written, unbuilt** (code-only mode, 2026-11-13, D950).
 - The locking clause kept in the statement's tree, so `FOR UPDATE` in a read-only transaction is
   found exactly: a column named `share` after `FOR`, `FOR UPDATE OF` naming only temporary
   tables, and an outer clause over a `WITH` query, which PostgreSQL does not lock (D338).

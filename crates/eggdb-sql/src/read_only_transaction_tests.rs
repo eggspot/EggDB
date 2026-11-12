@@ -767,6 +767,34 @@ fn an_exported_snapshot_shows_another_session_what_the_exporter_sees() {
 }
 
 #[test]
+fn a_read_write_block_exports_the_snapshot_it_started_from_without_its_own_changes() {
+    let store = MemoryStore::default();
+    let mut exporter = Session::new(&store);
+    let mut importer = Session::new(&store);
+    answer(&mut exporter, "CREATE TABLE t (x int); INSERT INTO t VALUES (1)");
+    answer(&mut exporter, "BEGIN ISOLATION LEVEL REPEATABLE READ");
+    answer(&mut exporter, "INSERT INTO t VALUES (2)");
+    let exported = answer(&mut exporter, "SELECT pg_export_snapshot()");
+    let id = exported.lines().nth(1).unwrap_or_default().to_owned();
+    assert_eq!(
+        answer(&mut exporter, "SELECT count(*) FROM t"),
+        "count\n2\nSELECT 1"
+    );
+    answer(&mut importer, "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    answer(&mut importer, &format!("SET TRANSACTION SNAPSHOT '{id}'"));
+    assert_eq!(
+        answer(&mut importer, "SELECT count(*) FROM t"),
+        "count\n1\nSELECT 1"
+    );
+    answer(&mut importer, "COMMIT");
+    answer(&mut exporter, "COMMIT");
+    answer(&mut importer, "BEGIN READ ONLY");
+    let error = refusal(&mut importer, &format!("SET TRANSACTION SNAPSHOT '{id}'"));
+    assert_eq!(error.state().code(), "22023", "{error}");
+    answer(&mut importer, "ROLLBACK");
+}
+
+#[test]
 fn lock_timeout_cancels_a_statement_waiting_for_the_writer() {
     let store = MemoryStore::default();
     let mut holder = Session::new(&store);
