@@ -723,7 +723,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Left: a directory in CI.
 - PostgreSQL 18's `OAUTHBEARER` mechanism (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D801).
   Left: libpq's device flow checked against EggDB in CI.
-- SAML, API keys and multi-factor sign-in for interactive tools (D22).
+- SAML, API keys and multi-factor sign-in for interactive tools (D22). API keys (`CREATE EXTENSION eggdb_api_keys`, the `apikey` rule): **code written,
+  unbuilt** (code-only mode, 2026-11-12, D820). Left: SAML and multi-factor sign-in.
 - External authentication rules on the MySQL and TDS listeners, and rules by address or database
   (D185).
 - MySQL and TDS logins for stored roles (D183).

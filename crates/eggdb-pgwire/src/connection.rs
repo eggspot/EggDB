@@ -686,6 +686,13 @@ fn authenticate_externally<S: KeyValueStore>(
                 Err(error) => Err(error.to_string()),
             }
         }
+        eggdb_auth::AuthMethod::ApiKey => {
+            if eggdb_sql::api_keys::check_api_key(store, user, &secret) {
+                Ok(())
+            } else {
+                Err("the API key is not a live key of this role".to_owned())
+            }
+        }
         eggdb_auth::AuthMethod::ScramSha256
         | eggdb_auth::AuthMethod::Reject
         | eggdb_auth::AuthMethod::Certificate

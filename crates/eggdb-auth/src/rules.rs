@@ -54,13 +54,16 @@ pub enum AuthMethod {
     },
     /// A TLS client certificate, checked by the TLS layer, whose common name is the user.
     Certificate,
+    /// An API key of the role, sent as the password and checked against the hashes
+    /// `CREATE EXTENSION eggdb_api_keys` keeps.
+    ApiKey,
     /// No login.
     Reject,
 }
 
 impl AuthMethod {
     /// The method's name as a rule file writes it: `scram-sha-256`, `ldap`, `jwt`, `oauth`,
-    /// `cert` or `reject`.
+    /// `cert`, `apikey` or `reject`.
     pub fn name(&self) -> &'static str {
         match self {
             Self::ScramSha256 => "scram-sha-256",
@@ -68,6 +71,7 @@ impl AuthMethod {
             Self::Jwt { .. } => "jwt",
             Self::OAuthBearer { .. } => "oauth",
             Self::Certificate => "cert",
+            Self::ApiKey => "apikey",
             Self::Reject => "reject",
         }
     }
@@ -75,7 +79,7 @@ impl AuthMethod {
     /// Whether the method has the client send its password or token in clear text, so it is
     /// allowed only over TLS or a local socket.
     pub fn sends_secret_in_clear(&self) -> bool {
-        matches!(self, Self::Ldap(_) | Self::Jwt { .. } | Self::OAuthBearer { .. })
+        matches!(self, Self::Ldap(_) | Self::Jwt { .. } | Self::OAuthBearer { .. } | Self::ApiKey)
     }
 }
 
@@ -181,6 +185,7 @@ impl AuthRules {
             let method = match method {
                 "scram-sha-256" => AuthMethod::ScramSha256,
                 "reject" => AuthMethod::Reject,
+                "apikey" => AuthMethod::ApiKey,
                 "ldap" => {
                     let written = required(&found, "server", line)?;
                     let (server, mut security) = if let Some(rest) = written.strip_prefix("ldaps://") {
@@ -271,7 +276,7 @@ impl AuthRules {
                     return Err(RulesError {
                         line,
                         message: format!(
-                            "unknown method {other}; use scram-sha-256, ldap, jwt, oauth, cert or reject"
+                            "unknown method {other}; use scram-sha-256, ldap, jwt, oauth, cert, apikey or reject"
                         ),
                     });
                 }

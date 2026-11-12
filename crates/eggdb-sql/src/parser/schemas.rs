@@ -560,6 +560,7 @@ impl<'t> Parser<'t> {
             "eggdb_streams",
             "eggdb_etl",
             "eggdb_app_auth",
+            "eggdb_api_keys",
             "eggdb_shredding",
             "eggdb_iot",
             "eggdb_advisor",

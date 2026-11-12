@@ -2786,6 +2786,7 @@ impl<'s> Session<'s> {
             "eggdb_streams" => ("eggdb_streams", crate::streams::STREAMS_SCRIPT),
             "eggdb_etl" => ("eggdb_etl", crate::etl::ETL_SCRIPT),
             "eggdb_app_auth" => ("eggdb_app_auth", crate::app_auth::APP_AUTH_SCRIPT),
+            "eggdb_api_keys" => ("eggdb_api_keys", crate::api_keys::API_KEYS_SCRIPT),
             "eggdb_shredding" => ("eggdb_shredding", crate::shredding::SHREDDING_SCRIPT),
             "eggdb_iot" => ("eggdb_iot", crate::iot::IOT_SCRIPT),
             "eggdb_advisor" => ("eggdb_advisor", crate::advisor::ADVISOR_SCRIPT),
