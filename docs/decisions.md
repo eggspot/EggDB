@@ -721,3 +721,4 @@ its full title with its status.
 - [D694](decisions/D694.md) Code-only batch 342 (M16): Kafka transactions, control markers and `read_committed` fetches
 - [D695](decisions/D695.md) Code-only batch 343 (M10): SQL Server `xml` columns and their `value()`, `query()` and `exist()` methods
 - [D696](decisions/D696.md) Code-only batch 344 (M10): SQL Server `xml.nodes()` in `CROSS APPLY` and node-relative methods
+- [D697](decisions/D697.md) Code-only batch 345 (M6a): PostgreSQL's `xml` type accepted and read as `text`

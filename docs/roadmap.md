@@ -632,7 +632,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Large HTTP request bodies handed to the handler as they arrive (D325).
 - PostgreSQL's function call protocol (D103). **Code written, unbuilt** (code-only mode, 2026-11-11,
   D461).
-- PostgreSQL's network address, geometric, bit string, `money`, `xml` and multirange types (D19).
+- PostgreSQL's network address, geometric, bit string, `money`, `xml` and multirange types (D19). `xml` read as
+  `text`: **code written, unbuilt** (code-only mode, 2026-11-12, D697).
 - `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289).
 - `refcursor` and `refcursor[]` table columns kept as their own types, a file format change with
   its security review; `refcursor[]` values are built (D35, D301).

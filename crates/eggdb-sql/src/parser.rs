@@ -2754,6 +2754,7 @@ impl<'t> Parser<'t> {
                 SqlType::Bpchar(Some(self.character_length(token.start)?.unwrap_or(1)))
             }
             "bpchar" => SqlType::Bpchar(self.character_length(token.start)?),
+            "xml" if self.postgresql() => SqlType::Text,
             "money" | "inet" | "cidr" | "xml" | "bit" | "point" => {
                 return Err(
                     SqlError::not_supported(format!("type {word} is not supported yet"))
