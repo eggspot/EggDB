@@ -782,3 +782,4 @@ its full title with its status.
 - [D755](decisions/D755.md) Code-only batch 403 (M11): bitemporal tables, `CREATE EXTENSION eggdb_temporal`
 - [D756](decisions/D756.md) Code-only batch 404 (M11): order-book and double-entry ledger primitives, `CREATE EXTENSION eggdb_finance`
 - [D757](decisions/D757.md) Code-only batch 405 (M6b): synthetic data, `eggdb_privacy.synthetic_copy`
+- [D758](decisions/D758.md) Code-only batch 406 (M6b): the snapping mechanism and l-diversity

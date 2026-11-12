@@ -1,7 +1,8 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 7] = ["ff1_encrypt", "ff1_decrypt", "laplace_noise", "gen_random_bytes", "eggdb_seal", "eggdb_unseal", "eggdb_blind_index"];
+pub(crate) const FUNCTIONS: [&str; 8] = ["ff1_encrypt", "ff1_decrypt", "laplace_noise", "gen_random_bytes", "eggdb_seal", "eggdb_unseal", "eggdb_blind_index", "snapping_mechanism"];
+const LOWEST_EXPONENT: i32 = -1022;
 const DEFAULT_BLIND_INDEX_BITS: i64 = 64;
 const MOST_RANDOM_BYTES: i64 = 1024;
 const SEAL_VERSION: u8 = 1;
@@ -25,6 +26,49 @@ BEGIN
         grouped := grouped || quote_ident(quasi_identifiers[column_at]);
     END LOOP;
     EXECUTE format('SELECT min(n) FROM (SELECT count(*) AS n FROM %I.%I GROUP BY %s) g', schema_name, table_name, grouped) INTO smallest;
+    RETURN coalesce(smallest, 0);
+END
+$$;
+CREATE FUNCTION eggdb_privacy.l_diversity(schema_name text, table_name text, quasi_identifiers text[], sensitive_column text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    grouped text := '';
+    smallest bigint;
+BEGIN
+    IF coalesce(array_length(quasi_identifiers, 1), 0) = 0 THEN
+        RAISE EXCEPTION 'l_diversity needs at least one quasi-identifier column' USING ERRCODE = '22023';
+    END IF;
+    FOR column_at IN 1..array_length(quasi_identifiers, 1) LOOP
+        IF column_at > 1 THEN
+            grouped := grouped || ', ';
+        END IF;
+        grouped := grouped || quote_ident(quasi_identifiers[column_at]);
+    END LOOP;
+    EXECUTE format('SELECT min(n) FROM (SELECT count(DISTINCT %I) AS n FROM %I.%I GROUP BY %s) g', sensitive_column, schema_name, table_name, grouped) INTO smallest;
+    RETURN coalesce(smallest, 0);
+END
+$$;
+CREATE FUNCTION eggdb_privacy.entropy_l_diversity(schema_name text, table_name text, quasi_identifiers text[], sensitive_column text) RETURNS double precision LANGUAGE plpgsql AS $$
+DECLARE
+    grouped text := '';
+    class_columns text := '';
+    joined text := '';
+    smallest double precision;
+BEGIN
+    IF coalesce(array_length(quasi_identifiers, 1), 0) = 0 THEN
+        RAISE EXCEPTION 'entropy_l_diversity needs at least one quasi-identifier column' USING ERRCODE = '22023';
+    END IF;
+    FOR column_at IN 1..array_length(quasi_identifiers, 1) LOOP
+        IF column_at > 1 THEN
+            grouped := grouped || ', ';
+            class_columns := class_columns || ', ';
+            joined := joined || ' AND ';
+        END IF;
+        grouped := grouped || quote_ident(quasi_identifiers[column_at]);
+        class_columns := class_columns || 'g.' || quote_ident(quasi_identifiers[column_at]);
+        joined := joined || format('g.%1$I IS NOT DISTINCT FROM c.%1$I', quasi_identifiers[column_at]);
+    END LOOP;
+    EXECUTE format('SELECT min(d) FROM (SELECT exp(-sum((g.n::double precision / c.total) * ln(g.n::double precision / c.total))) AS d FROM (SELECT %1$s, %2$I, count(*) AS n FROM %3$I.%4$I WHERE %2$I IS NOT NULL GROUP BY %1$s, %2$I) g JOIN (SELECT %1$s, count(*) AS total FROM %3$I.%4$I WHERE %2$I IS NOT NULL GROUP BY %1$s) c ON %5$s GROUP BY %6$s) classes',
+        grouped, sensitive_column, schema_name, table_name, joined, class_columns) INTO smallest;
     RETURN coalesce(smallest, 0);
 END
 $$;
@@ -156,16 +200,19 @@ BEGIN
     INSERT INTO eggdb_privacy.budget_spending (dataset, epsilon, purpose) VALUES (spend.dataset, epsilon, purpose);
 END
 $$;
-CREATE FUNCTION eggdb_privacy.dp_count(dataset text, query text, epsilon double precision) RETURNS double precision LANGUAGE plpgsql AS $$
+CREATE FUNCTION eggdb_privacy.dp_count(dataset text, query text, epsilon double precision, bound double precision DEFAULT NULL) RETURNS double precision LANGUAGE plpgsql AS $$
 DECLARE
     exact bigint;
 BEGIN
     PERFORM eggdb_privacy.spend(dataset, epsilon, 'count');
     EXECUTE format('SELECT count(*) FROM (%s) q', query) INTO exact;
+    IF bound IS NOT NULL THEN
+        RETURN greatest(snapping_mechanism(exact, 1, epsilon, bound), 0);
+    END IF;
     RETURN greatest(exact + laplace_noise(1, epsilon), 0);
 END
 $$;
-CREATE FUNCTION eggdb_privacy.dp_sum(dataset text, query text, column_name text, lower_bound double precision, upper_bound double precision, epsilon double precision) RETURNS double precision LANGUAGE plpgsql AS $$
+CREATE FUNCTION eggdb_privacy.dp_sum(dataset text, query text, column_name text, lower_bound double precision, upper_bound double precision, epsilon double precision, bound double precision DEFAULT NULL) RETURNS double precision LANGUAGE plpgsql AS $$
 DECLARE
     exact double precision;
 BEGIN
@@ -174,6 +221,9 @@ BEGIN
     END IF;
     PERFORM eggdb_privacy.spend(dataset, epsilon, 'sum');
     EXECUTE format('SELECT coalesce(sum(least(greatest(%I::double precision, %s), %s)), 0) FROM (%s) q', column_name, lower_bound, upper_bound, query) INTO exact;
+    IF bound IS NOT NULL THEN
+        RETURN snapping_mechanism(exact, greatest(abs(lower_bound), abs(upper_bound)), epsilon, bound);
+    END IF;
     RETURN exact + laplace_noise(greatest(abs(lower_bound), abs(upper_bound)), epsilon);
 END
 $$;
@@ -397,6 +447,51 @@ fn laplace_noise(values: &[Value]) -> SqlResult<Value> {
     ))
 }
 
+fn uniform_over_doubles() -> SqlResult<f64> {
+    let mut bytes = [0u8; 8];
+    let mut exponent: i32 = -1;
+    loop {
+        crate::random::fill(&mut bytes)?;
+        let word = u64::from_be_bytes(bytes);
+        if word == 0 {
+            exponent -= 64;
+            if exponent <= LOWEST_EXPONENT {
+                return Ok(f64::MIN_POSITIVE);
+            }
+            continue;
+        }
+        exponent -= word.leading_zeros() as i32;
+        break;
+    }
+    crate::random::fill(&mut bytes)?;
+    let mantissa = u64::from_be_bytes(bytes) >> 12;
+    let significand = 1.0 + mantissa as f64 / (1u64 << 52) as f64;
+    Ok(significand * 2f64.powi(exponent.max(LOWEST_EXPONENT)))
+}
+
+fn snapping_mechanism(values: &[Value]) -> SqlResult<Value> {
+    let [value, sensitivity, epsilon, bound] = values else {
+        return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "snapping_mechanism takes (value, sensitivity, epsilon, bound)"));
+    };
+    let (Some(value), Some(sensitivity), Some(epsilon), Some(bound)) = (number(value), number(sensitivity), number(epsilon), number(bound)) else {
+        return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "snapping_mechanism takes four numbers"));
+    };
+    let positive = |number: f64| number.is_finite() && number > 0.0;
+    if !(value.is_finite() && positive(sensitivity) && positive(epsilon) && positive(bound)) {
+        return Err(invalid("snapping_mechanism needs a finite value and a positive sensitivity, epsilon and bound"));
+    }
+    let scale = sensitivity / epsilon;
+    if !positive(scale) || scale >= bound {
+        return Err(invalid("snapping_mechanism needs a bound above sensitivity / epsilon"));
+    }
+    let snap = 2f64.powi(scale.log2().ceil() as i32);
+    let mut sign = [0u8; 1];
+    crate::random::fill(&mut sign)?;
+    let direction = if sign[0] & 1 == 0 { 1.0 } else { -1.0 };
+    let noisy = value.clamp(-bound, bound) + direction * scale * uniform_over_doubles()?.ln();
+    Ok(Value::Double(((noisy / snap).round() * snap).clamp(-bound, bound)))
+}
+
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if !FUNCTIONS.contains(&name) {
         return None;
@@ -406,6 +501,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     }
     Some(match name {
         "laplace_noise" => laplace_noise(values),
+        "snapping_mechanism" => snapping_mechanism(values),
         "gen_random_bytes" => random_bytes(values),
         "eggdb_seal" | "eggdb_unseal" => sealed(name, values),
         "eggdb_blind_index" => blind_index(values),
@@ -482,7 +578,7 @@ fn sealed(name: &str, values: &[Value]) -> SqlResult<Value> {
 }
 
 pub(crate) fn result_type(name: &str) -> crate::types::SqlType {
-    if name == "laplace_noise" {
+    if matches!(name, "laplace_noise" | "snapping_mechanism") {
         crate::types::SqlType::Double
     } else if matches!(name, "gen_random_bytes" | "eggdb_seal" | "eggdb_unseal") {
         crate::types::SqlType::Bytea
@@ -579,5 +675,29 @@ mod tests {
             run(&mut session, "SELECT count(DISTINCT country) AS countries, min(id) >= 1 AND max(id) <= 10 AS ids_in_range, min(signed_up) >= DATE '2026-01-02' AND max(signed_up) <= DATE '2026-01-11' AS dates_in_range FROM customers_synthetic").unwrap(),
             "countries|ids_in_range|dates_in_range\n1|t|t\nSELECT 1"
         );
+    }
+
+    #[test]
+    fn l_diversity_counts_sensitive_values_per_class_and_snapping_stays_in_bounds() {
+        crate::memory_store::use_seeded_random_bytes();
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION eggdb_privacy",
+            "CREATE TABLE patients (id integer PRIMARY KEY, zip text, diagnosis text)",
+            "INSERT INTO patients VALUES (1, '100', 'flu'), (2, '100', 'flu'), (3, '100', 'cold'), (4, '200', 'flu'), (5, '200', 'asthma'), (6, '200', 'cold')",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(run(&mut session, "SELECT eggdb_privacy.l_diversity('public', 'patients', ARRAY['zip'], 'diagnosis') AS l").unwrap(), "l\n2\nSELECT 1");
+        assert_eq!(
+            run(&mut session, "SELECT round(eggdb_privacy.entropy_l_diversity('public', 'patients', ARRAY['zip'], 'diagnosis')::numeric, 3) AS l").unwrap(),
+            "l\n1.890\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT bool_and(x BETWEEN -50 AND 50) AS bounded, bool_and(x = round(x / 2) * 2) AS snapped FROM (SELECT snapping_mechanism(10, 1, 0.5, 50) AS x FROM generate_series(1, 500)) s").unwrap(),
+            "bounded|snapped\nt|t\nSELECT 1"
+        );
+        assert!(run(&mut session, "SELECT snapping_mechanism(10, 1, 0.5, 1)").is_err());
     }
 }

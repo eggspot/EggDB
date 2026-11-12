@@ -1826,6 +1826,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "fix_field" => &[TEXT, INTEGER],
         "extract_text" => &[Some(SqlType::Bytea)],
         "laplace_noise" => &[DOUBLE, DOUBLE],
+        "snapping_mechanism" => &[DOUBLE, DOUBLE, DOUBLE, DOUBLE],
         "chr" => &[INTEGER],
         "pg_sleep" => &[DOUBLE],
         "eggdb_cron_schedule_check" => &[TEXT],

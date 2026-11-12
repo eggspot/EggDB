@@ -3671,6 +3671,13 @@ SELECT eggdb_privacy.k_anonymity('public', 'patients', ARRAY['zip', 'age_band'])
   budget is spent they refuse with `53400`.
 - `eggdb_privacy.masked_copy(schema, table, target, masks)` copies a table for non-production use with each column
   kept or masked as `masks` says: `null`, `redact`, `hash`, `email` (a fake address) or `keep_last:N`.
+- `snapping_mechanism(value, sensitivity, epsilon, bound)` adds Laplace noise of scale `sensitivity / epsilon` the
+  way Mironov's snapping mechanism does (D758): the value is clamped to `[-bound, bound]`, the noise is drawn from a
+  uniform sample over every double in (0, 1), and the sum is rounded to a power of two at least the scale and clamped
+  again, so the floating-point gaps that let Laplace noise leak the true value are closed. `dp_count` and `dp_sum`
+  use it when given a last `bound` argument. `eggdb_privacy.l_diversity(schema, table, quasi_identifiers, sensitive)`
+  returns the fewest distinct sensitive values in any group of rows sharing the quasi-identifiers, and
+  `entropy_l_diversity` the smallest exponentiated entropy of those values in a group.
 - `eggdb_privacy.synthetic_copy(schema, table, target, rows [, minimum_group])` writes a table of made-up rows with
   the same columns (D757). Each column keeps its share of NULLs and is drawn on its own: numbers from a normal
   distribution with the column's mean and spread, kept between its smallest and largest value; dates and timestamps
