@@ -1,4 +1,14 @@
-use eggdb_graph::{Node, Path, Relationship, Value};
+use eggdb_graph::{Node, Path, Point, Relationship, Temporal, Value};
+
+const DATE: u8 = 0x44;
+const TIME: u8 = 0x54;
+const LOCAL_TIME: u8 = 0x74;
+const DATE_TIME_UTC: u8 = 0x49;
+const DATE_TIME_LOCAL_SECONDS: u8 = 0x46;
+const LOCAL_DATE_TIME: u8 = 0x64;
+const DURATION: u8 = 0x45;
+const POINT_2D: u8 = 0x58;
+const POINT_3D: u8 = 0x59;
 
 const MAX_DEPTH: usize = 64;
 
@@ -56,10 +66,86 @@ impl Packed {
             Packed::Bytes(_) => {
                 return Err("byte array parameters are not supported yet".to_owned());
             }
-            Packed::Struct(..) => {
-                return Err("temporal and spatial parameters are not supported yet".to_owned());
-            }
+            Packed::Struct(signature, fields) => structure_value(*signature, fields)?,
         })
+    }
+}
+
+fn structure_value(signature: u8, fields: &[Packed]) -> Result<Value, String> {
+    let integer = |at: usize| match fields.get(at) {
+        Some(Packed::Integer(number)) => Ok(*number),
+        _ => Err(format!("structure 0x{signature:02x} needs an integer in field {at}")),
+    };
+    let small = |at: usize| integer(at).and_then(|number| i32::try_from(number).map_err(|_| format!("field {at} is out of range")));
+    let float = |at: usize| match fields.get(at) {
+        Some(Packed::Float(number)) => Ok(*number),
+        Some(Packed::Integer(number)) => Ok(*number as f64),
+        _ => Err(format!("structure 0x{signature:02x} needs a float in field {at}")),
+    };
+    Ok(match (signature, fields.len()) {
+        (DATE, 1) => Value::Temporal(Temporal::Date { days: integer(0)? }),
+        (TIME, 2) => Value::Temporal(Temporal::Time { nanos: integer(0)?, offset: small(1)? }),
+        (LOCAL_TIME, 1) => Value::Temporal(Temporal::LocalTime { nanos: integer(0)? }),
+        (DATE_TIME_UTC, 3) => Value::Temporal(Temporal::DateTime { seconds: integer(0)?, nanos: small(1)?, offset: small(2)? }),
+        (DATE_TIME_LOCAL_SECONDS, 3) => {
+            let offset = small(2)?;
+            Value::Temporal(Temporal::DateTime { seconds: integer(0)? - i64::from(offset), nanos: small(1)?, offset })
+        }
+        (LOCAL_DATE_TIME, 2) => Value::Temporal(Temporal::LocalDateTime { seconds: integer(0)?, nanos: small(1)? }),
+        (DURATION, 4) => Value::Temporal(Temporal::Duration {
+            months: integer(0)?,
+            days: integer(1)?,
+            seconds: integer(2)?,
+            nanos: small(3)?,
+        }),
+        (POINT_2D, 3) => Value::Point(Point { srid: small(0)?, x: float(1)?, y: float(2)?, z: None }),
+        (POINT_3D, 4) => Value::Point(Point { srid: small(0)?, x: float(1)?, y: float(2)?, z: Some(float(3)?) }),
+        _ => return Err(format!("structure 0x{signature:02x} is not supported as a parameter")),
+    })
+}
+
+fn write_temporal(out: &mut Vec<u8>, temporal: &Temporal, utc: bool) {
+    match *temporal {
+        Temporal::Date { days } => {
+            out.extend_from_slice(&[0xb1, DATE]);
+            write_integer(out, days);
+        }
+        Temporal::Time { nanos, offset } => {
+            out.extend_from_slice(&[0xb2, TIME]);
+            write_integer(out, nanos);
+            write_integer(out, i64::from(offset));
+        }
+        Temporal::LocalTime { nanos } => {
+            out.extend_from_slice(&[0xb1, LOCAL_TIME]);
+            write_integer(out, nanos);
+        }
+        Temporal::DateTime { seconds, nanos, offset } => {
+            out.extend_from_slice(&[0xb3, if utc { DATE_TIME_UTC } else { DATE_TIME_LOCAL_SECONDS }]);
+            write_integer(out, if utc { seconds } else { seconds + i64::from(offset) });
+            write_integer(out, i64::from(nanos));
+            write_integer(out, i64::from(offset));
+        }
+        Temporal::LocalDateTime { seconds, nanos } => {
+            out.extend_from_slice(&[0xb2, LOCAL_DATE_TIME]);
+            write_integer(out, seconds);
+            write_integer(out, i64::from(nanos));
+        }
+        Temporal::Duration { months, days, seconds, nanos } => {
+            out.extend_from_slice(&[0xb4, DURATION]);
+            write_integer(out, months);
+            write_integer(out, days);
+            write_integer(out, seconds);
+            write_integer(out, i64::from(nanos));
+        }
+    }
+}
+
+fn write_point(out: &mut Vec<u8>, point: &Point) {
+    out.extend_from_slice(&[if point.z.is_some() { 0xb4 } else { 0xb3 }, if point.z.is_some() { POINT_3D } else { POINT_2D }]);
+    write_integer(out, i64::from(point.srid));
+    for coordinate in [Some(point.x), Some(point.y), point.z].into_iter().flatten() {
+        out.push(0xc1);
+        out.extend_from_slice(&coordinate.to_be_bytes());
     }
 }
 
@@ -279,6 +365,8 @@ pub(crate) fn write_value(out: &mut Vec<u8>, value: &Value, element_ids: bool) {
             }
         }
         Value::Path(path) => write_path(out, path, element_ids),
+        Value::Temporal(temporal) => write_temporal(out, temporal, element_ids),
+        Value::Point(point) => write_point(out, point),
     }
 }
 

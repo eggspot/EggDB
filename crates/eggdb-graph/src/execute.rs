@@ -437,6 +437,8 @@ impl<'g> Executor<'g, '_> {
                     .iter()
                     .find(|(name, _)| name == property)
                     .map_or(Value::Null, |(_, value)| value.clone()),
+                Value::Temporal(temporal) => temporal.field(property).unwrap_or(Value::Null),
+                Value::Point(point) => point.field(property).unwrap_or(Value::Null),
                 Value::Null => Value::Null,
                 other => {
                     return Err(type_error(format!(
@@ -708,10 +710,11 @@ impl<'g> Executor<'g, '_> {
             | Operator::Greater
             | Operator::GreaterOrEqual => {
                 let comparable = a.kind_rank() == b.kind_rank()
-                    && matches!(
-                        a,
-                        Value::Integer(_) | Value::Float(_) | Value::String(_) | Value::Boolean(_)
-                    );
+                    && match &a {
+                        Value::Integer(_) | Value::Float(_) | Value::String(_) | Value::Boolean(_) => true,
+                        Value::Temporal(temporal) => temporal.is_ordered(),
+                        _ => false,
+                    };
                 if !comparable {
                     return Ok(Value::Null);
                 }
@@ -899,6 +902,9 @@ impl<'g> Executor<'g, '_> {
                         .map(|at| Value::Integer(start + at * step))
                         .collect(),
                 )
+            }
+            (name, arguments) if crate::temporal::FUNCTIONS.contains(&name) => {
+                crate::temporal::call(name, arguments).ok_or_else(argument_error)?
             }
             _ => {
                 return Err(GraphError::new(
@@ -2397,6 +2403,8 @@ pub fn display(value: &Value) -> String {
                 .collect::<String>()
         ),
         Value::Relationship(relationship) => format!("[{}:{}]", relationship.id, relationship.kind),
+        Value::Temporal(temporal) => temporal.text(),
+        Value::Point(point) => point.text(),
         Value::Path(path) => {
             let mut text = path
                 .nodes

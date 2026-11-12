@@ -1381,7 +1381,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Bolt: open transactions across messages, `LOGON` (5.1 and later), routing tables and bookmarks
   (D207). `LOGON`, routing tables and bookmarks: **code written, unbuilt** (code-only mode, 2026-11-11, D504);
   open transactions across messages: **code written, unbuilt** (code-only mode, 2026-11-12, D606).
-- Bolt's temporal and spatial PackStream types (D207).
+- Bolt's temporal and spatial PackStream types (D207). **Code written, unbuilt** (code-only mode, 2026-11-12, D720),
+  with Cypher's temporal and point values.
 - Apache TinkerPop Gremlin, and Cosmos DB's Gremlin API after D58's legal check (D48).
 - Louvain, Leiden, betweenness and closeness centrality, weighted shortest paths, k-core and graph
   embeddings (D55, D248). Louvain, betweenness, closeness, weighted shortest paths and k-core:

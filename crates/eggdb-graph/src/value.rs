@@ -1,3 +1,4 @@
+use crate::temporal::{Point, Temporal};
 use std::cmp::Ordering;
 
 /// A node as a query returns it.
@@ -59,6 +60,10 @@ pub enum Value {
     Relationship(Box<Relationship>),
     /// A path.
     Path(Box<Path>),
+    /// A date, time, date and time, or duration.
+    Temporal(Temporal),
+    /// A 2D or 3D point.
+    Point(Point),
 }
 
 impl Value {
@@ -82,10 +87,12 @@ impl Value {
             Value::Relationship(_) => 2,
             Value::List(_) => 3,
             Value::Path(_) => 4,
-            Value::String(_) => 5,
-            Value::Boolean(_) => 6,
-            Value::Integer(_) | Value::Float(_) => 7,
-            Value::Null => 9,
+            Value::Point(_) => 5,
+            Value::Temporal(temporal) => 6 + temporal.rank(),
+            Value::String(_) => 12,
+            Value::Boolean(_) => 13,
+            Value::Integer(_) | Value::Float(_) => 14,
+            Value::Null => 16,
         }
     }
 
@@ -102,6 +109,8 @@ impl Value {
             Value::Node(_) => "NODE",
             Value::Relationship(_) => "RELATIONSHIP",
             Value::Path(_) => "PATH",
+            Value::Temporal(temporal) => temporal.type_name(),
+            Value::Point(_) => "POINT",
         }
     }
 }
@@ -133,6 +142,13 @@ pub fn order(left: &Value, right: &Value) -> Ordering {
         (Value::Node(a), Value::Node(b)) => a.id.cmp(&b.id),
         (Value::Relationship(a), Value::Relationship(b)) => a.id.cmp(&b.id),
         (Value::Path(a), Value::Path(b)) => path_ids(a).cmp(&path_ids(b)),
+        (Value::Temporal(a), Value::Temporal(b)) => a.order(b),
+        (Value::Point(a), Value::Point(b)) => a
+            .srid
+            .cmp(&b.srid)
+            .then_with(|| a.x.total_cmp(&b.x))
+            .then_with(|| a.y.total_cmp(&b.y))
+            .then_with(|| a.z.unwrap_or(0.0).total_cmp(&b.z.unwrap_or(0.0))),
         _ => Ordering::Equal,
     }
 }
@@ -186,6 +202,71 @@ pub(crate) fn to_bson(value: &Value) -> Option<eggdb_bson::Bson> {
         Value::Float(number) => Bson::Double(*number),
         Value::String(text) => Bson::String(text.clone()),
         Value::List(items) => Bson::Array(items.iter().map(to_bson).collect::<Option<_>>()?),
+        Value::Temporal(temporal) => {
+            let (kind, fields): (&str, Vec<(&str, i64)>) = match *temporal {
+                Temporal::Date { days } => ("date", vec![("days", days)]),
+                Temporal::LocalTime { nanos } => ("localtime", vec![("nanos", nanos)]),
+                Temporal::Time { nanos, offset } => ("time", vec![("nanos", nanos), ("offset", i64::from(offset))]),
+                Temporal::LocalDateTime { seconds, nanos } => {
+                    ("localdatetime", vec![("seconds", seconds), ("nanos", i64::from(nanos))])
+                }
+                Temporal::DateTime { seconds, nanos, offset } => (
+                    "datetime",
+                    vec![("seconds", seconds), ("nanos", i64::from(nanos)), ("offset", i64::from(offset))],
+                ),
+                Temporal::Duration { months, days, seconds, nanos } => (
+                    "duration",
+                    vec![("months", months), ("days", days), ("seconds", seconds), ("nanos", i64::from(nanos))],
+                ),
+            };
+            let mut stored = eggdb_bson::Document::new();
+            stored.insert(STORED_KIND, Bson::String(kind.to_owned()));
+            for (name, value) in fields {
+                stored.insert(name, Bson::Int64(value));
+            }
+            Bson::Document(stored)
+        }
+        Value::Point(point) => {
+            let mut stored = eggdb_bson::Document::new();
+            stored.insert(STORED_KIND, Bson::String("point".to_owned()));
+            stored.insert("srid", Bson::Int32(point.srid));
+            stored.insert("x", Bson::Double(point.x));
+            stored.insert("y", Bson::Double(point.y));
+            if let Some(z) = point.z {
+                stored.insert("z", Bson::Double(z));
+            }
+            Bson::Document(stored)
+        }
+        _ => return None,
+    })
+}
+
+const STORED_KIND: &str = "$cypher";
+
+fn stored_value(stored: &eggdb_bson::Document) -> Option<Value> {
+    let number = |name: &str| stored.get_i64(name);
+    let small = |name: &str| number(name).and_then(|value| i32::try_from(value).ok());
+    let float = |name: &str| match stored.get(name)? {
+        eggdb_bson::Bson::Double(value) => Some(*value),
+        _ => None,
+    };
+    Some(match stored.get_str(STORED_KIND)? {
+        "date" => Value::Temporal(Temporal::Date { days: number("days")? }),
+        "localtime" => Value::Temporal(Temporal::LocalTime { nanos: number("nanos")? }),
+        "time" => Value::Temporal(Temporal::Time { nanos: number("nanos")?, offset: small("offset")? }),
+        "localdatetime" => Value::Temporal(Temporal::LocalDateTime { seconds: number("seconds")?, nanos: small("nanos")? }),
+        "datetime" => Value::Temporal(Temporal::DateTime {
+            seconds: number("seconds")?,
+            nanos: small("nanos")?,
+            offset: small("offset")?,
+        }),
+        "duration" => Value::Temporal(Temporal::Duration {
+            months: number("months")?,
+            days: number("days")?,
+            seconds: number("seconds")?,
+            nanos: small("nanos")?,
+        }),
+        "point" => Value::Point(Point { srid: small("srid")?, x: float("x")?, y: float("y")?, z: float("z") }),
         _ => return None,
     })
 }
@@ -199,6 +280,7 @@ pub(crate) fn from_bson(value: &eggdb_bson::Bson) -> Value {
         Bson::Double(number) => Value::Float(*number),
         Bson::String(text) => Value::String(text.clone()),
         Bson::Array(items) => Value::List(items.iter().map(from_bson).collect()),
+        Bson::Document(stored) => stored_value(stored).unwrap_or(Value::Null),
         _ => Value::Null,
     }
 }

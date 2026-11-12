@@ -19,6 +19,7 @@ mod execute;
 mod procedures;
 mod schema;
 mod store;
+mod temporal;
 mod value;
 
 pub use algorithms::{
@@ -26,6 +27,7 @@ pub use algorithms::{
     triangle_count,
 };
 pub use execute::display;
+pub use temporal::{CARTESIAN, CARTESIAN_3D, Point, Temporal, WGS_84, WGS_84_3D};
 pub use value::{Node, Path, Relationship, Value, equals, order};
 
 use eggdb_keyspace::Keyspace;
