@@ -2718,6 +2718,7 @@ impl<'s> Session<'s> {
             "eggdb_etl" => ("eggdb_etl", crate::etl::ETL_SCRIPT),
             "eggdb_app_auth" => ("eggdb_app_auth", crate::app_auth::APP_AUTH_SCRIPT),
             "eggdb_shredding" => ("eggdb_shredding", crate::shredding::SHREDDING_SCRIPT),
+            "eggdb_iot" => ("eggdb_iot", crate::iot::IOT_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };
         let mut installed = false;

@@ -4109,6 +4109,29 @@ SELECT eggdb_shredding.shred('user-1');
 - `place_hold(name, subject, reason)` keeps a subject from being shredded until `lift_hold(name, subject)`;
   `shred` then returns false, and every request is logged in `eggdb_shredding.shred_log`.
 
+## Web of Things (eggdb_iot)
+
+`CREATE EXTENSION eggdb_iot` keeps devices described by W3C Web of Things Thing Descriptions (TD 1.0 and 1.1) and
+checks what they report against them (D774):
+
+```sql
+CREATE EXTENSION eggdb_iot;
+SELECT eggdb_iot.register_thing('{"@context": "https://www.w3.org/2022/wot/td/v1.1", "id": "urn:dev:lamp-1",
+    "title": "Lamp", "securityDefinitions": {"nosec_sc": {"scheme": "nosec"}}, "security": "nosec_sc",
+    "properties": {"brightness": {"type": "integer", "minimum": 0, "maximum": 100,
+    "forms": [{"href": "https://lamp.example/brightness"}]}}}');
+SELECT eggdb_iot.record_reading('urn:dev:lamp-1', 'brightness', '42');
+SELECT eggdb_iot.latest('urn:dev:lamp-1');
+```
+
+- `register_thing(td)` checks the description (`@context`, `title`, `securityDefinitions`, `security` naming defined
+  schemes, and a form with an `href` on every property, action and event), stores it under its `id` (or a
+  `urn:eggdb:thing:` name from its title) and returns the id; `description_problems(td)` lists what is wrong.
+- `record_reading(thing, property, value [, observed_at])` and `emit_event(thing, event [, data])` refuse a value
+  that breaks the affordance's data schema (`type`, `const`, `enum`, `minimum`, `maximum`, string and array lengths,
+  array `items`, object `required` and `properties`) with SQLSTATE 22023, and keep it in `eggdb_iot.readings` or
+  `eggdb_iot.events`. `latest(thing)` returns each property's newest reading.
+
 ## Resumable copies with verified differences (eggdb_migration)
 
 `CREATE EXTENSION eggdb_migration` moves a large table in batches that survive interruptions,

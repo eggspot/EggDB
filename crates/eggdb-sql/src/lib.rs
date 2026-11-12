@@ -122,6 +122,7 @@ mod app_tokens;
 mod app_auth;
 mod webauthn;
 mod shredding;
+mod iot;
 mod report_pdf;
 mod zarr;
 mod new_files;

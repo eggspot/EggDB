@@ -1633,7 +1633,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - ISO 20022 and DICOM (D50). DICOM files as DICOM's JSON model (`dicom_parse`): **code written, unbuilt** (code-only
   mode, 2026-11-12, D698); ISO 20022 messages as JSON (`iso20022_parse`): **code written, unbuilt** (code-only mode,
   2026-11-12, D699). Left: schema validation.
-- IoT models: W3C Web of Things, and DTDL after D58's legal check (D57).
+- IoT models: W3C Web of Things, and DTDL after D58's legal check (D57). Web of Things (`eggdb_iot`): **code written,
+  unbuilt** (code-only mode, 2026-11-12, D774). Left: DTDL.
 - OPC UA, Modbus and Sparkplug ingest (D57). Sparkplug B payloads decoded in SQL (`sparkplug_decode`): **code written,
   unbuilt** (code-only mode, 2026-11-12, D701). Left: ingest as messages arrive, OPC UA and Modbus.
 - Email stores with IMAP, JMAP and SMTP (D56).
