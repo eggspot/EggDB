@@ -729,9 +729,27 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             names_only: false,
             properties,
         };
+        let expand = document
+            .child(DAV, "prop")
+            .and_then(|prop| prop.child(CALDAV, "calendar-data"))
+            .and_then(|data| data.child(CALDAV, "expand"))
+            .map(|expand| {
+                let bound = |name: &str| expand.attribute(name).and_then(ical::parse_moment).map(|moment| moment.seconds);
+                TimeRange {
+                    start: bound("start"),
+                    end: bound("end"),
+                }
+            });
         let data = |namespace: &str, name: &str, resource: &Resource| {
             let wanted_data = (namespace == CALDAV && name == "calendar-data") || (namespace == CARDDAV && name == "address-data");
-            (wanted_data && resource.kind == Kind::File).then(|| escaped(&String::from_utf8_lossy(&resource.body)))
+            if !wanted_data || resource.kind != Kind::File {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&resource.body);
+            Some(match expand {
+                Some(range) if name == "calendar-data" => escaped(&ical::expanded(&text, range)),
+                _ => escaped(&text),
+            })
         };
         let multiget = document.is(CALDAV, "calendar-multiget") || document.is(CARDDAV, "addressbook-multiget");
         let resources: Vec<Resource> = if multiget {

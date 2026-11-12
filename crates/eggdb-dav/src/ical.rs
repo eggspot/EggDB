@@ -397,32 +397,29 @@ fn period_starts(rule: &Rule, first: i64, stop_at: i64) -> Vec<i64> {
     starts
 }
 
-/// Whether `component` (one with `DTSTART`, `DTEND` or `DURATION`, `DUE` for to-dos, and maybe
-/// `RRULE`, `RDATE` and `EXDATE`) has an instance overlapping `range`, by RFC 4791 section 9.9.
-/// A recurrence rule this reader does not follow (`BYMONTHDAY`, `BYSETPOS` and the like) counts
-/// as overlapping, so a client gets the object and filters it itself.
-pub fn overlaps(component: &Component, range: TimeRange) -> bool {
+enum Instances {
+    Unanchored(bool),
+    Unknown,
+    Listed { starts: Vec<i64>, length: Option<i64>, date_only: bool },
+}
+
+fn instances(component: &Component, range: TimeRange) -> Instances {
     let start = component.moment("DTSTART");
     let end = component.moment("DTEND").or_else(|| component.moment("DUE"));
     let duration = component.first("DURATION").and_then(|property| parse_duration(&property.value));
     let Some(start) = start else {
-        return match end {
+        return Instances::Unanchored(match end {
             Some(due) => {
                 range.start.is_none_or(|from| from < due.seconds) && range.end.is_none_or(|until| until >= due.seconds)
             }
             None => true,
-        };
+        });
     };
     let length = match (end, duration) {
         (Some(end), _) => Some((end.seconds - start.seconds).max(0)),
         (None, Some(duration)) => Some(duration.max(0)),
         (None, None) if start.date_only => Some(SECONDS_PER_DAY),
         (None, None) => None,
-    };
-    let instance_holds = |at: i64| match length {
-        Some(0) => range.holds_instant(at),
-        Some(length) => range.overlaps(at, at + length),
-        None => range.holds_instant(at),
     };
     let excluded = component.moments("EXDATE");
     let mut starts = vec![start.seconds];
@@ -435,11 +432,213 @@ pub fn overlaps(component: &Component, range: TimeRange) -> bool {
                     starts.push(start.seconds);
                 }
             }
-            ParsedRule::Unknown => return true,
+            ParsedRule::Unknown => return Instances::Unknown,
         }
     }
     starts.extend(component.moments("RDATE"));
-    starts.into_iter().filter(|at| !excluded.contains(at)).any(instance_holds)
+    starts.retain(|at| !excluded.contains(at));
+    starts.sort_unstable();
+    starts.dedup();
+    Instances::Listed {
+        starts,
+        length,
+        date_only: start.date_only,
+    }
+}
+
+fn instance_holds(range: TimeRange, at: i64, length: Option<i64>) -> bool {
+    match length {
+        Some(0) | None => range.holds_instant(at),
+        Some(length) => range.overlaps(at, at + length),
+    }
+}
+
+/// Whether `component` (one with `DTSTART`, `DTEND` or `DURATION`, `DUE` for to-dos, and maybe
+/// `RRULE`, `RDATE` and `EXDATE`) has an instance overlapping `range`, by RFC 4791 section 9.9.
+/// A recurrence rule this reader does not follow (`BYMONTHDAY`, `BYSETPOS` and the like) counts
+/// as overlapping, so a client gets the object and filters it itself.
+pub fn overlaps(component: &Component, range: TimeRange) -> bool {
+    match instances(component, range) {
+        Instances::Unanchored(holds) => holds,
+        Instances::Unknown => true,
+        Instances::Listed { starts, length, .. } => starts.into_iter().any(|at| instance_holds(range, at, length)),
+    }
+}
+
+fn written_time(seconds: i64, date_only: bool) -> String {
+    let (year, month, day) = civil_from_days(seconds.div_euclid(SECONDS_PER_DAY));
+    if date_only {
+        return format!("{year:04}{month:02}{day:02}");
+    }
+    let within = seconds.rem_euclid(SECONDS_PER_DAY);
+    format!("{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z", within / 3600, within / 60 % 60, within % 60)
+}
+
+fn time_line(name: &str, seconds: i64, date_only: bool) -> String {
+    if date_only {
+        format!("{name};VALUE=DATE:{}", written_time(seconds, true))
+    } else {
+        format!("{name}:{}", written_time(seconds, false))
+    }
+}
+
+const RECURRENCE_PROPERTIES: [&str; 8] = ["DTSTART", "DTEND", "DURATION", "DUE", "RRULE", "RDATE", "EXDATE", "RECURRENCE-ID"];
+
+enum Segment {
+    Line(String),
+    Block(Vec<String>, Component),
+}
+
+fn own_component(lines: &[String]) -> Component {
+    let mut depth = 0usize;
+    let mut component = Component {
+        name: String::new(),
+        properties: Vec::new(),
+    };
+    for line in lines {
+        let Some(property) = property_of(line) else {
+            continue;
+        };
+        match property.name.as_str() {
+            "BEGIN" => {
+                if depth == 0 {
+                    component.name = property.value.trim().to_ascii_uppercase();
+                }
+                depth += 1;
+            }
+            "END" => depth = depth.saturating_sub(1),
+            _ if depth == 1 => component.properties.push(property),
+            _ => {}
+        }
+    }
+    component
+}
+
+fn segments(text: &str) -> Vec<Segment> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut block: Option<Vec<String>> = None;
+    let mut skipping = false;
+    for line in unfolded(text) {
+        if line.is_empty() {
+            continue;
+        }
+        let property = property_of(&line);
+        let name = property.as_ref().map(|property| property.name.as_str()).unwrap_or_default();
+        let value = property.as_ref().map(|property| property.value.trim().to_ascii_uppercase()).unwrap_or_default();
+        match name {
+            "BEGIN" => {
+                depth += 1;
+                if depth == 2 {
+                    if value == "VTIMEZONE" {
+                        skipping = true;
+                    } else if matches!(value.as_str(), "VEVENT" | "VTODO" | "VJOURNAL") {
+                        block = Some(Vec::new());
+                    }
+                }
+            }
+            "END" => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        match (&mut block, skipping) {
+            (_, true) => {}
+            (Some(lines), false) => lines.push(line),
+            (None, false) => out.push(Segment::Line(line)),
+        }
+        if name == "END" && depth == 1 {
+            skipping = false;
+            if let Some(lines) = block.take() {
+                let component = own_component(&lines);
+                out.push(Segment::Block(lines, component));
+            }
+        }
+    }
+    out
+}
+
+fn recurrence_key(component: &Component) -> Option<(String, i64)> {
+    let id = component.moment("RECURRENCE-ID")?;
+    let uid = component.first("UID").map(|property| property.value.clone()).unwrap_or_default();
+    Some((uid, id.seconds))
+}
+
+fn instance_lines(lines: &[String], start: i64, length: Option<i64>, date_only: bool) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines.len() + 2);
+    let mut depth = 0usize;
+    for line in lines {
+        let property = property_of(line);
+        let name = property.as_ref().map(|property| property.name.clone()).unwrap_or_default();
+        match name.as_str() {
+            "BEGIN" => {
+                depth += 1;
+                out.push(line.clone());
+                if depth == 1 {
+                    out.push(time_line("DTSTART", start, date_only));
+                    if let Some(length) = length.filter(|length| *length > 0) {
+                        out.push(time_line("DTEND", start + length, date_only));
+                    }
+                    out.push(time_line("RECURRENCE-ID", start, date_only));
+                }
+            }
+            "END" => {
+                depth = depth.saturating_sub(1);
+                out.push(line.clone());
+            }
+            own if depth == 1 && RECURRENCE_PROPERTIES.contains(&own) => {}
+            _ => out.push(line.clone()),
+        }
+    }
+    out
+}
+
+/// A calendar object with `expand` applied (RFC 4791 section 9.6.5): each recurring
+/// component replaced by its instances overlapping `range`, each with its own `DTSTART`,
+/// `DTEND` and `RECURRENCE-ID` in UTC and no recurrence properties; overridden instances given
+/// by their own components; other components kept when they overlap; time zones left out.
+pub fn expanded(text: &str, range: TimeRange) -> String {
+    let segments = segments(text);
+    let overridden: Vec<(String, i64)> = segments
+        .iter()
+        .filter_map(|segment| match segment {
+            Segment::Block(_, component) => recurrence_key(component),
+            Segment::Line(_) => None,
+        })
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for segment in segments {
+        match segment {
+            Segment::Line(line) => out.push(line),
+            Segment::Block(lines, component) => {
+                if recurrence_key(&component).is_some() {
+                    if overlaps(&component, range) {
+                        out.extend(lines);
+                    }
+                    continue;
+                }
+                let uid = component.first("UID").map(|property| property.value.clone()).unwrap_or_default();
+                match instances(&component, range) {
+                    Instances::Unanchored(true) | Instances::Unknown => out.extend(lines),
+                    Instances::Unanchored(false) => {}
+                    Instances::Listed { starts, length, date_only } => {
+                        let recurring = component.first("RRULE").is_some() || component.first("RDATE").is_some();
+                        for start in starts {
+                            if !instance_holds(range, start, length) || overridden.contains(&(uid.clone(), start)) {
+                                continue;
+                            }
+                            if recurring {
+                                out.extend(instance_lines(&lines, start, length, date_only));
+                            } else {
+                                out.extend(lines.iter().cloned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut text = out.join("\r\n");
+    text.push_str("\r\n");
+    text
 }
 
 #[cfg(test)]
@@ -488,6 +687,18 @@ mod tests {
             end: None,
         };
         assert!(overlaps(&event("DTSTART:20260112T090000Z\r\nDURATION:PT15M"), open));
+    }
+
+    #[test]
+    fn expansion_writes_each_instance_in_the_range() {
+        let text = "BEGIN:VCALENDAR\r\nBEGIN:VTIMEZONE\r\nTZID:X\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:standup\r\nSUMMARY:Standup\r\nDTSTART:20260105T090000Z\r\nDURATION:PT15M\r\nRRULE:FREQ=DAILY;COUNT=5\r\nBEGIN:VALARM\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:standup\r\nRECURRENCE-ID:20260107T090000Z\r\nSUMMARY:Moved\r\nDTSTART:20260107T100000Z\r\nDURATION:PT15M\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let out = expanded(text, range("20260106T000000Z", "20260108T000000Z"));
+        assert!(!out.contains("VTIMEZONE"), "{out}");
+        assert!(!out.contains("RRULE"), "{out}");
+        assert!(out.contains("DTSTART:20260106T090000Z\r\nDTEND:20260106T091500Z\r\nRECURRENCE-ID:20260106T090000Z"), "{out}");
+        assert!(!out.contains("RECURRENCE-ID:20260107T090000Z\r\nUID") && out.contains("SUMMARY:Moved"), "{out}");
+        assert_eq!(out.matches("BEGIN:VEVENT").count(), 2, "{out}");
+        assert!(out.contains("TRIGGER:-PT5M"), "{out}");
     }
 
     #[test]
