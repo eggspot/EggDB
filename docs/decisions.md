@@ -987,3 +987,4 @@ its full title with its status.
 - [D960](decisions/D960.md) Code-only batch 608 (M6f): a sqlite3-compatible module for TypeORM and Sequelize
 - [D961](decisions/D961.md) Code-only batch 609 (M6f): a Prisma driver adapter for the Node.js driver
 - [D962](decisions/D962.md) Code-only batch 610 (M6f): GORM on EggDB through GORM's SQLite dialector
+- [D963](decisions/D963.md) Code-only batch 611 (M6f): a Doctrine DBAL driver for the PHP driver
