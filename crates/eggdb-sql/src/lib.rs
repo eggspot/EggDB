@@ -100,6 +100,7 @@ mod mysql_named_locks;
 mod mysql_set;
 mod mysql_variables;
 mod name_resolution;
+mod wasm_routines;
 mod native_functions;
 mod image_metadata;
 mod netcdf;

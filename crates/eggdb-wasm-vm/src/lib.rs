@@ -12,7 +12,7 @@ mod decode;
 mod float;
 mod run;
 
-pub use decode::{Module, WasmError};
+pub use decode::{Module, ValueType, WasmError};
 pub use run::{Instance, Limits, Trap, Value};
 
 #[cfg(test)]

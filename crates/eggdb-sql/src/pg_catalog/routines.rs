@@ -14,6 +14,7 @@ const SQL_LANGUAGE: u32 = 14;
 const PLPGSQL_LANGUAGE: u32 = 13576;
 const TSQL_LANGUAGE: u32 = 13577;
 const PLSQL_LANGUAGE: u32 = 13578;
+const WASM_LANGUAGE: u32 = 13579;
 const VOID_TYPE: u32 = 2278;
 const TRIGGER_TYPE: u32 = 2279;
 const EVENT_TRIGGER_TYPE: u32 = 3838;
@@ -27,7 +28,7 @@ pub(crate) struct Language {
     pub(crate) trusted: bool,
 }
 
-pub(crate) const LANGUAGES: [Language; 6] = [
+pub(crate) const LANGUAGES: [Language; 7] = [
     Language {
         oid: INTERNAL_LANGUAGE,
         name: "internal",
@@ -64,6 +65,12 @@ pub(crate) const LANGUAGES: [Language; 6] = [
         procedural: true,
         trusted: true,
     },
+    Language {
+        oid: WASM_LANGUAGE,
+        name: "wasm",
+        procedural: true,
+        trusted: true,
+    },
 ];
 
 pub(crate) fn language_oid(language: RoutineLanguage) -> u32 {
@@ -73,6 +80,7 @@ pub(crate) fn language_oid(language: RoutineLanguage) -> u32 {
         RoutineLanguage::Tsql => TSQL_LANGUAGE,
         RoutineLanguage::PlSql => PLSQL_LANGUAGE,
         RoutineLanguage::MySql => SQL_LANGUAGE,
+        RoutineLanguage::Wasm => WASM_LANGUAGE,
     }
 }
 

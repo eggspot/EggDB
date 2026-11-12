@@ -23,3 +23,4 @@ eggdb-storage = { path = "../eggdb-storage" }
 eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }
 eggdb-text = { path = "../eggdb-text" }
 eggdb-vector = { path = "../eggdb-vector" }
+eggdb-wasm-vm = { path = "../eggdb-wasm-vm" }

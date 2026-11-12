@@ -419,4 +419,51 @@ impl Module {
     pub fn exports(&self) -> impl Iterator<Item = &str> {
         self.exports.iter().map(|(name, _)| name.as_str())
     }
+
+    /// The parameter types and the result type (`None` for none) of the function exported as
+    /// `name`.
+    pub fn export_signature(&self, name: &str) -> Option<(Vec<ValueType>, Option<ValueType>)> {
+        let index = self
+            .exports
+            .iter()
+            .find(|(export, _)| export == name)
+            .map(|(_, index)| *index)?;
+        let function = self.functions.get(index as usize)?;
+        let signature = self.types.get(function.type_index as usize)?;
+        let params = signature
+            .params
+            .iter()
+            .map(|code| ValueType::of(*code))
+            .collect::<Option<Vec<_>>>()?;
+        let result = match signature.results.first() {
+            Some(code) => Some(ValueType::of(*code)?),
+            None => None,
+        };
+        Some((params, result))
+    }
+}
+
+/// A WebAssembly value type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueType {
+    /// `i32`.
+    I32,
+    /// `i64`.
+    I64,
+    /// `f32`.
+    F32,
+    /// `f64`.
+    F64,
+}
+
+impl ValueType {
+    fn of(code: u8) -> Option<Self> {
+        match code {
+            I32 => Some(Self::I32),
+            I64 => Some(Self::I64),
+            F32 => Some(Self::F32),
+            F64 => Some(Self::F64),
+            _ => None,
+        }
+    }
 }

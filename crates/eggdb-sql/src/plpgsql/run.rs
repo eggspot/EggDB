@@ -195,6 +195,9 @@ fn invoke_in(
             definition.kind.keyword(),
             base_name(&definition.name)
         ),
+        RoutineLanguage::Wasm => {
+            return crate::wasm_routines::invoke(&definition, call.arguments);
+        }
         RoutineLanguage::Tsql => {
             return crate::tsql::invoke_function(
                 writer.get(),
@@ -231,7 +234,7 @@ fn run_definition(
         RoutineLanguage::PlPgSql | RoutineLanguage::PlSql | RoutineLanguage::MySql => {
             Some(crate::routines::compiled_program(run.tables, definition)?)
         }
-        RoutineLanguage::Sql | RoutineLanguage::Tsql => None,
+        RoutineLanguage::Sql | RoutineLanguage::Tsql | RoutineLanguage::Wasm => None,
     };
     if run.oracle {
         run.attach_local(definition);

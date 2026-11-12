@@ -1727,7 +1727,9 @@ fn routines_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                         RoutineLanguage::Sql | RoutineLanguage::Tsql | RoutineLanguage::MySql => {
                             "SQL"
                         }
-                        RoutineLanguage::PlPgSql | RoutineLanguage::PlSql => "EXTERNAL",
+                        RoutineLanguage::PlPgSql | RoutineLanguage::PlSql | RoutineLanguage::Wasm => {
+                            "EXTERNAL"
+                        }
                     }),
                 )
                 .set("routine_definition", character_data(&definition.body))

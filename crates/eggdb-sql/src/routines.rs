@@ -67,6 +67,7 @@ pub(crate) enum RoutineLanguage {
     Tsql,
     PlSql,
     MySql,
+    Wasm,
 }
 
 impl RoutineLanguage {
@@ -77,6 +78,7 @@ impl RoutineLanguage {
             Self::Tsql => "tsql",
             Self::PlSql => "plsql",
             Self::MySql => "mysql",
+            Self::Wasm => "wasm",
         }
     }
 }
@@ -610,7 +612,15 @@ fn check_returns(
 }
 
 fn check_body(definition: &RoutineDefinition, body_position: Option<usize>) -> SqlResult<()> {
+    if definition.language != RoutineLanguage::Wasm
+        && definition.body.contains(crate::wasm_routines::SYMBOL_SEPARATOR)
+    {
+        return Err(SqlError::not_supported(
+            "a routine in a loadable object file (AS 'file', 'symbol') is not supported yet",
+        ));
+    }
     match definition.language {
+        RoutineLanguage::Wasm => crate::wasm_routines::check(definition),
         RoutineLanguage::Sql => tokenize_in(&definition.body, definition.dialect).map(drop),
         RoutineLanguage::PlPgSql => crate::plpgsql::check(definition, body_position),
         RoutineLanguage::MySql => crate::parser::mysql_program(definition).map(drop),

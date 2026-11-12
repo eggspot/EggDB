@@ -624,12 +624,16 @@ impl<'t> Parser<'t> {
         let TokenKind::String(text) = &token.kind else {
             return Err(self.unexpected());
         };
-        let text = text.as_ref().to_owned();
+        let mut text = text.as_ref().to_owned();
         self.at += 1;
-        if self.peek_kind() == &TokenKind::Comma {
-            return Err(
-                self.not_supported("a routine in a loadable object file (AS 'file', 'symbol')")
-            );
+        if self.take(&TokenKind::Comma) {
+            let TokenKind::String(symbol) = self.peek_kind() else {
+                return Err(self.unexpected());
+            };
+            text.push(crate::wasm_routines::SYMBOL_SEPARATOR);
+            text.push_str(symbol.as_ref());
+            self.at += 1;
+            return Ok((text, None));
         }
         let position = self.source_position(token.start, token.end, &text);
         Ok((text, position))
@@ -677,10 +681,11 @@ impl<'t> Parser<'t> {
         match name.as_str() {
             "sql" => Ok(RoutineLanguage::Sql),
             "plpgsql" => Ok(RoutineLanguage::PlPgSql),
+            "wasm" => Ok(RoutineLanguage::Wasm),
             other => Err(SqlError::not_supported(format!(
                 "routines in LANGUAGE {other} are not supported"
             ))
-            .with_hint("EggDB runs routines written in SQL and PL/pgSQL.")
+            .with_hint("EggDB runs routines written in SQL, PL/pgSQL and WebAssembly (LANGUAGE wasm).")
             .at(position)),
         }
     }
