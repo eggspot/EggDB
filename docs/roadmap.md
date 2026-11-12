@@ -1055,8 +1055,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M9 Documents and MongoDB
 - Indexes used by queries, unique indexes and collations (D197). Unique indexes (by scanning): **code written,
-  unbuilt** (code-only mode, 2026-11-11, D529). Left: indexes in the file used by queries, and
-  collations.
+  unbuilt** (code-only mode, 2026-11-11, D529); collations in `find`, `count` and `distinct`: **code written,
+  unbuilt** (code-only mode, 2026-11-12, D738). Left: indexes in the file used by queries, and collations in writes
+  and `aggregate`.
 - `$$NOW` and `$$CLUSTER_TIME` in `aggregate`, and `$$CLUSTER_TIME` in pipeline-style updates
   (D349). **Code written, unbuilt** (code-only mode, 2026-11-10, D404).
 - `$text`, `$expr`, `$jsonSchema`, `$where` and the projection operators (D197). `$expr`: **code

@@ -119,6 +119,36 @@ fn projection_of(body: &Document, name: &str) -> Result<Option<Projection>, Docu
     }
 }
 
+fn collation_of(body: &Document) -> Result<Option<eggdb_documents::Collation>, DocumentError> {
+    match body.get("collation") {
+        None | Some(Bson::Null) => Ok(None),
+        Some(Bson::Document(given)) => eggdb_documents::Collation::parse(given),
+        Some(_) => Err(DocumentError::type_mismatch("BSON field 'collation' needs an object")),
+    }
+}
+
+fn raw_filter(body: &Document, name: &str) -> Document {
+    match body.get(name) {
+        Some(Bson::Document(filter)) => eggdb_documents::filter_with_time(filter, now_ms()),
+        _ => Document::new(),
+    }
+}
+
+fn found_with(
+    shared: &Shared<'_>,
+    database: &str,
+    collection: &str,
+    body: &Document,
+    filter_field: &str,
+    filter: &eggdb_documents::Filter,
+    sort: &SortSpec,
+) -> Result<Vec<Document>, DocumentError> {
+    match collation_of(body)? {
+        Some(collation) => collation.find(shared.store, database, collection, &raw_filter(body, filter_field), sort),
+        None => shared.store.find(database, collection, filter, sort),
+    }
+}
+
 fn count_of(body: &Document, name: &str) -> Result<Option<i64>, DocumentError> {
     match body.get(name) {
         None | Some(Bson::Null) => Ok(None),
@@ -776,7 +806,7 @@ fn find(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Document
         )));
     }
     let tail_from = if tailable { Some(shared.store.change_position()?) } else { None };
-    let found = shared.store.find(database, collection, &filter, &sort)?;
+    let found = found_with(shared, database, collection, body, "filter", &filter, &sort)?;
     let mut remaining: VecDeque<Document> = found
         .into_iter()
         .skip(skip as usize)
@@ -1132,10 +1162,7 @@ fn count(shared: &Shared<'_>, database: &str, body: &Document) -> Result<Documen
     let filter = filter_of(body, "query")?;
     let skip = count_of(body, "skip")?.unwrap_or(0).max(0) as usize;
     let limit = count_of(body, "limit")?.unwrap_or(0).unsigned_abs() as usize;
-    let found = shared
-        .store
-        .find(database, collection, &filter, &SortSpec::default())?
-        .len();
+    let found = found_with(shared, database, collection, body, "query", &filter, &SortSpec::default())?.len();
     let mut n = found.saturating_sub(skip);
     if limit > 0 {
         n = n.min(limit);
@@ -1155,15 +1182,17 @@ fn distinct(
         ));
     };
     let filter = filter_of(body, "query")?;
+    let collation = collation_of(body)?;
     let mut values: Vec<Bson> = Vec::new();
-    for found in shared
-        .store
-        .find(database, collection, &filter, &SortSpec::default())?
-    {
+    let compared = |left: &Bson, right: &Bson| match &collation {
+        Some(collation) => compare(&collation.collated(left), &collation.collated(right)),
+        None => compare(left, right),
+    };
+    for found in found_with(shared, database, collection, body, "query", &filter, &SortSpec::default())? {
         let mut add = |value: &Bson| {
             if !values
                 .iter()
-                .any(|held| compare(held, value) == Ordering::Equal)
+                .any(|held| compared(held, value) == Ordering::Equal)
             {
                 values.push(value.clone());
             }
@@ -1175,7 +1204,7 @@ fn distinct(
             }
         }
     }
-    values.sort_by(compare);
+    values.sort_by(|left, right| compared(left, right));
     Ok(ok(document(vec![("values", Bson::Array(values))])))
 }
 

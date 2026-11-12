@@ -7,6 +7,7 @@
 //! read.
 
 mod change_log;
+mod collation;
 mod error;
 mod expression;
 mod extended_json;
@@ -25,6 +26,7 @@ mod update;
 mod where_script;
 
 pub use change_log::KEPT_CHANGES;
+pub use collation::Collation;
 pub use error::{DocumentError, DocumentResult};
 pub use expression::{evaluate, field_value};
 pub use extended_json::parse_extended_json;
