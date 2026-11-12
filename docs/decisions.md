@@ -920,3 +920,4 @@ its full title with its status.
 - [D893](decisions/D893.md) Code-only batch 541 (M16): IMAP over the email store
 - [D894](decisions/D894.md) Code-only batch 542 (M16): JMAP over the email store
 - [D895](decisions/D895.md) Code-only batch 543 (M16): WebDAV, CalDAV and CardDAV
+- [D896](decisions/D896.md) Code-only batch 544 (M11): ORC union columns

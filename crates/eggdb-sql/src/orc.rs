@@ -559,6 +559,7 @@ fn values(kind: Kind, streams: &Streams<'_>, count: usize) -> Result<Vec<Cell>, 
 const TYPE_LIST: u64 = 10;
 const TYPE_MAP: u64 = 11;
 const TYPE_STRUCT: u64 = 12;
+const TYPE_UNION: u64 = 13;
 const MOST_NESTING: usize = 32;
 const DAYS_FROM_0000_TO_1970: i64 = 719_468;
 
@@ -709,6 +710,23 @@ impl Stripe<'_> {
                     })
                     .collect()
             }
+            TYPE_UNION => {
+                let tags = byte_rle(streams.need(DATA)?, count)?;
+                let mut variants = Vec::with_capacity(children.len());
+                for (index, child) in children.iter().enumerate() {
+                    let slots = tags.iter().filter(|tag| usize::from(**tag) == index).count();
+                    variants.push(self.json(*child, slots, depth + 1)?.into_iter());
+                }
+                let mut out = Vec::with_capacity(count);
+                for tag in tags {
+                    let value = variants
+                        .get_mut(usize::from(tag))
+                        .and_then(Iterator::next)
+                        .ok_or_else(|| damaged("a union names a variant it does not have"))?;
+                    out.push(format!("{{\"tag\":{tag},\"value\":{value}}}"));
+                }
+                out
+            }
             other => {
                 let kind = kind_of(other, number(described, 5).unwrap_or(38), number(described, 6).unwrap_or(0))
                     .ok_or_else(|| format!("ORC type {other} inside a nested column is not supported yet"))?;
@@ -723,7 +741,8 @@ impl Stripe<'_> {
 /// The flat columns of an ORC file (Apache ORC's format, versions 0.11 and 0.12): booleans,
 /// integers, floats, strings, binary, dates, timestamps and decimals, with no, ZLIB, Snappy or
 /// ZSTD compression, direct and dictionary encodings and integer run-length encodings 1 and 2;
-/// list, map and struct columns as JSON text (D836). Union columns are left out.
+/// list, map and struct columns as JSON text (D836), and union columns as JSON objects of the
+/// variant's tag and value (D896).
 pub(crate) fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
     let length = bytes.len();
     let postscript_length = usize::from(*bytes.last().ok_or_else(|| damaged("the file is empty"))?);
@@ -756,7 +775,7 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Vec<Column>, String> {
         };
         let code = number(described, 1).unwrap_or(u64::MAX);
         let kind = kind_of(code, number(described, 5).unwrap_or(38), number(described, 6).unwrap_or(0));
-        if kind.is_none() && !matches!(code, TYPE_LIST | TYPE_MAP | TYPE_STRUCT) {
+        if kind.is_none() && !matches!(code, TYPE_LIST | TYPE_MAP | TYPE_STRUCT | TYPE_UNION) {
             continue;
         }
         columns.push((
@@ -892,5 +911,36 @@ mod tests {
         assert!(looping.json(0, 1, 0).is_err());
         assert_eq!(civil_date(0), "1970-01-01");
         assert_eq!(civil_date(19_723), "2024-01-01");
+    }
+
+    #[test]
+    fn union_columns_read_as_tagged_values() {
+        let types: Vec<Vec<(u64, Field<'static>)>> = vec![
+            vec![(1, Field::Varint(TYPE_UNION)), (2, Field::Varint(1)), (2, Field::Varint(2))],
+            vec![(1, Field::Varint(3))],
+            vec![(1, Field::Varint(3))],
+        ];
+        let streams = |type_id: usize| -> Result<Streams<'static>, String> {
+            let kinds = match type_id {
+                0 => vec![(DATA, vec![0xFD, 0, 1, 0])],
+                1 => vec![(DATA, vec![0xFE, 14, 18])],
+                _ => vec![(DATA, vec![0xFF, 4])],
+            };
+            Ok(Streams {
+                kinds,
+                encoding: 0,
+                dictionary_size: 0,
+                _file: std::marker::PhantomData,
+            })
+        };
+        let stripe = Stripe { types: &types, streams: &streams };
+        assert_eq!(
+            stripe.json(0, 3, 0).unwrap(),
+            vec![
+                "{\"tag\":0,\"value\":7}".to_owned(),
+                "{\"tag\":1,\"value\":2}".to_owned(),
+                "{\"tag\":0,\"value\":9}".to_owned()
+            ]
+        );
     }
 }
