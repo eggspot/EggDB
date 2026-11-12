@@ -763,4 +763,4 @@ its full title with its status.
 - [D736](decisions/D736.md) Code-only batch 384 (M11): `CREATE EXTENSION timescaledb` with hypertables, `drop_chunks`, retention and continuous-aggregate policies
 - [D737](decisions/D737.md) Code-only batch 385 (M9): MongoDB users in `admin.system.users`, user commands, SCRAM sign-in and built-in roles
 - [D738](decisions/D738.md) Code-only batch 386 (M9): MongoDB collations by strength and `numericOrdering` in `find`, `count` and `distinct`
-- [D739](decisions/D739.md) Code-only batch 387 (M8): Elasticsearch analyzers from `settings.analysis` with stop words, synonyms, stemming and folding
+- [D739](decisions/D739.md) Code-only batch 387 (M8): Elasticsearch analyzers from `settings.analysis` with stop words, synonyms, stemming and folding, and `_analyze`

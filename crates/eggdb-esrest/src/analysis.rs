@@ -188,6 +188,25 @@ impl Analyzer {
         self.filtered(raw)
     }
 
+    /// The tokens of `text` with where each came from: its byte offsets and its position among
+    /// the tokenizer's words (words a filter drops keep their positions).
+    pub(crate) fn tokens_with_offsets(&self, text: &str) -> Vec<(String, usize, usize, usize)> {
+        let base = text.as_ptr() as usize;
+        let words: Vec<&str> = match self.tokenizer {
+            Tokenizer::Standard => eggdb_search::words(text),
+            Tokenizer::Whitespace => text.split_whitespace().collect(),
+            Tokenizer::Keyword => vec![text],
+        };
+        let mut out = Vec::new();
+        for (position, word) in words.into_iter().enumerate() {
+            let start = word.as_ptr() as usize - base;
+            if let Some(token) = self.filtered(vec![word.to_owned()]).into_iter().next() {
+                out.push((token, start, start + word.len(), position));
+            }
+        }
+        out
+    }
+
     /// Query terms that the standard analyzer already split and lowered, run through this
     /// analyzer's filters.
     pub(crate) fn refine(&self, terms: Vec<String>) -> Vec<String> {

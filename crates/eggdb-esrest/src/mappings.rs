@@ -140,6 +140,17 @@ impl FieldTypes {
             .collect()
     }
 
+    /// The analyzer `name`, from the indices' settings or built in.
+    pub(crate) fn named_analyzer(&self, name: &str) -> Option<crate::analysis::Analyzer> {
+        self.analysis.analyzer(name)
+    }
+
+    /// The index-time analyzer of `field`, if its mapping names one.
+    pub(crate) fn index_analyzer(&self, field: &str) -> Option<crate::analysis::Analyzer> {
+        let (index, _) = self.analyzer_names.get(field)?;
+        self.analysis.analyzer(index.as_deref()?)
+    }
+
     /// The analyzer a query on `field` uses: its `search_analyzer`, else its `analyzer`.
     pub(crate) fn search_analyzer(&self, field: &str) -> Option<crate::analysis::Analyzer> {
         let (index, search) = self.analyzer_names.get(field)?;

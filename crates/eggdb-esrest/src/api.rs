@@ -615,6 +615,7 @@ impl<'k> Api<'k> {
             }
             ("GET" | "POST", ["_search"]) => self.search(None, request, false),
             ("GET" | "POST", ["_count"]) => self.search(None, request, true),
+            ("GET" | "POST", ["_analyze"]) => self.analyze_text(None, request),
             ("GET" | "POST", ["_mget"]) => self.mget(None, request),
             ("GET" | "POST", ["_msearch"]) => self.msearch(None, request),
             ("GET" | "POST", ["_msearch", "template"]) => self.msearch_template(None, request),
@@ -637,6 +638,7 @@ impl<'k> Api<'k> {
             ("GET" | "POST", [index, "_count"]) => {
                 self.search(Some(std::slice::from_ref(index)), request, true)
             }
+            ("GET" | "POST", [index, "_analyze"]) => self.analyze_text(Some(index), request),
             ("GET" | "POST", [index, "_mget"]) => self.mget(Some(index), request),
             ("GET" | "POST", [index, "_msearch"]) => self.msearch(Some(index), request),
             ("POST", [index, "_update_by_query"]) => self.update_by_query(index, request),
@@ -774,6 +776,57 @@ impl<'k> Api<'k> {
                 escaped(index)
             ),
         ))
+    }
+
+    fn analyze_text(&self, index: Option<&str>, request: &Request) -> Answer {
+        let body = String::from_utf8_lossy(&request.body).into_owned();
+        let parsed = parse_document(if body.trim().is_empty() { "{}" } else { &body })?;
+        let types = match index {
+            Some(index) => self.field_types(std::iter::once(index))?,
+            None => crate::mappings::FieldTypes::default(),
+        };
+        let text_of = |node: &Node| match &node.value {
+            Json::String(text) => Some(text.clone()),
+            _ => None,
+        };
+        let texts: Vec<String> = match member_of(&parsed, "text").map(|node| node.value) {
+            Some(Json::Array(items)) => items.iter().filter_map(text_of).collect(),
+            Some(Json::String(text)) => vec![text],
+            _ => return Ok(error(400, "action_request_validation_exception", "Validation Failed: 1: text is missing;")),
+        };
+        let analyzer = match (member_of(&parsed, "analyzer").as_ref().and_then(text_of), member_of(&parsed, "field").as_ref().and_then(text_of)) {
+            (Some(name), _) => match types.named_analyzer(&name) {
+                Some(analyzer) => analyzer,
+                None => return Ok(error(400, "illegal_argument_exception", &format!("failed to find analyzer [{name}]"))),
+            },
+            (None, Some(field)) => types.index_analyzer(&field).or_else(|| types.named_analyzer("standard")).ok_or_else(|| "no analyzer".to_owned())?,
+            (None, None) => types.named_analyzer("standard").ok_or_else(|| "no analyzer".to_owned())?,
+        };
+        let mut out = String::from("{\"tokens\":[");
+        let mut first = true;
+        let mut offset_base = 0usize;
+        let mut position_base = 0usize;
+        for text in &texts {
+            let found = analyzer.tokens_with_offsets(text);
+            let last_position = found.last().map_or(0, |token| token.3 + 1);
+            for (token, start, end, position) in found {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str(&format!(
+                    "{{\"token\":{},\"start_offset\":{},\"end_offset\":{},\"type\":\"<ALPHANUM>\",\"position\":{}}}",
+                    escaped(&token),
+                    offset_base + start,
+                    offset_base + end,
+                    position_base + position
+                ));
+            }
+            offset_base += text.len() + 1;
+            position_base += last_position + 100;
+        }
+        out.push_str("]}");
+        Ok(json(200, out))
     }
 
     fn delete_index(&self, index: &str) -> Answer {
