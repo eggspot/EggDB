@@ -627,6 +627,7 @@ impl Parser<'_> {
                 }
             }
         }
+        self.rowversion_column = None;
         Ok(Statement::AlterTable(AlterTable {
             name,
             if_exists,

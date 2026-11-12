@@ -3,6 +3,7 @@ mod cursors;
 pub(crate) mod database_switch;
 mod event_triggers;
 mod system_versioning;
+mod rowversion;
 mod mysql;
 pub(crate) mod mysql_events;
 mod mysql_load;
@@ -3457,11 +3458,16 @@ impl<'s> Session<'s> {
                     binding.create_table(writer, tables, create)?;
                     crate::sqlite_schema_text::create_table(writer, tables, create, dialect)
                 });
-                match (created, create.system_versioning.clone()) {
-                    (Ok(answer), Some(versioning)) => {
-                        let table = create.name.text.clone();
-                        self.enable_system_versioning(&table, &versioning)
-                            .map(|()| answer)
+                let table = create.name.text.clone();
+                let created = match (created, create.system_versioning.clone()) {
+                    (Ok(answer), Some(versioning)) => self
+                        .enable_system_versioning(&table, &versioning)
+                        .map(|()| answer),
+                    (outcome, _) => outcome,
+                };
+                match (created, create.rowversion_column.clone()) {
+                    (Ok(answer), Some(column)) => {
+                        self.enable_rowversion(&table, &column).map(|()| answer)
                     }
                     (outcome, _) => outcome,
                 }

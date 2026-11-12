@@ -822,3 +822,4 @@ its full title with its status.
 - [D795](decisions/D795.md) Code-only batch 443 (M14): SQL Server's and MariaDB's system-versioning syntax on `eggdb_temporal`
 - [D796](decisions/D796.md) Code-only batch 444 (M12): a stored `vector` type with binary I/O and a catalog entry
 - [D797](decisions/D797.md) Code-only batch 445 (M10): SQL Server's `hierarchyid` with its static and instance methods
+- [D798](decisions/D798.md) Code-only batch 446 (M10): SQL Server's `rowversion` stamped by every write

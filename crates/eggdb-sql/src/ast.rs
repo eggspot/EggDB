@@ -1386,6 +1386,7 @@ pub(crate) struct CreateTable {
     pub(crate) partition_of: Option<PartitionOf>,
     pub(crate) sqlite_text: Option<String>,
     pub(crate) system_versioning: Option<SystemVersioning>,
+    pub(crate) rowversion_column: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

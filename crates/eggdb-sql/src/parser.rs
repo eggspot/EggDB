@@ -443,6 +443,7 @@ pub(crate) struct Parser<'t> {
     system_period: Option<(String, String)>,
     system_versioning_on: Option<Option<crate::ast::Name>>,
     vector_dimensions: Option<u32>,
+    rowversion_column: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -575,6 +576,7 @@ impl<'t> Parser<'t> {
             system_period: None,
             system_versioning_on: None,
             vector_dimensions: None,
+            rowversion_column: None,
         }
     }
 
@@ -2081,6 +2083,7 @@ impl<'t> Parser<'t> {
         if self.mysql() && self.at_mysql_table_query() {
             let declared = CreateTable {
                 system_versioning: None,
+                rowversion_column: None,
                 name: name.clone(),
                 temporary,
                 if_not_exists,
@@ -2129,6 +2132,7 @@ impl<'t> Parser<'t> {
         }
         Ok(Statement::CreateTable(CreateTable {
             system_versioning: self.take_system_versioning()?,
+            rowversion_column: self.rowversion_column.take(),
             name,
             temporary,
             if_not_exists,
@@ -2221,6 +2225,13 @@ impl<'t> Parser<'t> {
         let untyped =
             (self.sqlserver() && self.is_word("as")) || (self.oracle() && self.starts_generation());
         let serial = self.serial_type();
+        if self.sqlserver()
+            && serial.is_none()
+            && !untyped
+            && (self.is_word("rowversion") || self.is_word("timestamp"))
+        {
+            self.rowversion_column = Some(name.text.clone());
+        }
         let sql_type = match serial {
             Some(sql_type) => sql_type,
             None if untyped => SqlType::Text,

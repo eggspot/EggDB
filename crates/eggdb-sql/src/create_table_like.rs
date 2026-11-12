@@ -103,6 +103,7 @@ fn shell_table(
         .collect();
     Ok(CreateTable {
         system_versioning: None,
+        rowversion_column: None,
         name,
         temporary: None,
         if_not_exists: false,

@@ -1324,6 +1324,7 @@ impl<'t> Parser<'t> {
             "xml" if self.peek_kind() != &TokenKind::LeftParen => SqlServerType::Xml,
             "xml" => return Err(not_supported("Typed xml (an XML schema collection)").at(position)),
             "hierarchyid" => SqlServerType::VarBinary(Length::Given(HIERARCHYID_BYTES)),
+            "rowversion" | "timestamp" if !in_cast => SqlServerType::Binary(Length::Given(8)),
             "rowversion" | "timestamp" | "sql_variant" | "geography" | "geometry" => {
                 return Err(not_supported(&format!("The data type {word}")).at(position));
             }

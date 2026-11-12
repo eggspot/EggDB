@@ -579,6 +579,7 @@ impl<'s> Session<'s> {
         let mut cache = TableCache::default();
         let create = CreateTable {
             system_versioning: None,
+            rowversion_column: None,
             comment: None,
             partition_by: None,
             partition_of: None,
