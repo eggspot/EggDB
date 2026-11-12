@@ -35,10 +35,24 @@ impl Parser<'_> {
     pub(in crate::parser) fn tsql_declare_cursor(&mut self) -> SqlResult<Statement> {
         self.at += 1;
         let name = self.name()?;
-        let insensitive = self.take_word("insensitive");
-        let iso_scroll = self.take_word("scroll");
+        self.tsql_cursor_definition(name, false)
+    }
+
+    /// `SET @c = CURSOR [options] FOR query`: a cursor variable, kept as a local cursor named by
+    /// the variable.
+    pub(in crate::parser) fn tsql_set_cursor_variable(&mut self) -> SqlResult<Statement> {
+        let name = self.variable_name()?;
+        if !self.take_operator("=") {
+            return Err(self.unexpected());
+        }
+        self.tsql_cursor_definition(name, true)
+    }
+
+    fn tsql_cursor_definition(&mut self, name: Name, variable: bool) -> SqlResult<Statement> {
+        let insensitive = !variable && self.take_word("insensitive");
+        let iso_scroll = !variable && self.take_word("scroll");
         self.expect_word("cursor")?;
-        let mut global = true;
+        let mut global = !variable;
         let mut forward_only = false;
         let mut scroll = iso_scroll;
         let mut kind: Option<String> = None;
@@ -52,6 +66,9 @@ impl Parser<'_> {
             let option = word.to_owned();
             let shown = option.to_uppercase();
             if seen.contains(&option) || insensitive || iso_scroll {
+                return Err(self.unexpected());
+            }
+            if CURSOR_SCOPES.contains(&word) && variable {
                 return Err(self.unexpected());
             }
             if CURSOR_SCOPES.contains(&word) {
@@ -123,8 +140,11 @@ impl Parser<'_> {
         if global {
             self.at += 1;
         }
-        if self.at_variable(0) {
-            return Err(not_supported("cursor variables").at(self.position()));
+        if self.at_variable(0) && !global {
+            return Ok(CursorName {
+                name: self.variable_name()?,
+                global: false,
+            });
         }
         Ok(CursorName {
             name: self.name()?,

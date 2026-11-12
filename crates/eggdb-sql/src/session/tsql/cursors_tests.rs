@@ -307,3 +307,27 @@ fn select_assignment_reads_its_own_variable_row_by_row() {
         vec!["apple;pear;plum;", "6", "plum,pear,apple"]
     );
 }
+
+#[test]
+fn cursor_variables_are_set_opened_fetched_and_freed() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    batch(&mut session, "CREATE TABLE marks (id int PRIMARY KEY, score int); INSERT INTO marks VALUES (1, 10), (2, 20), (3, 30)");
+    let steps = batch(
+        &mut session,
+        "DECLARE @c CURSOR, @total int = 0, @score int;
+         SET @c = CURSOR FORWARD_ONLY STATIC FOR SELECT score FROM marks ORDER BY id;
+         OPEN @c;
+         FETCH NEXT FROM @c INTO @score;
+         WHILE @@FETCH_STATUS = 0
+         BEGIN
+             SET @total = @total + @score;
+             FETCH NEXT FROM @c INTO @score;
+         END;
+         CLOSE @c;
+         DEALLOCATE @c;
+         SELECT @total AS total;",
+    );
+    assert!(errors(&steps).is_empty(), "{:?}", errors(&steps));
+    assert_eq!(rows(&steps).last(), Some(&vec![Value::Integer(60)]));
+}

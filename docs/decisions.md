@@ -873,3 +873,4 @@ its full title with its status.
 - [D846](decisions/D846.md) Code-only batch 494 (M12): geometry typmods as checks
 - [D847](decisions/D847.md) Code-only batch 495 (M5): one-argument GROUPING in SQL Server and Oracle
 - [D848](decisions/D848.md) Code-only batch 496 (M6a): restoring roles and privileges (`restore --roles`)
+- [D849](decisions/D849.md) Code-only batch 497 (M10): T-SQL cursor variables

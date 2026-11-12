@@ -1247,7 +1247,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL Server's application locks choosing one victim when two waiters close a cycle (PR #91). **Code
   written, unbuilt** (code-only mode, 2026-11-11, D448).
 - Cursor variables, `WHERE CURRENT OF` on `FOR UPDATE` cursors (in PostgreSQL too), `sp_cursor*`
-  server cursors and cursors reset by `sp_reset_connection` (D291).
+  server cursors and cursors reset by `sp_reset_connection` (D291). Cursor variables (`DECLARE @c CURSOR`, `SET @c = CURSOR ...
+  FOR`): **code written, unbuilt** (code-only mode, 2026-11-12, D849).
 - `INSERT ... EXEC` of dynamic SQL, `EXEC AS`, three-part names and other databases in a batch
   (sql.md). `INSERT ... EXEC` of a procedure into a table or a temporary table: **code written, unbuilt**
   (code-only mode, 2026-11-12, D648).

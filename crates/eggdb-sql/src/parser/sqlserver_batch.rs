@@ -400,8 +400,11 @@ impl Parser<'_> {
         loop {
             let name = self.variable_name()?;
             self.take_word("as");
-            if self.is_word("cursor") {
-                return Err(not_supported("DECLARE CURSOR").at(self.position()));
+            if self.take_word("cursor") {
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+                continue;
             }
             if self.is_word("table") {
                 return Err(self.unexpected());
@@ -445,6 +448,12 @@ impl Parser<'_> {
             if !self.take(&TokenKind::Comma) {
                 break;
             }
+        }
+        if declarations.is_empty() {
+            return Ok(Statement::Ignored {
+                tag: "DECLARE",
+                notice: None,
+            });
         }
         Ok(Statement::SqlServer(SqlServerStatement::Declare(
             declarations,

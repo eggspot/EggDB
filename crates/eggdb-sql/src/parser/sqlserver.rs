@@ -1015,6 +1015,9 @@ impl<'t> Parser<'t> {
         self.at += 1;
         let position = self.position();
         if matches!(self.peek_kind(), TokenKind::Variable(_)) {
+            if matches!(self.peek_kind_at(1), TokenKind::Operator("=")) && self.is_word_at(2, "cursor") {
+                return self.tsql_set_cursor_variable();
+            }
             return self.sqlserver_set_variable();
         }
         if self.take_word("transaction") {
