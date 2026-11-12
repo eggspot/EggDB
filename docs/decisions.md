@@ -919,3 +919,4 @@ its full title with its status.
 - [D892](decisions/D892.md) Code-only batch 540 (M16): an email store with an SMTP receiver
 - [D893](decisions/D893.md) Code-only batch 541 (M16): IMAP over the email store
 - [D894](decisions/D894.md) Code-only batch 542 (M16): JMAP over the email store
+- [D895](decisions/D895.md) Code-only batch 543 (M16): WebDAV, CalDAV and CardDAV

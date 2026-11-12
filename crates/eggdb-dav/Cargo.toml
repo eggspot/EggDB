@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-dav"
+description = "EggDB's WebDAV, CalDAV and CardDAV server: files, calendars and address books on EggDB's key-value transactions, written from the IETF RFCs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http = { path = "../eggdb-http" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }

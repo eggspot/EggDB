@@ -260,6 +260,7 @@ impl CommandName {
             | OptionName::SmtpListen
             | OptionName::ImapListen
             | OptionName::JmapListen
+            | OptionName::DavListen
             | OptionName::DynamodbListen
             | OptionName::KafkaListen
             | OptionName::AmqpListen
@@ -469,6 +470,7 @@ enum OptionName {
     SmtpListen,
     ImapListen,
     JmapListen,
+    DavListen,
     DynamodbListen,
     KafkaListen,
     AmqpListen,
@@ -603,6 +605,7 @@ impl OptionName {
             b"smtp-listen" => Self::SmtpListen,
             b"imap-listen" => Self::ImapListen,
             b"jmap-listen" => Self::JmapListen,
+            b"dav-listen" => Self::DavListen,
             b"dynamodb-listen" => Self::DynamodbListen,
             b"kafka-listen" => Self::KafkaListen,
             b"amqp-listen" => Self::AmqpListen,
@@ -940,6 +943,7 @@ pub(crate) struct ServeOptions {
     pub(crate) smtp_listen: Option<SocketAddr>,
     pub(crate) imap_listen: Option<SocketAddr>,
     pub(crate) jmap_listen: Option<SocketAddr>,
+    pub(crate) dav_listen: Option<SocketAddr>,
     pub(crate) dynamodb_listen: Option<SocketAddr>,
     pub(crate) kafka_listen: Option<SocketAddr>,
     pub(crate) amqp_listen: Option<SocketAddr>,
@@ -1557,6 +1561,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::JmapListen => {
                 request.serve.jmap_listen =
                     Some(parse_listen(&option.spelled, value, 8443).map_err(usage)?);
+            }
+            OptionName::DavListen => {
+                request.serve.dav_listen =
+                    Some(parse_listen(&option.spelled, value, 5232).map_err(usage)?);
             }
             OptionName::RestoreFrom => {
                 let url = value.to_str().unwrap_or_default();

@@ -487,6 +487,22 @@ impl Session<'_> {
             }
             None => None,
         };
+        let dav_listener = match options.dav_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--dav-listen {address}: the WebDAV server has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for WebDAV on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let sparql_listener = match options.sparql_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -816,6 +832,7 @@ impl Session<'_> {
                 smtp_listener.as_ref(),
                 imap_listener.as_ref(),
                 jmap_listener.as_ref(),
+                dav_listener.as_ref(),
                 cql_listener.as_ref(),
                 stomp_listener.as_ref(),
                 nats_listener.as_ref(),
@@ -972,6 +989,11 @@ impl Session<'_> {
             max_message_bytes: 25 << 20,
         };
         let jmap_endpoint = eggdb_mail::JmapEndpoint::new(&mail_database, mail_config.clone());
+        let dav_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::DAV_COLLECTIONS,
+        };
+        let dav_endpoint = eggdb_dav::Endpoint::new(&dav_database, &config.user, server_password_sha256, read_only);
         let sparql_endpoint = eggdb_rdf::Endpoint::new(
             &rdf_database,
             0,
@@ -1133,6 +1155,17 @@ impl Session<'_> {
                     &|request| jmap_endpoint.answer(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_mail::MAX_JMAP_REQUEST_BYTES, &memory_budget)
+                        .with_rate_limit(rate_limiter.as_ref())
+                        .decoding_content_encoding(),
+                ),
+                None => Ok(()),
+            });
+            let dav_server = scope.spawn(|| match &dav_listener {
+                Some(listener) => eggdb_http::serve_with_limits(
+                    listener,
+                    &|request| dav_endpoint.answer(request),
+                    &stop_signals::requested,
+                    &eggdb_http::Limits::new(eggdb_dav::MAX_REQUEST_BYTES, &memory_budget)
                         .with_rate_limit(rate_limiter.as_ref())
                         .decoding_content_encoding(),
                 ),
@@ -1444,6 +1477,7 @@ impl Session<'_> {
             let _ = smtp_server.join();
             let _ = imap_server.join();
             let _ = jmap_server.join();
+            let _ = dav_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = cdc_topic_delivery.join();
             let _ = sqs_server.join();
