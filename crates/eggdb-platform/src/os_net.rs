@@ -156,7 +156,19 @@ fn not_connected_once_reset(error: io::Error) -> io::Error {
     }
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(windows)]
+fn not_connected_once_reset(error: io::Error) -> io::Error {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+    ) {
+        io::Error::from(io::ErrorKind::NotConnected)
+    } else {
+        error
+    }
+}
+
+#[cfg(not(any(target_vendor = "apple", windows)))]
 fn not_connected_once_reset(error: io::Error) -> io::Error {
     error
 }

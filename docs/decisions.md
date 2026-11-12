@@ -967,3 +967,4 @@ its full title with its status.
 - [D940](decisions/D940.md) Code-only batch 588 (M4): key-value transactions and collections in the Dart package
 - [D941](decisions/D941.md) Code-only batch 589 (M1): Windows named pipes in the platform layer and eggdb serve --mysql-pipe
 - [D942](decisions/D942.md) Code-only batch 590 (M1): the TDS server on local connections and eggdb serve --tds-pipe
+- [D943](decisions/D943.md) Code-only batch 591 (M1): NotConnected after a reset on Windows sockets in the network contract

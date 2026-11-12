@@ -540,7 +540,7 @@ fn a_reset_end_has_no_peer_address_and_cannot_shut_down() {
         assert_eq!(client.peer_address().unwrap_err().kind(), not_connected);
         assert_eq!(client.shutdown_write().unwrap_err().kind(), not_connected);
     }
-    if cfg!(any(target_os = "linux", target_vendor = "apple")) {
+    if cfg!(any(target_os = "linux", target_vendor = "apple", windows)) {
         for backend in os_backends() {
             run(&OsBackend(backend));
         }

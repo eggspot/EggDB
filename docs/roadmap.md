@@ -363,7 +363,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Check: the benchmark lines with and without it.
 - The M1 review's IOCP follow-ups: a guard against packets after an immediate success, and tests
   that cancel a pending connect and mix port and worker operations (Where we are). The guard: **Code written, unbuilt** (code-only mode, 2026-11-10). The tests: left.
-- `NotConnected` after a reset checked against Windows' sockets in the contract test (D314).
+- `NotConnected` after a reset checked against Windows' sockets in the contract test (D314). **Code written,
+  unbuilt** (code-only mode, 2026-11-13, D943).
 - Optional accelerators behind build features: first CXL memory placed as a NUMA node for the
   page cache, with no `mmap`, on D65 and the NUMA item above (D40, D45). Check: cache benchmarks.
 - Persistent memory and GPUs, each after a decision that fits D60 and D77 (no `mmap`, the log in
