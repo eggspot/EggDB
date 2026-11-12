@@ -601,7 +601,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (`eggdb-sqllogictest DIR --minimum PERCENT`): **code written, unbuilt** (code-only mode, 2026-11-12, D664).
   Left: the CI job over sqlite.org's files, the published rate and the stated minimum.
 - `libsqlite3`: `sqlite3_create_function`, `sqlite3_backup_*` and the rest of the interface, with
-  rows streamed per step (D181). Check: the sqlite3 shell and Python's `sqlite3` module in CI.
+  rows streamed per step (D181). Check: the sqlite3 shell and Python's `sqlite3` module in CI. Scalar
+  `sqlite3_create_function[_v2]` with the `sqlite3_value_*` and `sqlite3_result_*` calls, and the status and
+  statement calls (`sqlite3_errstr`, `sqlite3_get_autocommit`, `sqlite3_complete`, `sqlite3_interrupt`,
+  `sqlite3_sql`, `sqlite3_column_decltype`, `sqlite3_bind_parameter_name`/`index` and others): **code written,
+  unbuilt** (code-only mode, 2026-11-12, D790). Left: user aggregates and window functions, collations,
+  `sqlite3_backup_*`, named `:name` parameters, and rows streamed per step.
 - The C API: parsed plans kept in prepared statements, binary result formats, typed `Parse` on
   server sessions and the remaining open options, `check` and `stats` (D142, D268, D293).
 - Asynchronous C API calls, completed by one callback per batch (D17, D293).

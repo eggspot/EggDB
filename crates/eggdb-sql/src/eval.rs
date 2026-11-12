@@ -1514,6 +1514,9 @@ impl Evaluator<'_> {
             held.add(&value)?;
             values.push(value);
         }
+        if let Some(result) = crate::native_functions::call(name, &values) {
+            return result;
+        }
         let unknown = || {
             if crate::set_returning::named(name).is_some() {
                 return SqlError::not_supported("set-returning functions are not allowed here")

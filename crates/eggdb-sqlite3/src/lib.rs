@@ -3,11 +3,13 @@
 //! `sqlite3_errmsg`, `sqlite3_changes`, `sqlite3_last_insert_rowid` and the rest declared in
 //! `include/sqlite3.h`, written from SQLite's published C interface. Built as `libsqlite3`, a
 //! program written for SQLite links against it and runs its SQL in EggDB's SQLite dialect. A
-//! statement runs at its first step and keeps its rows until it is reset or finalized.
+//! statement runs at its first step and keeps its rows until it is reset or finalized. Scalar
+//! functions the program defines with `sqlite3_create_function_v2` run inside its SQL.
 
 use eggdb::Database;
 use eggdb::sql::{
-    Dialect, OutputColumn, Parameter, QueryResult, Session, SqlError, SqlType, Store, Value,
+    Dialect, NativeFunctions, OutputColumn, Parameter, QueryResult, Session, SqlError, SqlType,
+    Store, Value, with_native_functions,
 };
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
 use std::sync::Arc;
@@ -61,6 +63,7 @@ pub struct Sqlite3 {
     code: c_int,
     changes: i64,
     total_changes: i64,
+    functions: Arc<NativeFunctions>,
     _store: Arc<Store<'static>>,
     _database: Arc<Database>,
 }
@@ -82,6 +85,9 @@ pub struct Sqlite3Stmt {
     bindings: Vec<Parameter>,
     columns: Vec<OutputColumn>,
     names: Vec<CString>,
+    declared_types: Vec<Option<CString>>,
+    parameter_names: Vec<Option<CString>>,
+    text_c: Option<CString>,
     rows: Vec<Vec<Value>>,
     next_row: usize,
     ran: bool,
@@ -110,12 +116,14 @@ impl Sqlite3 {
 
     fn run(&mut self, text: &str, parameters: &[Parameter]) -> Result<Vec<QueryResult>, c_int> {
         let mut results = Vec::new();
-        let outcome = self
-            .session
-            .execute_prepared(text, parameters, &mut |result| {
+        let functions = Arc::clone(&self.functions);
+        let session = &mut self.session;
+        let outcome = with_native_functions(&functions, || {
+            session.execute_prepared(text, parameters, &mut |result| {
                 results.push(result);
                 true
-            });
+            })
+        });
         match outcome {
             Ok(()) => {
                 let changed: i64 = results.iter().map(|result| affected(&result.tag)).sum();
@@ -206,6 +214,7 @@ pub unsafe extern "C" fn sqlite3_open_v2(
         code: SQLITE_OK,
         changes: 0,
         total_changes: 0,
+        functions: Arc::new(NativeFunctions::default()),
         _store: store,
         _database: database,
     });
@@ -404,6 +413,7 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
         .and_then(|description| description.columns)
         .unwrap_or_default();
     let names = column_names(&columns);
+    let declared_types = declared_types(&columns);
     let prepared = Box::new(Sqlite3Stmt {
         db,
         text: first.to_owned(),
@@ -416,6 +426,9 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
         ],
         columns,
         names,
+        declared_types,
+        parameter_names: Vec::new(),
+        text_c: None,
         rows: Vec::new(),
         next_row: 0,
         ran: false,
@@ -425,6 +438,17 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
     // SAFETY: `statement` is writable memory for one pointer.
     unsafe { statement.write(Box::into_raw(prepared)) };
     SQLITE_OK
+}
+
+fn declared_types(columns: &[OutputColumn]) -> Vec<Option<CString>> {
+    columns
+        .iter()
+        .map(|column| {
+            column
+                .sql_type
+                .and_then(|sql_type| CString::new(sql_type.name().to_ascii_uppercase()).ok())
+        })
+        .collect()
 }
 
 fn column_names(columns: &[OutputColumn]) -> Vec<CString> {
@@ -682,6 +706,7 @@ pub unsafe extern "C" fn sqlite3_step(statement: *mut Sqlite3Stmt) -> c_int {
             statement.rows = last.rows;
         }
         statement.names = column_names(&statement.columns);
+        statement.declared_types = declared_types(&statement.columns);
         statement.next_row = 0;
     }
     if statement.next_row < statement.rows.len() {
@@ -982,3 +1007,17 @@ pub extern "C" fn sqlite3_libversion() -> *const c_char {
 pub extern "C" fn sqlite3_libversion_number() -> c_int {
     VERSION_NUMBER
 }
+
+mod functions;
+mod interface;
+
+pub use functions::{
+    FinalCallback, ScalarCallback, Sqlite3Context, Sqlite3Value, sqlite3_context_db_handle,
+    sqlite3_create_function, sqlite3_create_function_v2, sqlite3_result_blob,
+    sqlite3_result_double, sqlite3_result_error, sqlite3_result_error_nomem,
+    sqlite3_result_error_toobig, sqlite3_result_int, sqlite3_result_int64, sqlite3_result_null,
+    sqlite3_result_text, sqlite3_result_value, sqlite3_user_data, sqlite3_value_blob,
+    sqlite3_value_bytes, sqlite3_value_double, sqlite3_value_int, sqlite3_value_int64,
+    sqlite3_value_text, sqlite3_value_type,
+};
+pub use interface::*;

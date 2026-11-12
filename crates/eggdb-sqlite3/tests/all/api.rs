@@ -166,3 +166,148 @@ fn exec_calls_back_for_each_row() {
     unsafe { sqlite3_close(db) };
     assert_eq!(rows, 3);
 }
+
+unsafe extern "C" fn doubled(
+    context: *mut Sqlite3Context,
+    count: c_int,
+    arguments: *mut *mut Sqlite3Value,
+) {
+    assert_eq!(count, 1);
+    // SAFETY: SQLite hands the function `count` live values.
+    let value = unsafe { *arguments };
+    // SAFETY: a live value and the running function's context.
+    unsafe {
+        if sqlite3_value_type(value) == SQLITE_NULL {
+            sqlite3_result_null(context);
+        } else {
+            let factor = *sqlite3_user_data(context).cast::<i64>();
+            sqlite3_result_int64(context, sqlite3_value_int64(value) * factor);
+        }
+    }
+}
+
+unsafe extern "C" fn refusing(
+    context: *mut Sqlite3Context,
+    _count: c_int,
+    _arguments: *mut *mut Sqlite3Value,
+) {
+    let message = CString::new("refused by the program").unwrap();
+    // SAFETY: the running function's context and a NUL-terminated message.
+    unsafe { sqlite3_result_error(context, message.as_ptr(), -1) };
+}
+
+fn single_text(db: *mut Sqlite3, sql: &str) -> Option<String> {
+    let sql = CString::new(sql).unwrap();
+    let mut statement = ptr::null_mut();
+    // SAFETY: a live connection, NUL-terminated text and memory for one pointer.
+    let prepared =
+        unsafe { sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut statement, ptr::null_mut()) };
+    assert_eq!(prepared, SQLITE_OK);
+    // SAFETY: a live statement.
+    let stepped = unsafe { sqlite3_step(statement) };
+    let found = if stepped == SQLITE_ROW {
+        // SAFETY: a live statement on a row.
+        let pointer = unsafe { sqlite3_column_text(statement, 0) };
+        (!pointer.is_null()).then(|| text(pointer))
+    } else {
+        None
+    };
+    // SAFETY: a live statement, used no more.
+    unsafe { sqlite3_finalize(statement) };
+    found
+}
+
+#[test]
+fn functions_a_program_defines_run_in_its_sql() {
+    let mut db = ptr::null_mut();
+    let name = CString::new(":memory:").unwrap();
+    // SAFETY: a NUL-terminated name and memory for one pointer.
+    assert_eq!(unsafe { sqlite3_open(name.as_ptr(), &mut db) }, SQLITE_OK);
+    let mut factor: i64 = 3;
+    let function = CString::new("triple").unwrap();
+    // SAFETY: a live connection, a NUL-terminated name and a function that follows the contract.
+    let created = unsafe {
+        sqlite3_create_function_v2(
+            db,
+            function.as_ptr(),
+            1,
+            1,
+            (&raw mut factor).cast::<c_void>(),
+            Some(doubled),
+            None,
+            None,
+            None,
+        )
+    };
+    assert_eq!(created, SQLITE_OK);
+    assert_eq!(single_text(db, "SELECT TRIPLE(14)").as_deref(), Some("42"));
+    assert_eq!(single_text(db, "SELECT triple(NULL)"), None);
+    let refuse = CString::new("refuse").unwrap();
+    // SAFETY: as above.
+    let created = unsafe {
+        sqlite3_create_function(db, refuse.as_ptr(), 0, 1, ptr::null_mut(), Some(refusing), None, None)
+    };
+    assert_eq!(created, SQLITE_OK);
+    let sql = CString::new("SELECT refuse()").unwrap();
+    let mut statement = ptr::null_mut();
+    // SAFETY: a live connection, NUL-terminated text and memory for one pointer.
+    unsafe { sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut statement, ptr::null_mut()) };
+    // SAFETY: a live statement.
+    assert_eq!(unsafe { sqlite3_step(statement) }, SQLITE_ERROR);
+    // SAFETY: a live connection.
+    let message = unsafe { CStr::from_ptr(sqlite3_errmsg(db)) };
+    assert!(message.to_string_lossy().contains("refused by the program"));
+    // SAFETY: a live statement, used no more.
+    unsafe { sqlite3_finalize(statement) };
+    // SAFETY: removing the function: every callback NULL.
+    let removed = unsafe {
+        sqlite3_create_function_v2(db, function.as_ptr(), 1, 1, ptr::null_mut(), None, None, None, None)
+    };
+    assert_eq!(removed, SQLITE_OK);
+    // SAFETY: a live connection, used no more.
+    unsafe { sqlite3_close(db) };
+}
+
+#[test]
+fn the_interface_reports_text_state_and_completeness() {
+    // SAFETY: SQLite's static texts.
+    let busy = unsafe { CStr::from_ptr(sqlite3_errstr(SQLITE_BUSY)) };
+    assert_eq!(busy.to_str().unwrap(), "database is locked");
+    let complete = CString::new("SELECT 1;").unwrap();
+    let partial = CString::new("SELECT 'a;").unwrap();
+    // SAFETY: NUL-terminated texts.
+    assert_eq!(unsafe { sqlite3_complete(complete.as_ptr()) }, 1);
+    // SAFETY: as above.
+    assert_eq!(unsafe { sqlite3_complete(partial.as_ptr()) }, 0);
+    let mut db = ptr::null_mut();
+    let name = CString::new(":memory:").unwrap();
+    // SAFETY: a NUL-terminated name and memory for one pointer.
+    assert_eq!(unsafe { sqlite3_open(name.as_ptr(), &mut db) }, SQLITE_OK);
+    // SAFETY: a live connection.
+    assert_eq!(unsafe { sqlite3_get_autocommit(db) }, 1);
+    let begin = CString::new("BEGIN").unwrap();
+    // SAFETY: a live connection and NUL-terminated SQL.
+    unsafe { sqlite3_exec(db, begin.as_ptr(), None, ptr::null_mut(), ptr::null_mut()) };
+    // SAFETY: a live connection.
+    assert_eq!(unsafe { sqlite3_get_autocommit(db) }, 0);
+    let sql = CString::new("SELECT ?2, ?1").unwrap();
+    let mut statement = ptr::null_mut();
+    // SAFETY: a live connection, NUL-terminated text and memory for one pointer.
+    unsafe { sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut statement, ptr::null_mut()) };
+    // SAFETY: a live statement.
+    let first = unsafe { CStr::from_ptr(sqlite3_bind_parameter_name(statement, 1)) };
+    assert_eq!(first.to_str().unwrap(), "?1");
+    let second = CString::new("?2").unwrap();
+    // SAFETY: a live statement and a NUL-terminated name.
+    assert_eq!(unsafe { sqlite3_bind_parameter_index(statement, second.as_ptr()) }, 2);
+    // SAFETY: a live statement.
+    assert_eq!(unsafe { sqlite3_stmt_readonly(statement) }, 1);
+    // SAFETY: a live statement.
+    let shown = unsafe { CStr::from_ptr(sqlite3_sql(statement)) };
+    assert_eq!(shown.to_str().unwrap(), "SELECT ?2, ?1");
+    // SAFETY: a live statement, used no more, and its connection.
+    unsafe {
+        sqlite3_finalize(statement);
+        sqlite3_close(db);
+    }
+}
