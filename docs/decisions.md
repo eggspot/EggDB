@@ -834,3 +834,4 @@ its full title with its status.
 - [D807](decisions/D807.md) Code-only batch 455 (M16): CQL collection element updates, `CONTAINS` and `CONTAINS KEY`
 - [D808](decisions/D808.md) Code-only batch 456 (M16): CQL `DELETE m[k]` and `DELETE l[i]`
 - [D809](decisions/D809.md) Code-only batch 457 (M16): CQL user-defined types
+- [D810](decisions/D810.md) Code-only batch 458 (M16): JetStream object stores (stream names by subject)

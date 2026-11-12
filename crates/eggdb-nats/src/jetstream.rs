@@ -655,6 +655,24 @@ fn write<T>(keyspace: &dyn Keyspace, body: impl FnOnce(&mut dyn KeysWrite) -> Re
     out.ok_or_else(|| "the write did not run".to_owned())
 }
 
+/// Whether some subject matches both `left` and `right`, each of which may hold `*` and `>`.
+fn subjects_overlap(left: &str, right: &str) -> bool {
+    let mut left_tokens = left.split('.');
+    let mut right_tokens = right.split('.');
+    loop {
+        match (left_tokens.next(), right_tokens.next()) {
+            (Some(">"), Some(_)) | (Some(_), Some(">")) => return true,
+            (Some(a), Some(b)) => {
+                if a != b && a != "*" && b != "*" {
+                    return false;
+                }
+            }
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
 fn stream_config(keys: &dyn KeysRead, name: &str) -> Result<Option<StreamConfig>, String> {
     Ok(keys.get(&key(STREAM, &[name.as_bytes()]))?.and_then(|raw| StreamConfig::from_stored(&raw)))
 }
@@ -902,8 +920,8 @@ impl<'k> JetStream<'k> {
             ["STREAM", "PURGE", name] => self.purge_stream(name, &request),
             ["DIRECT", "GET", stream] => return self.direct_get(stream, None, &request, reply),
             ["DIRECT", "GET", stream, subject @ ..] => return self.direct_get(stream, Some(subject.join(".")), &request, reply),
-            ["STREAM", "NAMES"] => self.stream_list(false),
-            ["STREAM", "LIST"] => self.stream_list(true),
+            ["STREAM", "NAMES"] => self.stream_list(false, &request),
+            ["STREAM", "LIST"] => self.stream_list(true, &request),
             ["STREAM", "MSG", "GET", name] => self.get_message(name, &request),
             ["STREAM", "MSG", "DELETE", name] => self.delete_message(name, &request),
             ["CONSUMER", "CREATE", stream] => self.create_consumer(stream, None, &request),
@@ -1054,9 +1072,23 @@ impl<'k> JetStream<'k> {
         })
     }
 
-    fn stream_list(&self, detailed: bool) -> Result<String, String> {
+    fn stream_list(&self, detailed: bool, request: &Node) -> Result<String, String> {
+        let wanted_subject = text(request, "subject");
+        let offset = integer(request, "offset", 0).max(0) as usize;
         read(self.keyspace, |keys| {
-            let names = stream_names(keys)?;
+            let mut names = Vec::new();
+            for name in stream_names(keys)? {
+                let listed = match &wanted_subject {
+                    None => true,
+                    Some(wanted) => stream_config(keys, &name)?
+                        .is_some_and(|config| config.subjects.iter().any(|subject| subjects_overlap(subject, wanted))),
+                };
+                if listed {
+                    names.push(name);
+                }
+            }
+            let total = names.len();
+            let names: Vec<String> = names.into_iter().skip(offset).collect();
             let items = if detailed {
                 let mut items = Vec::new();
                 for name in &names {
@@ -1070,9 +1102,8 @@ impl<'k> JetStream<'k> {
                 names.iter().map(|name| quote(name)).collect()
             };
             Ok(format!(
-                "{{\"type\":\"io.nats.jetstream.api.v1.{}\",\"total\":{},\"offset\":0,\"limit\":{MOST_STREAMS},\"streams\":[{}]}}",
+                "{{\"type\":\"io.nats.jetstream.api.v1.{}\",\"total\":{total},\"offset\":{offset},\"limit\":{MOST_STREAMS},\"streams\":[{}]}}",
                 if detailed { "stream_list_response" } else { "stream_names_response" },
-                items.len(),
                 items.join(",")
             ))
         })
@@ -1773,6 +1804,41 @@ mod tests {
         assert!(info.contains("\"num_ack_pending\":1"), "{info}");
         let empty = jetstream.request("$JS.API.CONSUMER.MSG.NEXT.ORDERS.worker", Some("_INBOX.5"), br#"{"batch":1,"no_wait":true}"#);
         assert_eq!(empty[0].headers, NO_MESSAGES);
+    }
+
+    #[test]
+    fn subjects_overlap_through_wildcards() {
+        assert!(subjects_overlap("$O.files.>", "$O.*.M.>"));
+        assert!(subjects_overlap("orders.*", "orders.new"));
+        assert!(!subjects_overlap("orders.*", "orders.new.eu"));
+        assert!(!subjects_overlap("$KV.settings.>", "$O.*.M.>"));
+        assert!(subjects_overlap("a.b", "a.b"));
+        assert!(!subjects_overlap("a", "a.b"));
+    }
+
+    #[test]
+    fn an_object_store_bucket_keeps_chunks_and_rolled_up_metadata() {
+        let keyspace = MemoryKeyspace::default();
+        let jetstream = JetStream::new(&keyspace);
+        answer(
+            &jetstream,
+            "$JS.API.STREAM.CREATE.OBJ_files",
+            r#"{"name":"OBJ_files","subjects":["$O.files.C.>","$O.files.M.>"],"discard":"new","allow_rollup_hdrs":true,"allow_direct":true}"#,
+        );
+        answer(&jetstream, "$JS.API.STREAM.CREATE.ORDERS", r#"{"name":"ORDERS","subjects":["orders.>"]}"#);
+        let names = answer(&jetstream, "$JS.API.STREAM.NAMES", r#"{"subject":"$O.*.M.>"}"#);
+        assert!(names.contains("\"streams\":[\"OBJ_files\"]") && names.contains("\"total\":1"), "{names}");
+        let rollup = b"NATS/1.0\r\nNats-Rollup: sub\r\n\r\n";
+        jetstream.store("$O.files.C.first", None, b"", b"old");
+        jetstream.store("$O.files.M.cmVwb3J0", None, rollup, br#"{"name":"report","nuid":"first","size":3,"chunks":1}"#);
+        jetstream.store("$O.files.C.second", None, b"", b"new-1");
+        jetstream.store("$O.files.C.second", None, b"", b"new-2");
+        jetstream.store("$O.files.M.cmVwb3J0", None, rollup, br#"{"name":"report","nuid":"second","size":10,"chunks":2}"#);
+        answer(&jetstream, "$JS.API.STREAM.PURGE.OBJ_files", r#"{"filter":"$O.files.C.first"}"#);
+        let meta = jetstream.request("$JS.API.DIRECT.GET.OBJ_files.$O.files.M.cmVwb3J0", Some("_INBOX.7"), b"");
+        assert!(String::from_utf8_lossy(&meta[0].payload).contains("\"nuid\":\"second\""));
+        let info = answer(&jetstream, "$JS.API.STREAM.INFO.OBJ_files", "");
+        assert!(info.contains("\"messages\":3"), "{info}");
     }
 
     #[test]
