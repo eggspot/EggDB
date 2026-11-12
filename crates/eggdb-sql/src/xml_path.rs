@@ -1346,6 +1346,78 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     })
 }
 
+fn json_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    crate::json::write_string(text, &mut out);
+    out
+}
+
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+impl Document {
+    fn element_json(&self, id: usize) -> String {
+        let Kind::Element { attributes, .. } = &self.nodes[id].kind else {
+            return "null".to_owned();
+        };
+        let mut members: Vec<(String, Vec<String>)> = Vec::new();
+        let mut text = String::new();
+        for (key, value) in attributes.iter().filter(|(key, _)| key != "xmlns" && !key.starts_with("xmlns:")) {
+            members.push((format!("@{}", local_name(key)), vec![json_text(value)]));
+        }
+        for &child in &self.nodes[id].children {
+            match &self.nodes[child].kind {
+                Kind::Element { name, .. } => {
+                    let key = local_name(name).to_owned();
+                    let value = self.element_json(child);
+                    match members.iter_mut().find(|(known, _)| *known == key) {
+                        Some((_, values)) => values.push(value),
+                        None => members.push((key, vec![value])),
+                    }
+                }
+                Kind::Text(content) => text.push_str(content),
+                _ => {}
+            }
+        }
+        let text = text.trim();
+        if members.is_empty() {
+            return json_text(text);
+        }
+        if !text.is_empty() {
+            members.push(("#text".to_owned(), vec![json_text(text)]));
+        }
+        let fields: Vec<String> = members
+            .into_iter()
+            .map(|(key, values)| {
+                let value = if values.len() == 1 { values.into_iter().next().unwrap_or_default() } else { format!("[{}]", values.join(",")) };
+                format!("{}:{value}", json_text(&key))
+            })
+            .collect();
+        format!("{{{}}}", fields.join(","))
+    }
+}
+
+/// An XML document as JSON: each element an object of its children by local name (repeated
+/// ones as arrays), its attributes as `@name` and its text as `#text`, or a string when it holds
+/// only text; with the root element's local name and namespace.
+pub(crate) fn document_json(xml: &str) -> SqlResult<(String, Option<String>, String)> {
+    let document = Document::parse(xml, true)?;
+    let root = document.nodes[0]
+        .children
+        .iter()
+        .copied()
+        .find(|child| matches!(document.nodes[*child].kind, Kind::Element { .. }))
+        .ok_or_else(|| invalid("an XML document has exactly one root element"))?;
+    let Kind::Element { name, attributes } = &document.nodes[root].kind else {
+        return Err(invalid("an XML document has exactly one root element"));
+    };
+    let prefix = name.split_once(':').map(|(prefix, _)| prefix);
+    let namespace_attribute = prefix.map_or_else(|| "xmlns".to_owned(), |prefix| format!("xmlns:{prefix}"));
+    let namespace = attributes.iter().find(|(key, _)| *key == namespace_attribute).map(|(_, value)| value.clone());
+    Ok((local_name(name).to_owned(), namespace, document.element_json(root)))
+}
+
 /// The internal table function a parsed `XMLTABLE` becomes.
 pub(crate) const TABLE: &str = "eggdb_xml_table";
 /// What separates the columns of an `XMLTABLE` plan.
@@ -1511,5 +1583,16 @@ mod tests {
         assert_eq!(updated, Value::Text("<a><b>1</b>  <c>2</c></a>".to_owned()));
         let exists = function("xpath_exists", &[Value::Text("//item[@id=3]".to_owned()), Value::Text(xml.to_owned())]).unwrap().unwrap();
         assert_eq!(exists, Value::Boolean(false));
+    }
+
+    #[test]
+    fn documents_become_json_by_element_name() {
+        let (root, namespace, json) = document_json(
+            "<Document xmlns='urn:iso:std:iso:20022:tech:xsd:pacs.008.001.08'><Amt Ccy='EUR'>12.50</Amt><Nm>A</Nm><Nm>B</Nm></Document>",
+        )
+        .unwrap();
+        assert_eq!(root, "Document");
+        assert_eq!(namespace.as_deref(), Some("urn:iso:std:iso:20022:tech:xsd:pacs.008.001.08"));
+        assert_eq!(json, "{\"Amt\":{\"@Ccy\":\"EUR\",\"#text\":\"12.50\"},\"Nm\":[\"A\",\"B\"]}");
     }
 }

@@ -1,8 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 6] = [
+pub(crate) const FUNCTIONS: [&str; 7] = [
     "dicom_parse",
+    "iso20022_parse",
     "fix_parse",
     "fix_field",
     "hl7_parse",
@@ -365,6 +366,24 @@ fn edifact_parse(message: &str) -> SqlResult<Value> {
     jsonb(array(out))
 }
 
+const ISO20022_NAMESPACE: &str = "urn:iso:std:iso:20022:tech:xsd:";
+
+/// An ISO 20022 XML message as `{"message": "pacs.008.001.08", "root": "Document",
+/// "document": {...}}`: the message definition from the root's namespace, and the message as
+/// JSON (elements by name, repeated ones as arrays, attributes such as `@Ccy`, text as strings).
+fn iso20022_parse(text: &str) -> SqlResult<Value> {
+    let (root, namespace, document) = crate::xml_path::document_json(text)?;
+    let message = namespace
+        .as_deref()
+        .and_then(|namespace| namespace.strip_prefix(ISO20022_NAMESPACE))
+        .ok_or_else(|| invalid("ISO 20022", format!("the root's namespace is not {ISO20022_NAMESPACE}...")))?;
+    jsonb(format!(
+        "{{\"message\": {}, \"root\": {}, \"document\": {document}}}",
+        string(message),
+        string(&root)
+    ))
+}
+
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if !FUNCTIONS.contains(&name) {
         return None;
@@ -414,6 +433,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("fix_field", [_, tag]) => fix_field(text, tag),
         ("hl7_parse", [_]) => hl7_parse(text),
         ("edifact_parse", [_]) => edifact_parse(text),
+        ("iso20022_parse", [_]) => iso20022_parse(text),
         _ => Err(SqlError::new(
             SqlState::UNDEFINED_FUNCTION,
             format!("{name} does not take {} arguments", values.len()),
