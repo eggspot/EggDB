@@ -54,3 +54,22 @@ fn xmlquery_serializes_and_xmlexists_tests() {
     let exists = last(&mut postgres, &format!("SELECT XMLEXISTS('//item[@id=\"9\"]' PASSING BY REF {SHOP})"));
     assert!(exists.contains('f'), "{exists}");
 }
+
+#[test]
+fn sqlserver_xml_columns_answer_value_query_and_exist() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    last(&mut session, "CREATE TABLE orders (id int, doc xml)");
+    last(
+        &mut session,
+        "INSERT INTO orders VALUES (1, '<order total=\"12.5\"><line sku=\"egg\"/><line sku=\"milk\"/></order>')",
+    );
+    let rows = last(
+        &mut session,
+        "SELECT doc.value('(/order/@total)[1]', 'decimal(9,2)') + 1, o.doc.exist('//line[@sku=\"milk\"]'), \
+         doc.query('/order/line[1]') FROM orders o",
+    );
+    for expected in ["13.50", "1", "<line sku=\"egg\"/>"] {
+        assert!(rows.contains(expected), "{expected} in {rows}");
+    }
+}

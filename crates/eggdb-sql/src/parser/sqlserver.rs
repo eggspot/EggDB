@@ -1320,7 +1320,9 @@ impl<'t> Parser<'t> {
             "datetimeoffset" => SqlServerType::DateTimeOffset {
                 scale: self.sqlserver_time_scale(&word, position)?,
             },
-            "rowversion" | "timestamp" | "sql_variant" | "xml" | "hierarchyid" | "geography"
+            "xml" if self.peek_kind() != &TokenKind::LeftParen => SqlServerType::Xml,
+            "xml" => return Err(not_supported("Typed xml (an XML schema collection)").at(position)),
+            "rowversion" | "timestamp" | "sql_variant" | "hierarchyid" | "geography"
             | "geometry" => {
                 return Err(not_supported(&format!("The data type {word}")).at(position));
             }

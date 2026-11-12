@@ -1328,7 +1328,7 @@ pub(crate) fn convert(
             within_limit(text.len())?;
             sized_text(text, length, false)
         }
-        SqlServerType::Text | SqlServerType::NText => {
+        SqlServerType::Text | SqlServerType::NText | SqlServerType::Xml => {
             let text = text_of(&value, style, scale)?;
             within_limit(text.len())?;
             Ok(Value::Text(text))

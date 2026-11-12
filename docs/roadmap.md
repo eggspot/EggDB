@@ -1150,7 +1150,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `OVER` in that dialect today (found while building D340). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D427). `IGNORE NULLS` and `ORDER BY` through a named window: **code written, unbuilt** (code-only mode,
   2026-11-12, D600).
-- SQL Server's `rowversion`, `sql_variant`, `xml` and `hierarchyid` (D19).
+- SQL Server's `rowversion`, `sql_variant`, `xml` and `hierarchyid` (D19). Untyped `xml` with `value()`, `query()`
+  and `exist()`: **code written, unbuilt** (code-only mode, 2026-11-12, D695).
 - `datetimeoffset` keeping its offset, and the declared `varchar` or `nvarchar` kept (D19, D133).
 - `deleted.` in a Transact-SQL `UPDATE`'s `OUTPUT`, `TOP ... PERCENT` in `UPDATE`, `DELETE` and
   `INSERT`, and global `##temp` tables; `TOP ... PERCENT`, `WITH TIES`, `OUTPUT ... INTO` and

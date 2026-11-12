@@ -719,3 +719,4 @@ its full title with its status.
 - [D692](decisions/D692.md) Code-only batch 340 (M9, M10): `XMLTABLE` over the XPath evaluator
 - [D693](decisions/D693.md) Code-only batch 341 (M9, M10): `XMLQUERY` and `XMLEXISTS` over XPath 1.0
 - [D694](decisions/D694.md) Code-only batch 342 (M16): Kafka transactions, control markers and `read_committed` fetches
+- [D695](decisions/D695.md) Code-only batch 343 (M10): SQL Server `xml` columns and their `value()`, `query()` and `exist()` methods

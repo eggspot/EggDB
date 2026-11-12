@@ -704,8 +704,9 @@ SELECT @@VERSION
   | `uniqueidentifier` | `uuid` | printed in upper case |
   | `char`/`nchar`/`varchar`/`nvarchar(n \| max)`, `text`, `ntext`, `sysname` | `character(n)`, `varchar(n)`, `text`, `varchar(128)` | 1 when no length is given (30 in `CAST`) |
   | `binary(n)`, `varbinary(n \| max)`, `image` | `bytea` | `0x0102FF` constants; printed as `0x...` |
+  | `xml` (untyped) | `text` | `.value('path', 'type')`, `.query('path')` and `.exist('path')` evaluate XPath 1.0 (D695) |
 
-  `rowversion`/`timestamp`, `sql_variant`, `xml`, `hierarchyid` and the spatial types are error
+  `rowversion`/`timestamp`, `sql_variant`, typed `xml(schema)`, `hierarchyid` and the spatial types are error
   40517. Seven fractional digits are read and the seventh is dropped (`.9999999` stays in its
   second).
 - **Conversions follow SQL Server's rules** for `CAST`, `CONVERT`, assignment to a column, `+`

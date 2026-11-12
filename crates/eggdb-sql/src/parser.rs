@@ -37,6 +37,7 @@ mod row_security;
 mod schemas;
 mod select_into;
 mod sql_json;
+mod sqlserver_xml;
 mod xml_table;
 mod sqlite;
 mod sqlserver;
@@ -5000,6 +5001,20 @@ impl<'t> Parser<'t> {
                 return Err(self.not_supported("a qualified * outside the select list"));
             }
             let column = self.name()?;
+            if self.sqlserver()
+                && self.peek_kind() == &TokenKind::LeftParen
+                && !first.text.eq_ignore_ascii_case("dbo")
+                && sqlserver_xml::is_xml_method(&column.text)
+            {
+                let target = Expr {
+                    kind: ExprKind::Column {
+                        qualifier: None,
+                        name: first.text,
+                    },
+                    position: first.position,
+                };
+                return self.sqlserver_xml_method(target, &column);
+            }
             if self.sqlserver() && self.peek_kind() == &TokenKind::LeftParen {
                 return self.sqlserver_user_function(first, column);
             }
@@ -5083,6 +5098,18 @@ impl<'t> Parser<'t> {
                     },
                     position: first.position,
                 });
+            }
+            if self.sqlserver() && self.peek_kind() == &TokenKind::Dot && self.at_xml_method(1) {
+                self.at += 1;
+                let method = self.name()?;
+                let target = Expr {
+                    kind: ExprKind::Column {
+                        qualifier: Some(first.text),
+                        name: column.text,
+                    },
+                    position: first.position,
+                };
+                return self.sqlserver_xml_method(target, &method);
             }
             if self.peek_kind() == &TokenKind::Dot || self.peek_kind() == &TokenKind::LeftParen {
                 return Err(self.not_supported("names with more than three parts"));

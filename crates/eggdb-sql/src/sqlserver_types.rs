@@ -40,6 +40,7 @@ pub(crate) enum SqlServerType {
     VarBinary(Length),
     Image,
     UniqueIdentifier,
+    Xml,
 }
 
 fn stored_scale(scale: u8) -> Option<u8> {
@@ -84,7 +85,8 @@ impl SqlServerType {
             | Self::VarChar(Length::Max)
             | Self::NVarChar(Length::Max)
             | Self::Text
-            | Self::NText => SqlType::Text,
+            | Self::NText
+            | Self::Xml => SqlType::Text,
             Self::Binary(_) | Self::VarBinary(_) | Self::Image => SqlType::Bytea,
             Self::UniqueIdentifier => SqlType::Uuid,
         }
@@ -118,6 +120,7 @@ impl SqlServerType {
             Self::VarBinary(_) => "varbinary",
             Self::Image => "image",
             Self::UniqueIdentifier => "uniqueidentifier",
+            Self::Xml => "xml",
         }
     }
 
@@ -144,7 +147,8 @@ impl SqlServerType {
             | Self::NChar(_)
             | Self::NVarChar(_)
             | Self::Text
-            | Self::NText => TypeFamily::Character,
+            | Self::NText
+            | Self::Xml => TypeFamily::Character,
             Self::Binary(_) | Self::VarBinary(_) | Self::Image => TypeFamily::Binary,
             Self::UniqueIdentifier => TypeFamily::Guid,
         }

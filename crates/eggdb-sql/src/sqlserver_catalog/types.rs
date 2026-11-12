@@ -404,6 +404,7 @@ impl SqlServerColumnType {
             SqlServerType::VarBinary(length) => sized(SqlServerTypeName::VarBinary, length),
             SqlServerType::Image => plain(SqlServerTypeName::Image),
             SqlServerType::UniqueIdentifier => plain(SqlServerTypeName::UniqueIdentifier),
+            SqlServerType::Xml => plain(SqlServerTypeName::Xml),
         }
     }
 

@@ -1192,11 +1192,14 @@ fn ordered(mut nodes: Vec<Target>) -> Vec<Target> {
 }
 
 /// The internal names of the XPath functions.
-/// The internal function a parsed `XMLQUERY` becomes.
+/// The internal function a parsed `XMLQUERY` (and SQL Server's `xml.query()`) becomes.
 pub(crate) const QUERY: &str = "eggdb_xmlquery";
+/// The internal function SQL Server's `xml.value()` becomes, before its cast.
+pub(crate) const VALUE: &str = "eggdb_xml_value";
 
-pub(crate) const FUNCTIONS: [&str; 9] = [
+pub(crate) const FUNCTIONS: [&str; 10] = [
     QUERY,
+    VALUE,
     "updatexml",
     "xpath",
     "xpath_exists",
@@ -1211,7 +1214,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     Some(match name {
         "xpath" => SqlType::Array(ArrayElement::Text),
         "xpath_exists" | "xml_is_well_formed" | "xml_is_well_formed_document" | "xml_is_well_formed_content" => SqlType::Boolean,
-        "extractvalue" | "updatexml" | QUERY => SqlType::Text,
+        "extractvalue" | "updatexml" | QUERY | VALUE => SqlType::Text,
         "existsnode" => SqlType::Integer,
         _ => return None,
     })
@@ -1282,6 +1285,10 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 }
                 Value::Text(out)
             }
+            other => Value::Text(document.string_of(&other)),
+        }),
+        (VALUE, [xml, path]) => evaluated(xml, path).map(|(document, outcome)| match outcome {
+            Outcome::Nodes(nodes) => nodes.first().map_or(Value::Null, |node| Value::Text(document.string_value(*node))),
             other => Value::Text(document.string_of(&other)),
         }),
         ("existsnode", [xml, path, ..]) => {
