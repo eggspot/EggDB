@@ -12,6 +12,15 @@ pub(super) struct ColumnFormat {
     format: Option<Format>,
     null_text: Option<String>,
     hidden: bool,
+    wrap: Wrap,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Wrap {
+    #[default]
+    Wrapped,
+    WordWrapped,
+    Truncated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +147,11 @@ fn shown(name: &str, format: &ColumnFormat) -> String {
     if format.hidden {
         text.push_str("NOPRINT\n");
     }
+    match format.wrap {
+        Wrap::Wrapped => text.push_str("wrap\n"),
+        Wrap::WordWrapped => text.push_str("word_wrap\n"),
+        Wrap::Truncated => text.push_str("truncate\n"),
+    }
     text
 }
 
@@ -182,6 +196,15 @@ pub(super) fn column_command(arguments: &str, formats: &mut ColumnFormats) -> Re
             at += 1;
         } else if option_named(option, "print", 3) {
             format.hidden = false;
+            at += 1;
+        } else if option_named(option, "wrapped", 3) {
+            format.wrap = Wrap::Wrapped;
+            at += 1;
+        } else if option_named(option, "word_wrapped", 3) {
+            format.wrap = Wrap::WordWrapped;
+            at += 1;
+        } else if option_named(option, "truncated", 3) {
+            format.wrap = Wrap::Truncated;
             at += 1;
         } else if option_named(option, "clear", 3) {
             format = ColumnFormat::default();
@@ -276,6 +299,47 @@ fn cut_to(text: &str, width: usize) -> String {
     format!("{kept:<width$}")
 }
 
+fn wrapped_lines(text: &str, width: usize, wrap: Wrap) -> Vec<String> {
+    let width = width.max(1);
+    if wrap == Wrap::Truncated {
+        return vec![cut_to(text.lines().next().unwrap_or_default(), width)];
+    }
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let characters: Vec<char> = paragraph.chars().collect();
+        if characters.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut start = 0;
+        while start < characters.len() {
+            let mut end = (start + width).min(characters.len());
+            if wrap == Wrap::WordWrapped
+                && end < characters.len()
+                && let Some(space) = characters[start..end].iter().rposition(|character| *character == ' ')
+                && space > 0
+            {
+                end = start + space;
+            }
+            lines.push(characters[start..end].iter().collect::<String>().trim_end().to_owned());
+            start = end;
+            if wrap == Wrap::WordWrapped {
+                while start < characters.len() && characters[start] == ' ' {
+                    start += 1;
+                }
+            }
+        }
+    }
+    lines.into_iter().map(|line| format!("{line:<width$}")).collect()
+}
+
+fn text_width(format: &ColumnFormat) -> Option<usize> {
+    match &format.format {
+        Some(Format::Text { width }) => Some(*width),
+        _ => None,
+    }
+}
+
 fn shown_value(value: &Value, format: &ColumnFormat) -> Value {
     if matches!(value, Value::Null) {
         return match &format.null_text {
@@ -333,21 +397,45 @@ pub(super) fn formatted(result: &QueryResult, formats: &ColumnFormats) -> QueryR
             })
             .collect(),
     );
-    shown.rows = result
-        .rows
-        .iter()
-        .map(|row| {
-            kept.iter()
-                .map(|&position| {
-                    let value = row.get(position).cloned().unwrap_or(Value::Null);
-                    match settings[position] {
+    let mut rows = Vec::with_capacity(result.rows.len());
+    for row in &result.rows {
+        let mut first: Vec<Value> = Vec::with_capacity(kept.len());
+        let mut continued: Vec<Vec<String>> = Vec::with_capacity(kept.len());
+        for &position in &kept {
+            let value = row.get(position).cloned().unwrap_or(Value::Null);
+            let setting = settings[position];
+            let lines = match (setting, setting.and_then(text_width)) {
+                (Some(format), Some(width)) if !matches!(value, Value::Null) => {
+                    wrapped_lines(&value.to_text().unwrap_or_default(), width, format.wrap)
+                }
+                _ => Vec::new(),
+            };
+            match lines.split_first() {
+                Some((head, rest)) => {
+                    first.push(Value::Text(head.clone()));
+                    continued.push(rest.to_vec());
+                }
+                None => {
+                    first.push(match setting {
                         Some(format) => shown_value(&value, format),
                         None => value,
-                    }
-                })
-                .collect()
-        })
-        .collect();
+                    });
+                    continued.push(Vec::new());
+                }
+            }
+        }
+        let extra = continued.iter().map(Vec::len).max().unwrap_or(0);
+        rows.push(first);
+        for line in 0..extra {
+            rows.push(
+                continued
+                    .iter()
+                    .map(|lines| Value::Text(lines.get(line).cloned().unwrap_or_default()))
+                    .collect(),
+            );
+        }
+    }
+    shown.rows = rows;
     shown
 }
 
@@ -433,6 +521,17 @@ mod tests {
             Value::Text("(none)".to_owned()),
             Value::Text("##########".to_owned())
         ]);
+    }
+
+    #[test]
+    fn text_columns_wrap_by_characters_or_words_or_truncate() {
+        assert_eq!(wrapped_lines("abcdefgh", 3, Wrap::Wrapped), vec!["abc", "def", "gh "]);
+        assert_eq!(wrapped_lines("one two three", 7, Wrap::WordWrapped), vec!["one two", "three  "]);
+        assert_eq!(wrapped_lines("abcdefgh", 3, Wrap::Truncated), vec!["abc"]);
+        let mut formats = ColumnFormats::new();
+        column_command("ename format a2", &mut formats).unwrap();
+        let shown = formatted(&result(), &formats);
+        assert!(shown.rows.len() > result().rows.len());
     }
 
     #[test]
