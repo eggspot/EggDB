@@ -833,3 +833,4 @@ its full title with its status.
 - [D806](decisions/D806.md) Code-only batch 454 (D57): Zarr v3 sharding and Blosc chunks in `read_zarr`
 - [D807](decisions/D807.md) Code-only batch 455 (M16): CQL collection element updates, `CONTAINS` and `CONTAINS KEY`
 - [D808](decisions/D808.md) Code-only batch 456 (M16): CQL `DELETE m[k]` and `DELETE l[i]`
+- [D809](decisions/D809.md) Code-only batch 457 (M16): CQL user-defined types

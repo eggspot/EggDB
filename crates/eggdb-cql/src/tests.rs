@@ -748,3 +748,70 @@ fn single_map_entries_and_list_items_are_deleted() {
     assert!(item.contains("\"items\" = (COALESCE(\"items\", '[]')::jsonb #- ARRAY[('2'::integer)::text])::text"), "{item}");
     assert!(collection_sql("DELETE tags['a'] FROM t WHERE k = 'a'", &[]).is_err());
 }
+
+struct TypedCatalog;
+
+impl Catalog for TypedCatalog {
+    fn table(&mut self, keyspace: &str, table: &str) -> Result<TableInfo, String> {
+        Ok(TableInfo {
+            keyspace: keyspace.to_owned(),
+            table: table.to_owned(),
+            columns: vec![
+                ("k".to_owned(), CqlType::Varchar),
+                ("home".to_owned(), self.user_type(keyspace, "address")?),
+            ],
+            partition: vec!["k".to_owned()],
+            clustering: Vec::new(),
+            descending: Vec::new(),
+        })
+    }
+
+    fn user_type(&mut self, keyspace: &str, name: &str) -> Result<CqlType, String> {
+        if name != "address" {
+            return Err(format!("Unknown type {keyspace}.{name}"));
+        }
+        Ok(CqlType::Udt(crate::types::interned_user_type(crate::types::UserType {
+            keyspace: keyspace.to_owned(),
+            name: name.to_owned(),
+            fields: vec![("street".to_owned(), CqlType::Varchar), ("number".to_owned(), CqlType::Int)],
+        })?))
+    }
+}
+
+fn typed_sql(cql: &str) -> Result<String, String> {
+    let (statement, markers) = parse(cql)?;
+    Ok(translate(&statement, markers, Some("ks"), &mut TypedCatalog)?.render(&[]))
+}
+
+#[test]
+fn user_defined_types_are_created_stored_and_used_in_tables() {
+    let created = typed_sql("CREATE TYPE IF NOT EXISTS ks.point (x int, y int, tags list<text>)").unwrap();
+    assert!(created.contains("INSERT INTO eggdb_cql.types VALUES ('ks', 'point', 'udt<ks.point, x int, y int, tags list<text>>') ON CONFLICT"), "{created}");
+    assert!(parse("CREATE TYPE point (x int, x int)").is_err());
+    let table = typed_sql("CREATE TABLE people (k text PRIMARY KEY, home frozen<address>, past list<frozen<address>>)").unwrap();
+    assert!(table.contains("home\tudt<ks.address, street text, number int>"), "{table}");
+    assert!(table.contains("past\tlist<udt<ks.address, street text, number int>>"), "{table}");
+    assert!(typed_sql("CREATE TABLE people (k text PRIMARY KEY, home missing)").is_err());
+    let inserted = typed_sql("INSERT INTO people (k, home) VALUES ('a', {street: 'Main', number: 5})").unwrap();
+    assert!(inserted.contains("'[\"Main\",5]'::text"), "{inserted}");
+    let partial = typed_sql("UPDATE people SET home = {number: 7} WHERE k = 'a'").unwrap();
+    assert!(partial.contains("'[null,7]'::text"), "{partial}");
+    assert!(typed_sql("UPDATE people SET home = {floor: 2} WHERE k = 'a'").is_err());
+    assert!(typed_sql("DROP TYPE address").unwrap().contains("DELETE FROM eggdb_cql.types"));
+    assert!(typed_sql("DROP TYPE missing").is_err());
+    assert!(typed_sql("DROP TYPE IF EXISTS missing").is_ok());
+}
+
+#[test]
+fn stored_user_types_read_back_without_a_lookup() {
+    let stored = "list<udt<ks.address, street text, number int>>";
+    let parsed = CqlType::parse(stored).expect("a stored type");
+    assert_eq!(parsed.stored_name(), stored);
+    assert_eq!(parsed.name(), "list<frozen<address>>");
+    let CqlType::List(element) = parsed else {
+        panic!("a list");
+    };
+    assert_eq!(element.id(), 0x0030);
+    let bytes = crate::types::encode_text("[\"Main\",null]", *element).unwrap();
+    assert_eq!(parameter_text(Some(&bytes), *element).unwrap().as_deref(), Some("[\"Main\",null]"));
+}

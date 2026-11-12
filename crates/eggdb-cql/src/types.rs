@@ -9,6 +9,45 @@ const MOST_COLLECTION_ITEMS: usize = 65_535;
 const MOST_TYPE_DEPTH: usize = 16;
 static INTERNED: Mutex<Vec<&'static CqlType>> = Mutex::new(Vec::new());
 static INTERNED_TUPLES: Mutex<Vec<&'static [CqlType]>> = Mutex::new(Vec::new());
+static INTERNED_USER_TYPES: Mutex<Vec<&'static UserType>> = Mutex::new(Vec::new());
+
+/// A user-defined type: its keyspace, name and fields in order. A type named in a statement
+/// but not yet looked up has an empty keyspace and no fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UserType {
+    pub(crate) keyspace: String,
+    pub(crate) name: String,
+    pub(crate) fields: Vec<(String, CqlType)>,
+}
+
+impl UserType {
+    pub(crate) fn is_resolved(&self) -> bool {
+        !self.keyspace.is_empty()
+    }
+}
+
+/// The one shared copy of a user-defined type.
+pub(crate) fn interned_user_type(user_type: UserType) -> Result<&'static UserType, String> {
+    let mut known = INTERNED_USER_TYPES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(found) = known.iter().find(|found| ***found == user_type) {
+        return Ok(*found);
+    }
+    if known.len() >= MOST_INTERNED_TYPES {
+        return Err(format!("at most {MOST_INTERNED_TYPES} distinct user-defined types are supported"));
+    }
+    let leaked: &'static UserType = Box::leak(Box::new(user_type));
+    known.push(leaked);
+    Ok(leaked)
+}
+
+/// A user-defined type named in a statement, to be looked up in its keyspace.
+pub(crate) fn unresolved_user_type(name: &str) -> Result<CqlType, String> {
+    Ok(CqlType::Udt(interned_user_type(UserType {
+        keyspace: String::new(),
+        name: name.to_owned(),
+        fields: Vec::new(),
+    })?))
+}
 
 const UNIX_EPOCH_FROM_2000_DAYS: i64 = 10_957;
 const UNIX_EPOCH_FROM_2000_MS: i64 = 946_684_800_000;
@@ -39,6 +78,7 @@ pub(crate) enum CqlType {
     Set(&'static CqlType),
     Map(&'static CqlType, &'static CqlType),
     Tuple(&'static [CqlType]),
+    Udt(&'static UserType),
 }
 
 /// The one shared copy of `cql`, so collection types stay `Copy`; at most 4,096 distinct ones.
@@ -99,6 +139,9 @@ fn parse_type(text: &str, depth: usize) -> Option<CqlType> {
         return CqlType::from_name(text);
     };
     let inner = text.strip_suffix('>')?.get(open + 1..)?;
+    if text[..open].trim().eq_ignore_ascii_case("udt") {
+        return parse_user_type(inner, depth);
+    }
     let arguments = split_arguments(inner)?;
     let parsed: Vec<CqlType> = arguments.iter().map(|argument| parse_type(argument, depth + 1)).collect::<Option<_>>()?;
     match (text[..open].trim().to_ascii_lowercase().as_str(), parsed.as_slice()) {
@@ -109,6 +152,25 @@ fn parse_type(text: &str, depth: usize) -> Option<CqlType> {
         ("tuple", items) if !items.is_empty() => Some(CqlType::Tuple(interned_tuple(items.to_vec()).ok()?)),
         _ => None,
     }
+}
+
+fn parse_user_type(inner: &str, depth: usize) -> Option<CqlType> {
+    let arguments = split_arguments(inner)?;
+    let (qualified, fields) = arguments.split_first()?;
+    let (keyspace, name) = qualified.split_once('.')?;
+    let mut parsed = Vec::with_capacity(fields.len());
+    for field in fields {
+        let (field_name, field_type) = field.trim().split_once(' ')?;
+        parsed.push((field_name.to_owned(), parse_type(field_type, depth + 1)?));
+    }
+    Some(CqlType::Udt(
+        interned_user_type(UserType {
+            keyspace: keyspace.to_owned(),
+            name: name.to_owned(),
+            fields: parsed,
+        })
+        .ok()?,
+    ))
 }
 
 const NAMES: [(&str, CqlType); 20] = [
@@ -149,7 +211,34 @@ impl CqlType {
     }
 
     pub(crate) fn is_collection(self) -> bool {
-        matches!(self, CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_))
+        matches!(self, CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) | CqlType::Udt(_))
+    }
+
+    /// The item types of a tuple or the field types of a user-defined type, in order.
+    pub(crate) fn item_types(self) -> Vec<CqlType> {
+        match self {
+            CqlType::Tuple(items) => items.to_vec(),
+            CqlType::Udt(user_type) => user_type.fields.iter().map(|(_, cql)| *cql).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The type as `eggdb_cql` metadata keeps it: as [`CqlType::name`], except that a
+    /// user-defined type carries its whole definition, `udt<ks.name, field type, ...>`, so
+    /// reading it back needs no lookup.
+    pub(crate) fn stored_name(self) -> String {
+        match self {
+            CqlType::List(element) => format!("list<{}>", element.stored_name()),
+            CqlType::Set(element) => format!("set<{}>", element.stored_name()),
+            CqlType::Map(key, value) => format!("map<{}, {}>", key.stored_name(), value.stored_name()),
+            CqlType::Tuple(items) => format!("tuple<{}>", items.iter().map(|item| item.stored_name()).collect::<Vec<_>>().join(", ")),
+            CqlType::Udt(user_type) => {
+                let mut parts = vec![format!("{}.{}", user_type.keyspace, user_type.name)];
+                parts.extend(user_type.fields.iter().map(|(name, cql)| format!("{name} {}", cql.stored_name())));
+                format!("udt<{}>", parts.join(", "))
+            }
+            other => other.name(),
+        }
     }
 
     pub(crate) fn name(self) -> String {
@@ -159,6 +248,7 @@ impl CqlType {
             CqlType::Set(element) => format!("set<{}>", element.name()),
             CqlType::Map(key, value) => format!("map<{}, {}>", key.name(), value.name()),
             CqlType::Tuple(items) => format!("tuple<{}>", items.iter().map(|item| item.name()).collect::<Vec<_>>().join(", ")),
+            CqlType::Udt(user_type) => format!("frozen<{}>", user_type.name),
             other => NAMES
                 .iter()
                 .find(|(_, cql)| *cql == other)
@@ -192,6 +282,7 @@ impl CqlType {
             CqlType::Map(..) => 0x0021,
             CqlType::Set(_) => 0x0022,
             CqlType::Tuple(_) => 0x0031,
+            CqlType::Udt(_) => 0x0030,
         }
     }
 
@@ -199,7 +290,7 @@ impl CqlType {
     pub(crate) fn sql(self) -> &'static str {
         match self {
             CqlType::Ascii | CqlType::Varchar | CqlType::Inet => "text",
-            CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) => "text",
+            CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) | CqlType::Udt(_) => "text",
             CqlType::BigInt | CqlType::Counter => "bigint",
             CqlType::Blob => "bytea",
             CqlType::Boolean => "boolean",
@@ -500,7 +591,7 @@ pub(crate) fn parameter_text(bytes: Option<&[u8]>, cql: CqlType) -> Result<Optio
             16 => IpAddr::from(fixed::<16>(bytes, cql)?).to_string(),
             other => return Err(format!("an inet value must be 4 or 16 bytes, not {other}")),
         },
-        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) => collection_json(bytes, cql, 0)?,
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) | CqlType::Udt(_) => collection_json(bytes, cql, 0)?,
     };
     Ok(Some(text))
 }
@@ -606,9 +697,10 @@ fn collection_json(bytes: &[u8], cql: CqlType, depth: usize) -> Result<String, S
             pairs.dedup_by(|later, earlier| later.0 == earlier.0);
             pairs.into_iter().map(|(key, value)| format!("[{key},{value}]")).collect()
         }
-        CqlType::Tuple(types) => {
+        CqlType::Tuple(_) | CqlType::Udt(_) => {
+            let types = cql.item_types();
             let mut items = Vec::with_capacity(types.len());
-            for item in types {
+            for item in &types {
                 items.push(match (cursor.at < bytes.len()).then(|| cursor.element()).transpose()?.flatten() {
                     Some(raw) => element_json(raw, *item, depth)?,
                     None => "null".to_owned(),
@@ -671,8 +763,8 @@ fn encode_json(node: &Node, cql: CqlType, depth: usize) -> Result<Vec<u8>, Strin
                 push_element(&mut out, Some(encode_json(stored_value, *value, depth + 1)?));
             }
         }
-        CqlType::Tuple(types) => {
-            for (at, item) in types.iter().enumerate() {
+        CqlType::Tuple(_) | CqlType::Udt(_) => {
+            for (at, item) in cql.item_types().iter().enumerate() {
                 let bytes = match items.get(at) {
                     Some(node) if node.value != Json::Null => Some(encode_json(node, *item, depth + 1)?),
                     _ => None,
@@ -767,7 +859,7 @@ pub(crate) fn encode_text(text: &str, cql: CqlType) -> Result<Vec<u8>, String> {
         CqlType::Date => u32::try_from(date_days(text).ok_or_else(wrong)? + DATE_CENTER).map_err(|_| wrong())?.to_be_bytes().to_vec(),
         CqlType::Time => time_nanos(text).ok_or_else(wrong)?.to_be_bytes().to_vec(),
         CqlType::Blob => hex_bytes(text).ok_or_else(wrong)?,
-        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) => {
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) | CqlType::Udt(_) => {
             let node = parse_document(text).map_err(|error| error.message)?;
             encode_json(&node, cql, 0)?
         }
@@ -893,7 +985,7 @@ pub(crate) fn encode_value(value: &Value, cql: CqlType) -> Result<Option<Vec<u8>
             Ok(IpAddr::V6(address)) => address.octets().to_vec(),
             Err(_) => return Err(mismatch(value, cql)),
         },
-        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) => {
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) | CqlType::Udt(_) => {
             encode_text(&value.to_text().unwrap_or_default(), cql)?
         }
     };

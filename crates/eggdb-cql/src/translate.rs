@@ -4,7 +4,7 @@ use crate::cql::{
 };
 use crate::types::CqlType;
 
-pub(crate) const METADATA_DDL: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_cql; CREATE TABLE IF NOT EXISTS eggdb_cql.tables (keyspace_name text, table_name text, partition_key text NOT NULL, clustering_key text NOT NULL, descending text NOT NULL, column_types text NOT NULL, PRIMARY KEY (keyspace_name, table_name))";
+pub(crate) const METADATA_DDL: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_cql; CREATE TABLE IF NOT EXISTS eggdb_cql.tables (keyspace_name text, table_name text, partition_key text NOT NULL, clustering_key text NOT NULL, descending text NOT NULL, column_types text NOT NULL, PRIMARY KEY (keyspace_name, table_name)); CREATE TABLE IF NOT EXISTS eggdb_cql.types (keyspace_name text, type_name text, definition text NOT NULL, PRIMARY KEY (keyspace_name, type_name))";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TableInfo {
@@ -32,6 +32,48 @@ impl TableInfo {
 /// Where translation learns about keyspaces and tables.
 pub(crate) trait Catalog {
     fn table(&mut self, keyspace: &str, table: &str) -> Result<TableInfo, String>;
+
+    fn user_type(&mut self, keyspace: &str, name: &str) -> Result<CqlType, String> {
+        Err(format!("Unknown type {keyspace}.{name}"))
+    }
+}
+
+const MOST_RESOLVE_DEPTH: usize = 16;
+
+/// `cql` with every user-defined type it names looked up in `keyspace`.
+fn resolve(cql: CqlType, keyspace: &str, catalog: &mut dyn Catalog, depth: usize) -> Result<CqlType, String> {
+    if depth > MOST_RESOLVE_DEPTH {
+        return Err("types are nested too deeply".to_owned());
+    }
+    Ok(match cql {
+        CqlType::Udt(user_type) if !user_type.is_resolved() => catalog.user_type(keyspace, &user_type.name)?,
+        CqlType::List(element) => CqlType::List(crate::types::interned(resolve(*element, keyspace, catalog, depth + 1)?)?),
+        CqlType::Set(element) => CqlType::Set(crate::types::interned(resolve(*element, keyspace, catalog, depth + 1)?)?),
+        CqlType::Map(key, value) => CqlType::Map(
+            crate::types::interned(resolve(*key, keyspace, catalog, depth + 1)?)?,
+            crate::types::interned(resolve(*value, keyspace, catalog, depth + 1)?)?,
+        ),
+        CqlType::Tuple(items) => {
+            let mut resolved = Vec::with_capacity(items.len());
+            for item in items {
+                resolved.push(resolve(*item, keyspace, catalog, depth + 1)?);
+            }
+            CqlType::Tuple(crate::types::interned_tuple(resolved)?)
+        }
+        other => other,
+    })
+}
+
+fn resolved_columns(columns: &[ColumnDefinition], keyspace: &str, catalog: &mut dyn Catalog) -> Result<Vec<ColumnDefinition>, String> {
+    columns
+        .iter()
+        .map(|definition| {
+            Ok(ColumnDefinition {
+                name: definition.name.clone(),
+                cql: resolve(definition.cql, keyspace, catalog, 0)?,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +166,7 @@ impl Builder {
     }
 
     fn term(&mut self, term: &Term, name: &str, cql: CqlType) -> Result<(), String> {
-        if matches!(term, Term::List(_) | Term::Set(_) | Term::Map(_) | Term::Tuple(_)) {
+        if matches!(term, Term::List(_) | Term::Set(_) | Term::Map(_) | Term::Tuple(_) | Term::Fields(_)) {
             if !cql.is_collection() {
                 return Err(format!("a collection value cannot go in the {} column {name}", cql.name()));
             }
@@ -163,7 +205,7 @@ impl Builder {
             Term::Boolean(flag) => self.sql(if *flag { "TRUE" } else { "FALSE" }),
             Term::Blob(hex) => self.sql(&format!("'\\x{hex}'::bytea")),
             Term::Null => self.sql("NULL"),
-            Term::List(_) | Term::Set(_) | Term::Map(_) | Term::Tuple(_) => {}
+            Term::List(_) | Term::Set(_) | Term::Map(_) | Term::Tuple(_) | Term::Fields(_) => {}
         }
         Ok(())
     }
@@ -200,6 +242,21 @@ fn term_json(term: &Term, cql: CqlType, depth: usize) -> Result<String, String> 
                 parts.push(match item {
                     Term::Null => "null".to_owned(),
                     other => term_json(other, *item_type, depth + 1)?,
+                });
+            }
+            Ok(format!("[{}]", parts.join(",")))
+        }
+        (Term::Fields(fields), CqlType::Udt(user_type)) => {
+            for (field, _) in fields {
+                if !user_type.fields.iter().any(|(known, _)| known == field) {
+                    return Err(format!("Unknown field {field} in value of user defined type {}", user_type.name));
+                }
+            }
+            let mut parts = Vec::with_capacity(user_type.fields.len());
+            for (field, field_type) in &user_type.fields {
+                parts.push(match fields.iter().find(|(given, _)| given == field).map(|(_, term)| term) {
+                    None | Some(Term::Null) => "null".to_owned(),
+                    Some(term) => term_json(term, *field_type, depth + 1)?,
                 });
             }
             Ok(format!("[{}]", parts.join(",")))
@@ -580,7 +637,7 @@ fn create_table(
         .collect();
     let types: Vec<String> = columns
         .iter()
-        .map(|definition| format!("{}\t{}", definition.name, definition.cql.name()))
+        .map(|definition| format!("{}\t{}", definition.name, definition.cql.stored_name()))
         .collect();
     builder.sql(&format!(
         "{METADATA_DDL}; CREATE TABLE {}{} ({}, PRIMARY KEY ({})); INSERT INTO eggdb_cql.tables VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (keyspace_name, table_name) DO NOTHING",
@@ -725,6 +782,7 @@ fn statement(
             descending,
         } => {
             let keyspace = keyspace_of(table, current)?;
+            let columns = &resolved_columns(columns, &keyspace, catalog)?;
             create_table(
                 builder,
                 &keyspace,
@@ -758,7 +816,7 @@ fn statement(
             let mut sql = Vec::new();
             match change {
                 crate::cql::AlterChange::Add(columns) => {
-                    for column in columns {
+                    for column in &resolved_columns(columns, &keyspace, catalog)? {
                         if info.columns.iter().any(|(name, _)| *name == column.name) {
                             return Err(format!(
                                 "Invalid column name {} because it conflicts with an existing column",
@@ -820,7 +878,7 @@ fn statement(
                 let types: Vec<String> = info
                     .columns
                     .iter()
-                    .map(|(name, cql)| format!("{name}\t{}", cql.name()))
+                    .map(|(name, cql)| format!("{name}\t{}", cql.stored_name()))
                     .collect();
                 sql.push(format!(
                     "{METADATA_DDL}; UPDATE eggdb_cql.tables SET partition_key = {}, clustering_key = {}, descending = {}, column_types = {} WHERE keyspace_name = {} AND table_name = {}",
@@ -872,6 +930,57 @@ fn statement(
                 },
                 keyspace,
                 table.table.clone(),
+            )
+        }
+        Statement::CreateType {
+            name,
+            if_not_exists,
+            fields,
+        } => {
+            let keyspace = keyspace_of(name, current)?;
+            let fields = resolved_columns(fields, &keyspace, catalog)?;
+            let user_type = crate::types::interned_user_type(crate::types::UserType {
+                keyspace: keyspace.clone(),
+                name: name.table.clone(),
+                fields: fields.into_iter().map(|field| (field.name, field.cql)).collect(),
+            })?;
+            builder.sql(&format!(
+                "{METADATA_DDL}; INSERT INTO eggdb_cql.types VALUES ({}, {}, {}){}",
+                literal(&keyspace),
+                literal(&name.table),
+                literal(&CqlType::Udt(user_type).stored_name()),
+                if *if_not_exists { " ON CONFLICT (keyspace_name, type_name) DO NOTHING" } else { "" }
+            ));
+            (
+                Outcome::SchemaChange {
+                    change: "CREATED",
+                    target: "TYPE",
+                    keyspace: keyspace.clone(),
+                    name: Some(name.table.clone()),
+                },
+                keyspace,
+                name.table.clone(),
+            )
+        }
+        Statement::DropType { name, if_exists } => {
+            let keyspace = keyspace_of(name, current)?;
+            if !*if_exists {
+                catalog.user_type(&keyspace, &name.table)?;
+            }
+            builder.sql(&format!(
+                "{METADATA_DDL}; DELETE FROM eggdb_cql.types WHERE keyspace_name = {} AND type_name = {}",
+                literal(&keyspace),
+                literal(&name.table)
+            ));
+            (
+                Outcome::SchemaChange {
+                    change: "DROPPED",
+                    target: "TYPE",
+                    keyspace: keyspace.clone(),
+                    name: Some(name.table.clone()),
+                },
+                keyspace,
+                name.table.clone(),
             )
         }
         Statement::DropIndex { index, if_exists } => {

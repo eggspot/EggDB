@@ -124,6 +124,14 @@ fn write_type(out: &mut Out, cql: CqlType) {
                 write_type(out, *item);
             }
         }
+        CqlType::Udt(user_type) => {
+            out.string(&user_type.keyspace).string(&user_type.name);
+            out.short(u16::try_from(user_type.fields.len()).unwrap_or(u16::MAX));
+            for (name, field) in &user_type.fields {
+                out.string(name);
+                write_type(out, *field);
+            }
+        }
         _ => {}
     }
 }
@@ -256,6 +264,23 @@ fn lines(text: &str) -> Vec<String> {
 }
 
 impl Catalog for SessionCatalog<'_, '_> {
+    fn user_type(&mut self, keyspace: &str, name: &str) -> Result<CqlType, String> {
+        let rows = text_rows(
+            self.session,
+            &format!(
+                "SELECT definition FROM eggdb_cql.types WHERE keyspace_name = {} AND type_name = {}",
+                literal(keyspace),
+                literal(name)
+            ),
+        )
+        .unwrap_or_default();
+        rows.into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next())
+            .and_then(|definition| CqlType::parse(&definition))
+            .ok_or_else(|| format!("Unknown type {keyspace}.{name}"))
+    }
+
     fn table(&mut self, keyspace: &str, table: &str) -> Result<TableInfo, String> {
         let key = (keyspace.to_owned(), table.to_owned());
         if let Some(found) = self.tables.get(&key) {

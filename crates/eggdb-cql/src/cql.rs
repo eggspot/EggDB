@@ -171,6 +171,7 @@ pub(crate) enum Term {
     Set(Vec<Term>),
     Map(Vec<(Term, Term)>),
     Tuple(Vec<Term>),
+    Fields(Vec<(String, Term)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,6 +272,15 @@ pub(crate) enum Statement {
     },
     DropIndex {
         index: TableName,
+        if_exists: bool,
+    },
+    CreateType {
+        name: TableName,
+        if_not_exists: bool,
+        fields: Vec<ColumnDefinition>,
+    },
+    DropType {
+        name: TableName,
         if_exists: bool,
     },
     Truncate(TableName),
@@ -431,6 +441,19 @@ impl Parser {
                 if self.eat_symbol("}") {
                     return Ok(Term::Set(Vec::new()));
                 }
+                if self.starts_field() {
+                    let mut fields = Vec::new();
+                    loop {
+                        let field = self.identifier()?;
+                        self.expect_symbol(":")?;
+                        fields.push((field, self.nested_term()?));
+                        if !self.eat_symbol(",") {
+                            break;
+                        }
+                    }
+                    self.expect_symbol("}")?;
+                    return Ok(Term::Fields(fields));
+                }
                 let first = self.nested_term()?;
                 if !self.eat_symbol(":") {
                     let mut items = vec![first];
@@ -451,6 +474,15 @@ impl Parser {
             }
             _ => Err("line 1: mismatched input, expecting a value".to_owned()),
         }
+    }
+
+    fn starts_field(&self) -> bool {
+        let named = match self.peek() {
+            Some(Token::Word(word)) => !matches!(word.as_str(), "true" | "false" | "null" | "nan" | "infinity"),
+            Some(Token::Quoted(_)) => true,
+            _ => false,
+        };
+        named && matches!(self.tokens.get(self.at + 1), Some(Token::Symbol(":")))
     }
 
     fn nested_term(&mut self) -> Result<Term, String> {
@@ -490,8 +522,11 @@ impl Parser {
     fn cql_type_inner(&mut self) -> Result<CqlType, String> {
         let name = self.identifier()?.to_ascii_lowercase();
         if !matches!(name.as_str(), "list" | "set" | "map" | "frozen" | "tuple") {
-            return CqlType::from_name(&name)
-                .ok_or_else(|| format!("unknown type {name}: user-defined types are not supported yet"));
+            if let Some(cql) = CqlType::from_name(&name) {
+                return Ok(cql);
+            }
+            let name = if self.eat_symbol(".") { self.identifier()? } else { name };
+            return crate::types::unresolved_user_type(&name);
         }
         self.expect_symbol("<")?;
         let mut arguments = vec![self.cql_type()?];
@@ -610,6 +645,29 @@ impl Parser {
             return Ok(Statement::CreateKeyspace {
                 name,
                 if_not_exists,
+            });
+        }
+        if self.eat_word("type") {
+            let if_not_exists = self.if_not_exists()?;
+            let name = self.table_name()?;
+            self.expect_symbol("(")?;
+            let mut fields: Vec<ColumnDefinition> = Vec::new();
+            loop {
+                let field = self.identifier()?;
+                if fields.iter().any(|existing| existing.name == field) {
+                    return Err(format!("Duplicate field name {field} in type {}", name.table));
+                }
+                let cql = self.cql_type()?;
+                fields.push(ColumnDefinition { name: field, cql });
+                if !self.eat_symbol(",") {
+                    break;
+                }
+            }
+            self.expect_symbol(")")?;
+            return Ok(Statement::CreateType {
+                name,
+                if_not_exists,
+                fields,
             });
         }
         let custom = self.eat_word("custom");
@@ -1019,9 +1077,15 @@ impl Parser {
                         if_exists,
                         index: self.table_name()?,
                     })
+                } else if self.eat_word("type") {
+                    let if_exists = self.if_exists()?;
+                    Ok(Statement::DropType {
+                        if_exists,
+                        name: self.table_name()?,
+                    })
                 } else {
                     Err(unsupported(
-                        "this DROP statement (only keyspaces, tables and indexes are)",
+                        "this DROP statement (only keyspaces, tables, indexes and types are)",
                     ))
                 }
             }
