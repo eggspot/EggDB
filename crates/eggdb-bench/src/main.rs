@@ -32,6 +32,7 @@ mod checkpoint;
 mod citext;
 mod copy;
 mod database;
+mod disk_overhead;
 mod egg_allocator;
 mod entries;
 mod footprint;
@@ -111,10 +112,11 @@ const COUNTED: [(&str, Counted); 43] = [
     (sql_bulk_write::SQLSERVER, sql_bulk_write::sqlserver),
 ];
 
-const FOOTPRINT: [(&str, Uncounted); 3] = [
+const FOOTPRINT: [(&str, Uncounted); 4] = [
     (footprint::BINARY, footprint::binary),
     (footprint::START, footprint::start),
     (footprint::OPEN_AND_GET, footprint::open_and_get),
+    (disk_overhead::DISK, disk_overhead::disk),
 ];
 
 fn main() -> ExitCode {

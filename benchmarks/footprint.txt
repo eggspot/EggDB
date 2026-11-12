@@ -1,4 +1,6 @@
 linux embedded c_api_library_bytes 16777216
+linux embedded disk_bytes_per_index_entry 40
+linux embedded disk_bytes_per_row 64
 linux full eggdb_binary_bytes 67108864
 linux full open_and_get_peak_resident_bytes 16777216
 linux full open_and_get_ratio 3.0
@@ -6,6 +8,8 @@ linux full serve_idle_resident_bytes 33554432
 linux full start_peak_resident_bytes 8388608
 linux full start_ratio 2.0
 macos embedded c_api_library_bytes 12582912
+macos embedded disk_bytes_per_index_entry 40
+macos embedded disk_bytes_per_row 64
 macos full eggdb_binary_bytes 50331648
 macos full open_and_get_peak_resident_bytes 16777216
 macos full open_and_get_ratio 3.0

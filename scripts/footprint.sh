@@ -63,6 +63,8 @@ lines+=("$system full start_peak_resident_bytes $(bench_value footprint.start pe
 lines+=("$system full start_ratio $(bench_value footprint.start ratio_to_a_program_that_exits_at_once)")
 lines+=("$system full open_and_get_peak_resident_bytes $(bench_value footprint.open_and_get peak_resident_bytes)")
 lines+=("$system full open_and_get_ratio $(bench_value footprint.open_and_get ratio_to_a_program_that_exits_at_once)")
+lines+=("$system embedded disk_bytes_per_row $(bench_value footprint.disk bytes_per_row)")
+lines+=("$system embedded disk_bytes_per_index_entry $(bench_value footprint.disk bytes_per_index_entry)")
 
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 {

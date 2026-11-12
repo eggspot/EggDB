@@ -488,7 +488,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQLite's `speedtest1` and the standard embedded benchmarks on the `embedded` profile (D41).
   Check: the compare job, gated.
 - On-disk overhead per row and per index entry, measured with a target beside the others (D6,
-  D354).
+  D354). **Code written, unbuilt** (code-only mode, 2026-11-13, D952):
+  `footprint.disk`, targets 64 bytes per row and 40 per index entry.
 - The `server` profile split of the binary, with its own size, idle-memory and first-start targets
   (D230, D354), and `serve`'s time to its first line in `scripts/footprint.sh`. Check:
   `benchmarks/footprint.txt`.
