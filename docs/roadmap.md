@@ -2057,7 +2057,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   shared HTTP client's TLS: **code written, unbuilt** (code-only mode, 2026-11-12, D920); multipart uploads of large
   archives: **code written, unbuilt** (code-only mode, 2026-11-12, D921). Uploads without a staging file and the
   simulator test of restoring under failures: **code written, unbuilt** (code-only mode, 2026-11-13, D1100).
-- Stateless compute nodes over shared storage, scaling apart from storage (D18).
+- Stateless compute nodes over shared storage, scaling apart from storage (D18). **Code written, unbuilt** (code-only mode, 2026-11-13, D1101):
+  read-only servers over a page store (`eggdb serve --page-store s3://... --read-only`) that follow the writer's manifest
+  with `Database::refresh_page_store`.
 - Serverless: `eggdb serve` archives and exits when idle, and starts again through
   `--restore-from` (D226); research decides what wakes it (D18). Check: a timed cold start.
 - Tiered storage: hot, warm and cold pages by age across memory, disk and object storage (D18,

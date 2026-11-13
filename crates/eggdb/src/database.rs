@@ -87,6 +87,8 @@ pub struct Database {
     row_capture: OnceLock<fn(&[u8]) -> bool>,
     auto_checkpoint_log_bytes: Option<u64>,
     power_source: std::sync::Mutex<PowerSource>,
+    page_store_generation: std::sync::atomic::AtomicU64,
+    page_store_side: AtomicU8,
 }
 
 /// How much more log a commit leaves before its automatic checkpoint while the machine runs on
@@ -337,8 +339,10 @@ impl Database {
         options: Options,
     ) -> Result<Self> {
         let cache = cache.as_ref();
-        let file = crate::page_store::PageStoreFile::open(objects, cache)
+        let local = if options.read_only { follower_cache(cache, 0) } else { cache.to_path_buf() };
+        let file = crate::page_store::PageStoreFile::open(objects, &local)
             .map_err(|error| Error::storage(error.into()))?;
+        let generation = file.manifest().generation;
         let empty = file.size().map_err(|error| Error::storage(error.into()))? == 0;
         let file = DatabaseFile::custom(Box::new(file));
         let opened = if empty {
@@ -360,7 +364,49 @@ impl Database {
         } else {
             PageFile::open_in(file, Access::ReadWrite)
         };
-        Self::with_page_file(opened.map_err(Error::storage)?, cache, &options)
+        let db = Self::with_page_file(opened.map_err(Error::storage)?, cache, &options)?;
+        db.page_store_generation.store(generation, Ordering::Release);
+        Ok(db)
+    }
+
+    /// Moves a database opened read-only from a page store to the store's newest manifest
+    /// (D1101): a stateless compute node serving queries over shared storage calls it to see
+    /// the writer's latest commits. Returns whether the manifest had moved. While a read
+    /// transaction is open it fails with
+    /// [`ErrorKind::SnapshotTooOld`](crate::ErrorKind::SnapshotTooOld); try again once readers
+    /// finish. The local cache keeps every chunk the new manifest still names.
+    pub fn refresh_page_store(
+        &self,
+        objects: impl crate::page_store::ObjectStore + 'static,
+        options: &Options,
+    ) -> Result<bool> {
+        if !self.read_only {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "only a database opened read-only from a page store follows the writer's manifest",
+            ));
+        }
+        let current = objects
+            .get("manifest")
+            .map_err(|message| Error::new(ErrorKind::Io, format!("object storage: {message}")))?
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| crate::page_store::Manifest::decode(&text))
+            .map_or(0, |manifest| manifest.generation);
+        if self.page_store_generation.load(Ordering::Acquire) == current {
+            return Ok(false);
+        }
+        let side = 1 - self.page_store_side.load(Ordering::Acquire);
+        let file = crate::page_store::PageStoreFile::open(objects, &follower_cache(&self.path, side))
+            .map_err(|error| Error::storage(error.into()))?;
+        let generation = file.manifest().generation;
+        let opened = PageFile::open_in(DatabaseFile::custom(Box::new(file)), Access::ReadOnly)
+            .map_err(Error::storage)?;
+        let cache = PageCache::new(opened, &OsMemory::new(), CacheSize::Bytes(options.cache_bytes))
+            .map_err(Error::storage)?;
+        self.store.replace_cache(cache).map_err(Error::storage)?;
+        self.page_store_generation.store(generation, Ordering::Release);
+        self.page_store_side.store(side, Ordering::Release);
+        Ok(true)
     }
 
     /// Opens a database in memory from `image`, the bytes [`Database::image`] gave, for hosts
@@ -452,6 +498,8 @@ impl Database {
             row_capture: OnceLock::new(),
             auto_checkpoint_log_bytes: options.auto_checkpoint_log_bytes,
             power_source: std::sync::Mutex::new(PowerSource::Mains),
+            page_store_generation: std::sync::atomic::AtomicU64::new(0),
+            page_store_side: AtomicU8::new(0),
         })
     }
 
@@ -1339,6 +1387,12 @@ fn explain_open_error(error: StorageError, options: &Options) -> Error {
     } else {
         "the file does not exist; open it with `Options::create_if_missing(true)` to create it"
     })
+}
+
+fn follower_cache(path: &Path, side: u8) -> PathBuf {
+    let mut named = path.as_os_str().to_owned();
+    named.push(if side == 0 { ".page-cache-a" } else { ".page-cache-b" });
+    PathBuf::from(named)
 }
 
 fn staging_path(path: &Path, suffix: &str) -> PathBuf {

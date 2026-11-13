@@ -66,6 +66,10 @@ impl HybridClock {
         }
     }
 
+    pub(crate) fn observe(&mut self, stamp: CommitStamp) {
+        self.last = self.last.max(stamp.0);
+    }
+
     pub(crate) fn next(&mut self) -> Result<CommitStamp, StorageError> {
         let after_last = self
             .last

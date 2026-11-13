@@ -1125,3 +1125,4 @@ its full title with its status.
 - [D1098](decisions/D1098.md) Code-only batch 746 (M18): multi-primary SQL rows with a conflict rule per table
 - [D1099](decisions/D1099.md) Code-only batch 747 (M18): page-level remote storage: the database file as versioned chunks in object storage with a local cache
 - [D1100](decisions/D1100.md) Code-only batch 748 (M18): archive uploads without a staging file, and a simulation of restoring under failures
+- [D1101](decisions/D1101.md) Code-only batch 749 (M18): stateless compute nodes: read-only servers over a page store that follow the writer

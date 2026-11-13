@@ -226,6 +226,27 @@ impl<F: File> Store<F> {
         state.cache.image()
     }
 
+    /// Puts the store over `cache` instead, a cache over a newer state of the same database
+    /// that another server wrote, such as a page store's next manifest (D1101): later
+    /// transactions read it, and the clock moves past its last commit. Refused with
+    /// [`StorageError::WriterActive`] while a write transaction is open, and with
+    /// [`StorageError::SnapshotTooOld`] while a read transaction is, since both read the cache
+    /// being replaced.
+    pub fn replace_cache(&self, cache: PageCache<F>) -> Result<(), StorageError> {
+        let mut state = self.lock()?;
+        if state.writer_active {
+            return Err(StorageError::WriterActive);
+        }
+        if state.cache.has_open_snapshots() {
+            return Err(StorageError::SnapshotTooOld);
+        }
+        let high_water = cache.superblock().clock_high_water;
+        state.clock.observe(CommitStamp::from_bits(high_water));
+        state.last_commit = CommitStamp::from_bits(high_water);
+        state.cache = cache;
+        Ok(())
+    }
+
     /// Whether [`Store::suspend`] gave the file up.
     pub fn is_suspended(&self) -> Result<bool, StorageError> {
         Ok(self.lock()?.cache.is_suspended())

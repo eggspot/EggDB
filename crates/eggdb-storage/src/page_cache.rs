@@ -606,6 +606,11 @@ impl<F: File> PageCache<F> {
         self.images.get_mut().join_reader(version)
     }
 
+    /// Whether a read transaction holds a snapshot of this cache.
+    pub fn has_open_snapshots(&self) -> bool {
+        self.images.borrow().has_readers()
+    }
+
     pub(crate) fn end_snapshot(&mut self, version: u64) {
         self.images.get_mut().release_reader(version);
     }

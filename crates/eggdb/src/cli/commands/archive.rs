@@ -39,6 +39,27 @@ pub(super) fn page_store_objects(url: &str) -> Result<BucketObjects, String> {
     Ok(BucketObjects(bucket(url)?))
 }
 
+const FOLLOW_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Keeps a read-only server over the page store at `url` on the writer's newest manifest,
+/// checking it every two seconds until `stop`: a stateless compute node (D1101).
+pub(super) fn follow_page_store(db: &eggdb::Database, url: &str, options: &eggdb::Options, stop: &(dyn Fn() -> bool + Sync)) {
+    while !stop() {
+        std::thread::sleep(FOLLOW_EVERY);
+        let refreshed = page_store_objects(url).and_then(|objects| {
+            db.refresh_page_store(objects, options).map_err(|error| match error.kind() {
+                eggdb::ErrorKind::SnapshotTooOld => String::new(),
+                _ => error.to_string(),
+            })
+        });
+        if let Err(message) = refreshed
+            && !message.is_empty()
+        {
+            eprintln!("eggdb serve: --page-store {url}: {message}");
+        }
+    }
+}
+
 fn choose(entries: &[Archived], at: Option<&str>, shown: &str) -> Result<Archived, String> {
     let limit = match at {
         Some(text) => Some(

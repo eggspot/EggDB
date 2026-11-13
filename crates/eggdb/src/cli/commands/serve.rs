@@ -1118,6 +1118,7 @@ impl Session<'_> {
         self.print_listening(bound, &config, read_only, tls.as_ref(), &sockets);
         self.out.finish()?;
         let _ = stop_signals::watch();
+        let follow_options = self.database_options(Access::ReadOnly, None);
         let store = DatabaseStore(&db);
         let served_databases = ServedDirectory::new(ServedDirectorySetup {
             default_name: &config.database,
@@ -2022,6 +2023,11 @@ impl Session<'_> {
                 }
                 None => Ok(()),
             });
+            let page_store_follower = scope.spawn(|| {
+                if let Some(url) = options.page_store.as_deref().filter(|_| read_only) {
+                    super::archive::follow_page_store(&db, url, &follow_options, &stop_signals::requested);
+                }
+            });
             let multi_primary_puller = scope.spawn(|| match &multi_primary {
                 Some((node, peers)) => {
                     let outcome = super::serve_multi_primary::pull_peers(&store, node, peers, &password, &stop_signals::requested);
@@ -2146,6 +2152,7 @@ impl Session<'_> {
             let _ = cluster_node.join();
             let _ = quorum_node.join();
             let _ = multi_primary_puller.join();
+            let _ = page_store_follower.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();
             let _ = database_arrivals.join();

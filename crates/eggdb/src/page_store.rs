@@ -18,6 +18,10 @@ pub const CHUNK_BYTES: u64 = 1 << 20;
 const MANIFEST: &str = "manifest";
 const MANIFEST_HEADER: &str = "eggdb-pages 1";
 
+/// How long a chunk version no manifest names any more is kept for followers still reading an
+/// older manifest (D1101): 15 minutes.
+pub const RETIRED_KEPT_MS: u64 = 15 * 60 * 1000;
+
 /// Where a page-store file keeps its objects: an S3 bucket's prefix, or anything that stores
 /// whole objects by name.
 pub trait ObjectStore: Send + Sync {
@@ -87,6 +91,9 @@ pub struct Manifest {
     pub generation: u64,
     /// Each stored chunk's index and the version it was last written at.
     pub chunks: BTreeMap<u64, u64>,
+    /// Chunk objects no longer named, with when they were retired, in milliseconds since 1970:
+    /// kept for [`RETIRED_KEPT_MS`], then removed.
+    pub retired: Vec<(String, u64)>,
 }
 
 impl Manifest {
@@ -96,6 +103,9 @@ impl Manifest {
         let mut out = format!("{MANIFEST_HEADER}\nsize {}\ngeneration {}\n", self.size, self.generation);
         for (index, version) in &self.chunks {
             out.push_str(&format!("chunk {index} {version}\n"));
+        }
+        for (name, at) in &self.retired {
+            out.push_str(&format!("retired {name} {at}\n"));
         }
         out
     }
@@ -114,6 +124,9 @@ impl Manifest {
                 ("generation", Some(generation), None, None) => manifest.generation = generation.parse().ok()?,
                 ("chunk", Some(index), Some(version), None) => {
                     manifest.chunks.insert(index.parse().ok()?, version.parse().ok()?);
+                }
+                ("retired", Some(name), Some(at), None) if name.starts_with("chunks/") => {
+                    manifest.retired.push((name.to_owned(), at.parse().ok()?));
                 }
                 _ => return None,
             }
@@ -311,7 +324,15 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
             return Ok(());
         }
         let generation = state.manifest.generation + 1;
-        let mut next = Manifest { size: state.size, generation, chunks: state.manifest.chunks.clone() };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        let mut next = Manifest {
+            size: state.size,
+            generation,
+            chunks: state.manifest.chunks.clone(),
+            retired: state.manifest.retired.clone(),
+        };
         next.chunks.retain(|index, _| index * CHUNK_BYTES < state.size);
         let dirty: Vec<u64> = state.dirty.iter().copied().collect();
         for index in &dirty {
@@ -321,8 +342,6 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
             self.objects.put(&chunk_name(*index, generation), &bytes).map_err(failed)?;
             next.chunks.insert(*index, generation);
         }
-        self.cache.sync_data()?;
-        self.objects.put(MANIFEST, next.encode().as_bytes()).map_err(failed)?;
         let superseded: Vec<String> = state
             .manifest
             .chunks
@@ -330,6 +349,16 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
             .filter(|(index, version)| next.chunks.get(index) != Some(version))
             .map(|(index, version)| chunk_name(*index, *version))
             .collect();
+        next.retired.extend(superseded.into_iter().map(|name| (name, now)));
+        let expired: Vec<String> = next
+            .retired
+            .iter()
+            .filter(|(_, at)| now.saturating_sub(*at) >= RETIRED_KEPT_MS)
+            .map(|(name, _)| name.clone())
+            .collect();
+        next.retired.retain(|(_, at)| now.saturating_sub(*at) < RETIRED_KEPT_MS);
+        self.cache.sync_data()?;
+        self.objects.put(MANIFEST, next.encode().as_bytes()).map_err(failed)?;
         for index in &dirty {
             state.present.insert(*index, generation);
         }
@@ -337,7 +366,7 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
         state.manifest = next;
         self.record_present(&state)?;
         drop(state);
-        for name in superseded {
+        for name in expired {
             let _ = self.objects.delete(&name);
         }
         Ok(())
@@ -368,7 +397,12 @@ mod tests {
 
     #[test]
     fn manifests_read_back_and_damaged_ones_are_refused() {
-        let manifest = Manifest { size: 5, generation: 2, chunks: BTreeMap::from([(0, 2), (3, 1)]) };
+        let manifest = Manifest {
+            size: 5,
+            generation: 2,
+            chunks: BTreeMap::from([(0, 2), (3, 1)]),
+            retired: vec![("chunks/0000000000000000-0000000000000001".to_owned(), 99)],
+        };
         assert_eq!(Manifest::decode(&manifest.encode()), Some(manifest));
         assert_eq!(Manifest::decode("something else\n"), None);
         assert_eq!(Manifest::decode("eggdb-pages 1\nsize x\n"), None);
@@ -387,7 +421,8 @@ mod tests {
         let manifest = file.manifest();
         assert_eq!(manifest.chunks[&0], 1);
         assert_eq!(manifest.chunks[&1], 2);
-        assert_eq!(objects.names().iter().filter(|name| name.starts_with("chunks/")).count(), 3);
+        assert_eq!(objects.names().iter().filter(|name| name.starts_with("chunks/")).count(), 4);
+        assert_eq!(manifest.retired.len(), 1);
         drop(file);
         let second_cache = fresh("second");
         let reader = PageStoreFile::open(Arc::clone(&objects), &second_cache).unwrap();
@@ -399,6 +434,6 @@ mod tests {
         reader.set_size(CHUNK_BYTES / 2).unwrap();
         reader.sync_data().unwrap();
         assert_eq!(reader.manifest().chunks.keys().copied().collect::<Vec<_>>(), vec![0]);
-        assert_eq!(objects.names().iter().filter(|name| name.starts_with("chunks/")).count(), 1);
+        assert_eq!(reader.manifest().retired.len(), 4);
     }
 }

@@ -77,6 +77,10 @@ impl BeforeImages {
         Ok(())
     }
 
+    pub(crate) fn has_readers(&self) -> bool {
+        self.readers.iter().any(|(_, count)| *count > 0)
+    }
+
     pub(crate) fn release_reader(&mut self, version: u64) {
         let Ok(index) = self
             .readers

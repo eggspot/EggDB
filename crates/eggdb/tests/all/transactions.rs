@@ -566,3 +566,30 @@ fn a_page_store_database_reopens_on_a_new_cache_from_its_objects() {
     let db = Database::open_page_store(objects, third.path(), Options::new()).unwrap();
     assert_eq!(db.read(|tx| tx.get(key(1))).unwrap(), Some(b"changed".to_vec()));
 }
+
+#[test]
+fn a_read_only_compute_node_follows_the_writers_manifest() {
+    use eggdb::page_store::MemoryObjects;
+    use std::sync::Arc;
+    let objects = Arc::new(MemoryObjects::default());
+    let writer_cache = TempPath::new("compute-writer");
+    let writer = Database::open_page_store(Arc::clone(&objects), writer_cache.path(), Options::new()).unwrap();
+    writer.write(|tx| tx.put("count", "1")).unwrap();
+    let reader_cache = TempPath::new("compute-reader");
+    let options = Options::new().read_only(true);
+    let reader = Database::open_page_store(Arc::clone(&objects), reader_cache.path(), options.clone()).unwrap();
+    assert_eq!(reader.read(|tx| tx.get("count")).unwrap(), Some(b"1".to_vec()));
+    assert!(!reader.refresh_page_store(Arc::clone(&objects), &options).unwrap());
+    writer.write(|tx| tx.put("count", "2")).unwrap();
+    let held = reader.begin_read().unwrap();
+    assert_eq!(
+        reader.refresh_page_store(Arc::clone(&objects), &options).err().map(|error| error.kind()),
+        Some(ErrorKind::SnapshotTooOld)
+    );
+    drop(held);
+    assert!(reader.refresh_page_store(Arc::clone(&objects), &options).unwrap());
+    assert_eq!(reader.read(|tx| tx.get("count")).unwrap(), Some(b"2".to_vec()));
+    writer.write(|tx| tx.put("count", "3")).unwrap();
+    assert!(reader.refresh_page_store(objects, &options).unwrap());
+    assert_eq!(reader.read(|tx| tx.get("count")).unwrap(), Some(b"3".to_vec()));
+}
