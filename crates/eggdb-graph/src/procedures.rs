@@ -6,6 +6,7 @@ use crate::centrality::{
     betweenness_in, closeness_in, fast_rp_in, k_core_in, leiden_in, louvain_in,
     weighted_shortest_path_in,
 };
+use crate::embeddings::{Node2VecSettings, node2vec_in};
 use crate::store::GraphRead;
 use crate::topology::Topology;
 use crate::{GraphError, GraphResult, Value};
@@ -13,8 +14,9 @@ use crate::{GraphError, GraphResult, Value};
 type Records = (Vec<&'static str>, Vec<Vec<Value>>);
 
 /// The graph algorithm procedures, by their `CALL` names.
-pub const PROCEDURES: [&str; 13] = [
+pub const PROCEDURES: [&str; 14] = [
     "eggdb.fastRP",
+    "eggdb.node2vec",
     "eggdb.pageRank",
     "eggdb.connectedComponents",
     "eggdb.labelPropagation",
@@ -136,6 +138,7 @@ pub fn call_on(
         "eggdb.labelPropagation" | "eggdb.betweenness" | "eggdb.closeness" | "eggdb.louvain"
         | "eggdb.leiden" => 1,
         "eggdb.fastRP" => 2,
+        "eggdb.node2vec" => 7,
         _ if PROCEDURES.contains(&procedure) => 0,
         _ => {
             return Err(GraphError::new(
@@ -208,6 +211,31 @@ pub fn call_on(
                             Value::List(vector.into_iter().map(Value::Float).collect()),
                         ]
                     })
+                    .collect(),
+            )
+        }
+        "eggdb.node2vec" => {
+            let dimension = count_argument(arguments.first(), 64, "dimension")?.max(1);
+            let factor = |value: Option<&Value>, what: &str| match value {
+                None => Ok(1.0),
+                Some(Value::Integer(number)) if (1..=100).contains(number) => Ok(*number as f64),
+                Some(Value::Float(number)) if *number >= 0.01 && *number <= 100.0 => Ok(*number),
+                Some(_) => Err(argument_error(format!("{what} must be a number from 0.01 to 100"))),
+            };
+            let settings = Node2VecSettings {
+                dimension,
+                walk_length: count_argument(arguments.get(1), 20, "walkLength")?.max(1),
+                walks_per_node: count_argument(arguments.get(2), 10, "walksPerNode")?.max(1),
+                window: count_argument(arguments.get(3), 5, "windowSize")?.clamp(1, 50),
+                epochs: count_argument(arguments.get(4), 1, "epochs")?.clamp(1, 100),
+                return_factor: factor(arguments.get(5), "returnFactor")?,
+                in_out_factor: factor(arguments.get(6), "inOutFactor")?,
+            };
+            (
+                vec!["nodeId", "embedding"],
+                node2vec_in(graph, settings)?
+                    .into_iter()
+                    .map(|(node, vector)| vec![id(node), Value::List(vector.into_iter().map(Value::Float).collect())])
                     .collect(),
             )
         }

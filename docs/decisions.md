@@ -1036,3 +1036,4 @@ its full title with its status.
 - [D1009](decisions/D1009.md) Code-only batch 657 (M13): several path patterns and bounded quantified edges in GRAPH_TABLE
 - [D1010](decisions/D1010.md) Code-only batch 658 (M13): graph property indexes in an order-preserving encoding read as key ranges
 - [D1011](decisions/D1011.md) Code-only batch 659 (M13): Apache TinkerPop Gremlin server with GraphSON 3.0, scripts and bytecode
+- [D1012](decisions/D1012.md) Code-only batch 660 (M13): learned graph embeddings with node2vec

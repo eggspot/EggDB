@@ -15,6 +15,7 @@
 mod algorithms;
 mod centrality;
 mod cypher;
+mod embeddings;
 mod execute;
 mod procedures;
 mod schema;

@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
 const MAX_ALL_PAIRS_NODES: usize = 100_000;
 const MAX_LOUVAIN_PASSES: usize = 100;
 
-struct Indexed {
-    ids: Vec<u64>,
-    neighbours: Vec<Vec<usize>>,
+pub(crate) struct Indexed {
+    pub(crate) ids: Vec<u64>,
+    pub(crate) neighbours: Vec<Vec<usize>>,
 }
 
 fn too_large(what: &str) -> GraphError {
@@ -19,7 +19,7 @@ fn too_large(what: &str) -> GraphError {
     )
 }
 
-fn indexed(graph: &dyn Topology, directed: bool) -> GraphResult<Indexed> {
+pub(crate) fn indexed(graph: &dyn Topology, directed: bool) -> GraphResult<Indexed> {
     let ids = graph.node_ids()?;
     let position: HashMap<u64, usize> = ids.iter().enumerate().map(|(at, id)| (*id, at)).collect();
     let mut neighbours = vec![Vec::new(); ids.len()];
@@ -471,7 +471,7 @@ pub(crate) fn leiden_in(graph: &dyn Topology, max_levels: usize) -> GraphResult<
         .collect())
 }
 
-fn mixed(mut state: u64) -> u64 {
+pub(crate) fn mixed(mut state: u64) -> u64 {
     state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     state = (state ^ (state >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -489,7 +489,7 @@ fn initial_vector(node: u64, dimension: usize) -> Vec<f64> {
         .collect()
 }
 
-fn normalized(mut vector: Vec<f64>) -> Vec<f64> {
+pub(crate) fn normalized(mut vector: Vec<f64>) -> Vec<f64> {
     let length = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
     if length > 0.0 {
         vector.iter_mut().for_each(|value| *value /= length);
