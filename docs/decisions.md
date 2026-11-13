@@ -1040,3 +1040,4 @@ its full title with its status.
 - [D1013](decisions/D1013.md) Code-only batch 661 (M13): the W3C SPARQL test suite run weekly
 - [D1014](decisions/D1014.md) Code-only batch 662 (M13): RDF in the MCP tools with eggdb rdf get and run
 - [D1015](decisions/D1015.md) Code-only batch 663 (M13): the graph measured against Neo4j with LDBC-shaped data
+- [D1016](decisions/D1016.md) Code-only batch 664 (M13): Gremlin's branching steps

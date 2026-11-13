@@ -1627,7 +1627,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D721).
 - Apache TinkerPop Gremlin, and Cosmos DB's Gremlin API after D58's legal check (D48). Gremlin Server with GraphSON 3.0,
   scripts and bytecode (`eggdb serve --gremlin-listen`): **code written, unbuilt** (code-only mode, 2026-11-13, D1011).
-  Left: the branching steps, GraphBinary, sessions, and Cosmos DB's Gremlin API after D58's legal check.
+  The branching steps (`where`, `not`, `and`, `or`, `union`, `coalesce`, `optional`, `repeat`): **code written,
+  unbuilt** (code-only mode, 2026-11-13, D1016). Left: GraphBinary, sessions, and Cosmos DB's Gremlin API after D58's
+  legal check.
 - Louvain, Leiden, betweenness and closeness centrality, weighted shortest paths, k-core and graph
   embeddings (D55, D248). Louvain, betweenness, closeness, weighted shortest paths and k-core:
   **code written, unbuilt** (code-only mode, 2026-11-11, D436), with FastRP embeddings; Leiden: **code

@@ -22,7 +22,7 @@ pub(crate) struct Compiled {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Current {
+pub(crate) enum Current {
     Start,
     Vertex(String),
     Edge { name: String, out_vertex: Option<String>, in_vertex: Option<String>, other: String },
@@ -30,7 +30,7 @@ enum Current {
 }
 
 impl Current {
-    fn name(&self) -> Option<&str> {
+    pub(crate) fn name(&self) -> Option<&str> {
         match self {
             Self::Start => None,
             Self::Vertex(name) | Self::Value(name) => Some(name),
@@ -39,62 +39,63 @@ impl Current {
     }
 }
 
-struct PendingEdge {
+pub(crate) struct PendingEdge {
     label: String,
     from: Option<String>,
     to: Option<String>,
     properties: Vec<(String, String)>,
 }
 
-enum Pending {
+pub(crate) enum Pending {
     None,
     Edge(PendingEdge),
     Order(Vec<(String, bool)>),
     GroupCount(Option<String>),
     Select(Vec<String>, Vec<String>),
+    Repeat(crate::branch::Repeat),
 }
 
-struct Compiler {
+pub(crate) struct Compiler {
     clauses: Vec<String>,
     parameters: Vec<(String, Value)>,
-    scope: Vec<String>,
-    path: Vec<String>,
-    labels: Vec<(String, Current)>,
-    current: Current,
+    pub(crate) scope: Vec<String>,
+    pub(crate) path: Vec<String>,
+    pub(crate) labels: Vec<(String, Current)>,
+    pub(crate) current: Current,
     counter: usize,
     after_write: bool,
     open_match: Option<bool>,
-    pending: Pending,
+    pub(crate) pending: Pending,
     shape: Shape,
     writes: bool,
     finished: bool,
 }
 
-type Compiling<T> = Result<T, String>;
+pub(crate) type Compiling<T> = Result<T, String>;
 
-fn unsupported(step: &str) -> String {
+pub(crate) fn unsupported(step: &str) -> String {
     format!("the Gremlin step {step}() is not supported by EggDB yet")
 }
 
-fn text_arg(arg: Option<&Arg>, what: &str) -> Compiling<String> {
+pub(crate) fn text_arg(arg: Option<&Arg>, what: &str) -> Compiling<String> {
     match arg {
         Some(Arg::Value(Value::String(text))) => Ok(text.clone()),
         _ => Err(format!("{what} is a string")),
     }
 }
 
-fn texts(args: &[Arg], what: &str) -> Compiling<Vec<String>> {
+pub(crate) fn texts(args: &[Arg], what: &str) -> Compiling<Vec<String>> {
     args.iter().map(|arg| text_arg(Some(arg), what)).collect()
 }
 
-fn count_arg(arg: Option<&Arg>, what: &str) -> Compiling<i64> {
+pub(crate) fn count_arg(arg: Option<&Arg>, what: &str) -> Compiling<i64> {
     match arg {
         Some(Arg::Value(Value::Integer(number))) if *number >= -1 => Ok(*number),
         _ => Err(format!("{what} is a whole number")),
     }
 }
 
-fn identifier(name: &str) -> String {
+pub(crate) fn identifier(name: &str) -> String {
     if !name.is_empty() && name.chars().all(|character| character.is_ascii_alphanumeric() || character == '_') && !name.starts_with(|character: char| character.is_ascii_digit()) {
         name.to_owned()
     } else {
@@ -102,7 +103,7 @@ fn identifier(name: &str) -> String {
     }
 }
 
-fn type_list(labels: &[String]) -> String {
+pub(crate) fn type_list(labels: &[String]) -> String {
     if labels.is_empty() {
         String::new()
     } else {
@@ -110,7 +111,7 @@ fn type_list(labels: &[String]) -> String {
     }
 }
 
-fn id_values(args: &[Arg]) -> Compiling<Vec<Value>> {
+pub(crate) fn id_values(args: &[Arg]) -> Compiling<Vec<Value>> {
     let mut ids = Vec::new();
     for arg in args {
         match arg {
@@ -125,12 +126,12 @@ fn id_values(args: &[Arg]) -> Compiling<Vec<Value>> {
 }
 
 impl Compiler {
-    fn fresh(&mut self, prefix: &str) -> String {
+    pub(crate) fn fresh(&mut self, prefix: &str) -> String {
         self.counter += 1;
         format!("{prefix}{}", self.counter)
     }
 
-    fn parameter(&mut self, value: Value) -> String {
+    pub(crate) fn parameter(&mut self, value: Value) -> String {
         let name = format!("p{}", self.parameters.len());
         self.parameters.push((name.clone(), value));
         format!("${name}")
@@ -145,13 +146,13 @@ impl Compiler {
         self.open_match = None;
     }
 
-    fn matching(&mut self, pattern: String) {
+    pub(crate) fn matching(&mut self, pattern: String) {
         self.after_writes();
         self.clauses.push(format!("MATCH {pattern}"));
         self.open_match = Some(false);
     }
 
-    fn filter(&mut self, condition: String) {
+    pub(crate) fn filter(&mut self, condition: String) {
         match self.open_match {
             Some(has_where) => {
                 if let Some(last) = self.clauses.last_mut() {
@@ -175,7 +176,7 @@ impl Compiler {
         self.after_write = true;
     }
 
-    fn enter(&mut self, current: Current) {
+    pub(crate) fn enter(&mut self, current: Current) {
         if let Some(name) = current.name() {
             if !self.scope.iter().any(|known| known == name) {
                 self.scope.push(name.to_owned());
@@ -192,14 +193,14 @@ impl Compiler {
         }
     }
 
-    fn vertex(&self, step: &str) -> Compiling<String> {
+    pub(crate) fn vertex(&self, step: &str) -> Compiling<String> {
         match &self.current {
             Current::Vertex(name) => Ok(name.clone()),
             _ => Err(format!("{step}() follows a step that reaches vertices")),
         }
     }
 
-    fn expression(&self, step: &str) -> Compiling<String> {
+    pub(crate) fn expression(&self, step: &str) -> Compiling<String> {
         self.current.name().map(str::to_owned).ok_or_else(|| format!("{step}() needs a traversal before it"))
     }
 
@@ -225,7 +226,7 @@ impl Compiler {
         self.after_write = false;
     }
 
-    fn unwind(&mut self, list: String) {
+    pub(crate) fn unwind(&mut self, list: String) {
         self.after_writes();
         let name = self.fresh("gv");
         self.clause(format!("UNWIND {list} AS {name}"));
@@ -259,7 +260,7 @@ impl Compiler {
         })
     }
 
-    fn test(&mut self, subject: &str, arg: &Arg) -> Compiling<String> {
+    pub(crate) fn test(&mut self, subject: &str, arg: &Arg) -> Compiling<String> {
         match arg {
             Arg::Predicate(predicate) => self.predicate(subject, predicate),
             Arg::Value(value) => {
@@ -395,6 +396,7 @@ impl Compiler {
                 self.shape = Shape::GroupCount;
                 self.finished = true;
             }
+            Pending::Repeat(repeat) => self.repeated(repeat)?,
             Pending::Select(labels, keys) => {
                 let mut fields = Vec::new();
                 for (index, label) in labels.iter().enumerate() {
@@ -435,6 +437,7 @@ impl Compiler {
             Pending::Order(_) => "order",
             Pending::GroupCount(_) => "groupCount",
             Pending::Select(..) => "select",
+            Pending::Repeat(_) => "repeat",
         };
         match (pending, step.name.as_str()) {
             ("edge", "from" | "to") => {
@@ -468,6 +471,10 @@ impl Compiler {
                 if let Pending::GroupCount(found) = &mut self.pending {
                     *found = Some(key);
                 }
+                Ok(true)
+            }
+            ("repeat", "times" | "emit" | "until") => {
+                self.modulate_repeat(step)?;
                 Ok(true)
             }
             ("select", "by") => {
@@ -522,7 +529,8 @@ impl Compiler {
             return Err(format!("{step}() follows a step that reaches edges"));
         };
         match step {
-            "otherV" => self.enter(Current::Vertex(other)),
+            "otherV" if !other.is_empty() => self.enter(Current::Vertex(other)),
+            "otherV" => return Err("otherV() needs to know where the edge was reached from; use inV() or outV()".into()),
             "inV" | "outV" => {
                 let known = if step == "inV" { in_vertex } else { out_vertex };
                 match known {
@@ -781,6 +789,7 @@ impl Compiler {
                 self.finished = true;
             }
             "identity" | "barrier" => {}
+            "where" | "not" | "and" | "or" | "union" | "coalesce" | "optional" | "repeat" => self.branch(step)?,
             other => return Err(unsupported(other)),
         }
         Ok(())

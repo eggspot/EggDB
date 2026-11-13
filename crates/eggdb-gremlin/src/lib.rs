@@ -4,6 +4,7 @@
 //! traversal is compiled into one Cypher query and run on EggDB's property graph, the same graph
 //! Bolt and Cypher clients see (D1011).
 
+mod branch;
 mod compile;
 mod graphson;
 mod json;
