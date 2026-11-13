@@ -666,10 +666,17 @@ jobs:
         image: apache/kafka:3.7.0
         ports:
           - 9092:9092
+      rabbitmq:
+        image: rabbitmq:3.13
+        ports:
+          - 5672:5672
     env:
       COMPARE_MANIFEST: crates/eggdb-broker-compare/Cargo.toml
       EGGDB_KAFKA_ADDRESS: 127.0.0.1:19092
       KAFKA_ADDRESS: 127.0.0.1:9092
+      EGGDB_AMQP_ADDRESS: 127.0.0.1:15672
+      RABBITMQ_ADDRESS: 127.0.0.1:5672
+      EGGDB_PASSWORD: compare
     steps:
       - uses: actions/checkout@v7
         with:
@@ -691,12 +698,13 @@ jobs:
       - name: Start EggDB's Kafka listener
         run: |
           cargo build --release -p eggdb
-          EGGDB_PASSWORD=compare target/release/eggdb serve "$RUNNER_TEMP/broker.eggdb" --create --listen 127.0.0.1:15432 --kafka-listen "$EGGDB_KAFKA_ADDRESS" > "$RUNNER_TEMP/eggdb.log" 2>&1 &
+          target/release/eggdb serve "$RUNNER_TEMP/broker.eggdb" --create --listen 127.0.0.1:15432 --kafka-listen "$EGGDB_KAFKA_ADDRESS" --amqp-listen "$EGGDB_AMQP_ADDRESS" > "$RUNNER_TEMP/eggdb.log" 2>&1 &
           for attempt in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/19092) 2>/dev/null && break; sleep 1; done
-      - name: EggDB against Kafka (D7, D213, D1056)
+      - name: EggDB against Kafka and RabbitMQ (D7, D213, D214, D1056, D1058)
         run: |
           mkdir -p compare-results
           cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- kafka --results compare-results/eggdb-kafka-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- rabbitmq --results compare-results/eggdb-rabbitmq-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Keep the broker comparison results of this change
         if: always()
         uses: actions/upload-artifact@v7

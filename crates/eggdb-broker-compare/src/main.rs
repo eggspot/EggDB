@@ -3,11 +3,14 @@
 //!
 //! Run with `cargo run --release --manifest-path crates/eggdb-broker-compare/Cargo.toml --
 //! kafka [--results <file>]`, with `eggdb serve --kafka-listen` at `EGGDB_KAFKA_ADDRESS`
-//! (`127.0.0.1:19092` by default) and Apache Kafka at `KAFKA_ADDRESS` (`127.0.0.1:9092`). Both
+//! (`127.0.0.1:19092` by default) and Apache Kafka at `KAFKA_ADDRESS` (`127.0.0.1:9092`), or
+//! `rabbitmq`, with `eggdb serve --amqp-listen` at `EGGDB_AMQP_ADDRESS` (`127.0.0.1:15672`, user
+//! `eggdb` with `EGGDB_PASSWORD`) and RabbitMQ at `RABBITMQ_ADDRESS` (`127.0.0.1:5672`). Both
 //! sides get the same records over the same wire, so the ratio compares the servers, not the
 //! clients. The ratios are reported, not gated. A side that is not running is reported and the
 //! program exits successfully.
 
+mod amqp;
 mod kafka;
 mod measure;
 
@@ -15,6 +18,7 @@ use std::process::ExitCode;
 
 const BATCHES: usize = 2_000;
 const BATCH_SIZE: usize = 100;
+const AMQP_BATCHES: usize = 200;
 
 fn address(variable: &str, default: &str) -> String {
     std::env::var(variable).unwrap_or_else(|_| default.to_owned())
@@ -40,6 +44,27 @@ fn kafka(lines: &mut Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+fn rabbitmq(lines: &mut Vec<String>) -> Result<(), String> {
+    let eggdb = address("EGGDB_AMQP_ADDRESS", "127.0.0.1:15672");
+    let other = address("RABBITMQ_ADDRESS", "127.0.0.1:5672");
+    let eggdb_password = address("EGGDB_PASSWORD", "compare");
+    for side in [&eggdb, &other] {
+        if std::net::TcpStream::connect(side).is_err() {
+            println!("eggdb-broker-compare: nothing listens at {side}; AMQP not measured");
+            return Ok(());
+        }
+    }
+    let queue = format!("compare-{}", std::process::id());
+    let published_eggdb = amqp::publish(&eggdb, "eggdb", &eggdb_password, &queue, AMQP_BATCHES, BATCH_SIZE)?;
+    let published_rabbit = amqp::publish(&other, "guest", "guest", &queue, AMQP_BATCHES, BATCH_SIZE)?;
+    measure::report("amqp.publish (persistent, confirmed in batches of 100)", &published_eggdb, &published_rabbit, "RabbitMQ", lines);
+    let wanted = (AMQP_BATCHES * BATCH_SIZE) as u64;
+    let consumed_eggdb = amqp::consume(&eggdb, "eggdb", &eggdb_password, &queue, wanted)?;
+    let consumed_rabbit = amqp::consume(&other, "guest", "guest", &queue, wanted)?;
+    measure::report("amqp.consume (prefetch 1000, acknowledged every 100)", &consumed_eggdb, &consumed_rabbit, "RabbitMQ", lines);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let broker = arguments.next().unwrap_or_default();
@@ -48,7 +73,7 @@ fn main() -> ExitCode {
         match (argument.as_str(), arguments.next()) {
             ("--results", Some(path)) => results = Some(path),
             _ => {
-                eprintln!("usage: eggdb-broker-compare kafka [--results <file>]");
+                eprintln!("usage: eggdb-broker-compare kafka|rabbitmq [--results <file>]");
                 return ExitCode::from(2);
             }
         }
@@ -56,8 +81,9 @@ fn main() -> ExitCode {
     let mut lines = Vec::new();
     let outcome = match broker.as_str() {
         "kafka" => kafka(&mut lines),
+        "rabbitmq" => rabbitmq(&mut lines),
         _ => {
-            eprintln!("usage: eggdb-broker-compare kafka [--results <file>]");
+            eprintln!("usage: eggdb-broker-compare kafka|rabbitmq [--results <file>]");
             return ExitCode::from(2);
         }
     };

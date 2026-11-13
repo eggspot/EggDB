@@ -1816,7 +1816,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D615), within a delivery window.
 - Replicated (quorum-style) queues (D33). **Code written, unbuilt** (code-only mode, 2026-11-13, D1057):
   `x-queue-type: quorum` and `x-delivery-limit`, replicated by `serve --cluster`.
-- A benchmark against RabbitMQ (D33, D214).
+- A benchmark against RabbitMQ (D33, D214). **Code written, unbuilt** (code-only mode, 2026-11-13, D1058):
+  `eggdb-broker-compare rabbitmq` in CI's `broker-compare` job.
 - MQTT persistent sessions, and QoS 1 and 2 redelivery to subscribers (D33, D215). **Code written,
   unbuilt** (code-only mode, 2026-11-11, D526); sessions kept in memory. Kept in the file: **code
   written, unbuilt** (code-only mode, 2026-11-12, D581); flow control: **code written, unbuilt**

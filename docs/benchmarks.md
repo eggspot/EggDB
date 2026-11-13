@@ -284,4 +284,7 @@ libraries. `kafka` produces 2,000 batches of 100 records of 100 bytes with `acks
 messages per second, p50 and p99 round trips and EggDB's ratio. CI's `broker-compare` job runs it
 on every change against the `apache/kafka` image and keeps the results; like the other
 comparisons the ratio is reported, not gated.
+`rabbitmq` publishes 200 batches of 100 persistent 100-byte messages in confirm mode, waiting
+for each batch's confirmation, to EggDB's `--amqp-listen` and to RabbitMQ, then consumes them with
+a prefetch of 1,000, acknowledging every hundredth with `multiple` (D1058).
 
