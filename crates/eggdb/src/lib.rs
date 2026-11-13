@@ -82,7 +82,7 @@ mod writer_slot;
 
 pub use collection::{Collection, CollectionStats, DropProgress, ReadCollection, WriteCollection};
 pub use concurrent::{ConcurrentTransaction, Isolation};
-pub use database::{BackupReport, CheckReport, CompactReport, Database, DifferentialReport, Stats};
+pub use database::{BackupReport, CheckReport, CloneReport, CompactReport, Database, DifferentialReport, Stats};
 pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;
 pub use change_archive::{ArchivedChange, ArchivedEvent, read_change_archive, read_change_file};

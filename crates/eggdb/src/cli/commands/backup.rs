@@ -47,6 +47,9 @@ impl Session<'_> {
             ));
         }
         self.refuse_backup_destination(&copy, &copy_shown)?;
+        if self.request.clone_copy {
+            return self.clone_into(&copy, &copy_shown);
+        }
         let started = Instant::now();
         let db = match self.open_shared_or(Access::ReadOnly) {
             Ok(db) => db,
@@ -81,6 +84,32 @@ impl Session<'_> {
                 };
                 reports::backup_text(&mut self.out, &copied, &report);
             }
+        }
+        Ok(Exit::Done)
+    }
+
+    fn clone_into(&mut self, copy: &Path, copy_shown: &str) -> Result<Exit, Failure> {
+        let db = match self.open_shared_or(Access::ReadOnly) {
+            Ok(db) => db,
+            Err(error) => return Err(self.open_failure(&error, Access::ReadOnly)),
+        };
+        let report = db.clone_to(copy).map_err(|error| engine_failure(&error))?;
+        drop(db);
+        match self.format {
+            Format::Json => self.out.text(
+                &crate::cli::render::JsonObject::new()
+                    .string("file", &self.file_display)
+                    .string("clone", &copy.display().to_string())
+                    .number("stamp", report.stamp.bits())
+                    .boolean("instant", report.instant)
+                    .line(),
+            ),
+            _ => self.out.text(&format!(
+                "{} {} into {copy_shown}{}\n",
+                if report.instant { "cloned" } else { "copied" },
+                self.file,
+                if report.instant { ", copy-on-write" } else { " (this file system makes no copy-on-write clones)" }
+            )),
         }
         Ok(Exit::Done)
     }

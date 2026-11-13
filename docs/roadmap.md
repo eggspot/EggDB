@@ -1660,7 +1660,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Incremental and parallel backups, encrypted, with retention (D24, D208). Differential backups, AES-256-GCM sealed
   archives, `--keep` retention and parallel backup of served directories: **code written, unbuilt** (code-only mode,
   2026-11-13, D1020), with the change archive's old segments pruned with them.
-- Instant snapshots, and copy-on-write clones and branches of a whole database (D24, D28).
+- Instant snapshots, and copy-on-write clones and branches of a whole database (D24, D28). `Database::clone_to` and
+  `eggdb backup --clone` with APFS and Linux reflinks: **code written, unbuilt** (code-only mode, 2026-11-13, D1021).
+  Left: ReFS block cloning on Windows.
 - `eggdb dump`: one logical file of the whole database (schemas, rows, collections, roles,
   routines), where `eggdb export`'s eggdb-jsonl copies raw key-value entries (D24, D93). **Code written, unbuilt**
   (code-only mode, 2026-11-12, D899) as `eggdb export --dump`, which `eggdb restore` loads.

@@ -234,7 +234,7 @@ impl CommandName {
             OptionName::Kql | OptionName::Sparql => self == Self::Sql,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
             OptionName::LockDays => self == Self::Backup,
-            OptionName::Differential | OptionName::Keep => self == Self::Backup,
+            OptionName::Differential | OptionName::Keep | OptionName::Clone => self == Self::Backup,
             OptionName::BackupKeyFile => matches!(self, Self::Backup | Self::Restore),
             OptionName::ArchiveChanges => matches!(
                 self,
@@ -588,6 +588,7 @@ enum OptionName {
     Differential,
     Keep,
     BackupKeyFile,
+    Clone,
     Table,
     Header,
     Delimiter,
@@ -627,6 +628,7 @@ impl OptionName {
             b"lock-days" => Self::LockDays,
             b"archive-changes" => Self::ArchiveChanges,
             b"differential" => Self::Differential,
+            b"clone" => Self::Clone,
             b"keep" => Self::Keep,
             b"backup-key-file" => Self::BackupKeyFile,
             b"compress" => Self::Compress,
@@ -811,6 +813,7 @@ impl OptionName {
                 | Self::IfAbsent
                 | Self::Delete
                 | Self::Differential
+                | Self::Clone
         )
     }
 }
@@ -906,6 +909,7 @@ pub(crate) struct Request {
     pub(crate) lock_days: Option<u32>,
     pub(crate) archive_changes: Option<PathBuf>,
     pub(crate) differential: bool,
+    pub(crate) clone_copy: bool,
     pub(crate) keep_copies: Option<u32>,
     pub(crate) backup_key: Option<EncryptionKey>,
 }
@@ -1384,6 +1388,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         rdf: None,
         archive_changes: None,
         differential: false,
+        clone_copy: false,
         keep_copies: None,
         backup_key: None,
     };
@@ -1429,6 +1434,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::ArchiveChanges => request.archive_changes = Some(PathBuf::from(value)),
             OptionName::Differential => request.differential = true,
+            OptionName::Clone => request.clone_copy = true,
             OptionName::Keep => {
                 request.keep_copies = Some(
                     parse_whole_number(value.as_encoded_bytes())

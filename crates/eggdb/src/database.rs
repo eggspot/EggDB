@@ -81,6 +81,7 @@ pub struct Database {
     expiring_keys: AtomicBool,
     collection_drops: AtomicU8,
     change_archive: Option<crate::change_archive::ChangeArchive>,
+    encrypted: bool,
 }
 
 struct ClockHandle(Arc<dyn Clock>);
@@ -154,6 +155,17 @@ pub struct CheckReport {
     /// log. They do no harm, but the file lost track of them and never reuses them; a healthy
     /// database has none.
     pub leaked_pages: u64,
+}
+
+/// What [`Database::clone_to`] made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct CloneReport {
+    /// The stamp of the commit the clone holds.
+    pub stamp: CommitStamp,
+    /// Whether the file system cloned the file copy-on-write; otherwise the clone is a copy
+    /// [`Database::backup_to`] wrote.
+    pub instant: bool,
 }
 
 /// What [`Database::backup_differential_to`] wrote.
@@ -362,6 +374,7 @@ impl Database {
             expiring_keys: AtomicBool::new(expiring_keys),
             collection_drops: AtomicU8::new(crate::collection::DROPS_UNKNOWN),
             change_archive,
+            encrypted: options.encryption_key.is_some(),
         })
     }
 
@@ -578,41 +591,6 @@ impl Database {
         self.store.checkpoint().map_err(Error::storage)
     }
 
-    /// Writes a copy of the database's last commit to a new file at `path`, while readers and
-    /// the writer keep working: the backup reads one snapshot, as a read transaction does, so
-    /// commits made while it runs are not in the copy, and it never waits for them.
-    ///
-    /// The copy is rebuilt key by key, with every collection, SQL table and time to live, so
-    /// it holds no free or leaked pages and is often smaller than the file. It is built as
-    /// `<path>.backing-up` beside `path`, then synced and checked: its entries must be
-    /// exactly the snapshot's. Only then is it renamed to `path`, so a crash never leaves part
-    /// of a copy at `path`. After an error the `.backing-up` file is removed, except when
-    /// only the rename failed: then it is the complete copy, and the error says so. Its
-    /// commits stamp above the copied one, so keys that had expired stay expired.
-    ///
-    /// A file at `path` fails with [`ErrorKind::AlreadyExists`](crate::ErrorKind::AlreadyExists),
-    /// since a backup never replaces a file, and so does a `<path>.backing-up` left by a
-    /// backup that did not finish, which the backup leaves alone. A writer that changes more
-    /// pages than the snapshot memory holds while the backup runs makes it fail with
-    /// [`ErrorKind::SnapshotTooOld`](crate::ErrorKind::SnapshotTooOld) (see
-    /// [`Options::snapshot_memory_bytes`]). The backup takes a page cache of its own, 16 MiB
-    /// or the size of the largest value.
-    ///
-    /// ```
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-backup-{}.db", std::process::id()));
-    /// # let copy = std::env::temp_dir().join(format!("eggdb-doc-backup-{}-copy.db", std::process::id()));
-    /// let db = eggdb::Database::open(&path)?;
-    /// db.put("k", "v")?;
-    /// let report = db.backup_to(&copy)?;
-    /// assert_eq!(report.entries, 1);
-    /// db.put("k", "w")?;
-    /// assert_eq!(eggdb::Database::open(&copy)?.get("k")?, Some(b"v".to_vec()));
-    /// # drop(db);
-    /// # std::fs::remove_file(&path)?;
-    /// # std::fs::remove_file(&copy)?;
-    /// # Ok(()) }
-    /// ```
     /// Writes a differential backup of the last commit to the new file `path` (D1020): every
     /// key whose stored value differs from `base`'s, a copy of this database taken earlier
     /// (such as by [`Database::backup_to`]), and every key `base` has that this database no
@@ -664,6 +642,68 @@ impl Database {
         Ok(DifferentialReport { changes, ..report })
     }
 
+    /// Makes a clone of the database as of its last commit in the new file `path` (D1021): a
+    /// copy-on-write clone of the file where the file system makes them (APFS, Btrfs, XFS),
+    /// which takes no time and shares the file's blocks until either side changes, and an
+    /// ordinary copy ([`Database::backup_to`]) elsewhere, for an encrypted database and for one
+    /// in memory. While the file is cloned, the write transaction waits, so the clone holds
+    /// whole commits; opening it replays its log as after a stop. A clone is a branch: a database
+    /// of its own from that commit on.
+    pub fn clone_to(&self, path: impl AsRef<Path>) -> Result<CloneReport> {
+        let path = path.as_ref();
+        if !self.encrypted && !self.is_in_memory() {
+            let turn = if self.read_only { None } else { Some(self.writer.take(self.write_timeout)?) };
+            if turn.is_some() {
+                self.store.sync().map_err(Error::storage)?;
+            }
+            let stamp = self.store.last_commit().map_err(Error::storage)?;
+            let cloned = eggdb_platform::clone_file(&self.path, path).map_err(|error| {
+                Error::new(ErrorKind::Io, format!("cannot clone {} to {}: {error}", self.path.display(), path.display()))
+            })?;
+            drop(turn);
+            if cloned {
+                return Ok(CloneReport { stamp, instant: true });
+            }
+        }
+        let report = self.backup_to(path)?;
+        Ok(CloneReport { stamp: report.stamp, instant: false })
+    }
+
+    /// Writes a copy of the database's last commit to a new file at `path`, while readers and
+    /// the writer keep working: the backup reads one snapshot, as a read transaction does, so
+    /// commits made while it runs are not in the copy, and it never waits for them.
+    ///
+    /// The copy is rebuilt key by key, with every collection, SQL table and time to live, so
+    /// it holds no free or leaked pages and is often smaller than the file. It is built as
+    /// `<path>.backing-up` beside `path`, then synced and checked: its entries must be
+    /// exactly the snapshot's. Only then is it renamed to `path`, so a crash never leaves part
+    /// of a copy at `path`. After an error the `.backing-up` file is removed, except when
+    /// only the rename failed: then it is the complete copy, and the error says so. Its
+    /// commits stamp above the copied one, so keys that had expired stay expired.
+    ///
+    /// A file at `path` fails with [`ErrorKind::AlreadyExists`](crate::ErrorKind::AlreadyExists),
+    /// since a backup never replaces a file, and so does a `<path>.backing-up` left by a
+    /// backup that did not finish, which the backup leaves alone. A writer that changes more
+    /// pages than the snapshot memory holds while the backup runs makes it fail with
+    /// [`ErrorKind::SnapshotTooOld`](crate::ErrorKind::SnapshotTooOld) (see
+    /// [`Options::snapshot_memory_bytes`]). The backup takes a page cache of its own, 16 MiB
+    /// or the size of the largest value.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let path = std::env::temp_dir().join(format!("eggdb-doc-backup-{}.db", std::process::id()));
+    /// # let copy = std::env::temp_dir().join(format!("eggdb-doc-backup-{}-copy.db", std::process::id()));
+    /// let db = eggdb::Database::open(&path)?;
+    /// db.put("k", "v")?;
+    /// let report = db.backup_to(&copy)?;
+    /// assert_eq!(report.entries, 1);
+    /// db.put("k", "w")?;
+    /// assert_eq!(eggdb::Database::open(&copy)?.get("k")?, Some(b"v".to_vec()));
+    /// # drop(db);
+    /// # std::fs::remove_file(&path)?;
+    /// # std::fs::remove_file(&copy)?;
+    /// # Ok(()) }
+    /// ```
     pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<BackupReport> {
         let copy = path.as_ref();
         let staging = staging_path(copy, BACKUP_STAGING_SUFFIX);

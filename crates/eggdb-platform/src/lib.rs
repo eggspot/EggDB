@@ -48,6 +48,7 @@ mod database_file;
 pub mod dbus;
 mod error;
 pub mod fonts;
+mod file_clone;
 mod file_identity;
 mod fs;
 mod io;
@@ -156,6 +157,7 @@ pub use net::{
 };
 pub use os_cpus::OsCpus;
 pub use os_datagram::OsDatagramSocket;
+pub use file_clone::clone_file;
 pub use file_identity::{FileIdentity, file_identity_at};
 pub use os_fs::{OsFile, OsFileSystem};
 pub use os_io::OsIoQueue;

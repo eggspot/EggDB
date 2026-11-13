@@ -425,6 +425,7 @@ impl Session<'_> {
     fn archive_settings(&self) -> ArchiveSettings {
         ArchiveSettings {
             differential: self.request.differential,
+            clone: self.request.clone_copy,
             key: self.request.backup_key.as_ref().map(|key| key.0),
             keep: self.request.keep_copies,
             options: self.database_options(Access::ReadOnly, None),
@@ -663,6 +664,7 @@ const MOST_PARALLEL_BACKUPS: usize = 8;
 /// How [`archive_database`] archives a database into a directory.
 struct ArchiveSettings {
     differential: bool,
+    clone: bool,
     key: Option<[u8; 32]>,
     keep: Option<u32>,
     options: eggdb::Options,
@@ -716,13 +718,13 @@ fn archive_database(source: &Path, directory: &Path, settings: &ArchiveSettings)
         (report.changes, report.stamp.bits(), Some(base.file))
     } else {
         let db = open_source()?;
-        let copied = db.backup_to(&plain);
+        let copied = if settings.clone { db.clone_to(&plain).map(|report| report.stamp) } else { db.backup_to(&plain).map(|report| report.stamp) };
         drop(db);
-        let copied = copied.map_err(|error| format!("cannot archive {file_shown} into {shown}: {error}"))?;
+        let copied_stamp = copied.map_err(|error| format!("cannot archive {file_shown} into {shown}: {error}"))?;
         let verified = eggdb::Database::open_with(&plain, eggdb::Options::default().read_only(true))
             .and_then(|copy| copy.check())
             .map_err(|error| format!("the archived copy {plain_name} does not verify: {error}; it was kept for inspection"))?;
-        (verified.entries, copied.stamp.bits(), None)
+        (verified.entries, copied_stamp.bits(), None)
     };
     let (name, stored) = match &settings.key {
         Some(key) => {
