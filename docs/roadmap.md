@@ -1771,7 +1771,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MPP distributed analytics with workload queues (D58). **Code written, unbuilt** (code-only mode, 2026-11-13,
   D1050): shard queries read in parallel, `CREATE WORKLOAD QUEUE` and `eggdb.workload_queue` admission.
 - Resumable petabyte-scale migrations: Merkle range comparison and parallel ranges across nodes
-  (D58, D251).
+  (D58, D251). **Code written, unbuilt** (code-only mode, 2026-11-13, D1051): `split_ranges`, `claim_range`,
+  `copy_range_batch`, `range_digest`, `compare_ranges` and `compare_range` in `eggdb_migration`.
 - The etcd v3 gRPC API and the ZooKeeper protocol (D54, D247). The ZooKeeper protocol (`eggdb-zookeeper`, `--zookeeper-listen`):
   **code written, unbuilt** (code-only mode, 2026-11-12, D742). Left: the etcd v3 API (after HTTP/2 and gRPC).
 - Watches and service discovery on change streams (D54, D247). **Code written, unbuilt** (code-only mode, 2026-11-12,

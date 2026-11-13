@@ -4238,6 +4238,30 @@ SELECT * FROM eggdb_migration.compare('legacy', 'accounts', 'public', 'accounts'
   that is `missing in target`, `missing in source` or `different` (any column), so an empty
   result proves the two tables hold the same rows.
 
+For tables too large for one worker (D1051), split the key range and let several workers copy
+ranges in parallel, then compare range digests before comparing rows:
+
+```sql
+SELECT eggdb_migration.split_ranges('events', 'legacy', 'events', 'id', 64);
+SELECT eggdb_migration.claim_range('events', 'worker 7');            -- a range number, or NULL when none is left
+SELECT eggdb_migration.copy_range_batch('events', 12, 'legacy', 'events', 'public', 'events', 'id', 10000);
+SELECT * FROM eggdb_migration.compare_ranges('events', 'legacy', 'events', 'public', 'events', 'id');
+SELECT * FROM eggdb_migration.compare_range('legacy', 'events', 'public', 'events', 'id', '120000', '135000');
+```
+
+- `split_ranges(job, schema, table, key, pieces)` cuts the source's keys into up to `pieces` ranges
+  of about equal row counts (the first starts below every key, the last ends above every key)
+  and records them in `eggdb_migration.ranges`.
+- `claim_range(job, worker)` hands the next unclaimed range to one worker, so workers in any
+  number of sessions, on any server that reaches the job's database, never copy the same range.
+- `copy_range_batch(job, piece, ...)` copies the range's next rows after the largest key the
+  target already holds inside that range, so each range resumes on its own; it marks the range
+  done when a batch copies nothing.
+- `range_digest(schema, table, key, low, high)` is the row count and an MD5 over the range's rows
+  in key order; `compare_ranges` lists only the ranges whose digests differ, and
+  `compare_range(..., low, high)` compares the rows of one range, so equal ranges are never
+  compared row by row.
+
 ## Unicode normalization
 
 `normalize(text [, form])` returns the text in a Unicode normalization form, NFC unless the form
