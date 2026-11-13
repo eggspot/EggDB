@@ -108,6 +108,27 @@ impl Participant {
         )
     }
 
+    /// Every key starting with `prefix` with its value as of `at`, in key order, under the same
+    /// rule as [`Self::read_at`]: a transaction prepared at or before `at` that writes a key
+    /// with the prefix makes the scan wait for it.
+    pub fn scan_at(&mut self, prefix: &[u8], at: Timestamp) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TransactionId> {
+        self.read_floor = self.read_floor.max(at);
+        if let Some((transaction, _)) = self.prepared.iter().find(|(_, (prepared_at, writes))| {
+            *prepared_at <= at && writes.iter().any(|(written, _)| written.starts_with(prefix))
+        }) {
+            return Err(*transaction);
+        }
+        Ok(self
+            .versions
+            .range(prefix.to_vec()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .filter_map(|(key, versions)| {
+                let value = versions.iter().rev().find(|(stamp, _)| *stamp <= at)?.1.clone()?;
+                Some((key.clone(), value))
+            })
+            .collect())
+    }
+
     /// The timestamp of the last commit applied here.
     pub fn last_commit(&self) -> Timestamp {
         self.last_commit

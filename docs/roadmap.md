@@ -1752,7 +1752,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D212). **Code written, unbuilt** (code-only mode, 2026-11-13, D1042): hybrid logical clocks, versioned
   participants, commit at the largest prepare timestamp, `read_at` with a read floor and `snapshot_read`. Left: the
   same on the SQL path of sharded tables.
-- Global indexes (D18).
+- Global indexes (D18). **Code written, unbuilt** (code-only mode, 2026-11-13, D1043): `GlobalIndex` entries
+  changed in the row's distributed transaction, `CREATE GLOBAL INDEX` and routing of the distributed planner by it.
 - Multi-region clusters with latency-aware placement (D4, D212).
 - Rebalancing simulated under load, with partitions, clock skew and node failures (D18, D212).
 - Chaos testing of clusters (D44, D252).

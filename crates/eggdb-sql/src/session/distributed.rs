@@ -1,12 +1,14 @@
 use super::{OutputColumn, QueryResult, Session};
 use crate::dialect::Dialect;
-use crate::distributed::{PARTIALS, ShardedTable, plan_distributed, shard_of};
+use crate::distributed::{PARTIALS, ShardedTable, fixed_value, plan_distributed, shard_of};
 use crate::dump::sql_string;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::lexer::{Token, TokenKind, tokenize_in};
 use crate::types::{SqlType, Value};
 
 const CREATE_REGISTRY: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; CREATE TABLE IF NOT EXISTS eggdb_internal.sharded_tables (name text PRIMARY KEY, shard_key text NOT NULL, sources text NOT NULL)";
+const CREATE_INDEX_REGISTRY: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal; CREATE TABLE IF NOT EXISTS eggdb_internal.global_indexes (name text PRIMARY KEY, table_name text NOT NULL, column_name text NOT NULL, sources text NOT NULL)";
+const INDEX_TABLE: &str = "eggdb_global_index";
 const SOURCE_SEPARATOR: char = '\n';
 const SHARD_ROW: &str = "eggdb_shard_row";
 
@@ -24,6 +26,27 @@ enum ShardStatement {
         table: String,
         key: String,
     },
+    CreateIndex {
+        name: String,
+        table: String,
+        column: String,
+        sources: Vec<String>,
+    },
+    DropIndex {
+        name: String,
+    },
+    ShowIndexShard {
+        name: String,
+        value: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlobalIndexEntry {
+    name: String,
+    table: String,
+    column: String,
+    sources: Vec<String>,
 }
 
 fn word_is(token: &Token<'_>, word: &str) -> bool {
@@ -48,10 +71,79 @@ fn table_name<'a, 't>(tokens: &'a [Token<'t>]) -> Option<(String, &'a [Token<'t>
     }
 }
 
+fn sources_of(sources: &[Token<'_>]) -> Option<Vec<String>> {
+    let mut found = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        match (&source.kind, index % 2) {
+            (TokenKind::String(source), 0) => found.push(source.to_string()),
+            (TokenKind::Comma, 1) => {}
+            _ => return None,
+        }
+    }
+    (!found.is_empty() && sources.len() % 2 == 1).then_some(found)
+}
+
+fn literal_of(token: &Token<'_>) -> Option<String> {
+    match &token.kind {
+        TokenKind::String(text) => Some(text.to_string()),
+        TokenKind::Integer(digits) => Some((*digits).to_owned()),
+        _ => None,
+    }
+}
+
+fn index_statement(tokens: &[Token<'_>]) -> SqlResult<Option<ShardStatement>> {
+    let malformed = || {
+        SqlError::new(
+            SqlState::SYNTAX_ERROR,
+            "the global index statements are CREATE GLOBAL INDEX <name> ON <table> (<column>) ON '<source>' [, ...], DROP GLOBAL INDEX <name> and SHOW SHARD FOR INDEX <name> VALUE '<value>'",
+        )
+    };
+    match tokens {
+        [create, global, index, name, on, rest @ ..]
+            if word_is(create, "create") && word_is(global, "global") && word_is(index, "index") && word_is(on, "on") =>
+        {
+            let name = identifier(name).ok_or_else(malformed)?;
+            let (table, rest) = table_name(rest).ok_or_else(malformed)?;
+            let [open, column, close, on_sources, sources @ ..] = rest else {
+                return Err(malformed());
+            };
+            if !matches!(open.kind, TokenKind::LeftParen) || !matches!(close.kind, TokenKind::RightParen) || !word_is(on_sources, "on") {
+                return Err(malformed());
+            }
+            let column = identifier(column).ok_or_else(malformed)?;
+            let sources = sources_of(sources).ok_or_else(malformed)?;
+            Ok(Some(ShardStatement::CreateIndex { name, table, column, sources }))
+        }
+        [drop, global, index, name] if word_is(drop, "drop") && word_is(global, "global") && word_is(index, "index") => {
+            Ok(Some(ShardStatement::DropIndex { name: identifier(name).ok_or_else(malformed)? }))
+        }
+        [show, shard, for_word, index, name, value_word, value]
+            if word_is(show, "show") && word_is(shard, "shard") && word_is(for_word, "for") && word_is(index, "index") && word_is(value_word, "value") =>
+        {
+            Ok(Some(ShardStatement::ShowIndexShard {
+                name: identifier(name).ok_or_else(malformed)?,
+                value: literal_of(value).ok_or_else(malformed)?,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn statement(text: &str) -> SqlResult<Option<ShardStatement>> {
     let lowered = text.trim_start().to_ascii_lowercase();
-    if !["shard ", "unshard ", "show shard "].iter().any(|start| lowered.starts_with(start)) {
+    let global = lowered.starts_with("create global index ")
+        || lowered.starts_with("drop global index ")
+        || lowered.starts_with("show shard for index ");
+    if !global && !["shard ", "unshard ", "show shard "].iter().any(|start| lowered.starts_with(start)) {
         return Ok(None);
+    }
+    if global {
+        let tokens = tokenize_in(text, Dialect::PostgreSql)?;
+        let tokens: Vec<Token<'_>> = tokens
+            .into_iter()
+            .filter(|token| !matches!(token.kind, TokenKind::Semicolon | TokenKind::End))
+            .collect();
+        return index_statement(&tokens);
     }
     let tokens = tokenize_in(text, Dialect::PostgreSql)?;
     let tokens: Vec<Token<'_>> = tokens
@@ -74,17 +166,7 @@ fn statement(text: &str) -> SqlResult<Option<ShardStatement>> {
                 return Err(malformed());
             }
             let key = identifier(key).ok_or_else(malformed)?;
-            let mut found = Vec::new();
-            for (index, source) in sources.iter().enumerate() {
-                match (&source.kind, index % 2) {
-                    (TokenKind::String(source), 0) => found.push(source.to_string()),
-                    (TokenKind::Comma, 1) => {}
-                    _ => return Err(malformed()),
-                }
-            }
-            if found.is_empty() || sources.len() % 2 == 0 {
-                return Err(malformed());
-            }
+            let found = sources_of(sources).ok_or_else(malformed)?;
             Ok(Some(ShardStatement::Shard { table, key, sources: found }))
         }
         [unshard, table, rest @ ..] if word_is(unshard, "unshard") && word_is(table, "table") => {
@@ -103,11 +185,7 @@ fn statement(text: &str) -> SqlResult<Option<ShardStatement>> {
             let (table, rest) = table_name(rest).ok_or_else(malformed)?;
             match rest {
                 [key_word, value] if word_is(key_word, "key") => {
-                    let key = match &value.kind {
-                        TokenKind::String(text) => text.to_string(),
-                        TokenKind::Integer(digits) => (*digits).to_owned(),
-                        _ => return Err(malformed()),
-                    };
+                    let key = literal_of(value).ok_or_else(malformed)?;
                     Ok(Some(ShardStatement::ShowShard { table, key }))
                 }
                 _ => Err(malformed()),
@@ -149,6 +227,59 @@ impl Session<'_> {
                 })
             })
             .collect())
+    }
+
+    fn global_indexes(&mut self) -> SqlResult<Vec<GlobalIndexEntry>> {
+        let internal = crate::schemas::qualified("eggdb_internal", "global_indexes");
+        let registered = self.read(|reader, _| Ok(reader.get(&crate::encoding::table_key(&internal))?.is_some()))?;
+        if !registered {
+            return Ok(Vec::new());
+        }
+        let results = self.distributed_sql("SELECT name, table_name, column_name, sources FROM eggdb_internal.global_indexes")?;
+        Ok(results
+            .iter()
+            .flat_map(|result| result.rows.iter())
+            .filter_map(|row| {
+                let text = |index: usize| row.get(index).and_then(Value::to_text);
+                Some(GlobalIndexEntry {
+                    name: text(0)?,
+                    table: text(1)?,
+                    column: text(2)?,
+                    sources: text(3)?.split(SOURCE_SEPARATOR).map(str::to_owned).collect(),
+                })
+            })
+            .collect())
+    }
+
+    fn shards_by_index(&mut self, text: &str, table: &ShardedTable) -> SqlResult<Option<Vec<usize>>> {
+        for index in self.global_indexes()?.into_iter().filter(|index| index.table == table.name) {
+            let Some(value) = fixed_value(text, &index.column)? else {
+                continue;
+            };
+            let Some(source) = index.sources.get(shard_of(&value, index.sources.len())) else {
+                continue;
+            };
+            let lookup = format!(
+                "SELECT shard_key FROM {INDEX_TABLE} WHERE index_name = {} AND value = {}",
+                sql_string(&index.name),
+                sql_string(&value)
+            );
+            let results = self.distributed_sql(&format!(
+                "SELECT ({SHARD_ROW}.o ->> 'shard_key') FROM eggdb_foreign({}, {}) AS {SHARD_ROW}(o)",
+                sql_string(source),
+                sql_string(&lookup)
+            ))?;
+            let mut shards: Vec<usize> = results
+                .iter()
+                .flat_map(|result| result.rows.iter())
+                .filter_map(|row| row.first().and_then(Value::to_text))
+                .map(|key| shard_of(&key, table.sources.len()))
+                .collect();
+            shards.sort_unstable();
+            shards.dedup();
+            return Ok(Some(shards));
+        }
+        Ok(None)
     }
 
     fn local_columns(&mut self, table: &str) -> SqlResult<Vec<(String, String)>> {
@@ -218,6 +349,59 @@ impl Session<'_> {
                 }
                 on_result(QueryResult::command("UNSHARD TABLE"));
             }
+            ShardStatement::CreateIndex { name, table, column, sources } => {
+                if self.settings.checked_role.is_some() || !self.settings.is_superuser() {
+                    return Err(SqlError::new(SqlState::INSUFFICIENT_PRIVILEGE, "permission denied: CREATE GLOBAL INDEX needs a superuser"));
+                }
+                let sharded = if self.sharded_registry_exists()? { self.sharded_tables()? } else { Vec::new() };
+                if !sharded.iter().any(|sharded| sharded.name == table) {
+                    return Err(SqlError::new(SqlState::UNDEFINED_TABLE, format!("\"{table}\" is not a sharded table")));
+                }
+                if !self.local_columns(&table)?.iter().any(|(name, _)| *name == column) {
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_COLUMN,
+                        format!("column \"{column}\" of relation \"{table}\" does not exist"),
+                    ));
+                }
+                let joined = sources.join(&SOURCE_SEPARATOR.to_string());
+                self.atomically(|session| {
+                    session.distributed_sql(CREATE_INDEX_REGISTRY)?;
+                    session.distributed_sql(&format!("DELETE FROM eggdb_internal.global_indexes WHERE name = {}", sql_string(&name)))?;
+                    session.distributed_sql(&format!(
+                        "INSERT INTO eggdb_internal.global_indexes (name, table_name, column_name, sources) VALUES ({}, {}, {}, {})",
+                        sql_string(&name),
+                        sql_string(&table),
+                        sql_string(&column),
+                        sql_string(&joined)
+                    ))?;
+                    Ok(())
+                })?;
+                on_result(QueryResult::command("CREATE GLOBAL INDEX"));
+            }
+            ShardStatement::DropIndex { name } => {
+                if self.settings.checked_role.is_some() || !self.settings.is_superuser() {
+                    return Err(SqlError::new(SqlState::INSUFFICIENT_PRIVILEGE, "permission denied: DROP GLOBAL INDEX needs a superuser"));
+                }
+                if !self.global_indexes()?.is_empty() {
+                    self.distributed_sql(&format!("DELETE FROM eggdb_internal.global_indexes WHERE name = {}", sql_string(&name)))?;
+                }
+                on_result(QueryResult::command("DROP GLOBAL INDEX"));
+            }
+            ShardStatement::ShowIndexShard { name, value } => {
+                let Some(index) = self.global_indexes()?.into_iter().find(|index| index.name == name) else {
+                    return Err(SqlError::new(SqlState::UNDEFINED_OBJECT, format!("global index \"{name}\" does not exist")));
+                };
+                let shard = shard_of(&value, index.sources.len());
+                let columns = vec![
+                    OutputColumn { name: "shard".to_owned(), sql_type: Some(SqlType::Integer) },
+                    OutputColumn { name: "source".to_owned(), sql_type: Some(SqlType::Text) },
+                ];
+                let row = vec![
+                    Value::Integer(shard as i32),
+                    index.sources.get(shard).map_or(Value::Null, |source| Value::Text(source.clone())),
+                ];
+                on_result(QueryResult::rows("SHOW".to_owned(), columns, vec![row]));
+            }
             ShardStatement::ShowShard { table, key } => {
                 let found = if self.sharded_registry_exists()? {
                     self.sharded_tables()?.into_iter().find(|sharded| sharded.name == table)
@@ -267,9 +451,14 @@ impl Session<'_> {
                 continue;
             }
             let columns = self.local_columns(&table.name)?;
-            let Some(plan) = plan_distributed(text, &table, &columns)? else {
+            let Some(mut plan) = plan_distributed(text, &table, &columns)? else {
                 continue;
             };
+            if plan.shards.len() > 1
+                && let Some(shards) = self.shards_by_index(text, &table)?
+            {
+                plan.shards = shards;
+            }
             let casts: Vec<String> = plan
                 .columns
                 .iter()
@@ -338,6 +527,24 @@ mod tests {
         assert!(statement("SHARD TABLE orders BY customer ON").is_err());
         assert!(statement("SHARD TABLE orders BY customer ON 'a',").is_err());
         assert!(statement("SHOW SHARD orders").is_err());
+        assert_eq!(
+            statement("CREATE GLOBAL INDEX by_email ON users (email) ON 'postgresql://a@i1/db', 'postgresql://a@i2/db'").unwrap(),
+            Some(ShardStatement::CreateIndex {
+                name: "by_email".to_owned(),
+                table: "users".to_owned(),
+                column: "email".to_owned(),
+                sources: vec!["postgresql://a@i1/db".to_owned(), "postgresql://a@i2/db".to_owned()],
+            })
+        );
+        assert_eq!(
+            statement("DROP GLOBAL INDEX by_email").unwrap(),
+            Some(ShardStatement::DropIndex { name: "by_email".to_owned() })
+        );
+        assert_eq!(
+            statement("SHOW SHARD FOR INDEX by_email VALUE 'ada@example.com'").unwrap(),
+            Some(ShardStatement::ShowIndexShard { name: "by_email".to_owned(), value: "ada@example.com".to_owned() })
+        );
+        assert!(statement("CREATE GLOBAL INDEX by_email ON users email ON 'a'").is_err());
         assert_eq!(statement("SHOW search_path").unwrap(), None);
         assert_eq!(statement("SELECT 1").unwrap(), None);
     }

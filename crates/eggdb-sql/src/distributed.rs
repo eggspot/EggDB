@@ -317,7 +317,25 @@ fn column_reference(tokens: &[Token<'_>], alias: Option<&str>, table: &str) -> O
 }
 
 fn routed_shard(filter: Option<&[Token<'_>]>, shard_key: &str, shards: usize) -> Option<usize> {
-    let filter = filter?;
+    fixed_in(filter?, shard_key).map(|key| shard_of(&key, shards))
+}
+
+/// The literal `text`'s top-level `WHERE` fixes `column` to, when it is a `SELECT` whose filter
+/// is a conjunction with `column = <literal>` in it: what a global index on the column can
+/// look up.
+pub(crate) fn fixed_value(text: &str, column: &str) -> SqlResult<Option<String>> {
+    let tokens = tokenize_in(text, Dialect::PostgreSql)?;
+    let tokens: Vec<Token<'_>> = tokens
+        .into_iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Semicolon | TokenKind::End))
+        .collect();
+    let Some(clauses) = clauses(&tokens)? else {
+        return Ok(None);
+    };
+    Ok(clauses.filter.and_then(|filter| fixed_in(filter, column)))
+}
+
+fn fixed_in(filter: &[Token<'_>], shard_key: &str) -> Option<String> {
     if split_top_level(filter, |token| word_is(token, "or")).len() > 1 {
         return None;
     }
@@ -334,8 +352,8 @@ fn routed_shard(filter: Option<&[Token<'_>]>, shard_key: &str, shards: usize) ->
             }
             _ => None,
         };
-        if let Some(key) = key {
-            return Some(shard_of(&key, shards));
+        if key.is_some() {
+            return key;
         }
     }
     None

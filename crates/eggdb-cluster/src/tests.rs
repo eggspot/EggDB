@@ -676,3 +676,95 @@ fn hybrid_clocks_stay_ahead_of_what_they_saw_and_refuse_far_futures() {
     assert_eq!(Timestamp::new(7, 9).physical_ms(), 7);
     assert_eq!(Timestamp::new(7, 9).logical(), 9);
 }
+
+#[test]
+fn a_global_index_changes_with_its_rows_and_never_disagrees_in_a_snapshot() {
+    use crate::clock::HybridClock;
+    use crate::global_index::GlobalIndex;
+    use crate::transaction::{commit_timestamp, snapshot_read};
+    const ROWS: u32 = 8;
+    const ROW_SHARDS: u32 = 3;
+    const INDEX_SHARD_BASE: u32 = 10;
+    let index = GlobalIndex { name: "by_color".to_owned(), shards: 2 };
+    let colors: [&[u8]; 3] = [b"red", b"green", b"blue"];
+    let row_key = |row: u32| row.to_be_bytes().to_vec();
+    let mut participants: BTreeMap<u32, Participant> = (0..ROW_SHARDS)
+        .chain(INDEX_SHARD_BASE..INDEX_SHARD_BASE + index.shards)
+        .map(|shard| (shard, Participant::default()))
+        .collect();
+    let mut clock = HybridClock::new(1_000);
+    let mut wall = 5_000u64;
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut transaction = 0u64;
+    let mut snapshots = Vec::new();
+    for step in 0..300u32 {
+        wall += 1;
+        let row = (next() % u64::from(ROWS)) as u32;
+        let shard = row % ROW_SHARDS;
+        transaction += 1;
+        let old = participants
+            .get_mut(&shard)
+            .unwrap()
+            .read(transaction, &row_key(row))
+            .unwrap();
+        let new: Option<Vec<u8>> = if next() % 5 == 0 {
+            None
+        } else {
+            Some(colors[(next() % 3) as usize].to_vec())
+        };
+        let mut writes: BTreeMap<u32, Vec<(Vec<u8>, Option<Vec<u8>>)>> = BTreeMap::new();
+        writes.entry(shard).or_default().push((row_key(row), new.clone()));
+        for (index_shard, key, value) in index.entry_changes(&row_key(row), old.as_deref(), new.as_deref()) {
+            writes.entry(INDEX_SHARD_BASE + index_shard).or_default().push((key, value));
+        }
+        let mut prepared = Vec::new();
+        for (target, changes) in &writes {
+            let at = clock.now(wall);
+            let participant = participants.get_mut(target).unwrap();
+            assert_eq!(participant.prepare_at(transaction, changes.clone(), at), Vote::Yes);
+            prepared.push(participant.prepared_at(transaction).unwrap());
+        }
+        let at = commit_timestamp(&prepared);
+        for target in writes.keys() {
+            participants.get_mut(target).unwrap().decide_at(transaction, Decision::Commit, at);
+        }
+        if step % 10 == 0 {
+            snapshots.push(clock.now(wall));
+        }
+    }
+    for at in snapshots {
+        let keys: Vec<(u32, Vec<u8>)> = (0..ROWS).map(|row| (row % ROW_SHARDS, row_key(row))).collect();
+        let rows = snapshot_read(&mut participants, &keys, at).unwrap();
+        let mut entries = Vec::new();
+        for index_shard in 0..index.shards {
+            entries.extend(
+                participants
+                    .get_mut(&(INDEX_SHARD_BASE + index_shard))
+                    .unwrap()
+                    .scan_at(b"\xffgix\x00", at)
+                    .unwrap(),
+            );
+        }
+        let present: Vec<(u32, Vec<u8>)> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, value)| Some((row as u32, value.clone()?)))
+            .collect();
+        assert_eq!(entries.len(), present.len(), "at {at:?}: {entries:?} for {present:?}");
+        for (row, color) in present {
+            let shard = INDEX_SHARD_BASE + index.shard_of(&color);
+            let found = participants
+                .get_mut(&shard)
+                .unwrap()
+                .scan_at(&index.value_prefix(&color), at)
+                .unwrap();
+            assert!(found.iter().any(|(_, primary_key)| *primary_key == row_key(row)));
+        }
+    }
+}
