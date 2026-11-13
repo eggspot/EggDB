@@ -11,6 +11,11 @@ const BATCH: u8 = 4;
 const ACK: u8 = 5;
 const REFUSED: u8 = 6;
 const HEARTBEAT: u8 = 7;
+const SNAPSHOT_CHUNK: u8 = 8;
+const SNAPSHOT_END: u8 = 9;
+const WANTS_SNAPSHOT: u64 = u64::MAX;
+const SNAPSHOT_CHUNK_BYTES: usize = 1 << 20;
+const SNAPSHOT_STAGING_SUFFIX: &str = ".replica-seeding";
 const MOST_FRAME_BYTES: usize = 128 << 20;
 const BATCHES_PER_ROUND: usize = 64;
 const IDLE_WAIT: Duration = Duration::from_secs(1);
@@ -76,11 +81,14 @@ fn refusal_text(refusal: &ReplicationRefusal) -> String {
     }
 }
 
-fn ship(stream: &mut dyn Stream, primary: &ReplicationPrimary, replica: ReplicaId, mut applied: u64, stop: &(dyn Fn() -> bool + Sync)) -> std::io::Result<()> {
+fn ship(stream: &mut dyn Stream, db: &Database, primary: &ReplicationPrimary, replica: ReplicaId, mut applied: u64, stop: &(dyn Fn() -> bool + Sync)) -> std::io::Result<()> {
     let failed = |error: eggdb::Error| std::io::Error::other(error.to_string());
     while !stop() {
         let batches = match primary.batches_after(applied, BATCHES_PER_ROUND).map_err(failed)? {
             Ok(batches) => batches,
+            Err(first_kept) if db.archived_batches(applied, first_kept).map_err(failed)?.is_some() => {
+                db.archived_batches(applied, first_kept).map_err(failed)?.unwrap_or_default()
+            }
             Err(first_kept) => {
                 let message = format!(
                     "the primary keeps batches from {first_kept} on, and the replica needs {}; copy it again from a snapshot",
@@ -112,7 +120,31 @@ fn ship(stream: &mut dyn Stream, primary: &ReplicationPrimary, replica: ReplicaI
     Ok(())
 }
 
-fn serve_replica(stream: &mut dyn Stream, primary: &ReplicationPrimary, credentials: &ReplicationCredentials, stop: &(dyn Fn() -> bool + Sync)) -> std::io::Result<()> {
+fn send_snapshot(stream: &mut dyn Stream, db: &Database) -> std::io::Result<()> {
+    let directory = std::env::temp_dir();
+    let mut nonce = [0u8; 8];
+    eggdb_platform::secure_random::fill(&mut nonce)?;
+    let path = directory.join(format!("eggdb-replica-snapshot-{:016x}.eggdb", u64::from_le_bytes(nonce)));
+    let outcome = (|| -> std::io::Result<()> {
+        db.backup_to(&path).map_err(|error| std::io::Error::other(error.to_string()))?;
+        let mut file = std::fs::File::open(&path)?;
+        let mut hasher = eggdb_crypto::Sha256::new();
+        let mut chunk = vec![0u8; SNAPSHOT_CHUNK_BYTES];
+        loop {
+            let read = file.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&chunk[..read]);
+            write_frame(stream, SNAPSHOT_CHUNK, &chunk[..read])?;
+        }
+        write_frame(stream, SNAPSHOT_END, &hasher.finish())
+    })();
+    let _ = std::fs::remove_file(&path);
+    outcome
+}
+
+fn serve_replica(stream: &mut dyn Stream, db: &Database, primary: &ReplicationPrimary, credentials: &ReplicationCredentials, stop: &(dyn Fn() -> bool + Sync)) -> std::io::Result<()> {
     let mut nonce = [0u8; 32];
     eggdb_platform::secure_random::fill(&mut nonce)?;
     write_frame(stream, CHALLENGE, &nonce)?;
@@ -133,9 +165,12 @@ fn serve_replica(stream: &mut dyn Stream, primary: &ReplicationPrimary, credenti
         return write_frame(stream, REFUSED, b"the replica's user or password is not the primary's");
     }
     let failed = |error: eggdb::Error| std::io::Error::other(error.to_string());
+    if applied == WANTS_SNAPSHOT {
+        return send_snapshot(stream, db);
+    }
     primary.add_replica(replica, applied).map_err(failed)?;
     write_frame(stream, WELCOME, &primary.term().map_err(failed)?.to_le_bytes())?;
-    let shipped = ship(stream, primary, replica, applied, stop);
+    let shipped = ship(stream, db, primary, replica, applied, stop);
     let _ = primary.remove_replica(replica);
     shipped
 }
@@ -144,6 +179,7 @@ fn serve_replica(stream: &mut dyn Stream, primary: &ReplicationPrimary, credenti
 /// over TLS when `tls` is given.
 pub(super) fn serve_primary(
     listener: &TcpListener,
+    db: &Database,
     primary: &ReplicationPrimary,
     credentials: &ReplicationCredentials,
     tls: Option<Arc<eggdb_tls::ServerConfig>>,
@@ -166,12 +202,12 @@ pub(super) fn serve_primary(
             let _ = std::thread::Builder::new().name("eggdb-replication".to_owned()).spawn_scoped(scope, move || {
                 let _ = match tls {
                     Some(config) => match eggdb_tls::TlsStream::accept(stream, &config) {
-                        Ok(mut secured) => serve_replica(&mut secured, primary, credentials, stop),
+                        Ok(mut secured) => serve_replica(&mut secured, db, primary, credentials, stop),
                         Err(_) => Ok(()),
                     },
                     None => {
                         let mut plain = stream;
-                        serve_replica(&mut plain, primary, credentials, stop)
+                        serve_replica(&mut plain, db, primary, credentials, stop)
                     }
                 };
             });
@@ -186,25 +222,71 @@ pub(super) struct PrimaryAddress {
     pub(super) tls: Option<eggdb_tls::ClientConfig>,
 }
 
-fn follow_once(primary: &PrimaryAddress, db: &Database, credentials: &ReplicationCredentials, replica_id: ReplicaId, stop: &(dyn Fn() -> bool + Sync)) -> Result<(), String> {
+fn connect(primary: &PrimaryAddress) -> Result<Box<dyn Stream>, String> {
     let stream = TcpStream::connect(&primary.address).map_err(|error| format!("cannot reach the primary {}: {error}", primary.address))?;
     stream.set_read_timeout(Some(READ_TIMEOUT)).map_err(|error| error.to_string())?;
-    let mut stream: Box<dyn Stream> = match &primary.tls {
+    Ok(match &primary.tls {
         Some(config) => Box::new(eggdb_tls::TlsStream::connect(stream, config).map_err(|error| format!("TLS with the primary failed: {error}"))?),
         None => Box::new(stream),
-    };
+    })
+}
+
+fn greet(stream: &mut dyn Stream, credentials: &ReplicationCredentials, replica_id: ReplicaId, applied: u64) -> Result<(), String> {
     let io = |error: std::io::Error| format!("the primary connection failed: {error}");
-    let (kind, nonce) = read_frame(stream.as_mut()).map_err(io)?;
+    let (kind, nonce) = read_frame(stream).map_err(io)?;
     if kind != CHALLENGE {
         return Err("the primary did not send its challenge".into());
     }
-    let (term, applied) = db.replication_position().map_err(|error| error.to_string())?.unwrap_or((0, 0));
     let mut hello = vec![u8::try_from(credentials.user.len()).map_err(|_| "the user name is too long")?];
     hello.extend_from_slice(credentials.user.as_bytes());
     hello.extend_from_slice(&proof(credentials, &nonce));
     hello.extend_from_slice(&replica_id.to_le_bytes());
     hello.extend_from_slice(&applied.to_le_bytes());
-    write_frame(stream.as_mut(), HELLO, &hello).map_err(io)?;
+    write_frame(stream, HELLO, &hello).map_err(io)
+}
+
+/// Copies the primary's database to the new file `path` before a replica first opens it
+/// (D1025): the primary streams a fresh online backup, which carries its replication position,
+/// so the replica follows on from exactly that commit.
+pub(super) fn seed_from_primary(primary: &PrimaryAddress, path: &std::path::Path, credentials: &ReplicationCredentials) -> Result<(), String> {
+    let mut stream = connect(primary)?;
+    greet(stream.as_mut(), credentials, replica_id_of(path), WANTS_SNAPSHOT)?;
+    let mut staging = path.as_os_str().to_owned();
+    staging.push(SNAPSHOT_STAGING_SUFFIX);
+    let staging = std::path::PathBuf::from(staging);
+    let outcome = (|| -> Result<(), String> {
+        let io = |error: std::io::Error| format!("copying the primary's snapshot failed: {error}");
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&staging).map_err(io)?;
+        let mut hasher = eggdb_crypto::Sha256::new();
+        loop {
+            match read_frame(stream.as_mut()).map_err(io)? {
+                (SNAPSHOT_CHUNK, bytes) => {
+                    hasher.update(&bytes);
+                    file.write_all(&bytes).map_err(io)?;
+                }
+                (SNAPSHOT_END, digest) => {
+                    if digest.as_slice() != hasher.finish().as_slice() {
+                        return Err("the primary's snapshot arrived damaged".into());
+                    }
+                    file.sync_all().map_err(io)?;
+                    return std::fs::rename(&staging, path).map_err(io);
+                }
+                (REFUSED, message) => return Err(format!("the primary refused the replica: {}", String::from_utf8_lossy(&message))),
+                _ => return Err("the primary sent an unexpected frame while copying".into()),
+            }
+        }
+    })();
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    outcome
+}
+
+fn follow_once(primary: &PrimaryAddress, db: &Database, credentials: &ReplicationCredentials, replica_id: ReplicaId, stop: &(dyn Fn() -> bool + Sync)) -> Result<(), String> {
+    let mut stream = connect(primary)?;
+    let io = |error: std::io::Error| format!("the primary connection failed: {error}");
+    let (term, applied) = db.replication_position().map_err(|error| error.to_string())?.unwrap_or((0, 0));
+    greet(stream.as_mut(), credentials, replica_id, applied)?;
     let (kind, welcome) = read_frame(stream.as_mut()).map_err(io)?;
     match kind {
         WELCOME => {}

@@ -1682,7 +1682,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Replication wired into the engine: the commit hook and its change log, a transport with TLS and
   authentication, and `eggdb serve --replica-of` (D209). **Code written, unbuilt** (code-only mode, 2026-11-13, D1024):
   asynchronous or synchronous (`--synchronous-replicas`), with `--replication-listen` and `--replica-of`.
-- Initial copy of a replica from a snapshot archive (D208, D209).
+- Initial copy of a replica from a snapshot archive (D208, D209). **Code written, unbuilt** (code-only mode, 2026-11-13,
+  D1025): a new replica copies the primary over the connection; a restored archive copy catches up from the change
+  archive.
 - Automatic failure detection, fencing of an old primary, and planned switchover (D18, D209).
 - Delayed replicas, and standbys in another region fed by log shipping (D18).
 - Replica freshness chosen per request: linearizable, read-your-writes, causal, bounded staleness

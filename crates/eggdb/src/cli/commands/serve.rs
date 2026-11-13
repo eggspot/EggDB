@@ -814,6 +814,20 @@ impl Session<'_> {
             ),
             None => None,
         };
+        if let Some(address) = &options.replica_of
+            && std::fs::symlink_metadata(&self.request.file).is_err()
+        {
+            let primary = super::serve_replication::PrimaryAddress {
+                address: address.clone(),
+                tls: replica_tls(address, options.replica_of_ca.as_deref()).map_err(usage)?,
+            };
+            let credentials = super::serve_replication::ReplicationCredentials {
+                user: user.clone(),
+                password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            };
+            super::serve_replication::seed_from_primary(&primary, &self.request.file, &credentials)
+                .map_err(|message| Failure::database(message, Exit::DatabaseError))?;
+        }
         drop(password);
         let read_only = self.request.read_only || options.replica_of.is_some();
         let access = if self.request.read_only {
@@ -1533,6 +1547,7 @@ impl Session<'_> {
             let replication_server = scope.spawn(|| match (&replication_listener, &replication_primary) {
                 (Some(listener), Some(primary)) => super::serve_replication::serve_primary(
                     listener,
+                    &db,
                     primary,
                     &replication_credentials,
                     replication_tls.clone(),

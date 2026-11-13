@@ -149,6 +149,51 @@ impl Database {
         Ok(read.get_raw(POSITION_KEY)?.as_deref().and_then(decode_position))
     }
 
+    /// The batches with sequences after `after` and before `before`, rebuilt from the change
+    /// archive (D1019) when the database keeps one: each archived commit records its batch's
+    /// term and sequence under the replication key, so a replica restored from an older copy
+    /// can catch up past what the primary keeps in memory (D1025). `None` without an archive
+    /// or when the archive does not hold that whole range.
+    pub fn archived_batches(&self, after: u64, before: u64) -> Result<Option<Vec<Batch>>> {
+        let Some(archive) = self.change_archive() else {
+            return Ok(None);
+        };
+        let mut batches = Vec::new();
+        let mut previous_term = 0;
+        for event in crate::change_archive::read_change_archive(&archive.directory)? {
+            let crate::change_archive::ArchivedEvent::Commit(_, changes) = event else {
+                continue;
+            };
+            let Some((term, sequence)) = changes
+                .iter()
+                .find(|(key, _)| key.as_slice() == POSITION_KEY)
+                .and_then(|(_, value)| value.as_deref())
+                .and_then(decode_position)
+            else {
+                continue;
+            };
+            if sequence > after && sequence < before {
+                batches.push(Batch {
+                    term,
+                    sequence,
+                    previous_term,
+                    changes: changes
+                        .into_iter()
+                        .map(|(key, value)| match value {
+                            Some(value) => Change::Put { collection: String::new(), key, value },
+                            None => Change::Delete { collection: String::new(), key },
+                        })
+                        .collect(),
+                });
+            }
+            previous_term = term;
+        }
+        let complete = batches.first().is_some_and(|first| first.sequence == after + 1)
+            && batches.windows(2).all(|pair| pair[1].sequence == pair[0].sequence + 1)
+            && batches.last().is_some_and(|last| last.sequence + 1 == before);
+        Ok(complete.then_some(batches))
+    }
+
     /// Applies a batch a primary shipped, all of its changes in one write transaction, as a
     /// replica does. Changes outside the default key space are refused.
     pub fn apply_batch(&self, batch: &Batch) -> Result<()> {

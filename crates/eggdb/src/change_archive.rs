@@ -41,7 +41,7 @@ struct Segment {
 /// The continuous change archive of a database (D1019): every commit's changed keys,
 /// appended before the commit and confirmed after it, in segment files of a directory.
 pub(crate) struct ChangeArchive {
-    directory: PathBuf,
+    pub(crate) directory: PathBuf,
     segment: Mutex<Option<Segment>>,
     failed: AtomicBool,
 }
