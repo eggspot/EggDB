@@ -791,6 +791,11 @@ impl<'a> Session<'a> {
         cache_for_command: Option<usize>,
     ) -> Result<Database, Error> {
         let options = self.database_options(access, cache_for_command);
+        if let Some(url) = &self.request.serve.page_store {
+            let objects = archive::page_store_objects(url)
+                .map_err(|message| Error::new(eggdb::ErrorKind::InvalidOption, format!("--page-store {url}: {message}")))?;
+            return Database::open_page_store(objects, &self.request.file, options);
+        }
         if self.request.file.as_os_str() == IN_MEMORY_FILE {
             return Database::in_memory_with(options.read_only(false));
         }

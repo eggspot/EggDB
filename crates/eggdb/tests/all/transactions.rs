@@ -540,3 +540,29 @@ fn an_image_reopens_in_memory_with_every_commit() {
         Some(ErrorKind::NotADatabase)
     );
 }
+
+#[test]
+fn a_page_store_database_reopens_on_a_new_cache_from_its_objects() {
+    use eggdb::page_store::MemoryObjects;
+    use std::sync::Arc;
+    let objects = Arc::new(MemoryObjects::default());
+    let first = TempPath::new("page-store-first");
+    let db = Database::open_page_store(Arc::clone(&objects), first.path(), Options::new()).unwrap();
+    db.write(|tx| {
+        for index in 0..200u32 {
+            tx.put(key(index), vec![index as u8; 1000])?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    db.close().unwrap();
+    assert!(objects.names().iter().any(|name| name == "manifest"));
+    let second = TempPath::new("page-store-second");
+    let db = Database::open_page_store(Arc::clone(&objects), second.path(), Options::new()).unwrap();
+    assert_eq!(db.read(|tx| tx.get(key(150))).unwrap(), Some(vec![150u8; 1000]));
+    db.write(|tx| tx.put(key(1), "changed")).unwrap();
+    drop(db);
+    let third = TempPath::new("page-store-third");
+    let db = Database::open_page_store(objects, third.path(), Options::new()).unwrap();
+    assert_eq!(db.read(|tx| tx.get(key(1))).unwrap(), Some(b"changed".to_vec()));
+}

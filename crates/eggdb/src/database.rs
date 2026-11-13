@@ -3,7 +3,7 @@ use crate::expiry::Moment;
 use crate::options::Options;
 use crate::transaction::{ReadTransaction, WriteTransaction};
 use crate::writer_slot::WriterSlot;
-use eggdb_platform::{Clock, DatabaseFile, FileSystem, OpenMode, OsFileSystem, OsMemory, PowerSource};
+use eggdb_platform::{Clock, DatabaseFile, File as _, FileSystem, OpenMode, OsFileSystem, OsMemory, PowerSource};
 use eggdb_storage::{
     Access, BTree, CacheSize, CommitStamp, CopyDestination, CopyFailure, CreateOptions, Features,
     FileId, NO_PAGE, PageCache, PageFile, PageSize, StorageError, Store,
@@ -324,6 +324,43 @@ impl Database {
         options.check_cache_holds(new_file_page_size)?;
         let file = open_waiting_while_busy(path, options, new_file_page_size)?;
         Self::with_page_file(file, path, options)
+    }
+
+    /// Opens the database whose pages live in `objects` (an S3 bucket's prefix, say), with
+    /// `cache` as the local file that holds the pages read so far (D1099): a database not
+    /// stored there yet starts empty. Pages are fetched the first time they are read, and every
+    /// sync, at each durable commit and checkpoint, uploads the 1 MiB chunks changed since the
+    /// last one and then a new manifest. One server writes a page store at a time.
+    pub fn open_page_store(
+        objects: impl crate::page_store::ObjectStore + 'static,
+        cache: impl AsRef<Path>,
+        options: Options,
+    ) -> Result<Self> {
+        let cache = cache.as_ref();
+        let file = crate::page_store::PageStoreFile::open(objects, cache)
+            .map_err(|error| Error::storage(error.into()))?;
+        let empty = file.size().map_err(|error| Error::storage(error.into()))? == 0;
+        let file = DatabaseFile::custom(Box::new(file));
+        let opened = if empty {
+            if options.read_only {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    "the page store holds no database yet, so it can't be opened read-only",
+                ));
+            }
+            PageFile::create_in(
+                file,
+                CreateOptions {
+                    page_size: options.new_file_page_size()?,
+                    file_id: FileId::random(),
+                },
+            )
+        } else if options.read_only {
+            PageFile::open_in(file, Access::ReadOnly)
+        } else {
+            PageFile::open_in(file, Access::ReadWrite)
+        };
+        Self::with_page_file(opened.map_err(Error::storage)?, cache, &options)
     }
 
     /// Opens a database in memory from `image`, the bytes [`Database::image`] gave, for hosts

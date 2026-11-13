@@ -17,6 +17,28 @@ fn bucket(url: &str) -> Result<eggdb_s3::client::Location, String> {
     eggdb_s3::client::Location::parse(url, &|name| std::env::var(name).ok(), largest)
 }
 
+/// A page store's objects under an `s3://bucket/prefix` (D1099).
+pub(super) struct BucketObjects(eggdb_s3::client::Location);
+
+impl eggdb::page_store::ObjectStore for BucketObjects {
+    fn get(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        self.0.bucket.get(&self.0.key(name))
+    }
+
+    fn put(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        self.0.bucket.put(&self.0.key(name), bytes)
+    }
+
+    fn delete(&self, name: &str) -> Result<(), String> {
+        self.0.bucket.delete(&self.0.key(name))
+    }
+}
+
+/// The objects of the page store at `url`, with the bucket's settings from the environment.
+pub(super) fn page_store_objects(url: &str) -> Result<BucketObjects, String> {
+    Ok(BucketObjects(bucket(url)?))
+}
+
 fn choose(entries: &[Archived], at: Option<&str>, shown: &str) -> Result<Archived, String> {
     let limit = match at {
         Some(text) => Some(

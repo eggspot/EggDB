@@ -305,6 +305,7 @@ impl CommandName {
             | OptionName::PgReplication
             | OptionName::Cluster
             | OptionName::Quorum
+            | OptionName::PageStore
             | OptionName::MultiPrimary
             | OptionName::MultiPrimaryNode
             | OptionName::QuorumNode
@@ -555,6 +556,7 @@ enum OptionName {
     PgReplication,
     Cluster,
     Quorum,
+    PageStore,
     MultiPrimary,
     MultiPrimaryNode,
     QuorumNode,
@@ -743,6 +745,7 @@ impl OptionName {
             b"pg-replication" => Self::PgReplication,
             b"cluster" => Self::Cluster,
             b"quorum" => Self::Quorum,
+            b"page-store" => Self::PageStore,
             b"multi-primary" => Self::MultiPrimary,
             b"multi-primary-node" => Self::MultiPrimaryNode,
             b"quorum-node" => Self::QuorumNode,
@@ -1137,6 +1140,7 @@ pub(crate) struct ServeOptions {
     pub(crate) pg_replication: bool,
     pub(crate) cluster: Option<String>,
     pub(crate) quorum: Option<String>,
+    pub(crate) page_store: Option<String>,
     pub(crate) multi_primary: Option<String>,
     pub(crate) multi_primary_node: Option<String>,
     pub(crate) quorum_node: Option<u64>,
@@ -1972,6 +1976,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Quorum => {
                 let text = value.to_str().filter(|text| text.contains('=')).ok_or_else(|| usage(format!("{} takes id=host:port for every node, separated by commas", option.spelled)))?;
                 request.serve.quorum = Some(text.to_owned());
+            }
+            OptionName::PageStore => {
+                let text = value.to_str().filter(|text| text.starts_with("s3://")).ok_or_else(|| usage(format!("{} takes s3://bucket/prefix, where the database's pages are kept", option.spelled)))?;
+                request.serve.page_store = Some(text.to_owned());
             }
             OptionName::MultiPrimary => {
                 let text = value.to_str().filter(|text| text.contains('=')).ok_or_else(|| usage(format!("{} takes name=postgresql://host:port/database for every other server, separated by commas", option.spelled)))?;

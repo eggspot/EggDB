@@ -150,7 +150,7 @@ pub use power::{LOW_BATTERY_PERCENT, PowerSource, on_battery, power_source, powe
 pub use cache::{CACHE_LINE_PADDING, CachePadded};
 pub use clock::{Clock, SimClock, SystemClock};
 pub use cpus::{CpuId, CpuSet, Cpus};
-pub use database_file::DatabaseFile;
+pub use database_file::{CustomFile, DatabaseFile};
 pub use error::{Error, ErrorKind, Result};
 pub use fs::{File, FileLock, FileSystem, OpenMode};
 pub use io::{IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp};

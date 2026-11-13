@@ -2049,7 +2049,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Tombstones collected once every replica has seen them, and membership changes by epoch (D225). **Code
   written, unbuilt** (code-only mode, 2026-11-11, D444).
 - Page-level remote storage: the page cache reads missing pages from object storage, and the log
-  ships segment by segment (D18, D226).
+  ships segment by segment (D18, D226). **Code written, unbuilt** (code-only mode, 2026-11-13, D1099): `eggdb::page_store`
+  (`PageStoreFile` over an `ObjectStore`, 1 MiB chunks and a manifest), `Database::open_page_store`, and
+  `eggdb serve --page-store s3://...`.
 - `https://` object storage endpoints, multipart copies of large archives, and uploads without a
   staging file (D226). Check: a simulator test of restoring under failures. `https://` endpoints, through the
   shared HTTP client's TLS: **code written, unbuilt** (code-only mode, 2026-11-12, D920); multipart uploads of large

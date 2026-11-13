@@ -442,6 +442,11 @@ impl Session<'_> {
             (None, None) => None,
             _ => return Err(usage("--multi-primary and --multi-primary-node go together".to_owned())),
         };
+        if options.page_store.is_some() && (options.restore_from.is_some() || options.cluster.is_some() || options.replica_of.is_some()) {
+            return Err(usage(
+                "--page-store keeps the database in object storage itself; it goes without --restore-from, --cluster and --replica-of".to_owned(),
+            ));
+        }
         let quorum = match &options.quorum {
             Some(text) => {
                 let members = super::serve_cluster::parse_members(text).map_err(|message| usage(message.replace("--cluster", "--quorum")))?;
