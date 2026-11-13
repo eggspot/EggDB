@@ -11,6 +11,7 @@ const CREATE_INDEX_REGISTRY: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal;
 const INDEX_TABLE: &str = "eggdb_global_index";
 const SOURCE_SEPARATOR: char = '\n';
 const SHARD_ROW: &str = "eggdb_shard_row";
+const MOST_ROWS_GATHERED: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShardStatement {
@@ -471,22 +472,34 @@ impl Session<'_> {
                     )
                 })
                 .collect();
-            let reads: Vec<String> = plan
-                .shards
-                .iter()
-                .filter_map(|shard| table.sources.get(*shard))
-                .map(|source| {
-                    format!(
-                        "SELECT {} FROM eggdb_foreign({}, {}) AS {SHARD_ROW}(o)",
-                        casts.join(", "),
-                        sql_string(source),
-                        sql_string(&plan.shard_sql)
-                    )
-                })
-                .collect();
+            let sources: Vec<&String> = plan.shards.iter().filter_map(|shard| table.sources.get(*shard)).collect();
+            let gathered = gather_in_parallel(&sources, &plan.shard_sql)?;
+            let partials = match gathered {
+                Some(rows) if rows.is_empty() => format!(
+                    "SELECT {} FROM (SELECT NULL::jsonb AS o) AS {SHARD_ROW} WHERE false",
+                    casts.join(", ")
+                ),
+                Some(rows) => format!(
+                    "SELECT {} FROM (VALUES {}) AS {SHARD_ROW}(o)",
+                    casts.join(", "),
+                    rows.iter().map(|row| format!("({}::jsonb)", sql_string(row))).collect::<Vec<_>>().join(", ")
+                ),
+                None => sources
+                    .iter()
+                    .map(|source| {
+                        format!(
+                            "SELECT {} FROM eggdb_foreign({}, {}) AS {SHARD_ROW}(o)",
+                            casts.join(", "),
+                            sql_string(source),
+                            sql_string(&plan.shard_sql)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" UNION ALL "),
+            };
             let final_sql = plan.final_sql.replacen(
                 &format!(" FROM {PARTIALS}"),
-                &format!(" FROM ({}) AS {PARTIALS}", reads.join(" UNION ALL ")),
+                &format!(" FROM ({partials}) AS {PARTIALS}"),
                 1,
             );
             let dialect = self.dialect;
@@ -500,6 +513,39 @@ impl Session<'_> {
         }
         Ok(false)
     }
+}
+
+/// Every shard's answer to `shard_sql`, read from all of them at once, one thread each (D1050):
+/// the shards work in parallel and the coordinator waits for the slowest instead of the sum.
+/// `None` when the answers hold more rows than are worth gathering here, so the final query
+/// streams them through `eggdb_foreign` instead.
+fn gather_in_parallel(sources: &[&String], shard_sql: &str) -> SqlResult<Option<Vec<String>>> {
+    let role = crate::constraints::checked_role();
+    let answers: Vec<SqlResult<Vec<String>>> = std::thread::scope(|scope| {
+        let readers: Vec<_> = sources
+            .iter()
+            .map(|source| {
+                let role = role.clone();
+                scope.spawn(move || crate::foreign::read_rows(source, shard_sql, role.as_deref()))
+            })
+            .collect();
+        readers
+            .into_iter()
+            .map(|reader| {
+                reader
+                    .join()
+                    .unwrap_or_else(|_| Err(SqlError::new(SqlState::FDW_ERROR, "a shard read stopped unexpectedly")))
+            })
+            .collect()
+    });
+    let mut rows = Vec::new();
+    for answer in answers {
+        rows.extend(answer?);
+        if rows.len() > MOST_ROWS_GATHERED {
+            return Ok(None);
+        }
+    }
+    Ok(Some(rows))
 }
 
 #[cfg(test)]

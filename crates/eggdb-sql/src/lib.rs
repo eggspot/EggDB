@@ -48,6 +48,7 @@ mod destructive;
 mod calendar_cards;
 mod dicom;
 mod distributed;
+mod workload_queues;
 mod geotiff;
 mod dml_row_limit;
 mod dialect;

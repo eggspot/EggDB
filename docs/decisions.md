@@ -1074,3 +1074,4 @@ its full title with its status.
 - [D1047](decisions/D1047.md) Code-only batch 695 (M15): the tenant prefix in the key layout, and tenants moved online
 - [D1048](decisions/D1048.md) Code-only batch 696 (M15): databases per tenant moved and rebalanced online
 - [D1049](decisions/D1049.md) Code-only batch 697 (M15): rolling upgrades with mixed versions in a cluster
+- [D1050](decisions/D1050.md) Code-only batch 698 (M15): MPP distributed analytics with workload queues

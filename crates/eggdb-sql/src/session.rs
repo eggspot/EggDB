@@ -34,6 +34,7 @@ pub(crate) mod freshness;
 pub(crate) mod distributed;
 pub(crate) mod shard_move;
 pub(crate) mod switchover;
+pub(crate) mod workload;
 mod property_graphs;
 mod transaction_settings;
 mod triggers;
@@ -2004,6 +2005,10 @@ impl<'s> Session<'s> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
+        if self.prepare_workload(text, on_result)? {
+            return Ok(());
+        }
+        let _workload_slot = self.admit_workload()?;
         self.prepare_writer_snapshot(text)?;
         self.prepare_database_links(text)?;
         if self.prepare_backup(text, on_result)?

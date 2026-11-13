@@ -40,6 +40,28 @@ pub fn set_foreign_source(source: ForeignSource) {
     let _ = SOURCE.set(source);
 }
 
+/// Every row `query` returns at `source`, as JSON objects' text, read through the process's
+/// foreign source reader as `eggdb_foreign` reads it, for `role` (`None` for a superuser).
+/// Callable from several threads at once.
+pub(crate) fn read_rows(source: &str, query: &str, role: Option<&str>) -> SqlResult<Vec<String>> {
+    let Some(reader) = SOURCE.get() else {
+        return Err(SqlError::not_supported(
+            "foreign sources are off: the program running this SQL allows none (eggdb reads EGGDB_FOREIGN_SOURCES)",
+        ));
+    };
+    let mut rows = Vec::new();
+    let request = ForeignRequest { source, query, role };
+    reader(&request, &mut |row| {
+        rows.push(row);
+        Ok(())
+    })
+    .map_err(|failure| match failure {
+        ForeignFailure::Denied(message) => SqlError::new(SqlState::INSUFFICIENT_PRIVILEGE, format!("permission denied to read {message}")),
+        ForeignFailure::Failed(message) => SqlError::new(SqlState::FDW_ERROR, format!("eggdb_foreign({source}): {message}")),
+    })?;
+    Ok(rows)
+}
+
 pub(crate) fn foreign_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
     match types {
         [source, query]
