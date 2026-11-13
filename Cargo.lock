@@ -629,6 +629,7 @@ dependencies = [
  "eggdb-crypto",
  "eggdb-format",
  "eggdb-platform",
+ "eggdb-platform-core",
 ]
 
 [[package]]

@@ -1999,7 +1999,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (`eggdb-platform-core`): **code written, unbuilt** (code-only mode, 2026-11-13, D1081); the storage engine without
   `std`, with a fixed-frame cache over a caller's buffer: **code written, unbuilt** (code-only mode, 2026-11-13,
   D1082). Left: page encryption without `std` (`eggdb-crypto` without the standard library).
-- Wear levelling, the header slots on flash, and power-loss tests on raw flash (D41, D223).
+- Wear levelling, the header slots on flash, and power-loss tests on raw flash (D41, D223). **Code written, unbuilt**
+  (code-only mode, 2026-11-13, D1083): `WearLevelled` (atomic block writes, a journal in two alternating slots, dynamic
+  and static wear levelling, a power cut swept across every operation) and `FlashFile`, the engine's `File` on it.
 - A QEMU Cortex-M run in CI (D223).
 - A published memory floor and size budgets per microcontroller profile (D41, D230).
 - A fixed-memory mode that never allocates beyond a set budget (D41).

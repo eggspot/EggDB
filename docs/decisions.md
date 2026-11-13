@@ -1107,3 +1107,4 @@ its full title with its status.
 - [D1080](decisions/D1080.md) Code-only batch 728 (M17): EggOS as a target
 - [D1081](decisions/D1081.md) Code-only batch 729 (M17): the platform's error type and File and Clock traits without std
 - [D1082](decisions/D1082.md) Code-only batch 730 (M17): the storage engine without std, with a fixed-frame cache
+- [D1083](decisions/D1083.md) Code-only batch 731 (M17): wear levelling, header slots on flash, and power-loss tests
