@@ -2916,6 +2916,7 @@ impl<'s> Session<'s> {
             "eggdb_marketplace" => ("eggdb_marketplace", crate::marketplace::MARKETPLACE_SCRIPT),
             "eggdb_sheets" => ("eggdb_sheets", crate::sheets::SHEETS_SCRIPT),
             "eggdb_streams" => ("eggdb_streams", crate::streams::STREAMS_SCRIPT),
+            "eggdb_dictionaries" => ("eggdb_dictionaries", crate::dictionaries::DICTIONARIES_SCRIPT),
             "eggdb_etl" => ("eggdb_etl", crate::etl::ETL_SCRIPT),
             "eggdb_app_auth" => ("eggdb_app_auth", crate::app_auth::APP_AUTH_SCRIPT),
             "eggdb_api_keys" => ("eggdb_api_keys", crate::api_keys::API_KEYS_SCRIPT),

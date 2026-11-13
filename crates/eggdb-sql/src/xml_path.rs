@@ -141,6 +141,36 @@ impl Document {
         Ok(id)
     }
 
+    /// The child elements of node `id` (0 is the document), in order.
+    pub(crate) fn child_elements(&self, id: usize) -> Vec<usize> {
+        self.nodes
+            .get(id)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .copied()
+                    .filter(|child| matches!(self.nodes[*child].kind, Kind::Element { .. }))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The name of element `id`, without a namespace prefix.
+    pub(crate) fn element_name(&self, id: usize) -> Option<&str> {
+        match &self.nodes.get(id)?.kind {
+            Kind::Element { name, .. } => Some(name.rsplit(':').next().unwrap_or(name)),
+            _ => None,
+        }
+    }
+
+    /// The value of element `id`'s attribute `name`.
+    pub(crate) fn attribute(&self, id: usize, name: &str) -> Option<&str> {
+        match &self.nodes.get(id)?.kind {
+            Kind::Element { attributes, .. } => attributes.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str()),
+            _ => None,
+        }
+    }
+
     /// Parses `text` as an XML document (`whole_document`: one root element) or as content.
     pub(crate) fn parse(text: &str, whole_document: bool) -> SqlResult<Self> {
         let mut document = Document {

@@ -558,6 +558,7 @@ impl<'t> Parser<'t> {
             "eggdb_marketplace",
             "eggdb_sheets",
             "eggdb_streams",
+            "eggdb_dictionaries",
             "eggdb_etl",
             "eggdb_app_auth",
             "eggdb_api_keys",

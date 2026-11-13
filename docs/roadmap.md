@@ -1950,7 +1950,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   building and ACKs, FIX building and name dictionaries: **code written, unbuilt** (code-only mode,
   2026-11-11, D445). FHIR structural validation (`fhir_validate`): **code written, unbuilt** (code-only mode,
   2026-11-12, D834); FHIR validation against StructureDefinitions and profiles: **code written, unbuilt** (code-only
-  mode, 2026-11-13, D1068). Left: full dictionaries.
+  mode, 2026-11-13, D1068); full FIX and EDIFACT dictionaries, loaded from the standards' own files
+  (`eggdb_dictionaries`): **code written, unbuilt** (code-only mode, 2026-11-13, D1069).
 - ISO 20022 and DICOM (D50). DICOM files as DICOM's JSON model (`dicom_parse`): **code written, unbuilt** (code-only
   mode, 2026-11-12, D698); ISO 20022 messages as JSON (`iso20022_parse`): **code written, unbuilt** (code-only mode,
   2026-11-12, D699). Left: schema validation.

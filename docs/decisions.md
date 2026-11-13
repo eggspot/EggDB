@@ -1093,3 +1093,4 @@ its full title with its status.
 - [D1066](decisions/D1066.md) Code-only batch 714 (M16): Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus
 - [D1067](decisions/D1067.md) Code-only batch 715 (M16): the MATCH_RECOGNIZE clause and MEASURES
 - [D1068](decisions/D1068.md) Code-only batch 716 (M16): FHIR validation against StructureDefinitions and profiles
+- [D1069](decisions/D1069.md) Code-only batch 717 (M16): full FIX and EDIFACT dictionaries, loaded from the standards' files

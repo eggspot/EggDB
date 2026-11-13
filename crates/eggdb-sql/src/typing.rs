@@ -317,6 +317,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if let Some(sql_type) = crate::standards_build::result_type(name) {
         return Some(sql_type);
     }
+    if let Some(sql_type) = crate::dictionaries::result_type(name) {
+        return Some(sql_type);
+    }
     if let Some(sql_type) = crate::jsonlogic::result_type(name) {
         return Some(sql_type);
     }
