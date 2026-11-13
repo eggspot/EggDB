@@ -768,3 +768,58 @@ fn a_global_index_changes_with_its_rows_and_never_disagrees_in_a_snapshot() {
         }
     }
 }
+
+fn world() -> (Placement, crate::regions::Latencies) {
+    let mut latencies = crate::regions::Latencies::new();
+    latencies.set("eu", "us", 80);
+    latencies.set("eu", "ap", 160);
+    latencies.set("us", "ap", 120);
+    (
+        placement(&[(1, "eu"), (2, "eu"), (3, "us"), (4, "us"), (5, "ap")]),
+        latencies,
+    )
+}
+
+#[test]
+fn shards_move_toward_the_region_their_requests_come_from() {
+    use crate::regions::{Traffic, place_by_latency};
+    let (nodes, latencies) = world();
+    let map = ShardMap::new(Strategy::Hash { shards: 5 }, &nodes);
+    let mut traffic: Traffic = BTreeMap::new();
+    for shard in map.shards.keys() {
+        traffic.insert(*shard, [("ap".to_owned(), 900u64), ("eu".to_owned(), 100u64)].into_iter().collect());
+    }
+    let moves = place_by_latency(&map, &nodes, &traffic, &latencies);
+    let ap_owned = map.shards.values().filter(|shard| nodes.nodes[&shard.owner] == "ap").count();
+    assert_eq!(moves.len(), map.shards.len() - ap_owned);
+    assert!(moves.iter().all(|(_, _, to)| nodes.nodes[to] == "ap"));
+    let quiet: Traffic = BTreeMap::new();
+    assert!(place_by_latency(&map, &nodes, &quiet, &latencies).is_empty());
+    let pinned = ShardMap::new(
+        Strategy::Region {
+            regions: vec!["eu".to_owned(), "us".to_owned()],
+        },
+        &nodes,
+    );
+    let mut toward_ap: Traffic = BTreeMap::new();
+    for shard in pinned.shards.keys() {
+        toward_ap.insert(*shard, [("ap".to_owned(), 1_000u64)].into_iter().collect());
+    }
+    assert!(place_by_latency(&pinned, &nodes, &toward_ap, &latencies).is_empty());
+}
+
+#[test]
+fn voters_spread_over_regions_survive_losing_one_and_commit_at_the_second_nearest() {
+    use crate::regions::{choose_voters, quorum_latency, survives_region_loss};
+    let (nodes, latencies) = world();
+    let voters = choose_voters(&nodes, "eu", 3, &latencies).unwrap();
+    let regions: Vec<String> = voters.iter().map(|voter| nodes.nodes[voter].clone()).collect();
+    assert_eq!(regions, vec!["eu".to_owned(), "us".to_owned(), "ap".to_owned()]);
+    assert!(survives_region_loss(&nodes, &voters));
+    assert_eq!(quorum_latency("eu", &regions, &latencies), 80);
+    let crowded = choose_voters(&nodes, "eu", 5, &latencies).unwrap();
+    assert_eq!(crowded.len(), 5);
+    assert!(!survives_region_loss(&nodes, &[1, 2, 3]));
+    assert_eq!(choose_voters(&nodes, "eu", 6, &latencies), None);
+    assert_eq!(latencies.between("eu", "mars"), 160);
+}

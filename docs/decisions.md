@@ -1068,3 +1068,4 @@ its full title with its status.
 - [D1041](decisions/D1041.md) Code-only batch 689 (M15): a distributed planner for sharded tables
 - [D1042](decisions/D1042.md) Code-only batch 690 (M15): snapshot reads across shards by timestamp
 - [D1043](decisions/D1043.md) Code-only batch 691 (M15): global indexes over sharded data
+- [D1044](decisions/D1044.md) Code-only batch 692 (M15): latency-aware placement for multi-region clusters

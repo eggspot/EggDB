@@ -15,6 +15,7 @@ pub mod crdt;
 pub mod global_index;
 pub mod merkle;
 pub mod quorum;
+pub mod regions;
 mod shards;
 pub mod transaction;
 

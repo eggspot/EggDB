@@ -1754,7 +1754,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   same on the SQL path of sharded tables.
 - Global indexes (D18). **Code written, unbuilt** (code-only mode, 2026-11-13, D1043): `GlobalIndex` entries
   changed in the row's distributed transaction, `CREATE GLOBAL INDEX` and routing of the distributed planner by it.
-- Multi-region clusters with latency-aware placement (D4, D212).
+- Multi-region clusters with latency-aware placement (D4, D212). **Code written, unbuilt** (code-only mode,
+  2026-11-13, D1044): `eggdb_cluster::regions` (`place_by_latency`, `choose_voters`, `quorum_latency`,
+  `survives_region_loss`). Left: measuring latencies and traffic in `serve --cluster` and acting on the plan.
 - Rebalancing simulated under load, with partitions, clock skew and node failures (D18, D212).
 - Chaos testing of clusters (D44, D252).
 - The tenant prefix in the key layout, so tenants move online between shards (D20, D234).
