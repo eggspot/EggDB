@@ -2020,7 +2020,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `scripts/footprint-wasm.sh` with the `wasm32` budgets.
 - An IndexedDB-compatible API in the browser build (D48). **Code written, unbuilt** (code-only mode, 2026-11-13, D1091):
   `web/eggdb-indexeddb.js` (`indexedDBOver`), with `web/test-indexeddb.mjs` in CI's `browser` job.
-- Android emulator runs, a Gradle module and Android Archive, and the 32-bit ABIs in CI (D222).
+- Android emulator runs, a Gradle module and Android Archive, and the 32-bit ABIs in CI (D222). **Code written, unbuilt**
+  (code-only mode, 2026-11-13, D1092): `drivers/android`, `scripts/android/build-aar.sh`, and CI's `android` job (four
+  ABIs built, device tests on `x86_64` and `x86` emulators, the AAR as an artifact).
 - iOS Simulator runs, and a Swift package once a release publishes the XCFramework (D222).
 - Prepared statements and transactions in the mobile bindings, benchmarked against SQLite's
   Android and iOS bindings (D17, D222).

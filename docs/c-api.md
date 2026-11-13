@@ -479,9 +479,17 @@ EggDB(File(context.filesDir, "app.eggdb").path).use { db ->
 }
 ```
 
+Or take the Android Archive, which does all of that (D1092): `scripts/android/build-aar.sh` builds the
+C API for `arm64-v8a`, `armeabi-v7a`, `x86_64` and `x86` with the NDK's clang and assembles
+`drivers/android` (a Gradle library module over the same Kotlin sources and JNI file) into
+`drivers/android/build/outputs/aar/eggdb-android-release.aar`; add it to an app with
+`implementation(files("libs/eggdb-android-release.aar"))`. Its minimum is Android 6 (API 23).
+
 Text crosses JNI as UTF-8 bytes, never as Java's modified UTF-8, so every character survives;
 values come back as `Value.Integer`, `Real`, `Text`, `Blob` or `Null`. The same class runs on any
-JVM, which is how CI checks it.
+JVM, which is how CI checks it, and CI's `android` job runs the module's device tests
+(`connectedDebugAndroidTest`) on Android 11 emulators, one 64-bit (`x86_64`) and one 32-bit
+(`x86`), with the archive kept as the run's `eggdb-android-aar` artifact.
 
 **iOS (Swift).** `scripts/apple/xcframework.sh` builds the C API for iOS devices, the iOS
 simulator and macOS into `EggDB.xcframework` with a `CEggDB` module map; add it to an Xcode
