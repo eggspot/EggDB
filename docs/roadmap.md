@@ -344,7 +344,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - OpenBSD and DragonFly on the `poll(2)` backend, with CI runners for them (D73). **Code written, unbuilt** (code-only mode, 2026-11-10, D356): VM jobs with the
   systems' packaged Rust, since rustup has no toolchain for them.
 - Solaris: file locks, and sends that never raise `SIGPIPE` (D73, D78). File locks: **Code written, unbuilt** (code-only mode, 2026-11-10). `SIGPIPE`: left.
-- Datagrams in the network completion queue (`NetOp`) and batched receives, for QUIC (D315).
+- Datagrams in the network completion queue (`NetOp`) and batched receives, for QUIC (D315). A `DatagramQueue` beside
+  `NetQueue`, with `receive_batch` (`recvmmsg` on Linux): **Code written, unbuilt** (code-only mode, 2026-11-13, D1114).
 - Windows named pipes, for the mysql client and SQL Server clients on Windows (D267, Where we are). The pipes in the
   platform layer and `eggdb serve --mysql-pipe`: **code written, unbuilt** (code-only mode, 2026-11-13, D941); the
   TDS server on a local connection and `eggdb serve --tds-pipe`: **code written, unbuilt** (code-only mode,

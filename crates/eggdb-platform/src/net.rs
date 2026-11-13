@@ -76,6 +76,49 @@ pub trait DatagramSocket: Send + Sync + fmt::Debug {
     /// longer than some limit receives into a buffer one byte longer and refuses those that
     /// fill it.
     fn receive_from(&self, buffer: &mut [u8], wait: Duration) -> Result<(usize, SocketAddr)>;
+
+    /// Receives a datagram that has already arrived, without waiting: `Ok(None)` when none
+    /// has. The default asks [`DatagramSocket::receive_from`] for no wait at all, which on
+    /// sockets whose shortest wait is longer, such as [`OsDatagramSocket`] where no override
+    /// exists, waits that shortest time.
+    ///
+    /// [`OsDatagramSocket`]: crate::OsDatagramSocket
+    fn try_receive_from(&self, buffer: &mut [u8]) -> Result<Option<(usize, SocketAddr)>> {
+        match self.receive_from(buffer, Duration::ZERO) {
+            Ok(received) => Ok(Some(received)),
+            Err(error) if error.kind() == ErrorKind::TimedOut => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Waits up to `wait` for the first datagram, then takes every one that has already arrived
+    /// behind it, up to one per buffer, appending each one's length and sender to `received`
+    /// in arrival order, and says how many it took: a QUIC endpoint reads a burst of packets
+    /// in one call, which Linux makes one `recvmmsg` system call. Fails as
+    /// [`DatagramSocket::receive_from`] does when the first one fails, so with
+    /// [`ErrorKind::TimedOut`] when none came; a later failure ends the batch with what it took.
+    fn receive_batch(
+        &self,
+        buffers: &mut [&mut [u8]],
+        received: &mut Vec<(usize, SocketAddr)>,
+        wait: Duration,
+    ) -> Result<usize> {
+        let Some((first, rest)) = buffers.split_first_mut() else {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        };
+        received.push(self.receive_from(first, wait)?);
+        let mut taken = 1;
+        for buffer in rest {
+            match self.try_receive_from(buffer) {
+                Ok(Some(datagram)) => {
+                    received.push(datagram);
+                    taken += 1;
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        Ok(taken)
+    }
 }
 
 /// A socket that listens for connections.

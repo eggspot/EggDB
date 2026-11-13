@@ -52,6 +52,7 @@ pub mod fonts;
 mod file_clone;
 mod file_identity;
 mod immutable;
+mod datagram_queue;
 mod fs;
 mod io;
 pub mod local_socket;
@@ -154,6 +155,9 @@ pub use cache::{CACHE_LINE_PADDING, CachePadded};
 pub use clock::{Clock, SimClock, SystemClock};
 pub use cpus::{CpuId, CpuSet, Cpus};
 pub use database_file::{CustomFile, DatabaseFile};
+pub use datagram_queue::{
+    DatagramCompletion, DatagramOp, DatagramOutput, DatagramQueue, RejectedDatagramOp,
+};
 pub use error::{Error, ErrorKind, Result};
 pub use fs::{File, FileLock, FileSystem, OpenMode};
 pub use io::{IoBackend, IoBuffer, IoCompletion, IoOp, IoQueue, IoQueueOptions, RejectedOp};
