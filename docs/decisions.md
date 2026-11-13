@@ -1076,3 +1076,4 @@ its full title with its status.
 - [D1049](decisions/D1049.md) Code-only batch 697 (M15): rolling upgrades with mixed versions in a cluster
 - [D1050](decisions/D1050.md) Code-only batch 698 (M15): MPP distributed analytics with workload queues
 - [D1051](decisions/D1051.md) Code-only batch 699 (M15): resumable large migrations with range digests and parallel ranges
+- [D1052](decisions/D1052.md) Code-only batch 700 (M15): the etcd v3 API in eggdb-etcd

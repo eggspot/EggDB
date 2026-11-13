@@ -18,6 +18,10 @@ pub enum GrpcStatus {
     PermissionDenied = 7,
     /// `RESOURCE_EXHAUSTED`.
     ResourceExhausted = 8,
+    /// `FAILED_PRECONDITION`.
+    FailedPrecondition = 9,
+    /// `OUT_OF_RANGE`.
+    OutOfRange = 11,
     /// `UNIMPLEMENTED`.
     Unimplemented = 12,
     /// `INTERNAL`.

@@ -23,6 +23,7 @@ dependencies = [
  "eggdb-documents",
  "eggdb-dynamodb",
  "eggdb-esrest",
+ "eggdb-etcd",
  "eggdb-flight",
  "eggdb-format",
  "eggdb-gremlin",
@@ -229,6 +230,15 @@ dependencies = [
  "eggdb-platform",
  "eggdb-search",
  "eggdb-sql",
+]
+
+[[package]]
+name = "eggdb-etcd"
+version = "0.5.0"
+dependencies = [
+ "eggdb-http2",
+ "eggdb-keyspace",
+ "eggdb-platform",
 ]
 
 [[package]]

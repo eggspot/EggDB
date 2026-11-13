@@ -220,6 +220,19 @@ impl Session<'_> {
             }
             None => None,
         };
+        let etcd_listener = match options.etcd_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--etcd-listen {address}: EggDB does not offer etcd's authentication yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for etcd clients on {address}: {error}"), Exit::DatabaseError)
+                })?)
+            }
+            None => None,
+        };
         let zookeeper_listener = match options.zookeeper_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -1276,6 +1289,10 @@ impl Session<'_> {
             db: &db,
             prefix: super::serve_resp::ZOOKEEPER_COLLECTIONS,
         };
+        let etcd_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::ETCD_COLLECTIONS,
+        };
         let nats_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::NATS_COLLECTIONS,
@@ -1520,6 +1537,19 @@ impl Session<'_> {
                     eggdb_memcached::ServerConfig {
                         max_connections: config.max_connections,
                         memory_budget: Arc::clone(&memory_budget),
+                    },
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let etcd_server = scope.spawn(|| match &etcd_listener {
+                Some(listener) => eggdb_etcd::serve(
+                    &etcd_database,
+                    listener,
+                    &eggdb_etcd::ServerConfig {
+                        max_connections: config.max_connections,
+                        client_url: listener.local_addr().map(|address| format!("http://{address}")).unwrap_or_default(),
+                        ..eggdb_etcd::ServerConfig::default()
                     },
                     &stop_signals::requested,
                 ),
@@ -1821,6 +1851,7 @@ impl Session<'_> {
             let _ = resp_server.join();
             let _ = memcached_server.join();
             let _ = zookeeper_server.join();
+            let _ = etcd_server.join();
             let _ = es_server.join();
             let _ = mongo_server.join();
             let _ = bolt_server.join();

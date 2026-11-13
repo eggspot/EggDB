@@ -37,6 +37,8 @@ pub const MQTT_COLLECTIONS: &str = "mqtt";
 pub const NATS_COLLECTIONS: &str = "nats";
 /// The ZooKeeper-compatible tree.
 pub const ZOOKEEPER_COLLECTIONS: &str = "zookeeper";
+/// The etcd-compatible keys, revisions and leases.
+pub const ETCD_COLLECTIONS: &str = "etcd";
 /// The S3-compatible objects.
 pub const OBJECT_COLLECTIONS: &str = "objects";
 /// The DynamoDB-compatible tables.

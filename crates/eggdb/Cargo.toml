@@ -31,6 +31,7 @@ eggdb-http = { path = "../eggdb-http" }
 eggdb-mcp = { path = "../eggdb-mcp" }
 eggdb-memcached = { path = "../eggdb-memcached" }
 eggdb-zookeeper = { path = "../eggdb-zookeeper" }
+eggdb-etcd = { path = "../eggdb-etcd" }
 eggdb-esrest = { path = "../eggdb-esrest" }
 eggdb-kafka = { path = "../eggdb-kafka" }
 eggdb-bson = { path = "../eggdb-bson" }

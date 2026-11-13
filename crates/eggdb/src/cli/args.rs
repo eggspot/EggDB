@@ -282,6 +282,7 @@ impl CommandName {
             | OptionName::RespListen
             | OptionName::MemcachedListen
             | OptionName::ZookeeperListen
+            | OptionName::EtcdListen
             | OptionName::EsListen
             | OptionName::EsUsers
             | OptionName::EsPermissionField
@@ -517,6 +518,7 @@ enum OptionName {
     RespListen,
     MemcachedListen,
     ZookeeperListen,
+    EtcdListen,
     EsListen,
     EsUsers,
     EsPermissionField,
@@ -690,6 +692,7 @@ impl OptionName {
             b"resp-listen" => Self::RespListen,
             b"memcached-listen" => Self::MemcachedListen,
             b"zookeeper-listen" => Self::ZookeeperListen,
+            b"etcd-listen" => Self::EtcdListen,
             b"es-listen" => Self::EsListen,
             b"es-users" => Self::EsUsers,
             b"es-permission-field" => Self::EsPermissionField,
@@ -1069,6 +1072,7 @@ pub(crate) struct ServeOptions {
     pub(crate) resp_listen: Option<SocketAddr>,
     pub(crate) memcached_listen: Option<SocketAddr>,
     pub(crate) zookeeper_listen: Option<SocketAddr>,
+    pub(crate) etcd_listen: Option<SocketAddr>,
     pub(crate) es_listen: Option<SocketAddr>,
     pub(crate) es_users: Option<PathBuf>,
     pub(crate) es_permission_field: Option<String>,
@@ -1668,6 +1672,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::ZookeeperListen => {
                 request.serve.zookeeper_listen =
                     Some(parse_listen(&option.spelled, value, 2181).map_err(usage)?);
+            }
+            OptionName::EtcdListen => {
+                request.serve.etcd_listen =
+                    Some(parse_listen(&option.spelled, value, 2379).map_err(usage)?);
             }
             OptionName::MqttListen => {
                 request.serve.mqtt_listen =
