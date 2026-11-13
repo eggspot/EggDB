@@ -3,11 +3,12 @@
 Thank you for helping. EggDB is one database for every kind of data, written from scratch in
 Rust, and open source under MIT OR Apache-2.0. These rules keep it ours, safe and fast.
 
-## Clean room (D1)
+## Written by us (D1)
 - Write everything yourself, in Rust, from public specifications, papers and protocol
-  documentation. Never copy code from another database, and never read the source of a copyleft
-  or source-available database (MySQL, MariaDB, MongoDB, Redis's recent versions, Elasticsearch
-  and others) while working on EggDB.
+  documentation. You may read other databases' source to learn how they work, copyleft and
+  source-available ones included (MySQL, MariaDB, MongoDB, Redis's recent versions, Elasticsearch
+  and others), but never copy, translate or closely paraphrase their code. If you learned part of
+  your change from another project's code, say so in the PR and in the decision.
 - No third-party crates in what we ship. Tests, benchmarks and build tools may use a permissive
   (MIT, Apache-2.0, BSD) crate after it is approved; never GPL, LGPL, AGPL, MPL, SSPL or BSL.
 - Other products' names are trademarks: say "compatible with".
