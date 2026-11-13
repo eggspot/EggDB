@@ -1757,7 +1757,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Multi-region clusters with latency-aware placement (D4, D212). **Code written, unbuilt** (code-only mode,
   2026-11-13, D1044): `eggdb_cluster::regions` (`place_by_latency`, `choose_voters`, `quorum_latency`,
   `survives_region_loss`). Left: measuring latencies and traffic in `serve --cluster` and acting on the plan.
-- Rebalancing simulated under load, with partitions, clock skew and node failures (D18, D212).
+- Rebalancing simulated under load, with partitions, clock skew and node failures (D18, D212). **Code written,
+  unbuilt** (code-only mode, 2026-11-13, D1045): `eggdb_cluster::simulation::simulate_rebalancing`, 25 seeds in tests.
 - Chaos testing of clusters (D44, D252).
 - The tenant prefix in the key layout, so tenants move online between shards (D20, D234).
 - Databases per tenant moved and rebalanced online (D18, D32).

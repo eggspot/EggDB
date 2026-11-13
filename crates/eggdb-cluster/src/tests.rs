@@ -823,3 +823,24 @@ fn voters_spread_over_regions_survive_losing_one_and_commit_at_the_second_neares
     assert_eq!(choose_voters(&nodes, "eu", 6, &latencies), None);
     assert_eq!(latencies.between("eu", "mars"), 160);
 }
+
+#[test]
+fn rebalancing_under_load_and_faults_loses_nothing_and_ends_even() {
+    use crate::simulation::{SimulationConfig, simulate_rebalancing};
+    let mut moved = 0;
+    let mut refused_clocks = 0;
+    for seed in 1..=25u64 {
+        let report = simulate_rebalancing(SimulationConfig {
+            seed,
+            ..SimulationConfig::default()
+        });
+        assert_eq!(report.lost_writes, 0, "seed {seed}: {report:?}");
+        assert_eq!(report.writes_by_non_owners, 0, "seed {seed}: {report:?}");
+        assert!(report.final_imbalance <= 1, "seed {seed}: {report:?}");
+        assert!(report.writes_acknowledged > 0, "seed {seed}: {report:?}");
+        moved += report.moves_completed;
+        refused_clocks += report.clock_refusals;
+    }
+    assert!(moved > 0);
+    assert!(refused_clocks > 0, "the clock skew never exceeded the allowed offset");
+}

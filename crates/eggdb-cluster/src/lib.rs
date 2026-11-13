@@ -16,6 +16,7 @@ pub mod global_index;
 pub mod merkle;
 pub mod quorum;
 pub mod regions;
+pub mod simulation;
 mod shards;
 pub mod transaction;
 
