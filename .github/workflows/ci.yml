@@ -1992,7 +1992,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         with:
@@ -2007,8 +2007,8 @@ jobs:
             target
           key: cargo-v2-apple-mobile-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: cargo-v2-apple-mobile-${{ runner.os }}-
-      - name: Build the C API as an XCFramework for iOS, the iOS simulator and macOS
-        run: scripts/apple/xcframework.sh "$RUNNER_TEMP/EggDB.xcframework"
+      - name: Build the XCFramework and run the Swift package's tests on macOS and the iOS Simulator
+        run: scripts/apple/test-simulator.sh
 
   other-cpus:
     if: github.event_name != 'pull_request'

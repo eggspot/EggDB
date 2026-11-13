@@ -2023,7 +2023,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Android emulator runs, a Gradle module and Android Archive, and the 32-bit ABIs in CI (D222). **Code written, unbuilt**
   (code-only mode, 2026-11-13, D1092): `drivers/android`, `scripts/android/build-aar.sh`, and CI's `android` job (four
   ABIs built, device tests on `x86_64` and `x86` emulators, the AAR as an artifact).
-- iOS Simulator runs, and a Swift package once a release publishes the XCFramework (D222).
+- iOS Simulator runs, and a Swift package once a release publishes the XCFramework (D222). **Code written, unbuilt**
+  (code-only mode, 2026-11-13, D1093): `scripts/apple/test-simulator.sh` in CI's `apple-mobile` job, and the release
+  workflow's `xcframework` and `swift-package` jobs with `scripts/apple/swift-package.sh`.
 - Prepared statements and transactions in the mobile bindings, benchmarked against SQLite's
   Android and iOS bindings (D17, D222).
 - The rest of the crates tested on i686, armv7 and s390x under QEMU (PR #86).

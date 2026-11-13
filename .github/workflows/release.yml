@@ -221,8 +221,32 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  xcframework:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Build the C API as an XCFramework and zip it for Swift packages
+        run: |
+          name="eggdb-${TAG:-main}-apple.xcframework.zip"
+          scripts/apple/xcframework.sh "$RUNNER_TEMP/xcframework/CEggDB.xcframework"
+          mkdir -p dist
+          (cd "$RUNNER_TEMP/xcframework" && ditto -c -k --sequesterRsrc --keepParent CEggDB.xcframework "$GITHUB_WORKSPACE/dist/$name")
+          printf '| Apple XCFramework | - | %s |\n' "$(wc -c < "dist/$name" | tr -d ' ')" > "dist/$name.size"
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: eggdb-xcframework
+          path: dist/*
+          retention-days: 7
+
   publish:
-    needs: build
+    needs: [build, xcframework]
     if: inputs.tag != '' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -295,6 +319,41 @@ jobs:
               --verify-tag --title "EggDB $TAG" --notes-file release-notes.md
           fi
           gh release edit "$TAG" --draft=false --latest="$LATEST"
+
+  swift-package:
+    needs: publish
+    if: needs.publish.outputs.latest == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@v8
+        with:
+          name: eggdb-xcframework
+          path: dist
+      - name: Point the swift-package branch at this release's XCFramework
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip="dist/eggdb-$TAG-apple.xcframework.zip"
+          package="$RUNNER_TEMP/swift-package"
+          if git fetch --depth 1 origin swift-package; then
+            git worktree add --detach "$package" FETCH_HEAD
+          else
+            git worktree add --detach "$package"
+            git -C "$package" checkout --orphan swift-package
+            git -C "$package" rm -rq .
+          fi
+          scripts/apple/swift-package.sh "$TAG" "$zip" "$package"
+          cd "$package"
+          git add Package.swift Sources README.md
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Swift package for EggDB $TAG"
+          git push origin HEAD:refs/heads/swift-package
 
   image:
     needs: publish

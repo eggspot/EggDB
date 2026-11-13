@@ -495,6 +495,18 @@ JVM, which is how CI checks it, and CI's `android` job runs the module's device 
 simulator and macOS into `EggDB.xcframework` with a `CEggDB` module map; add it to an Xcode
 project and use it from Swift directly, or through `drivers/swift`.
 
+Each release also publishes the XCFramework as `eggdb-vX.Y.Z-apple.xcframework.zip` and moves the
+`swift-package` branch to a `Package.swift` that downloads it by URL and checks its checksum
+(D1093), so Xcode and SwiftPM add EggDB like any package:
+
+```swift
+.package(url: "https://github.com/eggspot/EggDB", branch: "swift-package")
+```
+
+Pin a revision of that branch for repeatable builds; each release adds one commit to it. CI's
+`apple-mobile` job runs the Swift package's tests against a fresh XCFramework on macOS and on an
+iPhone simulator (`scripts/apple/test-simulator.sh`).
+
 Mobile systems stop apps in the background (Android's Doze, iOS's suspension) and may kill them
 without warning. EggDB needs nothing special for that: a committed transaction is on disk when
 `eggdb_commit` or the statement returns (with the default durability), and an interrupted one
