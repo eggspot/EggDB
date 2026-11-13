@@ -1881,6 +1881,7 @@ jobs:
           cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb.wasm
           ls -l web/eggdb.wasm
           node web/test.mjs web/eggdb.wasm
+          node web/test-indexeddb.mjs web/eggdb.wasm
           cargo build --release -p eggdb-wasm --target wasm32-unknown-unknown
           cp target/wasm32-unknown-unknown/release/eggdb_wasm.wasm web/eggdb-bare.wasm
           ls -l web/eggdb-bare.wasm

@@ -1115,3 +1115,4 @@ its full title with its status.
 - [D1088](decisions/D1088.md) Code-only batch 736 (M17): suspend and resume for iOS background limits and Android Doze
 - [D1089](decisions/D1089.md) Code-only batch 737 (M17): the browser build in a worker with OPFS sync access handles, one database for every tab, and a real sleep
 - [D1090](decisions/D1090.md) Code-only batch 738 (M17): wasm32-unknown-unknown without WASI, database images, and module size budgets
+- [D1091](decisions/D1091.md) Code-only batch 739 (M17): an IndexedDB-compatible API over EggDB SQL in the browser build

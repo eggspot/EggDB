@@ -638,6 +638,27 @@ const db = await EggDB.open({ wasm: "eggdb.wasm", path: "/app.eggdb", dialect: "
 const out = await db.execute("SELECT 1 AS one");
 ```
 
+**IndexedDB.** Code written for IndexedDB runs on EggDB through `web/eggdb-indexeddb.js`
+(D1091), which turns an `EggDB` or `SharedEggDB` into an `IDBFactory`:
+
+```js
+import { SharedEggDB } from "./eggdb.js";
+import { indexedDBOver } from "./eggdb-indexeddb.js";
+const indexedDB = indexedDBOver(await SharedEggDB.open({ wasm: "eggdb.wasm", path: "/idb.eggdb", dialect: "sqlite" }));
+const request = indexedDB.open("shop", 1);
+request.onupgradeneeded = () => request.result.createObjectStore("orders", { keyPath: "id", autoIncrement: true });
+```
+
+It has the API's requests and events, versioned `open` with `upgradeneeded`, object stores with key
+paths and key generators, unique and multi-entry indexes, `IDBKeyRange`, cursors in all four
+directions with `continue`, `advance`, `update` and `delete`, transactions that commit when their
+last request is answered and roll back on an error or `abort()`, `databases()`, `deleteDatabase`
+and `cmp`, with IndexedDB's key order. Values are kept as a structured clone (dates, regular
+expressions, `ArrayBuffer`s and typed arrays, maps, sets, `bigint`s, `undefined` and `-0`); a `Blob` or a
+value that contains itself fails with `DataCloneError`. The data lives in SQL tables named `idb_*`, so
+SQL reads it too. Transactions run one at a time, and a request's key is checked when it runs,
+not when it is made.
+
 **Without WASI.** The same crate builds for `wasm32-unknown-unknown`, for hosts that run plain
 WebAssembly (D1090). The module then imports only two functions from `eggdb_host`,
 `monotonic_nanos` and `wall_clock_nanos`, and has no file system: it opens a database in memory, or

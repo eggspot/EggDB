@@ -2018,7 +2018,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-13, D1090): `eggdb_platform_core::time` with host clocks, `Database::image` and `from_image`,
   `eggdb_wasm_image` and `eggdb_wasm_open_image`, `web/eggdb-bare.js`, the bare build in CI's `browser` job, and
   `scripts/footprint-wasm.sh` with the `wasm32` budgets.
-- An IndexedDB-compatible API in the browser build (D48).
+- An IndexedDB-compatible API in the browser build (D48). **Code written, unbuilt** (code-only mode, 2026-11-13, D1091):
+  `web/eggdb-indexeddb.js` (`indexedDBOver`), with `web/test-indexeddb.mjs` in CI's `browser` job.
 - Android emulator runs, a Gradle module and Android Archive, and the 32-bit ABIs in CI (D222).
 - iOS Simulator runs, and a Swift package once a release publishes the XCFramework (D222).
 - Prepared statements and transactions in the mobile bindings, benchmarked against SQLite's
