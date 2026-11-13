@@ -181,8 +181,11 @@ Check each task against these before starting and again before opening the PR.
 - **Everything written by us, in Rust, from scratch.** The only exceptions are the per-language
   driver and ORM layers and the minimal HTML/JS that loads the browser build (D16). No code from other databases (SQLite,
   PostgreSQL, RocksDB, Redis, Lucene and so on). Implement from public specifications, papers and
-  protocol documentation (clean room), and never read the source of copyleft or source-available
-  databases (MySQL, MariaDB, MongoDB and others) while working on EggDB. No third-party crates in
+  protocol documentation. Reading other databases' source to learn how they work is allowed,
+  copyleft and source-available ones included (owner, 2026-11-13: "all code here we write ourself
+  only, could we read other code or learn from them"), but every line is written by us: never copy,
+  paste or line-by-line translate their code, and name the source in the decision when a part was
+  learned from someone else's code. No third-party crates in
   what we ship (Rust's standard library and our own OS API declarations are fine); the session's own
   research may approve a permissive (MIT, Apache-2.0, BSD) crate for tests, benchmarks or build
   tooling only. Never add copyleft or source-available code (GPL, LGPL, AGPL, MPL, SSPL, BSL).
