@@ -645,8 +645,34 @@ standard library (`default-features = false`, needing only an allocator): CRC-32
 slots, page headers and their checksums (D223). Its `FlashPages` keeps EggDB pages directly on
 raw flash through a small `Flash` trait your board's driver implements (read, erase a sector,
 program), with no file system and no allocation, and refuses a damaged, torn or misplaced page
-as the engine does in a file. CI builds it for a Cortex-M4F (`thumbv7em-none-eabihf`). The B-tree,
-transactions and SQL do not run there yet.
+as the engine does in a file. CI builds it for a Cortex-M4F (`thumbv7em-none-eabihf`).
+
+The storage engine runs there too (D1082 to D1085): `eggdb-storage` with `default-features = false`
+gives the B-tree, page cache, log and transactions without `std`. `WearLevelled` turns raw flash into
+blocks written atomically and spread over the chip's wear, `FlashFile` is the engine's file on it, and
+`PageCache::with_frame_buffer` takes its frames from a buffer you own, so memory is fixed when the
+cache is made:
+
+```rust
+let region = WearLevelled::format(my_flash_driver, 8)?;
+let file = PageFile::create_in(FlashFile::new(region), CreateOptions::default())?;
+let cache = PageCache::with_frame_buffer(file, frames)?;
+let store = Store::new(cache, Arc::new(my_clock));
+```
+
+CI runs this on a Cortex-M3 under QEMU (`crates/eggdb-cortex-m`). Pages are not encrypted without
+`std` yet, and SQL needs `std`.
+
+**The memory floor.** The microcontroller profile's footprint is what the engine needs beyond your own
+code:
+- the page cache's frames, at least one page each (64 KiB in the QEMU run);
+- the heap the engine takes as it runs, which the run reports as `heap_peak_bytes`;
+- its statics.
+
+Together they are `ram_floor_bytes`; with the engine's code (`code_bytes`) they are measured by
+`scripts/footprint-cortex-m.sh`. They are kept within the budgets in `benchmarks/footprint.txt`'s
+`cortex-m3 engine` lines, checked in the weekly performance pass (D354), which publishes each measured
+value with the release notes.
 
 ## Queues in process
 

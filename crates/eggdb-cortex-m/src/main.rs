@@ -24,7 +24,7 @@ const SECTOR_BYTES: u32 = 4096;
 const FRAME_BYTES: usize = 64 * 1024;
 const KEYS: u32 = 300;
 
-static mut FLASH_MEMORY: [u8; FLASH_BYTES] = [0xFF; FLASH_BYTES];
+static mut FLASH_MEMORY: [u8; FLASH_BYTES] = [0; FLASH_BYTES];
 static mut FRAME_MEMORY: [u8; FRAME_BYTES] = [0; FRAME_BYTES];
 
 /// Flash emulated in a RAM array: erased bytes are `0xFF` and programming only clears bits.
@@ -89,6 +89,7 @@ fn run() -> Result<(), alloc::string::String> {
     let flash_memory: &'static mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(FLASH_MEMORY) };
     // SAFETY: as above, the frame array is taken once and handed to the one page cache.
     let frames: &'static mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_MEMORY) };
+    flash_memory.fill(0xFF);
     let region = WearLevelled::format(RamFlash { bytes: flash_memory }, 8).map_err(|error| format!("format: {error:?}"))?;
     let file = PageFile::create_in(FlashFile::new(region), CreateOptions::default()).map_err(|error| format!("create: {error}"))?;
     let cache = PageCache::with_frame_buffer(file, frames).map_err(|error| format!("cache: {error}"))?;
@@ -120,6 +121,12 @@ fn main() -> ! {
     match run() {
         Ok(()) => {
             semihosting::write("eggdb-cortex-m: the engine wrote, committed and read back every key\n");
+            let statics = startup::static_bytes().saturating_sub(FLASH_BYTES + FRAME_BYTES + startup::HEAP_BYTES);
+            semihosting::write(&format!(
+                "cortex-m3 engine heap_peak_bytes {}\ncortex-m3 engine frame_bytes {FRAME_BYTES}\ncortex-m3 engine static_bytes {statics}\ncortex-m3 engine ram_floor_bytes {}\n",
+                startup::heap_peak(),
+                startup::heap_peak() + FRAME_BYTES + statics
+            ));
             semihosting::exit(true)
         }
         Err(message) => {

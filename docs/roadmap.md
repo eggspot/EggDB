@@ -2004,7 +2004,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and static wear levelling, a power cut swept across every operation) and `FlashFile`, the engine's `File` on it.
 - A QEMU Cortex-M run in CI (D223). **Code written, unbuilt** (code-only mode, 2026-11-13, D1084): `eggdb-cortex-m` on
   QEMU's `mps2-an385` in CI's `cortex-m` job.
-- A published memory floor and size budgets per microcontroller profile (D41, D230).
+- A published memory floor and size budgets per microcontroller profile (D41, D230). **Code written, unbuilt**
+  (code-only mode, 2026-11-13, D1085): `scripts/footprint-cortex-m.sh`, the `cortex-m3 engine` budgets and the floor
+  in `docs/embedded.md`.
 - A fixed-memory mode that never allocates beyond a set budget (D41).
 - Write-amplification and flash-wear budgets, and battery-aware background work (D41).
 - Correct behavior under iOS background limits and Android Doze (D41).

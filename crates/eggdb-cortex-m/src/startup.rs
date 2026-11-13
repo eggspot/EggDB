@@ -4,7 +4,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const HEAP_BYTES: usize = 2 << 20;
+pub(crate) const HEAP_BYTES: usize = 2 << 20;
 
 unsafe extern "C" {
     static mut __data_start: u32;
@@ -84,6 +84,20 @@ unsafe impl GlobalAlloc for Heap {
     }
 
     unsafe fn dealloc(&self, _pointer: *mut u8, _layout: Layout) {}
+}
+
+/// The most heap the program has taken: the bump allocator never gives memory back.
+pub(crate) fn heap_peak() -> usize {
+    HEAP.next.load(Ordering::Relaxed)
+}
+
+/// The bytes of RAM the program's statics take, `.data` and `.bss` together.
+pub(crate) fn static_bytes() -> usize {
+    let start = core::ptr::addr_of!(__data_start) as usize;
+    let data_end = core::ptr::addr_of!(__data_end) as usize;
+    let bss_start = core::ptr::addr_of!(__bss_start) as usize;
+    let bss_end = core::ptr::addr_of!(__bss_end) as usize;
+    (data_end - start) + (bss_end - bss_start)
 }
 
 #[panic_handler]

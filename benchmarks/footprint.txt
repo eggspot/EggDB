@@ -16,3 +16,6 @@ macos full open_and_get_ratio 3.0
 macos full serve_idle_resident_bytes 33554432
 macos full start_peak_resident_bytes 8388608
 macos full start_ratio 2.0
+cortex-m3 engine code_bytes 524288
+cortex-m3 engine heap_peak_bytes 524288
+cortex-m3 engine ram_floor_bytes 786432
