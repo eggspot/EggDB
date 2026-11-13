@@ -99,6 +99,9 @@ mod platform {
     }
 
     pub(super) fn topology() -> CpuTopology {
+        if crate::os_identity::on_eggos() {
+            return CpuTopology::unknown();
+        }
         crate::topology_sysfs::read(&|path| {
             std::fs::read_to_string(format!("/sys/devices/system/{path}")).ok()
         })

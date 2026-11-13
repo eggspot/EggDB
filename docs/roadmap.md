@@ -1990,7 +1990,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D1078).
 
 ### M17 Every platform
-- EggOS as a target, with its own backend in the platform layer (D8).
+- EggOS as a target, with its own backend in the platform layer (D8). **Code written, unbuilt** (code-only mode,
+  2026-11-13, D1080): the static Linux build, which EggOS runs through its native Linux ABI, finds EggOS by its kernel
+  release and keeps to the system calls EggOS implements. Left: EggOS's own CI building and testing EggDB inside EggOS
+  (stage 3 of EggOS's CI plan, in that repo).
 - The B-tree, page cache, log and transactions without `std`, on an embedded platform backend
   with a fixed-frame cache (D223).
 - Wear levelling, the header slots on flash, and power-loss tests on raw flash (D41, D223).

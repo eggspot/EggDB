@@ -57,6 +57,7 @@ mod imp {
     const EXDEV: i32 = 18;
     const EINVAL: i32 = 22;
     const ENOTTY: i32 = 25;
+    const ENOSYS: i32 = 38;
     const EOPNOTSUPP: i32 = 95;
 
     unsafe extern "C" {
@@ -76,7 +77,7 @@ mod imp {
         let error = std::io::Error::last_os_error();
         drop(to);
         std::fs::remove_file(target)?;
-        if error.raw_os_error().is_some_and(|code| [EXDEV, EINVAL, ENOTTY, EOPNOTSUPP].contains(&code)) {
+        if error.raw_os_error().is_some_and(|code| [EXDEV, EINVAL, ENOTTY, ENOSYS, EOPNOTSUPP].contains(&code)) {
             return Ok(false);
         }
         Err(error)

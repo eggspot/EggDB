@@ -60,6 +60,7 @@ mod net;
 mod os_cpus;
 mod os_datagram;
 mod os_fs;
+pub mod os_identity;
 mod os_io;
 mod os_io_uring;
 mod os_iocp;

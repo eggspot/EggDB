@@ -1104,3 +1104,4 @@ its full title with its status.
 - [D1077](decisions/D1077.md) Code-only batch 725 (M16): CalDAV scheduling and WebDAV ACLs
 - [D1078](decisions/D1078.md) Code-only batch 726 (M16): image renditions with our own PNG and JPEG codecs
 - [D1079](decisions/D1079.md) Code-only batch 727 (M16): CalDAV invitations sent as iMIP mail
+- [D1080](decisions/D1080.md) Code-only batch 728 (M17): EggOS as a target

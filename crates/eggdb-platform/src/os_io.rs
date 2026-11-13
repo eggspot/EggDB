@@ -75,6 +75,8 @@ impl OsIoQueue {
     pub(crate) fn new(options: IoQueueOptions) -> Result<Self> {
         let (capacity, threads) = options.validated()?;
         let backend = match options.requested_backend() {
+            None if crate::os_identity::on_eggos() && threads == 0 => Backend::Inline(VecDeque::new()),
+            None if crate::os_identity::on_eggos() => Backend::Pool(Pool::start(threads, Pool::no_wake())?),
             None => match Ring::new(capacity) {
                 Ok(ring) => Backend::Uring(ring),
                 Err(_) if threads == 0 => Backend::Inline(VecDeque::new()),
