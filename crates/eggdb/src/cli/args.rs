@@ -305,6 +305,7 @@ impl CommandName {
             | OptionName::PgReplication
             | OptionName::Cluster
             | OptionName::Quorum
+            | OptionName::IdleExit
             | OptionName::PageStore
             | OptionName::MultiPrimary
             | OptionName::MultiPrimaryNode
@@ -556,6 +557,7 @@ enum OptionName {
     PgReplication,
     Cluster,
     Quorum,
+    IdleExit,
     PageStore,
     MultiPrimary,
     MultiPrimaryNode,
@@ -745,6 +747,7 @@ impl OptionName {
             b"pg-replication" => Self::PgReplication,
             b"cluster" => Self::Cluster,
             b"quorum" => Self::Quorum,
+            b"idle-exit" => Self::IdleExit,
             b"page-store" => Self::PageStore,
             b"multi-primary" => Self::MultiPrimary,
             b"multi-primary-node" => Self::MultiPrimaryNode,
@@ -1140,6 +1143,7 @@ pub(crate) struct ServeOptions {
     pub(crate) pg_replication: bool,
     pub(crate) cluster: Option<String>,
     pub(crate) quorum: Option<String>,
+    pub(crate) idle_exit_seconds: Option<u64>,
     pub(crate) page_store: Option<String>,
     pub(crate) multi_primary: Option<String>,
     pub(crate) multi_primary_node: Option<String>,
@@ -1976,6 +1980,12 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Quorum => {
                 let text = value.to_str().filter(|text| text.contains('=')).ok_or_else(|| usage(format!("{} takes id=host:port for every node, separated by commas", option.spelled)))?;
                 request.serve.quorum = Some(text.to_owned());
+            }
+            OptionName::IdleExit => {
+                let seconds = parse_whole_number(value.as_encoded_bytes())
+                    .filter(|seconds| *seconds > 0)
+                    .ok_or_else(|| usage(format!("{} needs a whole number of seconds above 0, not '{}'", option.spelled, shown(value))))?;
+                request.serve.idle_exit_seconds = Some(seconds);
             }
             OptionName::PageStore => {
                 let text = value.to_str().filter(|text| text.starts_with("s3://")).ok_or_else(|| usage(format!("{} takes s3://bucket/prefix, where the database's pages are kept", option.spelled)))?;

@@ -38,6 +38,7 @@
 //! [`SimMemory`], [`SimCpus`]) that tests use
 //! to inject faults and crashes reproducibly from a seed (D9).
 
+pub mod activity;
 mod aligned;
 mod allocator;
 mod cache;
@@ -127,6 +128,7 @@ pub mod process;
 mod rng;
 pub mod secure_random;
 mod sim_cpus;
+pub mod socket_activation;
 mod sim_fs;
 mod sim_io;
 mod sim_memory;

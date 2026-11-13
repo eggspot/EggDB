@@ -28,3 +28,5 @@ wasm32 bare module_gzip_bytes 6291456
 container amd64 image_compressed_bytes 33554432
 container arm64 image_compressed_bytes 33554432
 container amd64 pull_ms 15000
+linux full cold_start_page_store_ms 3000
+linux full cold_start_restore_ms 3000

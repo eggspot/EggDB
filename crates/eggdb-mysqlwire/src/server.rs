@@ -344,6 +344,7 @@ fn run_connection<'a, D: DatabaseDirectory>(
     connection_id: u32,
     login: LoginTicket<'a>,
 ) {
+    let _open = eggdb_platform::activity::connection_opened();
     let deadline = Instant::now() + shared.config.authentication_timeout;
     let Ok(wire) = Wire::new(stream, shared.stop, Some(deadline)) else {
         return;

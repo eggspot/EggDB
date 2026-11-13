@@ -159,15 +159,28 @@ impl Session<'_> {
         let tls = tls_setup(&options, &listen_hosts)?;
         let with_tls = tls.is_some();
         missing_socket_directory(&options).map_or(Ok(()), |message| Err(usage(message)))?;
-        let listener = self.listener(
-            "--listen",
-            "PostgreSQL",
-            address,
-            eggdb_pgwire::listen(address, with_tls).map_err(|error| match error {
-                ListenError::NotLoopback(_) => None,
-                ListenError::Io(error) => Some(error),
-            }),
-        )?;
+        let listener = match eggdb_platform::socket_activation::inherited_tcp_listener() {
+            Some(inherited) => {
+                let local = inherited
+                    .local_addr()
+                    .map_err(|error| usage(format!("the socket the service manager passed is not usable: {error}")))?;
+                if !local.ip().is_loopback() && !with_tls {
+                    return Err(usage(format!(
+                        "the service manager passed a socket on {local}; clients outside this machine connect over TLS, so give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                inherited
+            }
+            None => self.listener(
+                "--listen",
+                "PostgreSQL",
+                address,
+                eggdb_pgwire::listen(address, with_tls).map_err(|error| match error {
+                    ListenError::NotLoopback(_) => None,
+                    ListenError::Io(error) => Some(error),
+                }),
+            )?,
+        };
         let tds_listener = match options.tds_listen {
             Some(address) => Some(self.listener(
                 "--tds-listen",
@@ -442,6 +455,11 @@ impl Session<'_> {
             (None, None) => None,
             _ => return Err(usage("--multi-primary and --multi-primary-node go together".to_owned())),
         };
+        if options.idle_exit_seconds.is_some() && options.restore_from.is_none() && options.page_store.is_none() {
+            return Err(usage(
+                "--idle-exit stops a server whose state lives elsewhere: give --restore-from s3://..., which it archives into before stopping, or --page-store s3://...".to_owned(),
+            ));
+        }
         if options.page_store.is_some() && (options.restore_from.is_some() || options.cluster.is_some() || options.replica_of.is_some()) {
             return Err(usage(
                 "--page-store keeps the database in object storage itself; it goes without --restore-from, --cluster and --replica-of".to_owned(),
@@ -2023,6 +2041,12 @@ impl Session<'_> {
                 }
                 None => Ok(()),
             });
+            let idle_stopper = scope.spawn(|| {
+                if let Some(seconds) = options.idle_exit_seconds {
+                    let archive_to = options.restore_from.as_deref().filter(|_| !read_only);
+                    exit_when_idle(&db, std::time::Duration::from_secs(seconds), archive_to, &self.request.file);
+                }
+            });
             let page_store_follower = scope.spawn(|| {
                 if let Some(url) = options.page_store.as_deref().filter(|_| read_only) {
                     super::archive::follow_page_store(&db, url, &follow_options, &stop_signals::requested);
@@ -2153,6 +2177,7 @@ impl Session<'_> {
             let _ = quorum_node.join();
             let _ = multi_primary_puller.join();
             let _ = page_store_follower.join();
+            let _ = idle_stopper.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();
             let _ = database_arrivals.join();
@@ -2904,4 +2929,28 @@ fn audit_server_events_from_environment(database: &std::path::Path) -> Result<()
 
 fn connection_share(limit: usize) -> usize {
     limit / 4
+}
+
+const IDLE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn exit_when_idle(db: &eggdb::Database, idle: std::time::Duration, archive_to: Option<&str>, file: &std::path::Path) {
+    while !stop_signals::requested() {
+        std::thread::sleep(IDLE_CHECK_EVERY);
+        if eggdb_platform::activity::idle_for().is_none_or(|idle_for| idle_for < idle) {
+            continue;
+        }
+        if let Some(url) = archive_to {
+            match super::archive::archive_open_database(db, url, file) {
+                Ok(name) => eprintln!("eggdb serve: idle for {}s; archived {name} into {url} and stopping", idle.as_secs()),
+                Err(message) => {
+                    eprintln!("eggdb serve: idle, but archiving into {url} failed, so the server keeps running: {message}");
+                    continue;
+                }
+            }
+        } else {
+            eprintln!("eggdb serve: idle for {}s; stopping", idle.as_secs());
+        }
+        stop_signals::request();
+        return;
+    }
 }

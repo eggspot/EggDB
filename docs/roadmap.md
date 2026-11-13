@@ -2061,7 +2061,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   read-only servers over a page store (`eggdb serve --page-store s3://... --read-only`) that follow the writer's manifest
   with `Database::refresh_page_store`.
 - Serverless: `eggdb serve` archives and exits when idle, and starts again through
-  `--restore-from` (D226); research decides what wakes it (D18). Check: a timed cold start.
+  `--restore-from` (D226); research decides what wakes it (D18). Check: a timed cold start. **Code written, unbuilt** (code-only mode, 2026-11-13, D1102):
+  `--idle-exit <seconds>`, systemd socket activation, and `scripts/cold-start.sh` with its budgets.
 - Tiered storage: hot, warm and cold pages by age across memory, disk and object storage (D18,
   D227).
 - An edge server on an edge copy, refreshed as its manifest grows, with cache limits and eviction

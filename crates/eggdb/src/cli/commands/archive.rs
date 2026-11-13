@@ -39,6 +39,38 @@ pub(super) fn page_store_objects(url: &str) -> Result<BucketObjects, String> {
     Ok(BucketObjects(bucket(url)?))
 }
 
+/// Archives the open database `db`, whose file is `file`, into the bucket at `url` as
+/// `eggdb backup` does, verified and listed in its manifest; returns the archived name. A server
+/// that stops when idle calls it before stopping (D1102).
+pub(super) fn archive_open_database(db: &eggdb::Database, url: &str, file: &Path) -> Result<String, String> {
+    let location = bucket(url)?;
+    let taken_at_ms = now_ms();
+    let stem = file
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "database".to_owned());
+    let stamp: String = rfc3339(taken_at_ms)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect();
+    let name = format!("{stem}-{stamp}.eggdb");
+    let shown = file.display().to_string();
+    let in_memory = db.stats().is_ok_and(|stats| stats.file_bytes <= IN_MEMORY_UPLOAD_BYTES);
+    if in_memory {
+        let (bytes, _) = db.backup_to_bytes().map_err(|error| format!("cannot copy {shown} for {url}: {error}"))?;
+        upload_copy(&location, UploadedCopy::InMemory(bytes), &name, taken_at_ms, &shown, None)?;
+    } else {
+        let mut staging = file.to_path_buf().into_os_string();
+        staging.push(format!(".{stamp}{UPLOAD_SUFFIX}"));
+        let staging = PathBuf::from(staging);
+        db.backup_to(&staging).map_err(|error| format!("cannot copy {shown} for {url}: {error}"))?;
+        let outcome = upload_copy(&location, UploadedCopy::Staged(&staging), &name, taken_at_ms, &shown, None);
+        let _ = std::fs::remove_file(&staging);
+        outcome?;
+    }
+    Ok(name)
+}
+
 const FOLLOW_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Keeps a read-only server over the page store at `url` on the writer's newest manifest,
