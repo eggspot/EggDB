@@ -15,7 +15,7 @@ pub fn set_switchover_hook(hook: SwitchoverHook) {
 
 fn target(text: &str, session_dialect: crate::dialect::Dialect) -> SqlResult<Option<String>> {
     let trimmed = text.trim_start();
-    if trimmed.len() < 10 || !trimmed[..10].eq_ignore_ascii_case("switchover") {
+    if !trimmed.get(..10).is_some_and(|start| start.eq_ignore_ascii_case("switchover")) {
         return Ok(None);
     }
     let tokens = tokenize_in(text, session_dialect)?;
@@ -59,5 +59,6 @@ mod tests {
         assert_eq!(target("SWITCHOVER TO 'db2:5444';", crate::dialect::Dialect::PostgreSql).unwrap(), Some("db2:5444".into()));
         assert!(target("SWITCHOVER db2", crate::dialect::Dialect::PostgreSql).is_err());
         assert_eq!(target("SELECT 1", crate::dialect::Dialect::PostgreSql).unwrap(), None);
+        assert_eq!(target("switchovñr", crate::dialect::Dialect::PostgreSql).unwrap(), None);
     }
 }

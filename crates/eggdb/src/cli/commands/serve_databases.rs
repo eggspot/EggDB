@@ -95,6 +95,38 @@ impl<'d> ServedDirectory<'d> {
     fn changed_listing(&self) {
         self.listing_version.fetch_add(1, Ordering::AcqRel);
     }
+
+    /// The database `name` of the directory (not the default one), to move it elsewhere.
+    pub(super) fn database_handle(&self, name: &str) -> Option<Arc<OwnedStore>> {
+        let others = self.others();
+        served_key(&others, name).and_then(|key| others.get(key)).cloned()
+    }
+
+    /// Where a database moved in from another server goes before it is served.
+    pub(super) fn arrival_path(&self, name: &str) -> Result<PathBuf, ServedDatabaseError> {
+        let directory = self.changing_directory()?;
+        if !is_valid_database_name(name) {
+            return Err(ServedDatabaseError::Failed(format!("\"{name}\" cannot name a database file")));
+        }
+        if name.eq_ignore_ascii_case(&self.default_name) || served_key(&self.others(), name).is_some() {
+            return Err(ServedDatabaseError::Exists);
+        }
+        let path = directory.join(format!("{name}.{DATABASE_EXTENSION}"));
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Err(ServedDatabaseError::Exists);
+        }
+        Ok(path)
+    }
+
+    /// Starts serving the database file at `path`, which a move just put in place, as `name`.
+    pub(super) fn adopt(&self, name: &str, path: &std::path::Path) -> Result<(), ServedDatabaseError> {
+        let options = self.options.clone().create_if_missing(false).read_only(false);
+        let db = Database::open_with(path, options)
+            .map_err(|error| ServedDatabaseError::Failed(format!("cannot open {}: {error}", path.display())))?;
+        self.others().insert(name.to_owned(), Arc::new(OwnedStore(db)));
+        self.changed_listing();
+        Ok(())
+    }
 }
 
 fn served_key<'m>(others: &'m BTreeMap<String, Arc<OwnedStore>>, name: &str) -> Option<&'m str> {

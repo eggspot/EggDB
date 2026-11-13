@@ -277,6 +277,7 @@ impl CommandName {
             | OptionName::MysqlListen
             | OptionName::TdsListen
             | OptionName::MetricsListen
+            | OptionName::MovesListen
             | OptionName::McpListen
             | OptionName::RespListen
             | OptionName::MemcachedListen
@@ -511,6 +512,7 @@ enum OptionName {
     MysqlListen,
     TdsListen,
     MetricsListen,
+    MovesListen,
     McpListen,
     RespListen,
     MemcachedListen,
@@ -683,6 +685,7 @@ impl OptionName {
             b"mysql-listen" => Self::MysqlListen,
             b"tds-listen" => Self::TdsListen,
             b"metrics-listen" => Self::MetricsListen,
+            b"moves-listen" => Self::MovesListen,
             b"mcp-listen" => Self::McpListen,
             b"resp-listen" => Self::RespListen,
             b"memcached-listen" => Self::MemcachedListen,
@@ -1085,6 +1088,7 @@ pub(crate) struct ServeOptions {
     pub(crate) cdc_capture_engine: bool,
     pub(crate) pg_replication: bool,
     pub(crate) cluster: Option<String>,
+    pub(crate) moves_listen: Option<SocketAddr>,
     pub(crate) cluster_node: Option<u64>,
     pub(crate) cluster_seed: bool,
     pub(crate) cluster_ca: Option<PathBuf>,
@@ -1616,6 +1620,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::MetricsListen => {
                 request.serve.metrics_listen =
                     Some(parse_listen(&option.spelled, value, 9187).map_err(usage)?);
+            }
+            OptionName::MovesListen => {
+                request.serve.moves_listen =
+                    Some(parse_listen(&option.spelled, value, 5445).map_err(usage)?);
             }
             OptionName::McpListen => {
                 request.serve.mcp_listen =

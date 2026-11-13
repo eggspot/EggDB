@@ -414,6 +414,16 @@ impl Database {
         }
     }
 
+    /// Fences the database with `reason` and waits until the write transaction open at that
+    /// moment, if any, has finished, so no write commits after this returns (D1048): the
+    /// freeze of a database moved to another server.
+    pub fn fence_and_drain(&self, reason: impl Into<String>) -> Result<()> {
+        self.fence(reason);
+        let drained = self.begin_write_unfenced(self.write_timeout)?;
+        drop(drained);
+        Ok(())
+    }
+
     /// Why writes are refused, while the database is fenced.
     pub fn fenced(&self) -> Option<String> {
         self.fence.lock().ok().and_then(|fence| fence.clone())

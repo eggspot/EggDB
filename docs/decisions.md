@@ -1072,3 +1072,4 @@ its full title with its status.
 - [D1045](decisions/D1045.md) Code-only batch 693 (M15): rebalancing simulated under load, partitions, clock skew and node failures
 - [D1046](decisions/D1046.md) Code-only batch 694 (M15): chaos testing of Raft clusters with eggdb-jepsen
 - [D1047](decisions/D1047.md) Code-only batch 695 (M15): the tenant prefix in the key layout, and tenants moved online
+- [D1048](decisions/D1048.md) Code-only batch 696 (M15): databases per tenant moved and rebalanced online

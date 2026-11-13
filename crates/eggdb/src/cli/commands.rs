@@ -44,6 +44,7 @@ mod restore_mongodump;
 mod restore_sqlite;
 mod row;
 mod serve;
+mod serve_database_moves;
 mod serve_databases;
 mod serve_cluster;
 mod serve_failover;

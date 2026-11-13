@@ -875,3 +875,40 @@ fn tenants_route_as_a_unit_and_move_to_a_shard_of_their_own() {
     assert!(!hashed.place_tenant("acme", 1, 1));
     assert_eq!(hashed.tenant_shard("acme"), None);
 }
+
+#[test]
+fn whole_databases_move_from_the_fullest_server_while_the_gap_narrows() {
+    use crate::databases::plan_database_moves;
+    let servers: BTreeMap<String, Vec<(String, u64)>> = [
+        (
+            "a".to_owned(),
+            vec![("shop".to_owned(), 100), ("blog".to_owned(), 50), ("wiki".to_owned(), 10)],
+        ),
+        ("b".to_owned(), Vec::new()),
+        ("c".to_owned(), vec![("crm".to_owned(), 70)]),
+    ]
+    .into_iter()
+    .collect();
+    let moves = plan_database_moves(&servers);
+    assert_eq!(moves[0], ("shop".to_owned(), "a".to_owned(), "b".to_owned()));
+    let mut held: BTreeMap<String, u64> = servers
+        .iter()
+        .map(|(server, databases)| (server.clone(), databases.iter().map(|(_, size)| size).sum()))
+        .collect();
+    let sizes: BTreeMap<String, u64> = servers.values().flatten().cloned().collect();
+    for (database, from, to) in &moves {
+        *held.get_mut(from).unwrap() -= sizes[database];
+        *held.get_mut(to).unwrap() += sizes[database];
+    }
+    let most = held.values().max().unwrap();
+    let fewest = held.values().min().unwrap();
+    assert!(most - fewest <= 100, "{held:?}");
+    assert!(plan_database_moves(&BTreeMap::new()).is_empty());
+    let even: BTreeMap<String, Vec<(String, u64)>> = [
+        ("a".to_owned(), vec![("x".to_owned(), 10)]),
+        ("b".to_owned(), vec![("y".to_owned(), 10)]),
+    ]
+    .into_iter()
+    .collect();
+    assert!(plan_database_moves(&even).is_empty());
+}

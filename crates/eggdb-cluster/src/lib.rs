@@ -12,6 +12,7 @@
 pub mod clock;
 mod codec;
 pub mod crdt;
+pub mod databases;
 pub mod global_index;
 pub mod merkle;
 pub mod quorum;

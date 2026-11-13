@@ -471,7 +471,7 @@ pub use sqlserver_catalog::is_catalog_procedure;
 pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use session::freshness::{Freshness, set_replication_hooks};
 pub use session::switchover::set_switchover_hook;
-pub use session::shard_move::{set_shard_move_hook, set_tenant_move_hook};
+pub use session::shard_move::{set_database_move_hook, set_shard_move_hook, set_tenant_move_hook};
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
     SnapshotHandle, StoreBackup, StoreFailure,

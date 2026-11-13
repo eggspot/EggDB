@@ -317,6 +317,22 @@ impl Session<'_> {
             }
             None => None,
         };
+        let moves_listener = match options.moves_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() && tls.is_none() {
+                    return Err(usage(format!(
+                        "--moves-listen {address}: servers outside this machine connect over TLS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                if !self.request.file.is_dir() {
+                    return Err(usage("--moves-listen moves databases of a data directory; serve a directory (eggdb serve <directory>)".to_owned()));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for database moves on {address}: {error}"), Exit::DatabaseError)
+                })?)
+            }
+            None => None,
+        };
         let cluster = match &options.cluster {
             Some(text) => {
                 let members = super::serve_cluster::parse_members(text).map_err(usage)?;
@@ -943,6 +959,7 @@ impl Session<'_> {
             mysql_pipe: options.mysql_pipe.clone(),
             tds_pipe: options.tds_pipe.clone(),
         };
+        let move_here = bound.to_string();
         let bound = Bound {
             postgresql: bound,
             mysql: mysql_bound,
@@ -1182,6 +1199,9 @@ impl Session<'_> {
         if moves_shards {
             eggdb_sql::set_shard_move_hook(super::serve_replication::request_shard_move);
             eggdb_sql::set_tenant_move_hook(super::serve_replication::request_tenant_move);
+        }
+        if moves_listener.is_some() {
+            eggdb_sql::set_database_move_hook(super::serve_database_moves::request_database_move);
         }
         let shard_owner = match &cluster {
             Some((settings, _)) => settings.node,
@@ -1668,6 +1688,27 @@ impl Session<'_> {
                 }
                 outcome
             });
+            let database_lender = scope.spawn(|| match &moves_listener {
+                Some(listener) => super::serve_database_moves::serve_database_moves(
+                    listener,
+                    &served_databases,
+                    &replication_credentials,
+                    replication_tls.clone(),
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
+            let database_arrivals = scope.spawn(|| {
+                if moves_listener.is_some() {
+                    super::serve_database_moves::serve_database_arrivals(
+                        &served_databases,
+                        &replication_credentials,
+                        shard_ca.as_deref(),
+                        &move_here,
+                        &stop_signals::requested,
+                    );
+                }
+            });
             let shard_mover = scope.spawn(|| {
                 if moves_shards {
                     super::serve_replication::serve_shard_moves(
@@ -1790,6 +1831,8 @@ impl Session<'_> {
             let _ = standby_follower.join();
             let _ = cluster_node.join();
             let _ = shard_mover.join();
+            let _ = database_lender.join();
+            let _ = database_arrivals.join();
             let _ = kafka_server.join();
             let _ = amqp_server.join();
             let _ = mqtt_server.join();

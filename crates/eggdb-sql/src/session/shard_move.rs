@@ -8,6 +8,13 @@ type TenantMoveHook = fn(&str, &str) -> Result<String, String>;
 
 static HOOK: OnceLock<ShardMoveHook> = OnceLock::new();
 static TENANT_HOOK: OnceLock<TenantMoveHook> = OnceLock::new();
+static DATABASE_HOOK: OnceLock<TenantMoveHook> = OnceLock::new();
+
+/// Lets `MOVE DATABASE <name> FROM '<host:port>'` move a whole database of another server's data
+/// directory into this server's (D1048); a server with a move listener installs it once.
+pub fn set_database_move_hook(hook: TenantMoveHook) {
+    let _ = DATABASE_HOOK.set(hook);
+}
 
 /// Lets `MOVE TENANT '<tenant>' FROM '<host:port>'` move one tenant's key range to this server
 /// (D1047); the server that replicates installs it once.
@@ -19,6 +26,7 @@ pub fn set_tenant_move_hook(hook: TenantMoveHook) {
 enum Request {
     Shard(u32, String),
     Tenant(String, String),
+    Database(String, String),
 }
 
 /// Lets `MOVE SHARD <n> FROM '<host:port>'` move a shard of the cluster's shard map to this
@@ -28,11 +36,11 @@ pub fn set_shard_move_hook(hook: ShardMoveHook) {
     let _ = HOOK.set(hook);
 }
 
-const FORM: &str = "MOVE SHARD takes the form MOVE SHARD <number> FROM 'host:port', and MOVE TENANT the form MOVE TENANT '<tenant>' FROM 'host:port'";
+const FORM: &str = "MOVE SHARD takes the form MOVE SHARD <number> FROM 'host:port', MOVE TENANT the form MOVE TENANT '<tenant>' FROM 'host:port', and MOVE DATABASE the form MOVE DATABASE <name> FROM 'host:port'";
 
 fn request(text: &str, dialect: crate::dialect::Dialect) -> SqlResult<Option<Request>> {
     let trimmed = text.trim_start();
-    if trimmed.len() < 4 || !trimmed[..4].eq_ignore_ascii_case("move") {
+    if !trimmed.get(..4).is_some_and(|start| start.eq_ignore_ascii_case("move")) {
         return Ok(None);
     }
     let tokens = tokenize_in(text, dialect)?;
@@ -69,9 +77,28 @@ fn request(text: &str, dialect: crate::dialect::Dialect) -> SqlResult<Option<Req
         {
             Ok(Some(Request::Tenant(tenant.to_string(), address.to_string())))
         }
+        [
+            TokenKind::Word(verb),
+            TokenKind::Word(database_word),
+            name,
+            TokenKind::Word(from),
+            TokenKind::String(address),
+        ] if verb.eq_ignore_ascii_case("move")
+            && database_word.eq_ignore_ascii_case("database")
+            && from.eq_ignore_ascii_case("from") =>
+        {
+            let name = match name {
+                TokenKind::Word(name) => name.to_string(),
+                TokenKind::QuotedIdentifier(name) => name.clone(),
+                _ => return Err(SqlError::new(SqlState::SYNTAX_ERROR, FORM)),
+            };
+            Ok(Some(Request::Database(name, address.to_string())))
+        }
         [TokenKind::Word(verb), TokenKind::Word(object), ..]
             if verb.eq_ignore_ascii_case("move")
-                && (object.eq_ignore_ascii_case("shard") || object.eq_ignore_ascii_case("tenant")) =>
+                && (object.eq_ignore_ascii_case("shard")
+                    || object.eq_ignore_ascii_case("tenant")
+                    || object.eq_ignore_ascii_case("database")) =>
         {
             Err(SqlError::new(SqlState::SYNTAX_ERROR, FORM))
         }
@@ -105,6 +132,7 @@ impl Session<'_> {
         let (tag, outcome) = match request {
             Request::Shard(shard, address) => ("MOVE SHARD", HOOK.get().ok_or_else(not_sharded)?(shard, &address)),
             Request::Tenant(tenant, address) => ("MOVE TENANT", TENANT_HOOK.get().ok_or_else(not_sharded)?(&tenant, &address)),
+            Request::Database(name, address) => ("MOVE DATABASE", DATABASE_HOOK.get().ok_or_else(not_sharded)?(&name, &address)),
         };
         let message = outcome.map_err(|message| SqlError::new(SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE, message))?;
         on_result(QueryResult::command(tag).with_notice(message));
@@ -128,9 +156,14 @@ mod tests {
             Some(Request::Tenant("acme".to_owned(), "db2:5444".to_owned()))
         );
         assert!(request("MOVE TENANT acme FROM 'db2:5444'", Dialect::PostgreSql).is_err());
+        assert_eq!(
+            request("MOVE DATABASE shop FROM 'db2:5445'", Dialect::PostgreSql).unwrap(),
+            Some(Request::Database("shop".to_owned(), "db2:5445".to_owned()))
+        );
         assert!(request("move shard x from 'a:1'", Dialect::PostgreSql).is_err());
         assert!(request("MOVE SHARD 99999999999 FROM 'a:1'", Dialect::PostgreSql).is_err());
         assert_eq!(request("MOVE NEXT FROM c", Dialect::PostgreSql).unwrap(), None);
         assert_eq!(request("SELECT 1", Dialect::PostgreSql).unwrap(), None);
+        assert_eq!(request("mñve", Dialect::PostgreSql).unwrap(), None);
     }
 }
