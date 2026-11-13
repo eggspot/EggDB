@@ -364,6 +364,19 @@ impl CpuTopology {
         (any_kind && !performance.is_empty()).then_some(performance)
     }
 
+    /// The NUMA nodes that hold memory but no CPUs, in increasing order: CXL memory expanders
+    /// and high-bandwidth memory show up this way on Linux. Empty where the system does not
+    /// say (everywhere but Linux and Android) or has none.
+    pub fn memory_only_numa_nodes() -> Vec<NumaNodeId> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if !crate::os_identity::on_eggos() {
+            return crate::topology_sysfs::memory_only_nodes(&|path| {
+                std::fs::read_to_string(format!("/sys/devices/system/{path}")).ok()
+            });
+        }
+        Vec::new()
+    }
+
     /// The NUMA nodes that have CPUs, in increasing order.
     pub fn numa_nodes(&self) -> Vec<NumaNodeId> {
         let mut nodes: Vec<NumaNodeId> = self

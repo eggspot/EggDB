@@ -18,6 +18,7 @@ path = "src/main.rs"
 [features]
 default = ["egg-allocator"]
 egg-allocator = []
+cxl = []
 
 [dependencies]
 eggdb-amqp = { path = "../eggdb-amqp" }

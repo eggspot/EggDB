@@ -98,6 +98,20 @@ fn numa_nodes(
         .then_some(nodes)
 }
 
+pub(crate) fn memory_only_nodes(file: &dyn Fn(&str) -> Option<String>) -> Vec<NumaNodeId> {
+    let Some(node_numbers) = list(file, "node/online") else {
+        return Vec::new();
+    };
+    node_numbers
+        .iter()
+        .filter(|number| {
+            list(file, &format!("node/node{}/cpulist", number.index()))
+                .is_some_and(|cpus| cpus.is_empty())
+        })
+        .map(|number| NumaNodeId::new(number.index()))
+        .collect()
+}
+
 fn grouped(
     online: &CpuSet,
     group_of: impl Fn(CpuId) -> Option<CpuSet>,
@@ -337,6 +351,21 @@ mod tests {
             read_files(&files).numa_nodes(),
             [NumaNodeId::new(0), NumaNodeId::new(1)]
         );
+    }
+
+    #[test]
+    fn nodes_without_cpus_are_the_memory_only_ones() {
+        let mut files = two_packages_of_two_cores_with_two_threads();
+        files.insert("node/online".into(), "0-2".into());
+        files.insert("node/node0/cpulist".into(), "0-7\n".into());
+        files.insert("node/node1/cpulist".into(), "\n".into());
+        files.insert("node/node2/cpulist".into(), "\n".into());
+        let lookup = |path: &str| files.get(path).cloned();
+        assert_eq!(
+            super::memory_only_nodes(&lookup),
+            vec![NumaNodeId::new(1), NumaNodeId::new(2)]
+        );
+        assert!(super::memory_only_nodes(&|_: &str| None).is_empty());
     }
 
     #[test]

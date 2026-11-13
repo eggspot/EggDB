@@ -371,9 +371,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `NotConnected` after a reset checked against Windows' sockets in the contract test (D314). **Code written,
   unbuilt** (code-only mode, 2026-11-13, D943).
 - Optional accelerators behind build features: first CXL memory placed as a NUMA node for the
-  page cache, with no `mmap`, on D65 and the NUMA item above (D40, D45). Check: cache benchmarks.
+  page cache, with no `mmap`, on D65 and the NUMA item above (D40, D45). Check: cache benchmarks. **Code written,
+  unbuilt** (code-only mode, 2026-11-13, D1118): the `cxl` feature's `Options::cache_on_memory_expander`.
 - Persistent memory and GPUs, each after a decision that fits D60 and D77 (no `mmap`, the log in
-  the file) (D40, D45).
+  the file) (D40, D45). Persistent memory: decided and **code written, unbuilt** (code-only mode, 2026-11-13, D1118),
+  as memory-only NUMA nodes in `kmem` mode. GPUs: decided (D1118); the code waits for the vector kernels (M12).
 
 ### M2 Storage engine
 - Users can choose the LSM tree per table with `WITH (storage = lsm)`, kept in the catalog (D170).

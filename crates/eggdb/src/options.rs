@@ -76,6 +76,7 @@ pub struct Options {
     pub(crate) clock: ClockChoice,
     pub(crate) lock_cache: bool,
     pub(crate) cache_numa_node: Option<u32>,
+    pub(crate) cache_on_memory_expander: bool,
     pub(crate) value_compression: eggdb_storage::ValueCompression,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) change_archive: Option<std::path::PathBuf>,
@@ -141,6 +142,7 @@ impl Options {
             clock: ClockChoice::default(),
             lock_cache: false,
             cache_numa_node: None,
+            cache_on_memory_expander: false,
             value_compression: eggdb_storage::ValueCompression::Off,
             encryption_key: None,
             change_archive: None,
@@ -200,6 +202,18 @@ impl Options {
     /// (everywhere but Linux and Android).
     pub fn cache_numa_node(mut self, node: Option<u32>) -> Self {
         self.cache_numa_node = node;
+        self
+    }
+
+    /// Places the page cache's memory on the machine's first memory-only NUMA node, a node
+    /// with memory and no CPUs, as a CXL memory expander appears on Linux, so a cache larger
+    /// than local memory stays off the swap and out of `mmap` (D60, D1118). A node given with
+    /// [`Options::cache_numa_node`] wins. Opening fails with
+    /// [`ErrorKind::InvalidOption`](crate::ErrorKind::InvalidOption) when the machine has no such
+    /// node. Built with the `cxl` feature only.
+    #[cfg(feature = "cxl")]
+    pub fn cache_on_memory_expander(mut self, on: bool) -> Self {
+        self.cache_on_memory_expander = on;
         self
     }
 

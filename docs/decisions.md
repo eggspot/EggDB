@@ -1142,3 +1142,4 @@ its full title with its status.
 - [D1115](decisions/D1115.md) Code-only batch 763 (M1): TDS attention on named pipes and local sockets
 - [D1116](decisions/D1116.md) Code-only batch 764 (M1): io_uring and completion ports as the automatic backends
 - [D1117](decisions/D1117.md) Code-only batch 765 (M1): EggDB's own allocator in the default build
+- [D1118](decisions/D1118.md) Code-only batch 766 (M1): CXL and persistent memory as memory-only NUMA nodes for the page cache, and the GPU decision

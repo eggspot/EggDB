@@ -476,10 +476,23 @@ impl Database {
             CacheSize::Bytes(options.cache_bytes),
         )
         .map_err(Error::storage)?;
-        if let Some(node) = options.cache_numa_node {
-            cache
-                .place_on_numa_node(eggdb_platform::NumaNodeId::new(node))
-                .map_err(Error::storage)?;
+        let cache_node = match options.cache_numa_node {
+            Some(node) => Some(eggdb_platform::NumaNodeId::new(node)),
+            None if options.cache_on_memory_expander => Some(
+                eggdb_platform::CpuTopology::memory_only_numa_nodes()
+                    .first()
+                    .copied()
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidOption,
+                            "this machine has no memory-only NUMA node (a CXL memory expander) for the page cache",
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+        if let Some(node) = cache_node {
+            cache.place_on_numa_node(node).map_err(Error::storage)?;
         }
         if options.lock_cache {
             cache.lock_in_memory().map_err(Error::storage)?;
