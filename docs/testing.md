@@ -735,11 +735,20 @@ simulation alike.
 - Real disks: the simulator's model of a power loss is sector-sized pieces of unsynced writes,
   not every behavior of real hardware.
 
-## 32-bit and big-endian CPUs
-The `other-cpus` CI job runs the tests of the file format, the storage engine, cryptography and
-the columnar encodings on 32-bit x86 (`i686-unknown-linux-gnu`, natively), 32-bit ARM
-(`armv7-unknown-linux-gnueabihf`) and big-endian IBM Z (`s390x-unknown-linux-gnu`), the last two
-under QEMU's user-mode emulation. Every number the format stores is little-endian on disk
-(`eggdb-format`'s `bytes`), so a file written on one CPU opens on any other; these runs check that
-nothing reads memory in the CPU's own byte order or assumes a 64-bit `usize`. The other crates
-are only linted for those targets so far.
+## 32-bit, big-endian and other CPUs
+The `other-cpus` CI job runs the whole workspace's tests on six CPUs besides the runners' own
+(D1095):
+- 32-bit x86 (`i686-unknown-linux-gnu`), natively;
+- 32-bit ARM (`armv7-unknown-linux-gnueabihf`);
+- big-endian IBM Z (`s390x-unknown-linux-gnu`);
+- RISC-V (`riscv64gc-unknown-linux-gnu`);
+- little-endian POWER (`powerpc64le-unknown-linux-gnu`);
+- LoongArch (`loongarch64-unknown-linux-gnu`).
+
+All but i686 run under QEMU's user-mode emulation, in three shards each: the engine, SQL and
+the rest. `scripts/qemu-test.sh test <cpu> <shard>` runs one the same way on any Linux machine. The
+GUI and the harnesses that need outside services or data (Jepsen, the SPARQL suite,
+sqllogictest, the benchmarks, fuzzing) are left out. Every number the format stores is
+little-endian on disk (`eggdb-format`'s `bytes`), so a file written on one CPU opens on any other;
+these runs check that nothing reads memory in the CPU's own byte order or assumes a 64-bit `usize`.
+The job runs on `main`, not on pull requests, since emulation is slow.

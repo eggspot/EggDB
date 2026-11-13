@@ -2015,20 +2015,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: i686-unknown-linux-gnu
-            packages: gcc-multilib
-            runner: ""
-          - target: armv7-unknown-linux-gnueabihf
-            packages: gcc-arm-linux-gnueabihf qemu-user
-            runner: qemu-arm -L /usr/arm-linux-gnueabihf
-            linker: arm-linux-gnueabihf-gcc
-          - target: s390x-unknown-linux-gnu
-            packages: gcc-s390x-linux-gnu qemu-user
-            runner: qemu-s390x -L /usr/s390x-linux-gnu
-            linker: s390x-linux-gnu-gcc
+        cpu: [i686, armv7, s390x, riscv64, ppc64le, loongarch64]
+        shard: [engine, sql, rest]
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
@@ -2036,26 +2026,18 @@ jobs:
       - name: Install the pinned toolchain, the target, its linker and QEMU
         run: |
           rustup show active-toolchain || rustup toolchain install
-          rustup target add ${{ matrix.target }}
-          sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+          rustup target add "$(scripts/qemu-test.sh target ${{ matrix.cpu }})"
+          sudo apt-get update && sudo apt-get install -y $(scripts/qemu-test.sh packages ${{ matrix.cpu }})
       - uses: ./.github/actions/cargo-cache
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-v2-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-v2-${{ matrix.target }}-${{ runner.os }}-
-      - name: Test the file format, the storage engine, cryptography and columnar encodings on ${{ matrix.target }}
-        env:
-          TARGET_ENV: ${{ matrix.target }}
-          LINKER: ${{ matrix.linker }}
-          RUNNER: ${{ matrix.runner }}
-        run: |
-          upper=$(echo "$TARGET_ENV" | tr 'a-z-' 'A-Z_')
-          if [ -n "$LINKER" ]; then export "CARGO_TARGET_${upper}_LINKER=$LINKER"; fi
-          if [ -n "$RUNNER" ]; then export "CARGO_TARGET_${upper}_RUNNER=$RUNNER"; fi
-          cargo test --target "$TARGET_ENV" -p eggdb-format -p eggdb-storage -p eggdb-crypto -p eggdb-columnar
+          key: cargo-v2-${{ matrix.cpu }}-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-${{ matrix.cpu }}-${{ matrix.shard }}-${{ runner.os }}-
+      - name: Test the ${{ matrix.shard }} crates on ${{ matrix.cpu }}
+        run: scripts/qemu-test.sh test ${{ matrix.cpu }} ${{ matrix.shard }}
 
   deploy-templates:
     needs: changes
