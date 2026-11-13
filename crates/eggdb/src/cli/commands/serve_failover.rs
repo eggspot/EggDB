@@ -120,18 +120,26 @@ impl<'d> ReplicationNode<'d> {
             *following = None;
         }
         if let Ok(mut current) = self.primary.lock() {
-            *current = Some(primary);
+            *current = Some(Arc::clone(&primary));
         }
+        note_role(Some(primary), None);
         self.touch();
         Ok(())
+    }
+
+    /// Publishes the node's starting role for the freshness checks (D1028).
+    pub(super) fn publish_role(&self) {
+        note_role(self.current_primary(), self.following().map(|primary| (primary, self.credentials.clone())));
     }
 
     /// Follows the primary at `address` from now on, as told by a promoted peer.
     pub(super) fn follow(&self, address: &str) {
         let tls = super::serve_replication::client_tls(address, self.replica_ca.as_deref()).ok().flatten();
+        let primary = PrimaryAddress { address: address.to_owned(), tls };
         if let Ok(mut following) = self.following.lock() {
-            *following = Some(PrimaryAddress { address: address.to_owned(), tls });
+            *following = Some(primary.clone());
         }
+        note_role(None, Some((primary, self.credentials.clone())));
         self.touch();
     }
 
@@ -241,6 +249,7 @@ impl<'d> ReplicationNode<'d> {
         if let Ok(mut following) = self.following.lock() {
             *following = Some(peer.clone());
         }
+        note_role(None, Some((peer.clone(), self.credentials.clone())));
         for other in self.peers.iter().filter(|other| other.address != target) {
             let _ = send_follow(other, &self.credentials, target);
         }
@@ -281,4 +290,112 @@ impl<'d> ReplicationNode<'d> {
 pub(super) fn is_loopback(address: &str) -> bool {
     let host = address.rsplit_once(':').map_or(address, |(host, _)| host).trim_start_matches('[').trim_end_matches(']');
     host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+struct Progress {
+    replica: std::sync::atomic::AtomicBool,
+    term: AtomicU64,
+    applied: AtomicU64,
+    primary_last: AtomicU64,
+    heard_ms: AtomicU64,
+}
+
+static PROGRESS: Progress = Progress {
+    replica: std::sync::atomic::AtomicBool::new(false),
+    term: AtomicU64::new(0),
+    applied: AtomicU64::new(0),
+    primary_last: AtomicU64::new(0),
+    heard_ms: AtomicU64::new(0),
+};
+
+static PRIMARY_LINK: Mutex<Option<(PrimaryAddress, ReplicationCredentials)>> = Mutex::new(None);
+static TOKEN_PRIMARY: Mutex<Option<Arc<ReplicationPrimary>>> = Mutex::new(None);
+
+const FRESHNESS_POLL: Duration = Duration::from_millis(5);
+
+/// Publishes what a replica applied and what it heard of its primary, for the freshness checks
+/// of the server's sessions (D1028).
+pub(super) fn note_applied(term: u64, applied: u64, primary_last: u64) {
+    PROGRESS.replica.store(true, Ordering::Release);
+    PROGRESS.term.store(term, Ordering::Release);
+    PROGRESS.applied.store(applied, Ordering::Release);
+    PROGRESS.primary_last.fetch_max(primary_last.max(applied), Ordering::AcqRel);
+    PROGRESS.heard_ms.store(now_ms(), Ordering::Release);
+}
+
+/// Publishes which primary this server follows, or that it is the primary, for the freshness
+/// checks and the replication token (D1028).
+pub(super) fn note_role(primary: Option<Arc<ReplicationPrimary>>, following: Option<(PrimaryAddress, ReplicationCredentials)>) {
+    PROGRESS.replica.store(primary.is_none() && following.is_some(), Ordering::Release);
+    if let Ok(mut token) = TOKEN_PRIMARY.lock() {
+        *token = primary;
+    }
+    if let Ok(mut link) = PRIMARY_LINK.lock() {
+        *link = following;
+    }
+}
+
+fn applied_position() -> (u64, u64) {
+    (PROGRESS.term.load(Ordering::Acquire), PROGRESS.applied.load(Ordering::Acquire))
+}
+
+fn wait_until(timeout: Duration, mut fresh: impl FnMut() -> bool, why: impl Fn() -> String) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    while !fresh() {
+        if started.elapsed() >= timeout {
+            return Err(why());
+        }
+        std::thread::sleep(FRESHNESS_POLL);
+    }
+    Ok(())
+}
+
+/// The freshness hook of `eggdb_sql::set_replication_hooks`: waits until this replica holds
+/// what the session asks for, up to `timeout`; a primary is always fresh.
+pub(super) fn freshness_hook(freshness: eggdb_sql::Freshness, timeout: Duration) -> Result<(), String> {
+    if !PROGRESS.replica.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    match freshness {
+        eggdb_sql::Freshness::Eventual => Ok(()),
+        eggdb_sql::Freshness::BoundedStaleness(bound) => {
+            let bound_ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
+            wait_until(
+                timeout,
+                || {
+                    let caught_up = PROGRESS.applied.load(Ordering::Acquire) >= PROGRESS.primary_last.load(Ordering::Acquire);
+                    caught_up && now_ms().saturating_sub(PROGRESS.heard_ms.load(Ordering::Acquire)) <= bound_ms
+                },
+                || format!("it last heard from its primary more than {bound_ms} ms ago or is behind it"),
+            )
+        }
+        eggdb_sql::Freshness::ReadYourWrites(term, sequence) | eggdb_sql::Freshness::Causal(term, sequence) => wait_until(
+            timeout,
+            || {
+                let (applied_term, applied) = applied_position();
+                applied_term > term || applied >= sequence
+            },
+            || format!("it has applied batch {} of the {sequence} the token needs", applied_position().1),
+        ),
+        eggdb_sql::Freshness::Linearizable => {
+            let link = PRIMARY_LINK.lock().ok().and_then(|link| link.clone()).ok_or("it follows no primary")?;
+            let status = super::serve_replication::query_status(&link.0, &link.1)?;
+            wait_until(
+                timeout,
+                || PROGRESS.applied.load(Ordering::Acquire) >= status.applied,
+                || format!("it has applied batch {} of the primary's {}", applied_position().1, status.applied),
+            )
+        }
+    }
+}
+
+/// The token hook of `eggdb_sql::set_replication_hooks`: the primary's last batch, or what a
+/// replica applied, as `term:sequence`.
+pub(super) fn token_hook() -> Option<(u64, u64)> {
+    let primary = TOKEN_PRIMARY.lock().ok().and_then(|primary| primary.clone());
+    match primary {
+        Some(primary) => Some((primary.term().ok()?, primary.last().ok()?)),
+        None if PROGRESS.replica.load(Ordering::Acquire) => Some(applied_position()),
+        None => None,
+    }
 }

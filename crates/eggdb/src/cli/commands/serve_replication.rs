@@ -105,7 +105,7 @@ fn ship(stream: &mut dyn Stream, db: &Database, primary: &ReplicationPrimary, re
         };
         if batches.is_empty() {
             primary.wait_for_more(applied, IDLE_WAIT).map_err(failed)?;
-            write_frame(stream, HEARTBEAT, &[])?;
+            write_frame(stream, HEARTBEAT, &primary.last().map_err(failed)?.to_le_bytes())?;
         } else {
             for batch in &batches {
                 write_frame(stream, BATCH, &eggdb::encode_batch(batch))?;
@@ -390,7 +390,10 @@ fn follow_once(primary: &PrimaryAddress, node: &ReplicationNode<'_>, stop: &(dyn
             BATCH => {
                 let batch: ReplicationBatch = eggdb::decode_batch(&payload)?;
                 match replica.receive(&batch) {
-                    Ok(applied) => write_frame(stream.as_mut(), ACK, &applied.to_le_bytes()).map_err(io)?,
+                    Ok(applied) => {
+                        super::serve_failover::note_applied(batch.term, applied, batch.sequence);
+                        write_frame(stream.as_mut(), ACK, &applied.to_le_bytes()).map_err(io)?;
+                    }
                     Err(ReplicationRefusal::Gap { next }) => {
                         write_frame(stream.as_mut(), ACK, &next.saturating_sub(1).to_le_bytes()).map_err(io)?;
                     }
@@ -401,7 +404,10 @@ fn follow_once(primary: &PrimaryAddress, node: &ReplicationNode<'_>, stop: &(dyn
                     }
                 }
             }
-            HEARTBEAT => write_frame(stream.as_mut(), ACK, &replica.applied().to_le_bytes()).map_err(io)?,
+            HEARTBEAT => {
+                super::serve_failover::note_applied(replica.term(), replica.applied(), number(&payload, 0).unwrap_or(0));
+                write_frame(stream.as_mut(), ACK, &replica.applied().to_le_bytes()).map_err(io)?;
+            }
             REFUSED => return Err(format!("the primary stopped the replica: {}", String::from_utf8_lossy(&payload))),
             _ => return Err("the primary sent an unexpected frame".into()),
         }

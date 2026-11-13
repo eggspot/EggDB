@@ -1691,7 +1691,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Delayed replicas, and standbys in another region fed by log shipping (D18). **Code written, unbuilt** (code-only mode,
   2026-11-13, D1027): `--standby-of` with `--apply-delay`, fed by the change archive.
 - Replica freshness chosen per request: linearizable, read-your-writes, causal, bounded staleness
-  or eventual (D18).
+  or eventual (D18). **Code written, unbuilt** (code-only mode, 2026-11-13, D1028): `eggdb.read_freshness`,
+  `eggdb.read_after` and `SHOW eggdb.replication_token`.
 - Jepsen-style checks against real processes (D9, D209).
 - Logical replication to other EggDB clusters, across versions, for upgrades without downtime
   (D18).

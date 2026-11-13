@@ -1052,3 +1052,4 @@ its full title with its status.
 - [D1025](decisions/D1025.md) Code-only batch 673 (M14): a replica's first copy from a snapshot
 - [D1026](decisions/D1026.md) Code-only batch 674 (M14): failure detection, fencing and planned switchover
 - [D1027](decisions/D1027.md) Code-only batch 675 (M14): delayed standbys and standbys fed by log shipping
+- [D1028](decisions/D1028.md) Code-only batch 676 (M14): replica freshness chosen per request

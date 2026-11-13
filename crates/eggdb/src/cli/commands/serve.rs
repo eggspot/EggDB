@@ -1128,6 +1128,10 @@ impl Session<'_> {
         if replication_listener.is_some() {
             eggdb_sql::set_switchover_hook(super::serve_failover::request_switchover);
         }
+        if replicates {
+            replication_node.publish_role();
+            eggdb_sql::set_replication_hooks(super::serve_failover::freshness_hook, super::serve_failover::token_hook);
+        }
         if let Some(directory) = &options.standby_of {
             if replicates {
                 return Err(usage("--standby-of follows a change archive; it goes without --replica-of and --replication-listen".to_owned()));
