@@ -1766,7 +1766,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   with `place_tenant`, `MOVE TENANT`. Left: SQL rows by tenant in the tenant range.
 - Databases per tenant moved and rebalanced online (D18, D32). **Code written, unbuilt** (code-only mode,
   2026-11-13, D1048): `--moves-listen`, `MOVE DATABASE`, `Database::fence_and_drain`, `plan_database_moves`.
-- Rolling upgrades with mixed versions in a cluster (D20).
+- Rolling upgrades with mixed versions in a cluster (D20). **Code written, unbuilt** (code-only mode, 2026-11-13,
+  D1049): feature levels in the cluster greeting, `negotiated_level`, the stored cluster level and `may_join`.
 - MPP distributed analytics with workload queues (D58).
 - Resumable petabyte-scale migrations: Merkle range comparison and parallel ranges across nodes
   (D58, D251).

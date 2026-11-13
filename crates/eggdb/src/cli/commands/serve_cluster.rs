@@ -3,11 +3,12 @@ use super::serve_replication::{
     read_frame, receive_snapshot, serve_shard_copy, signed_greeting, stream_file, write_frame,
 };
 use eggdb::consensus::wire::{decode_message, encode_message};
+use eggdb::cluster::versions::{LevelRange, may_join, negotiated_level};
 use eggdb::consensus::{EntryKind, Membership, Message, Node, NodeId, Role, Snapshot, Timing};
 use eggdb::{Database, ReplicaId, ReplicationMode, ReplicationPrimary};
 use std::collections::BTreeMap;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -33,6 +34,8 @@ const ENTRIES_KEPT_AFTER_COMPACTION: u64 = 10_000;
 const SEQUENCES_REMEMBERED: usize = 100_000;
 const NO_LEADER: u64 = u64::MAX;
 const CLUSTER_REPLICA: ReplicaId = u32::MAX;
+const LEVELS: LevelRange = LevelRange { oldest: 1, newest: 1 };
+const LEVELS_BEFORE_NEGOTIATION: LevelRange = LevelRange { oldest: 1, newest: 1 };
 
 /// A server's place in a cluster (D1038): its id and the address every voter listens on for
 /// the cluster's own traffic, this server's included.
@@ -111,6 +114,8 @@ struct Shared {
     finished: AtomicBool,
     seed_point: Mutex<SeedPoint>,
     primary: Mutex<Option<Arc<ReplicationPrimary>>>,
+    levels: Mutex<BTreeMap<NodeId, LevelRange>>,
+    raise_level_to: AtomicU32,
 }
 
 impl Shared {
@@ -300,7 +305,18 @@ fn serve_peer(
             let leader = shared.leader().unwrap_or(NO_LEADER);
             return write_frame(stream, NOT_LEADER, &leader.to_le_bytes());
         }
-        JOIN => {}
+        JOIN => {
+            let range = match (rest.get(8..12), rest.get(12..16)) {
+                (Some(oldest), Some(newest)) => LevelRange {
+                    oldest: u32::from_le_bytes(oldest.try_into().unwrap_or_default()),
+                    newest: u32::from_le_bytes(newest.try_into().unwrap_or_default()),
+                },
+                _ => LEVELS_BEFORE_NEGOTIATION,
+            };
+            if let Ok(mut levels) = shared.levels.lock() {
+                levels.insert(from, range);
+            }
+        }
         _ => return write_frame(stream, REFUSED, b"an unknown greeting"),
     }
     while !shared.done(stop) {
@@ -368,10 +384,13 @@ fn join(
     if kind != CHALLENGE {
         return Err(format!("node {peer} did not send its challenge"));
     }
+    let mut tail = settings.node.to_le_bytes().to_vec();
+    tail.extend_from_slice(&LEVELS.oldest.to_le_bytes());
+    tail.extend_from_slice(&LEVELS.newest.to_le_bytes());
     write_frame(
         stream.as_mut(),
         JOIN,
-        &signed_greeting(credentials, &nonce, &settings.node.to_le_bytes())?,
+        &signed_greeting(credentials, &nonce, &tail)?,
     )
     .map_err(failed)?;
     Ok(stream)
@@ -499,6 +518,20 @@ impl Driver<'_> {
         Ok(())
     }
 
+    fn raise_feature_level(&mut self, members: &[NodeId]) -> Result<(), String> {
+        if self.primary.is_none() || self.node.role() != Role::Leader {
+            return Ok(());
+        }
+        let current = self.db.cluster_feature_level().map_err(failed)?;
+        let mut ranges = self.shared.levels.lock().map(|levels| levels.clone()).unwrap_or_default();
+        ranges.insert(self.node.id(), LEVELS);
+        let level = negotiated_level(current, members, &ranges);
+        if level > current {
+            self.shared.raise_level_to.fetch_max(level, Ordering::AcqRel);
+        }
+        Ok(())
+    }
+
     fn propose_local_batches(&mut self) -> Result<Vec<eggdb::consensus::Envelope>, String> {
         let Some(primary) = self.primary.clone() else {
             return Ok(Vec::new());
@@ -592,6 +625,7 @@ pub(super) fn run_cluster(
     stop: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), String> {
     let members: Vec<NodeId> = settings.members.keys().copied().collect();
+    may_join(db.cluster_feature_level().map_err(failed)?, LEVELS).map_err(failed)?;
     let recovered = db.consensus_state().map_err(failed)?;
     let node = Node::recover(
         settings.node,
@@ -607,6 +641,8 @@ pub(super) fn run_cluster(
         finished: AtomicBool::new(false),
         seed_point: Mutex::new(SeedPoint::default()),
         primary: Mutex::new(None),
+        levels: Mutex::new(BTreeMap::new()),
+        raise_level_to: AtomicU32::new(0),
     };
     let (inbox_sender, inbox) = mpsc::channel::<(NodeId, Message)>();
     let mut outboxes: BTreeMap<NodeId, Sender<Message>> = BTreeMap::new();
@@ -634,7 +670,16 @@ pub(super) fn run_cluster(
         for (peer, receiver) in receivers {
             scope.spawn(move || send_to_peer(settings, peer, credentials, &receiver, shared, stop));
         }
-        let outcome = drive(&mut driver, &inbox, &outboxes, stop);
+        scope.spawn(|| {
+            while !shared.done(stop) {
+                std::thread::sleep(TICK * 10);
+                let wanted = shared.raise_level_to.load(Ordering::Acquire);
+                if wanted > 0 && db.raise_cluster_feature_level(wanted).is_ok() {
+                    shared.raise_level_to.store(0, Ordering::Release);
+                }
+            }
+        });
+        let outcome = drive(&mut driver, &inbox, &outboxes, &members, stop);
         shared.finished.store(true, Ordering::Release);
         if let Some(primary) = &driver.primary {
             primary.retire();
@@ -647,6 +692,7 @@ fn drive(
     driver: &mut Driver<'_>,
     inbox: &Receiver<(NodeId, Message)>,
     outboxes: &BTreeMap<NodeId, Sender<Message>>,
+    members: &[NodeId],
     stop: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), String> {
     let mut last_tick = Instant::now();
@@ -680,6 +726,7 @@ fn drive(
         }
         driver.apply_committed()?;
         driver.follow_role()?;
+        driver.raise_feature_level(members)?;
         driver.compact();
     }
     Ok(())

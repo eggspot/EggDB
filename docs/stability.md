@@ -20,6 +20,16 @@ Deprecations are announced in the release notes one minor release ahead, with th
 Removals happen only in a major release. After 1.0 there are release channels (stable, beta,
 nightly) and a long-term-support line.
 
+## Rolling upgrades of a cluster
+A `serve --cluster` group is upgraded one server at a time, with the others serving (D1049).
+Every release speaks a range of cluster feature levels, and the cluster runs at the newest level
+all of its members speak. Upgrade the followers first and the leader last: each upgraded server
+rejoins and keeps speaking the cluster's current level, and once the last member speaks a newer
+one the leader raises the level for everyone, through the log. Only then do new formats appear on
+the wire or in the log. A server whose release is too old for the cluster's level, or too new to
+speak it, refuses to start and says which release to run; once the level has risen, the cluster
+cannot take a server of an older release back, so test an upgrade on one group first.
+
 ## What EggDB never does
 EggDB sends nothing anywhere unless you turn it on: no telemetry, no update checks.
 

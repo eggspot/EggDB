@@ -489,8 +489,9 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
 - **Cluster metadata** (D1039): under the same prefix, `cluster 00 map` holds the shard map
   (version 1, the epoch, the strategy and every shard with its owner and pinned region),
   `cluster 00 next-transaction` the last cross-shard transaction id handed out (8 bytes,
-  big-endian), and `cluster 00 decision 00` followed by a transaction id (8) its decision (1
-  commit, 2 abort). Unlike the consensus keys these are ordinary writes, replicated to every
+  big-endian), `cluster 00 decision 00` followed by a transaction id (8) its decision (1
+  commit, 2 abort), and `cluster 00 feature-level` the cluster's feature level (4 bytes,
+  big-endian; 1 when absent, D1049). Unlike the consensus keys these are ordinary writes, replicated to every
   voter through the log.
 
 ### B+tree pages (types 2 and 3, layout 1)

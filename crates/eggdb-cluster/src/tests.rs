@@ -912,3 +912,28 @@ fn whole_databases_move_from_the_fullest_server_while_the_gap_narrows() {
     .collect();
     assert!(plan_database_moves(&even).is_empty());
 }
+
+#[test]
+fn a_rolling_upgrade_raises_the_level_only_when_every_member_speaks_it() {
+    use crate::versions::{JoinRefused, LevelRange, may_join, negotiated_level, upgrade_order};
+    let old = LevelRange { oldest: 1, newest: 1 };
+    let new = LevelRange { oldest: 1, newest: 2 };
+    let members = [1, 2, 3];
+    let mut ranges: BTreeMap<u64, LevelRange> = [(1, old), (2, old), (3, old)].into_iter().collect();
+    assert_eq!(negotiated_level(1, &members, &ranges), 1);
+    for node in upgrade_order(&members, Some(2)) {
+        assert_eq!(may_join(negotiated_level(1, &members, &ranges), new), Ok(()));
+        ranges.insert(node, new);
+        let level = negotiated_level(1, &members, &ranges);
+        assert_eq!(level, if node == 2 { 2 } else { 1 }, "after upgrading node {node}");
+    }
+    assert_eq!(upgrade_order(&members, Some(2)), vec![1, 3, 2]);
+    assert_eq!(may_join(2, old), Err(JoinRefused::TooOld { cluster: 2, newest: 1 }));
+    assert_eq!(
+        may_join(1, LevelRange { oldest: 2, newest: 3 }),
+        Err(JoinRefused::TooNew { cluster: 1, oldest: 2 })
+    );
+    ranges.remove(&3);
+    assert_eq!(negotiated_level(2, &members, &ranges), 2);
+    assert_eq!(negotiated_level(1, &members, &ranges), 1);
+}

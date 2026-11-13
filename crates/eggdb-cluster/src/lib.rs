@@ -21,6 +21,7 @@ pub mod simulation;
 pub mod tenants;
 mod shards;
 pub mod transaction;
+pub mod versions;
 
 pub use shards::{MoveStep, Placement, Shard, ShardMap, ShardMove, Strategy, rebalance, route};
 

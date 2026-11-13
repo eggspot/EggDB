@@ -5,6 +5,8 @@ use eggdb_cluster::transaction::{Decision, DecisionLog, TransactionId, Vote, dec
 const MAP_KEY: &[u8] = b"\xffCOL\x00\x7fcluster\x00map";
 const NEXT_TRANSACTION_KEY: &[u8] = b"\xffCOL\x00\x7fcluster\x00next-transaction";
 const DECISION_PREFIX: &[u8] = b"\xffCOL\x00\x7fcluster\x00decision\x00";
+const FEATURE_LEVEL_KEY: &[u8] = b"\xffCOL\x00\x7fcluster\x00feature-level";
+const FIRST_FEATURE_LEVEL: u32 = 1;
 const COMMIT: u8 = 1;
 const ABORT: u8 = 2;
 
@@ -62,6 +64,34 @@ impl Database {
             return Ok(false);
         }
         transaction.put_raw(MAP_KEY, &map.encode())?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// The feature level the cluster runs at (D1049): 1 until a rolling upgrade raised it.
+    pub fn cluster_feature_level(&self) -> Result<u32> {
+        let read = self.begin_read()?;
+        match read.get_raw(FEATURE_LEVEL_KEY)? {
+            Some(bytes) => Ok(u32::from_be_bytes(
+                bytes.as_slice().try_into().map_err(|_| broken("feature level"))?,
+            )),
+            None => Ok(FIRST_FEATURE_LEVEL),
+        }
+    }
+
+    /// Raises the cluster's feature level to `level` once every member speaks it; a level at
+    /// or below the stored one changes nothing. Returns whether it rose. In a cluster the write
+    /// goes through the log like any other, so every member learns it in order.
+    pub fn raise_cluster_feature_level(&self, level: u32) -> Result<bool> {
+        let mut transaction = self.begin_write()?;
+        let current = match transaction.get_raw(FEATURE_LEVEL_KEY)? {
+            Some(bytes) => u32::from_be_bytes(bytes.as_slice().try_into().map_err(|_| broken("feature level"))?),
+            None => FIRST_FEATURE_LEVEL,
+        };
+        if level <= current {
+            return Ok(false);
+        }
+        transaction.put_raw(FEATURE_LEVEL_KEY, &level.to_be_bytes())?;
         transaction.commit()?;
         Ok(true)
     }
