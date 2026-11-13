@@ -1,0 +1,34 @@
+[package]
+name = "eggdb-cortex-m"
+description = "EggDB's storage engine run on a Cortex-M3 under QEMU (D223, D1084): the B-tree, page cache, log and transactions without std, on wear-levelled flash in RAM. Never published and never shipped."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/eggspot/EggDB"
+publish = false
+
+[workspace]
+
+[dependencies]
+eggdb-format = { path = "../eggdb-format", default-features = false }
+eggdb-platform-core = { path = "../eggdb-platform-core", default-features = false }
+eggdb-storage = { path = "../eggdb-storage", default-features = false }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[profile.dev]
+panic = "abort"
+opt-level = "s"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1

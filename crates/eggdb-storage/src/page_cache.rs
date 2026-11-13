@@ -89,9 +89,9 @@ thread_local! {
 }
 
 #[cfg(not(feature = "std"))]
-static LOOKUP_HITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static LOOKUP_HITS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(not(feature = "std"))]
-static LOOKUP_READS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static LOOKUP_READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// The page lookups this thread has made so far; without `std`, which has one thread, those of
 /// the whole program.
@@ -103,8 +103,8 @@ pub fn thread_page_lookups() -> PageLookups {
     });
     #[cfg(not(feature = "std"))]
     let lookups = PageLookups {
-        hits: LOOKUP_HITS.load(core::sync::atomic::Ordering::Relaxed),
-        reads: LOOKUP_READS.load(core::sync::atomic::Ordering::Relaxed),
+        hits: LOOKUP_HITS.load(core::sync::atomic::Ordering::Relaxed) as u64,
+        reads: LOOKUP_READS.load(core::sync::atomic::Ordering::Relaxed) as u64,
     };
     lookups
 }

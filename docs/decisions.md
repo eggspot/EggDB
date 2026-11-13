@@ -1108,3 +1108,4 @@ its full title with its status.
 - [D1081](decisions/D1081.md) Code-only batch 729 (M17): the platform's error type and File and Clock traits without std
 - [D1082](decisions/D1082.md) Code-only batch 730 (M17): the storage engine without std, with a fixed-frame cache
 - [D1083](decisions/D1083.md) Code-only batch 731 (M17): wear levelling, header slots on flash, and power-loss tests
+- [D1084](decisions/D1084.md) Code-only batch 732 (M17): a QEMU Cortex-M run in CI

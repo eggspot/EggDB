@@ -2002,7 +2002,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Wear levelling, the header slots on flash, and power-loss tests on raw flash (D41, D223). **Code written, unbuilt**
   (code-only mode, 2026-11-13, D1083): `WearLevelled` (atomic block writes, a journal in two alternating slots, dynamic
   and static wear levelling, a power cut swept across every operation) and `FlashFile`, the engine's `File` on it.
-- A QEMU Cortex-M run in CI (D223).
+- A QEMU Cortex-M run in CI (D223). **Code written, unbuilt** (code-only mode, 2026-11-13, D1084): `eggdb-cortex-m` on
+  QEMU's `mps2-an385` in CI's `cortex-m` job.
 - A published memory floor and size budgets per microcontroller profile (D41, D230).
 - A fixed-memory mode that never allocates beyond a set budget (D41).
 - Write-amplification and flash-wear budgets, and battery-aware background work (D41).
