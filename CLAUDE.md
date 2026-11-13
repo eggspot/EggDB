@@ -184,7 +184,7 @@ Check each task against these before starting and again before opening the PR.
   protocol documentation. Reading other databases' source to learn how they work is allowed,
   copyleft and source-available ones included (owner, 2026-11-13: "all code here we write ourself
   only, could we read other code or learn from them"), but every line is written by us: never copy,
-  paste or line-by-line translate their code, and name the source in the decision when a part was
+  paste, translate or closely paraphrase their code, and name the source in the decision when a part was
   learned from someone else's code. No third-party crates in
   what we ship (Rust's standard library and our own OS API declarations are fine); the session's own
   research may approve a permissive (MIT, Apache-2.0, BSD) crate for tests, benchmarks or build
