@@ -434,7 +434,10 @@ jobs:
           assert g.V().has("stars", P.gt(4)).value_map("name").to_list() == [{"name": ["eggdb"]}]
           assert g.V().has_label("Person").count().next() >= 1
           connection.close()
-          print("gremlinpython over GraphSON 3: passed")
+          binary = DriverRemoteConnection(url, "g", username="eggdb", password="ci-resp-password")
+          assert traversal().with_remote(binary).V().has("software", "name", "eggdb").values("stars").next() == 5
+          binary.close()
+          print("gremlinpython over GraphSON 3 and GraphBinary: passed")
           PY
           "$RUNNER_TEMP/resp/bin/python" - <<'PY'
           from confluent_kafka import Consumer, Producer, TopicPartition, OFFSET_BEGINNING

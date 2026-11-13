@@ -1041,3 +1041,4 @@ its full title with its status.
 - [D1014](decisions/D1014.md) Code-only batch 662 (M13): RDF in the MCP tools with eggdb rdf get and run
 - [D1015](decisions/D1015.md) Code-only batch 663 (M13): the graph measured against Neo4j with LDBC-shaped data
 - [D1016](decisions/D1016.md) Code-only batch 664 (M13): Gremlin's branching steps
+- [D1017](decisions/D1017.md) Code-only batch 665 (M13): GraphBinary for Gremlin and bytecode results as traversers

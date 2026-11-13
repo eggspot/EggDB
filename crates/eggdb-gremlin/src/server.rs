@@ -87,17 +87,37 @@ fn request_id(json: &Json) -> Option<String> {
     }
 }
 
-fn body_of(message: &Message) -> Result<&[u8], String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Serializer {
+    GraphSonText,
+    GraphSonBinary,
+    GraphBinary,
+}
+
+fn request_of(message: &Message) -> Result<(Json, Serializer), (Serializer, String)> {
     if message.opcode != OPCODE_BINARY {
-        return Ok(&message.payload);
+        return parse(&message.payload)
+            .map(|json| (json, Serializer::GraphSonText))
+            .ok_or((Serializer::GraphSonText, "the request is not JSON".to_owned()));
     }
-    let (&length, rest) = message.payload.split_first().ok_or("an empty request")?;
-    let mime = rest.get(..usize::from(length)).ok_or("the request's MIME type is cut short")?;
-    let mime = std::str::from_utf8(mime).map_err(|_| "the request's MIME type is not text")?;
+    let failed = |message: &str| (Serializer::GraphSonBinary, message.to_owned());
+    let (&length, rest) = message.payload.split_first().ok_or_else(|| failed("an empty request"))?;
+    let mime = rest.get(..usize::from(length)).ok_or_else(|| failed("the request's MIME type is cut short"))?;
+    let mime = std::str::from_utf8(mime).map_err(|_| failed("the request's MIME type is not text"))?;
+    let body = &rest[usize::from(length)..];
+    if mime == crate::graphbinary::MIME {
+        return crate::graphbinary::read_request(body)
+            .map(|json| (json, Serializer::GraphBinary))
+            .map_err(|message| (Serializer::GraphBinary, message));
+    }
     if mime != GRAPHSON_V3 && mime != "application/json" {
-        return Err(format!("EggDB's Gremlin server speaks {GRAPHSON_V3}, not {mime}"));
+        return Err(failed(&format!("EggDB's Gremlin server speaks {GRAPHSON_V3} and {}, not {mime}", crate::graphbinary::MIME)));
     }
-    Ok(&rest[usize::from(length)..])
+    parse(body).map(|json| (json, Serializer::GraphSonBinary)).ok_or_else(|| failed("the request is not JSON"))
+}
+
+fn traverser(item: Json) -> Json {
+    Json::typed("g:Traverser", Json::object(vec![("bulk", Json::typed("g:Int64", Json::Integer(1))), ("value", item)]))
 }
 
 fn bindings(args: &Json) -> Result<Vec<(String, Value)>, String> {
@@ -193,7 +213,10 @@ impl Connection<'_> {
         if result.rows.len() > MAX_RESULTS {
             return vec![response(&request.id, SERVER_ERROR, &format!("the traversal returned more than {MAX_RESULTS} results"), None)];
         }
-        let items = shaped(&compiled, &result.rows);
+        let mut items = shaped(&compiled, &result.rows);
+        if request.op == "bytecode" {
+            items = items.into_iter().map(traverser).collect();
+        }
         if items.is_empty() {
             return vec![response(&request.id, NO_CONTENT, "", None)];
         }
@@ -207,14 +230,15 @@ impl Connection<'_> {
             .collect()
     }
 
-    fn handle(&mut self, message: &Message) -> Vec<Json> {
-        let body = match body_of(message) {
-            Ok(body) => body,
-            Err(text) => return vec![response("", MALFORMED_REQUEST, &text, None)],
+    fn handle(&mut self, message: &Message) -> (Vec<Json>, Serializer) {
+        let (json, serializer) = match request_of(message) {
+            Ok(found) => found,
+            Err((serializer, text)) => return (vec![response("", MALFORMED_REQUEST, &text, None)], serializer),
         };
-        let Some(json) = parse(body) else {
-            return vec![response("", MALFORMED_REQUEST, "the request is not JSON", None)];
-        };
+        (self.handle_request(&json), serializer)
+    }
+
+    fn handle_request(&mut self, json: &Json) -> Vec<Json> {
         let Some(id) = json.field("requestId").and_then(request_id) else {
             return vec![response("", MALFORMED_REQUEST, "the request has no requestId", None)];
         };
@@ -260,9 +284,14 @@ fn serve_stream(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(()),
             Err(error) => return Err(error),
         };
-        let opcode = if message.opcode == OPCODE_BINARY { OPCODE_BINARY } else { OPCODE_TEXT };
-        for reply in connection.handle(&message) {
-            writer.write_all(&frame(opcode, reply.to_text().as_bytes()))?;
+        let (replies, serializer) = connection.handle(&message);
+        for reply in replies {
+            let bytes = match serializer {
+                Serializer::GraphSonText => frame(OPCODE_TEXT, reply.to_text().as_bytes()),
+                Serializer::GraphSonBinary => frame(OPCODE_BINARY, reply.to_text().as_bytes()),
+                Serializer::GraphBinary => frame(OPCODE_BINARY, &crate::graphbinary::response_bytes(&reply)),
+            };
+            writer.write_all(&bytes)?;
         }
     }
 }
@@ -313,7 +342,7 @@ mod tests {
 
     fn request(connection: &mut Connection<'_>, body: &str) -> Vec<String> {
         let message = Message { opcode: OPCODE_TEXT, payload: body.as_bytes().to_vec() };
-        connection.handle(&message).iter().map(Json::to_text).collect()
+        connection.handle(&message).0.iter().map(Json::to_text).collect()
     }
 
     #[test]
