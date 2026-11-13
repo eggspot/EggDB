@@ -221,6 +221,16 @@ fn apply(
             crate::partition_alter::truncate(writer, tables, &parent, partitions)?;
             Ok(None)
         }
+        AlterAction::DropSubpartitions(subpartitions) => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::drop_subpartitions(writer, tables, &parent, subpartitions, dialect)?;
+            Ok(None)
+        }
+        AlterAction::TruncateSubpartitions(subpartitions) => {
+            let parent = current(writer, tables, name)?;
+            crate::partition_alter::truncate_subpartitions(writer, tables, &parent, subpartitions)?;
+            Ok(None)
+        }
         AlterAction::MaintainPartitions(partitions) => {
             let parent = current(writer, tables, name)?;
             crate::partition_alter::check_named(writer, tables, &parent, partitions)?;

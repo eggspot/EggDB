@@ -3,7 +3,9 @@ use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{self, TableCache};
-use crate::partition_ddl::{attach_resolved, copy_of, named_child, same_columns};
+use crate::partition_ddl::{
+    MYSQL_PARTITION_MARKER, attach_resolved, copy_of, named_child, same_columns,
+};
 use crate::partitions::{
     self, BoundText, PartitionBound, PartitionKey, PartitionStrategy, checked_range,
     highest_range_end, list_bound, list_values, range_bound_from, range_end, range_start,
@@ -82,6 +84,67 @@ fn table_name(text: &str, position: usize) -> Name {
     }
 }
 
+struct Subpartitioning {
+    key: PartitionKey,
+    sibling: String,
+    subpartitions: Vec<(String, PartitionBound)>,
+}
+
+fn short_name<'n>(owner: &str, name: &'n str) -> &'n str {
+    name.strip_prefix(owner)
+        .and_then(|rest| rest.strip_prefix(MYSQL_PARTITION_MARKER))
+        .unwrap_or(name)
+}
+
+fn subpartitioning(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    state: &Partitioned,
+) -> SqlResult<Option<Subpartitioning>> {
+    let catalog = partitions::catalog(writer, tables)?;
+    for (child, _) in &state.children {
+        let Some(key) = catalog.key_of(child) else {
+            continue;
+        };
+        let subpartitions = catalog
+            .children_of(child)
+            .into_iter()
+            .map(|(name, bound)| (short_name(child, name).to_owned(), bound.clone()))
+            .collect();
+        return Ok(Some(Subpartitioning {
+            key: key.clone(),
+            sibling: short_name(&parent.name, child).to_owned(),
+            subpartitions,
+        }));
+    }
+    Ok(None)
+}
+
+fn leaves(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    children: &[String],
+) -> SqlResult<Vec<String>> {
+    let catalog = partitions::catalog(writer, tables)?;
+    let mut found = Vec::new();
+    let mut pending: Vec<String> = children.iter().rev().cloned().collect();
+    while let Some(table) = pending.pop() {
+        if catalog.key_of(&table).is_some() {
+            let mut below: Vec<String> = catalog
+                .children_of(&table)
+                .into_iter()
+                .map(|(name, _)| name.to_owned())
+                .collect();
+            below.reverse();
+            pending.extend(below);
+        } else {
+            found.push(table);
+        }
+    }
+    Ok(found)
+}
+
 pub(crate) fn create_child(
     writer: &mut dyn KeyValueWrite,
     tables: &mut TableCache,
@@ -93,6 +156,35 @@ pub(crate) fn create_child(
     let child = copy_of(parent, name.clone())?;
     execute::create_table(writer, tables, &child, dialect)?;
     attach_resolved(writer, tables, parent, name, bound)
+}
+
+fn create_partition(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    name: &Name,
+    bound: PartitionBound,
+    sub: Option<&Subpartitioning>,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    create_child(writer, tables, parent, name, bound, dialect)?;
+    let Some(sub) = sub else {
+        return Ok(());
+    };
+    let mut record = partitions::stored(writer, &name.text)?;
+    record.key = Some(sub.key.clone());
+    partitions::save(writer, &name.text, &record)?;
+    let child = tables.require_target(writer, name, "add a partition to")?;
+    let short = short_name(&parent.name, &name.text).to_owned();
+    for (sub_short, sub_bound) in &sub.subpartitions {
+        let renamed = match sub_short.strip_prefix(sub.sibling.as_str()) {
+            Some(rest) => format!("{short}{rest}"),
+            None => format!("{short}_{sub_short}"),
+        };
+        let sub_name = named_child(&child, &renamed, name.position);
+        create_child(writer, tables, &child, &sub_name, sub_bound.clone(), dialect)?;
+    }
+    Ok(())
 }
 
 fn not_for_hash(position: usize) -> SqlError {
@@ -114,6 +206,7 @@ pub(crate) fn add(
     dialect: Dialect,
 ) -> SqlResult<()> {
     let state = partitioned(writer, tables, parent, position)?;
+    let sub = subpartitioning(writer, tables, parent, &state)?;
     if partitions::stored(writer, &parent.name)?.interval.is_some() {
         return Err(SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,
@@ -134,7 +227,7 @@ pub(crate) fn add(
                 let bound = range_bound_from(from, values, &state.types, partition.name.position)?;
                 from = range_end(&bound).unwrap_or_default().to_vec();
                 let name = named_child(parent, &partition.name.text, partition.name.position);
-                create_child(writer, tables, parent, &name, bound, dialect)?;
+                create_partition(writer, tables, parent, &name, bound, sub.as_ref(), dialect)?;
             }
             Ok(())
         }
@@ -146,7 +239,7 @@ pub(crate) fn add(
                 let bound =
                     list_bound(values, &state.key, &state.types, partition.name.position)?;
                 let name = named_child(parent, &partition.name.text, partition.name.position);
-                create_child(writer, tables, parent, &name, bound, dialect)?;
+                create_partition(writer, tables, parent, &name, bound, sub.as_ref(), dialect)?;
             }
             Ok(())
         }
@@ -199,8 +292,8 @@ fn take_rows(
     position: usize,
 ) -> SqlResult<Vec<Vec<Value>>> {
     let mut rows = Vec::new();
-    for child in children {
-        let table = tables.require_target(writer, &table_name(child, position), "reorganize")?;
+    for child in leaves(writer, tables, children)? {
+        let table = tables.require_target(writer, &table_name(&child, position), "reorganize")?;
         rows.extend(execute::every_row(writer, &table)?.into_iter().map(|(_, row)| row));
     }
     Ok(rows)
@@ -230,10 +323,12 @@ fn rebuild(
     position: usize,
     dialect: Dialect,
 ) -> SqlResult<()> {
+    let state = partitioned(writer, tables, parent, position)?;
+    let sub = subpartitioning(writer, tables, parent, &state)?;
     let rows = take_rows(writer, tables, old, position)?;
     drop_children(writer, tables, old, position, dialect)?;
     for (name, bound) in new {
-        create_child(writer, tables, parent, &name, bound, dialect)?;
+        create_partition(writer, tables, parent, &name, bound, sub.as_ref(), dialect)?;
     }
     let parent = tables.require_target(writer, &table_name(&parent.name, position), "reorganize")?;
     crate::partition_dml::reinsert_rows(writer, tables, &parent, rows)
@@ -308,8 +403,83 @@ pub(crate) fn truncate(
             .map(|partition| existing(&state, parent, partition).map(|(name, _)| name.clone()))
             .collect::<SqlResult<_>>()?
     };
-    for child in children {
+    for child in leaves(writer, tables, &children)? {
         let table = tables.require_target(writer, &table_name(&child, position), "truncate")?;
+        let rows = execute::every_row(writer, &table)?;
+        execute::delete_rows(writer, tables, &table, rows, &mut |_| Ok(()))?;
+    }
+    Ok(())
+}
+
+fn subpartitions_named(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    named: &[Name],
+) -> SqlResult<Vec<(String, String)>> {
+    let position = named.first().map_or(0, |name| name.position);
+    let state = partitioned(writer, tables, parent, position)?;
+    let catalog = partitions::catalog(writer, tables)?;
+    let mut found = Vec::with_capacity(named.len());
+    for wanted in named {
+        let hit = state.children.iter().find_map(|(child, _)| {
+            catalog
+                .children_of(child)
+                .into_iter()
+                .find(|(sub, _)| short_name(child, sub).eq_ignore_ascii_case(&wanted.text))
+                .map(|(sub, _)| (child.clone(), sub.to_owned()))
+        });
+        found.push(hit.ok_or_else(|| {
+            SqlError::new(
+                SqlState::UNDEFINED_OBJECT,
+                format!("subpartition \"{}\" does not exist", wanted.text),
+            )
+            .with_oracle_code(14251)
+            .at(wanted.position)
+        })?);
+    }
+    Ok(found)
+}
+
+/// Oracle's `ALTER TABLE ... DROP SUBPARTITION`: drops each named subpartition with its rows.
+/// A partition keeps at least one subpartition (`ORA-14629`).
+pub(crate) fn drop_subpartitions(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    named: &[Name],
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let position = named.first().map_or(0, |name| name.position);
+    let found = subpartitions_named(writer, tables, parent, named)?;
+    let catalog = partitions::catalog(writer, tables)?;
+    for (partition, _) in &found {
+        let left = catalog.children_of(partition).len();
+        let going = found.iter().filter(|(owner, _)| owner == partition).count();
+        if going >= left {
+            return Err(SqlError::new(
+                SqlState::INVALID_TABLE_DEFINITION,
+                "cannot drop the only subpartition of a partition",
+            )
+            .with_oracle_code(14629)
+            .at(position));
+        }
+    }
+    let subpartitions: Vec<String> = found.into_iter().map(|(_, sub)| sub).collect();
+    drop_children(writer, tables, &subpartitions, position, dialect)
+}
+
+/// Oracle's `ALTER TABLE ... TRUNCATE SUBPARTITION`: removes the rows of each named
+/// subpartition.
+pub(crate) fn truncate_subpartitions(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    parent: &TableDefinition,
+    named: &[Name],
+) -> SqlResult<()> {
+    let position = named.first().map_or(0, |name| name.position);
+    for (_, sub) in subpartitions_named(writer, tables, parent, named)? {
+        let table = tables.require_target(writer, &table_name(&sub, position), "truncate")?;
         let rows = execute::every_row(writer, &table)?;
         execute::delete_rows(writer, tables, &table, rows, &mut |_| Ok(()))?;
     }
@@ -506,6 +676,14 @@ pub(crate) fn exchange(
     let position = partition.position;
     let state = partitioned(writer, tables, parent, position)?;
     let (child, bound) = existing(&state, parent, partition)?.clone();
+    if partitions::catalog(writer, tables)?.key_of(&child).is_some() {
+        return Err(SqlError::new(
+            SqlState::FEATURE_NOT_SUPPORTED,
+            "exchanging a partition that has subpartitions is not supported; exchange its subpartitions one at a time",
+        )
+        .with_oracle_code(14291)
+        .at(position));
+    }
     let other_name = crate::schemas::resolve_relation(writer, &table.text)?;
     let other = tables.require_target(writer, &table_name(&other_name, table.position), "exchange")?;
     let catalog = partitions::catalog(writer, tables)?;
@@ -838,8 +1016,12 @@ fn row_count(
     child: &str,
     position: usize,
 ) -> SqlResult<usize> {
-    let table = tables.require_target(writer, &table_name(child, position), "modify")?;
-    Ok(execute::every_row(writer, &table)?.len())
+    let mut count = 0;
+    for leaf in leaves(writer, tables, &[child.to_owned()])? {
+        let table = tables.require_target(writer, &table_name(&leaf, position), "modify")?;
+        count += execute::every_row(writer, &table)?.len();
+    }
+    Ok(count)
 }
 
 fn bound_text_shown(value: &BoundText) -> String {

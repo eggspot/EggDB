@@ -509,7 +509,19 @@ fn subpartitioning(
     let Some(sub) = &by.subpartition_by else {
         return Ok(None);
     };
-    let partitions = if named.is_empty() {
+    let partitions = if named.is_empty() && !sub.template.is_empty() {
+        sub.template
+            .iter()
+            .map(|template| NamedPartition {
+                name: Name {
+                    text: format!("{partition}_{}", template.name.text),
+                    position: template.name.position,
+                },
+                bound: template.bound.clone(),
+                subpartitions: Vec::new(),
+            })
+            .collect()
+    } else if named.is_empty() {
         if sub.strategy != PartitionStrategy::Hash {
             return Err(SqlError::new(
                 SqlState::INVALID_TABLE_DEFINITION,

@@ -195,15 +195,36 @@ impl Parser<'_> {
             }
         }
         let key = self.partition_key()?;
-        let count = if self.take_word("subpartitions") {
+        let mut count = if self.take_word("subpartitions") {
             Some(self.partition_count()?)
         } else {
             None
         };
+        let mut template = Vec::new();
+        if self.oracle() && self.is_word("subpartition") && self.is_word_at(1, "template") {
+            self.at += 2;
+            if self.peek_kind() == &TokenKind::LeftParen {
+                template = self.subpartition_definitions(Some(strategy))?;
+                if template.is_empty() {
+                    return Err(self.unexpected());
+                }
+            } else {
+                if strategy != PartitionStrategy::Hash {
+                    return Err(SqlError::new(
+                        SqlState::INVALID_TABLE_DEFINITION,
+                        "a subpartition template of a range or list subpartitioning names its subpartitions",
+                    )
+                    .with_oracle_code(14160)
+                    .at(self.position()));
+                }
+                count = Some(self.partition_count()?);
+            }
+        }
         Ok(SubpartitionBy {
             strategy,
             key,
             count,
+            template,
             mysql_integer_key: self.mysql() && !by_key,
             position,
         })
@@ -497,6 +518,18 @@ impl Parser<'_> {
                 hash_count: None,
                 position,
             });
+            return Ok(true);
+        }
+        if self.oracle() && self.is_word("drop") && self.is_word_at(1, "subpartition") {
+            self.at += 2;
+            actions.push(AlterAction::DropSubpartitions(self.partition_names()?));
+            self.skip_oracle_index_clauses();
+            return Ok(true);
+        }
+        if self.oracle() && self.is_word("truncate") && self.is_word_at(1, "subpartition") {
+            self.at += 2;
+            actions.push(AlterAction::TruncateSubpartitions(self.partition_names()?));
+            self.skip_oracle_index_clauses();
             return Ok(true);
         }
         if self.is_word("drop") && partition_word(self, 1) {

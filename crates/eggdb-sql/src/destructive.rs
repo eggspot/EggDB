@@ -1097,7 +1097,16 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
                     .join(", "),
                 false,
             ),
-            AlterAction::TruncatePartitions(partitions) => (
+            AlterAction::DropSubpartitions(partitions) => (
+                DestructiveKind::DropPartition,
+                partitions
+                    .iter()
+                    .map(|partition| format!("{table}.{}", shown(partition)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                false,
+            ),
+            AlterAction::TruncatePartitions(partitions) | AlterAction::TruncateSubpartitions(partitions) => (
                 DestructiveKind::Truncate,
                 partitions
                     .iter()

@@ -1144,3 +1144,4 @@ its full title with its status.
 - [D1117](decisions/D1117.md) Code-only batch 765 (M1): EggDB's own allocator in the default build
 - [D1118](decisions/D1118.md) Code-only batch 766 (M1): CXL and persistent memory as memory-only NUMA nodes for the page cache, and the GPU decision
 - [D1119](decisions/D1119.md) Code-only batch 767 (M2): LSM trees per table with WITH (storage = lsm)
+- [D1120](decisions/D1120.md) Code-only batch 768 (M2): subpartitions in the partition ALTERs, SUBPARTITION TEMPLATE and DROP or TRUNCATE SUBPARTITION

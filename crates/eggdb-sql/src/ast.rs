@@ -1058,6 +1058,8 @@ pub(crate) enum AlterAction {
     },
     DropPartitions(Vec<Name>),
     TruncatePartitions(Vec<Name>),
+    DropSubpartitions(Vec<Name>),
+    TruncateSubpartitions(Vec<Name>),
     MaintainPartitions(Vec<Name>),
     ReorganizePartitions {
         from: Vec<Name>,
@@ -1465,6 +1467,7 @@ pub(crate) struct SubpartitionBy {
     pub(crate) strategy: PartitionStrategy,
     pub(crate) key: Vec<PartitionKeyPart>,
     pub(crate) count: Option<u32>,
+    pub(crate) template: Vec<NamedPartition>,
     pub(crate) mysql_integer_key: bool,
     pub(crate) position: usize,
 }
