@@ -1137,3 +1137,4 @@ its full title with its status.
 - [D1110](decisions/D1110.md) Code-only batch 758 (M18): filter pushdown into foreign tables
 - [D1111](decisions/D1111.md) Code-only batch 759 (M18): federated SQL in Trino's style with server.schema.table names imported on first use
 - [D1112](decisions/D1112.md) Code-only batch 760 (M18): a fleet control plane with inventory, canary-wave upgrades and placement by hardware class
+- [D1113](decisions/D1113.md) Code-only batch 761 (M18): databases per tenant at millions of tenants, and a tenant lifecycle API

@@ -4,7 +4,7 @@ use eggdb_sql::{
     DatabaseDirectory, KeyValueStore, ServedDatabaseError, ServedDatabases, SqlResult,
     is_valid_database_name,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -19,6 +19,62 @@ pub(super) struct ServedDirectory<'d> {
     read_only: bool,
     others: Mutex<BTreeMap<String, Arc<OwnedStore>>>,
     listing_version: AtomicU64,
+    tenants: Option<TenantFiles>,
+}
+
+/// Databases per tenant (D1113): kept under `<directory>/tenants/<aa>/<bb>/<name>.eggdb`, the
+/// two levels from the name's SHA-256 so no directory holds more than a few thousand files at
+/// millions of tenants, opened when first used, and closed again once `max_open` are open and
+/// they are the least recently used ones no session holds. Tenants suspended or deleted through
+/// the tenant API are refused.
+pub(super) struct TenantFiles {
+    root: PathBuf,
+    max_open: usize,
+    used: Mutex<BTreeMap<String, u64>>,
+    tick: AtomicU64,
+    refused: Mutex<BTreeSet<String>>,
+}
+
+impl TenantFiles {
+    /// Tenant files under `directory/tenants`, at most `max_open` open at once, refusing the
+    /// tenants in `refused`.
+    pub(super) fn new(directory: &std::path::Path, max_open: usize, refused: BTreeSet<String>) -> Self {
+        Self {
+            root: directory.join("tenants"),
+            max_open: max_open.max(1),
+            used: Mutex::new(BTreeMap::new()),
+            tick: AtomicU64::new(0),
+            refused: Mutex::new(refused),
+        }
+    }
+
+    /// Where tenant `name`'s file is.
+    pub(super) fn path_of(&self, name: &str) -> PathBuf {
+        let digest = eggdb_crypto::sha256(name.as_bytes());
+        self.root
+            .join(format!("{:02x}", digest[0]))
+            .join(format!("{:02x}", digest[1]))
+            .join(format!("{name}.{DATABASE_EXTENSION}"))
+    }
+
+    /// Refuses tenant `name` from now on, or serves it again.
+    pub(super) fn set_refused(&self, name: &str, refused: bool) {
+        let mut set = self.refused.lock().unwrap_or_else(PoisonError::into_inner);
+        if refused {
+            set.insert(name.to_owned());
+        } else {
+            set.remove(name);
+        }
+    }
+
+    fn is_refused(&self, name: &str) -> bool {
+        self.refused.lock().unwrap_or_else(PoisonError::into_inner).contains(name)
+    }
+
+    fn touch(&self, name: &str) {
+        let tick = self.tick.fetch_add(1, Ordering::Relaxed);
+        self.used.lock().unwrap_or_else(PoisonError::into_inner).insert(name.to_owned(), tick);
+    }
 }
 
 pub(super) enum AttachedDatabase<'a> {
@@ -33,6 +89,7 @@ pub(super) struct ServedDirectorySetup<'d> {
     pub(super) options: eggdb::Options,
     pub(super) read_only: bool,
     pub(super) others: Vec<(String, Database)>,
+    pub(super) tenants: Option<TenantFiles>,
 }
 
 impl<'d> ServedDirectory<'d> {
@@ -50,6 +107,7 @@ impl<'d> ServedDirectory<'d> {
             read_only: setup.read_only,
             others: Mutex::new(others),
             listing_version: AtomicU64::new(0),
+            tenants: setup.tenants,
         }
     }
 
@@ -90,6 +148,59 @@ impl<'d> ServedDirectory<'d> {
             ));
         }
         Ok(directory)
+    }
+
+    /// The tenant files, when this server keeps a database per tenant.
+    pub(super) fn tenant_files(&self) -> Option<&TenantFiles> {
+        self.tenants.as_ref()
+    }
+
+    /// Closes tenant databases past the open limit, the least recently used first, skipping
+    /// those a session holds.
+    fn close_idle_tenants(&self, others: &mut BTreeMap<String, Arc<OwnedStore>>) {
+        let Some(tenants) = &self.tenants else {
+            return;
+        };
+        let used = tenants.used.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let mut open: Vec<(u64, String)> = others
+            .keys()
+            .filter_map(|name| used.get(name).map(|tick| (*tick, name.clone())))
+            .collect();
+        if open.len() <= tenants.max_open {
+            return;
+        }
+        open.sort();
+        let mut excess = open.len() - tenants.max_open;
+        for (_, name) in open {
+            if excess == 0 {
+                break;
+            }
+            if others.get(&name).is_some_and(|store| Arc::strong_count(store) == 1) {
+                others.remove(&name);
+                tenants.used.lock().unwrap_or_else(PoisonError::into_inner).remove(&name);
+                excess -= 1;
+            }
+        }
+    }
+
+    /// Opens tenant `name`'s database when its file exists and it is not refused.
+    fn open_tenant(&self, name: &str) -> Option<Arc<OwnedStore>> {
+        let tenants = self.tenants.as_ref()?;
+        if !is_valid_database_name(name) || tenants.is_refused(name) {
+            return None;
+        }
+        let path = tenants.path_of(name);
+        if !path.is_file() {
+            return None;
+        }
+        let options = self.options.clone().create_if_missing(false).read_only(self.read_only);
+        let db = Database::open_with(&path, options).ok()?;
+        let store = Arc::new(OwnedStore(db));
+        let mut others = self.others();
+        let store = Arc::clone(others.entry(name.to_owned()).or_insert(store));
+        tenants.touch(name);
+        self.close_idle_tenants(&mut others);
+        Some(store)
     }
 
     fn changed_listing(&self) {
@@ -159,9 +270,17 @@ impl ServedDatabases for ServedDirectory<'_> {
         if name.eq_ignore_ascii_case(&self.default_name) || served_key(&others, name).is_some() {
             return Err(ServedDatabaseError::Exists);
         }
-        let path = directory.join(format!("{name}.{DATABASE_EXTENSION}"));
+        let path = match &self.tenants {
+            Some(tenants) => tenants.path_of(name),
+            None => directory.join(format!("{name}.{DATABASE_EXTENSION}")),
+        };
         if std::fs::symlink_metadata(&path).is_ok() {
             return Err(ServedDatabaseError::Exists);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ServedDatabaseError::Failed(format!("cannot create {}: {error}", parent.display()))
+            })?;
         }
         let options = self
             .options
@@ -172,6 +291,10 @@ impl ServedDatabases for ServedDirectory<'_> {
             ServedDatabaseError::Failed(format!("cannot create {}: {error}", path.display()))
         })?;
         others.insert(name.to_owned(), Arc::new(OwnedStore(db)));
+        if let Some(tenants) = &self.tenants {
+            tenants.touch(name);
+            self.close_idle_tenants(&mut others);
+        }
         self.changed_listing();
         Ok(())
     }
@@ -180,6 +303,9 @@ impl ServedDatabases for ServedDirectory<'_> {
         self.changing_directory()?;
         if name.eq_ignore_ascii_case(&self.default_name) {
             return Err(ServedDatabaseError::InUse);
+        }
+        if served_key(&self.others(), name).is_none() && self.open_tenant(name).is_none() {
+            return Err(ServedDatabaseError::Missing);
         }
         let mut others = self.others();
         let Some(key) = served_key(&others, name).map(str::to_owned) else {
@@ -245,9 +371,21 @@ impl DatabaseDirectory for ServedDirectory<'_> {
         if name == self.default_name {
             return Some(AttachedDatabase::Default(self.default));
         }
-        self.others()
-            .get(name)
-            .map(|store| AttachedDatabase::Other(Arc::clone(store)))
+        if let Some(tenants) = &self.tenants
+            && tenants.is_refused(name)
+        {
+            return None;
+        }
+        let open = self.others().get(name).map(Arc::clone);
+        match open {
+            Some(store) => {
+                if let Some(tenants) = &self.tenants {
+                    tenants.touch(name);
+                }
+                Some(AttachedDatabase::Other(store))
+            }
+            None => self.open_tenant(name).map(AttachedDatabase::Other),
+        }
     }
 }
 
@@ -326,7 +464,38 @@ mod tests {
             options: eggdb::Options::new(),
             read_only: false,
             others: Vec::new(),
+            tenants: None,
         })
+    }
+
+    #[test]
+    fn tenant_databases_open_on_first_use_and_close_past_the_cap() {
+        let scratch = Scratch::new("tenants");
+        let db = Database::open(scratch.0.join("main.eggdb")).expect("main");
+        let default = DatabaseStore(&db);
+        let served = ServedDirectory::new(ServedDirectorySetup {
+            default_name: "main",
+            default: &default,
+            directory: Some(scratch.0.clone()),
+            options: eggdb::Options::new(),
+            read_only: false,
+            others: Vec::new(),
+            tenants: Some(TenantFiles::new(&scratch.0, 1, BTreeSet::new())),
+        });
+        served.create("alice").expect("alice");
+        served.create("bob").expect("bob");
+        let tenants = served.tenant_files().expect("tenant files");
+        assert!(tenants.path_of("alice").is_file());
+        assert!(tenants.path_of("alice").starts_with(scratch.0.join("tenants")));
+        assert_eq!(served.others().len(), 1);
+        assert!(served.attach("alice").is_some());
+        assert!(served.others().contains_key("alice"));
+        assert!(!served.others().contains_key("bob"));
+        tenants.set_refused("bob", true);
+        assert!(served.attach("bob").is_none());
+        tenants.set_refused("bob", false);
+        assert!(served.attach("bob").is_some());
+        assert!(served.attach("carol").is_none());
     }
 
     #[test]

@@ -619,6 +619,19 @@ impl Session<'_> {
             None => None,
         };
         let dynamodb_secret = dynamodb_listener.as_ref().map(|_| password.clone());
+        let tenant_api_listener = match options.tenant_api_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() && tls.is_none() {
+                    return Err(usage(format!(
+                        "--tenant-api-listen {address}: callers outside this machine use HTTPS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for the tenant API on {address}: {error}"), Exit::DatabaseError)
+                })?)
+            }
+            None => None,
+        };
         let fleet_listener = match options.fleet_listen {
             Some(address) => {
                 if !address.ip().is_loopback() && tls.is_none() {
@@ -1191,6 +1204,20 @@ impl Session<'_> {
             None => self.database_options(Access::ReadOnly, None),
         };
         let store = DatabaseStore(&db);
+        let tenant_files = match options.tenant_databases {
+            Some(max_open) => {
+                if !self.request.file.is_dir() {
+                    return Err(usage("--tenant-databases keeps a database per tenant in a served directory; serve a directory (eggdb serve <directory>)".to_owned()));
+                }
+                let refused = super::serve_tenants::refused_tenants(&store)
+                    .map_err(|message| Failure::database(format!("cannot read the tenant registry: {message}"), Exit::DatabaseError))?;
+                Some(super::serve_databases::TenantFiles::new(&self.request.file, max_open, refused))
+            }
+            None => None,
+        };
+        if options.tenant_api_listen.is_some() && tenant_files.is_none() {
+            return Err(usage("--tenant-api-listen goes with --tenant-databases".to_owned()));
+        }
         let served_databases = ServedDirectory::new(ServedDirectorySetup {
             default_name: &config.database,
             default: &store,
@@ -1202,6 +1229,7 @@ impl Session<'_> {
             options: self.database_options(Access::Write { create: true }, None),
             read_only,
             others: directory,
+            tenants: tenant_files,
         });
         self.fire_instance_triggers(&store, InstanceEvent::Startup);
         let (events, received) = std::sync::mpsc::channel::<String>();
@@ -1653,6 +1681,25 @@ impl Session<'_> {
             let jmap_push = scope.spawn(|| {
                 if jmap_listener.is_some() {
                     jmap_endpoint.run_push(&stop_signals::requested);
+                }
+            });
+            let tenant_api = scope.spawn(|| match &tenant_api_listener {
+                Some(listener) => {
+                    let api = super::serve_tenants::TenantApi { registry: &store, served: &served_databases, password: &password };
+                    eggdb_http::serve_with_limits(
+                        listener,
+                        &|request| api.answer(request),
+                        &stop_signals::requested,
+                        &eggdb_http::Limits::new(1 << 20, &memory_budget)
+                            .with_rate_limit(rate_limiter.as_ref())
+                            .with_tls(tls.as_ref().map(|setup| &*setup.postgresql)),
+                    )
+                }
+                None => Ok(()),
+            });
+            let tenant_keeper = scope.spawn(|| {
+                if served_databases.tenant_files().is_some() && !read_only {
+                    super::serve_tenants::keep_tenants(&store, &served_databases, &stop_signals::requested);
                 }
             });
             let fleet_server = scope.spawn(|| match &fleet_listener {
@@ -2304,6 +2351,8 @@ impl Session<'_> {
             let _ = couch_server.join();
             let _ = fleet_server.join();
             let _ = fleet_reporter.join();
+            let _ = tenant_api.join();
+            let _ = tenant_keeper.join();
             let _ = placement_keeper.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();

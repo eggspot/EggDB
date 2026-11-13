@@ -312,6 +312,8 @@ impl CommandName {
             | OptionName::SyncListen
             | OptionName::CouchListen
             | OptionName::FleetListen
+            | OptionName::TenantDatabases
+            | OptionName::TenantApiListen
             | OptionName::FleetReport
             | OptionName::FleetCluster
             | OptionName::FleetClass
@@ -574,6 +576,8 @@ enum OptionName {
     SyncListen,
     CouchListen,
     FleetListen,
+    TenantDatabases,
+    TenantApiListen,
     FleetReport,
     FleetCluster,
     FleetClass,
@@ -774,6 +778,8 @@ impl OptionName {
             b"sync-listen" => Self::SyncListen,
             b"couch-listen" => Self::CouchListen,
             b"fleet-listen" => Self::FleetListen,
+            b"tenant-databases" => Self::TenantDatabases,
+            b"tenant-api-listen" => Self::TenantApiListen,
             b"fleet-report" => Self::FleetReport,
             b"fleet-cluster" => Self::FleetCluster,
             b"fleet-class" => Self::FleetClass,
@@ -1199,6 +1205,8 @@ pub(crate) struct ServeOptions {
     pub(crate) sync_listen: Option<SocketAddr>,
     pub(crate) couch_listen: Option<SocketAddr>,
     pub(crate) fleet_listen: Option<SocketAddr>,
+    pub(crate) tenant_databases: Option<usize>,
+    pub(crate) tenant_api_listen: Option<SocketAddr>,
     pub(crate) fleet_report: Option<String>,
     pub(crate) fleet_cluster: Option<String>,
     pub(crate) fleet_class: Option<String>,
@@ -1954,6 +1962,15 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     )));
                 }
                 request.serve.restore_from = Some(url.to_owned());
+            }
+            OptionName::TenantDatabases => {
+                let open = parse_whole_number(value.as_encoded_bytes())
+                    .filter(|open| (1..=1_000_000).contains(open))
+                    .ok_or_else(|| usage(format!("{} takes how many tenant databases may be open at once, 1 to 1000000, not '{}'", option.spelled, shown(value))))?;
+                request.serve.tenant_databases = Some(open as usize);
+            }
+            OptionName::TenantApiListen => {
+                request.serve.tenant_api_listen = Some(parse_listen(&option.spelled, value, 7800).map_err(usage)?);
             }
             OptionName::FleetListen => {
                 request.serve.fleet_listen = Some(parse_listen(&option.spelled, value, 7700).map_err(usage)?);

@@ -49,6 +49,7 @@ mod serve_databases;
 mod serve_cluster;
 mod serve_quorum;
 mod serve_multi_primary;
+mod serve_tenants;
 mod serve_failover;
 mod report_delivery;
 mod serve_jobs;
