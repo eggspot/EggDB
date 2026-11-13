@@ -87,7 +87,8 @@ impl<'a> Scope<'a> {
 
     pub(crate) fn is_hidden(&self, offset: usize) -> bool {
         self.source_of(offset).is_some_and(|(source, index)| {
-            crate::temp_tables::is_hidden_column(&source.table.columns[index].name)
+            let name = &source.table.columns[index].name;
+            crate::temp_tables::is_hidden_column(name) || crate::invisible_columns::is_invisible(&source.table.name, name)
         })
     }
 

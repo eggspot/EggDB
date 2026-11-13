@@ -1290,6 +1290,7 @@ fn insert_targets(
             (0..table.columns.len())
                 .filter(|&index| Some(index) != identity)
                 .filter(|&index| !(hides_generated && table.is_generated(index)))
+                .filter(|&index| !crate::invisible_columns::is_invisible(&table.name, &table.columns[index].name))
                 .collect()
         }
     };

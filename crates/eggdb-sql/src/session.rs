@@ -27,6 +27,7 @@ mod sqlserver_ddl_triggers;
 mod sqlserver_partitions;
 mod oracle_system_triggers;
 mod backup;
+mod invisible;
 mod logical_slots;
 pub(crate) mod freshness;
 pub(crate) mod switchover;
@@ -2011,8 +2012,16 @@ impl<'s> Session<'s> {
             property_graphs::GraphText::Unchanged => None,
         };
         let text = rewritten.as_deref().unwrap_or(text);
+        let invisible = self.invisible_columns_declared(text);
+        self.prepare_invisible_columns(text);
         let reader = self.file_reader;
-        crate::new_files::with_reader(reader, || self.run_text_with_reader(text, parameters, on_result, client))
+        let outcome = crate::new_files::with_reader(reader, || self.run_text_with_reader(text, parameters, on_result, client));
+        if outcome.is_ok()
+            && let Some((table, columns)) = invisible
+        {
+            self.record_invisible_columns(&table, &columns)?;
+        }
+        outcome
     }
 
     fn prepare_writer_snapshot(&mut self, text: &str) -> SqlResult<()> {

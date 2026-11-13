@@ -1056,3 +1056,4 @@ its full title with its status.
 - [D1029](decisions/D1029.md) Code-only batch 677 (M14): Jepsen-style checks against real processes
 - [D1030](decisions/D1030.md) Code-only batch 678 (M14): change capture without triggers
 - [D1031](decisions/D1031.md) Code-only batch 679 (M14): PostgreSQL's logical replication protocol served
+- [D1032](decisions/D1032.md) Code-only batch 680 (M14): invisible columns for HIDDEN and INVISIBLE

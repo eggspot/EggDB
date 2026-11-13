@@ -2355,6 +2355,9 @@ impl<'t> Parser<'t> {
             if self.sqlserver() && self.sqlserver_column_option()? {
                 continue;
             }
+            if self.oracle() && (self.take_word("visible") || self.take_word("invisible")) {
+                continue;
+            }
             let constraint = if self.take_word("constraint") {
                 Some(self.name()?)
             } else {

@@ -189,6 +189,7 @@ mod plan_cache;
 mod plpgsql;
 mod plsql;
 mod portals;
+mod invisible_columns;
 mod privacy;
 mod property_graphs;
 mod pushdown;

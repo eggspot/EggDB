@@ -825,6 +825,9 @@ impl<'t> Parser<'t> {
     }
 
     pub(super) fn mysql_column_option(&mut self, column: &mut ColumnDefinition) -> SqlResult<bool> {
+        if self.take_word("visible") || self.take_word("invisible") {
+            return Ok(true);
+        }
         if self.take_word("auto_increment") {
             column.auto_increment = true;
         } else if self.take_word("comment") {

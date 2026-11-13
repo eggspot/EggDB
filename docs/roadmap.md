@@ -1718,7 +1718,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `eggdb_temporal` keeps (D755): **code written, unbuilt** (code-only mode, 2026-11-12, D794); SQL Server's and
   MariaDB's `CREATE`/`ALTER` syntax for system versioning: **code written, unbuilt** (D795); SQL Server's
   `SYSTEM_VERSIONING = ON` in `ALTER TABLE` over a declared period, and `HISTORY_RETENTION_PERIOD`: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D900). Left: invisible (`HIDDEN`) period columns.
+  unbuilt** (code-only mode, 2026-11-12, D900); invisible (`HIDDEN`) period columns: **code written, unbuilt** (code-only
+  mode, 2026-11-13, D1032).
 - Materialized views kept up to date incrementally at commit, and continuous queries (D28,
   PR #86).
 - `eggdb follow` of `pgoutput`'s parallel streaming and two-phase messages, binary arrays,
