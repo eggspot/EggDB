@@ -535,3 +535,144 @@ fn any_decision_log_settles_in_doubt_transactions() {
         Decision::Abort
     );
 }
+
+#[test]
+fn snapshot_reads_across_shards_see_every_transfer_whole() {
+    use crate::clock::{HybridClock, Timestamp};
+    use crate::transaction::{TransactionId, commit_timestamp, snapshot_read};
+    const ACCOUNTS: u32 = 6;
+    const SHARDS: u32 = 3;
+    let key = |account: u32| account.to_be_bytes().to_vec();
+    let amount_of = |bytes: &[u8]| i64::from_be_bytes(bytes.try_into().unwrap());
+    for seed in 1..=20u64 {
+        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut participants: BTreeMap<u32, Participant> =
+            (0..SHARDS).map(|shard| (shard, Participant::default())).collect();
+        let mut clocks: Vec<HybridClock> = (0..SHARDS).map(|_| HybridClock::new(500)).collect();
+        let mut wall = 1_000u64;
+        let mut prepares = Vec::new();
+        for shard in 0..SHARDS {
+            let at = clocks[shard as usize].now(wall);
+            let writes = (0..ACCOUNTS)
+                .filter(|account| account % SHARDS == shard)
+                .map(|account| (key(account), Some(100i64.to_be_bytes().to_vec())))
+                .collect();
+            participants.get_mut(&shard).unwrap().prepare_at(1, writes, at);
+            prepares.push(at);
+        }
+        let setup_at = commit_timestamp(&prepares);
+        for participant in participants.values_mut() {
+            participant.decide_at(1, Decision::Commit, setup_at);
+        }
+        let mut pending: Vec<(TransactionId, Vec<u32>, Vec<Timestamp>)> = Vec::new();
+        let mut transaction: TransactionId = 1;
+        let mut remembered: Vec<(Timestamp, Vec<Option<Vec<u8>>>)> = Vec::new();
+        let keys: Vec<(u32, Vec<u8>)> = (0..ACCOUNTS).map(|account| (account % SHARDS, key(account))).collect();
+        let settle = |participants: &mut BTreeMap<u32, Participant>,
+                          clocks: &mut Vec<HybridClock>,
+                          wall: u64,
+                          (id, shards, prepared): (TransactionId, Vec<u32>, Vec<Timestamp>)| {
+            let at = commit_timestamp(&prepared);
+            for shard in shards {
+                let _ = clocks[shard as usize].observe(at, wall);
+                participants.get_mut(&shard).unwrap().decide_at(id, Decision::Commit, at);
+            }
+        };
+        for _ in 0..400 {
+            wall += next() % 3;
+            match next() % 3 {
+                0 => {
+                    let from = (next() % u64::from(ACCOUNTS)) as u32;
+                    let to = (next() % u64::from(ACCOUNTS)) as u32;
+                    if from == to {
+                        continue;
+                    }
+                    transaction += 1;
+                    let mut balances = Vec::new();
+                    let mut refused = false;
+                    for account in [from, to] {
+                        match participants.get_mut(&(account % SHARDS)).unwrap().read(transaction, &key(account)) {
+                            Ok(value) => balances.push(amount_of(value.as_deref().unwrap())),
+                            Err(_) => refused = true,
+                        }
+                    }
+                    if refused {
+                        for participant in participants.values_mut() {
+                            participant.decide(transaction, Decision::Abort);
+                        }
+                        continue;
+                    }
+                    let amount = (next() % 10) as i64 + 1;
+                    let mut by_shard: BTreeMap<u32, Vec<(Vec<u8>, Option<Vec<u8>>)>> = BTreeMap::new();
+                    by_shard.entry(from % SHARDS).or_default().push((key(from), Some((balances[0] - amount).to_be_bytes().to_vec())));
+                    by_shard.entry(to % SHARDS).or_default().push((key(to), Some((balances[1] + amount).to_be_bytes().to_vec())));
+                    let mut prepared = Vec::new();
+                    for (shard, writes) in &by_shard {
+                        let at = clocks[*shard as usize].now(wall);
+                        let participant = participants.get_mut(shard).unwrap();
+                        assert_eq!(participant.prepare_at(transaction, writes.clone(), at), Vote::Yes);
+                        prepared.push(participant.prepared_at(transaction).unwrap());
+                    }
+                    pending.push((transaction, by_shard.keys().copied().collect(), prepared));
+                }
+                1 => {
+                    if !pending.is_empty() {
+                        let oldest = pending.remove(0);
+                        settle(&mut participants, &mut clocks, wall, oldest);
+                    }
+                }
+                _ => {
+                    let at = Timestamp::new(wall.saturating_sub(next() % 5), 0);
+                    let values = loop {
+                        match snapshot_read(&mut participants, &keys, at) {
+                            Ok(values) => break values,
+                            Err(waiting) => {
+                                let position = pending
+                                    .iter()
+                                    .position(|(id, _, _)| *id == waiting)
+                                    .expect("a read waits only for a prepared transaction");
+                                let undecided = pending.remove(position);
+                                settle(&mut participants, &mut clocks, wall, undecided);
+                            }
+                        }
+                    };
+                    let present: Vec<i64> = values.iter().flatten().map(|bytes| amount_of(bytes.as_slice())).collect();
+                    assert!(
+                        present.is_empty() || (present.len() == ACCOUNTS as usize && present.iter().sum::<i64>() == 600),
+                        "seed {seed}: a snapshot at {at:?} saw a transfer in part: {present:?}"
+                    );
+                    remembered.push((at, values));
+                }
+            }
+        }
+        for (at, values) in remembered {
+            assert_eq!(
+                snapshot_read(&mut participants, &keys, at),
+                Ok(values),
+                "seed {seed}: a snapshot at {at:?} changed after it was read"
+            );
+        }
+    }
+}
+
+#[test]
+fn hybrid_clocks_stay_ahead_of_what_they_saw_and_refuse_far_futures() {
+    use crate::clock::{HybridClock, Timestamp};
+    let mut clock = HybridClock::new(100);
+    let first = clock.now(1_000);
+    assert_eq!(first, Timestamp::new(1_000, 0));
+    let second = clock.now(1_000);
+    assert_eq!(second, Timestamp::new(1_000, 1));
+    let seen = clock.observe(Timestamp::new(1_050, 7), 1_001).unwrap();
+    assert_eq!(seen, Timestamp::new(1_050, 8));
+    assert!(clock.now(1_002) > seen);
+    assert_eq!(clock.observe(Timestamp::new(5_000, 0), 1_002).unwrap_err().ahead_ms, 3_998);
+    assert_eq!(Timestamp::new(7, 9).physical_ms(), 7);
+    assert_eq!(Timestamp::new(7, 9).logical(), 9);
+}

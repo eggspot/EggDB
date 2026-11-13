@@ -1749,7 +1749,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-13, D1041): `SHARD TABLE ... BY ... ON ...`, pushed filters, partial aggregates and limits through
   `eggdb_foreign`, single-shard routing. Left: joins, subqueries and distributed writes.
 - Snapshot reads across shards by timestamp, and serializable distributed transactions (D18,
-  D212).
+  D212). **Code written, unbuilt** (code-only mode, 2026-11-13, D1042): hybrid logical clocks, versioned
+  participants, commit at the largest prepare timestamp, `read_at` with a read floor and `snapshot_read`. Left: the
+  same on the SQL path of sharded tables.
 - Global indexes (D18).
 - Multi-region clusters with latency-aware placement (D4, D212).
 - Rebalancing simulated under load, with partitions, clock skew and node failures (D18, D212).

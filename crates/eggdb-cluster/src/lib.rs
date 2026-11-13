@@ -9,6 +9,7 @@
 //! the decisions live in the cluster's Raft-replicated database (D1039). [`quorum`] replicates
 //! keys without a leader: any node takes writes, quorums decide success, and replicas converge.
 
+pub mod clock;
 mod codec;
 pub mod crdt;
 pub mod merkle;
