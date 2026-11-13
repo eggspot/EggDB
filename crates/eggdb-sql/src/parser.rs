@@ -1,4 +1,5 @@
 mod asof;
+mod match_recognize;
 mod foreign_tables;
 mod sqlserver_security;
 mod sqlserver_ddl_triggers;
@@ -3158,7 +3159,13 @@ impl<'t> Parser<'t> {
         }
         if self.peek_kind() == &TokenKind::LeftParen {
             if self.at_derived_table() {
-                return self.derived_table();
+                let start = self.peek().start;
+                let derived = self.derived_table()?;
+                if self.at_match_recognize() {
+                    let source = self.slice(start, self.previous_end());
+                    return self.match_recognize(&source);
+                }
+                return Ok(derived);
             }
             return Err(self.not_supported("parenthesized joins in FROM"));
         }
@@ -3171,6 +3178,9 @@ impl<'t> Parser<'t> {
         let name_text = self.slice(name_start, self.previous_end());
         let partition_selection = self.partition_selection()?;
         let system_time = self.system_time_clause()?;
+        if self.at_match_recognize() {
+            return self.match_recognize(&name_text);
+        }
         let alias = if !self.is_word("tablesample") && (self.take_word("as") || self.at_bare_alias()) {
             Some(self.name()?.text)
         } else {
@@ -3230,7 +3240,7 @@ impl<'t> Parser<'t> {
     }
 
     fn at_bare_alias(&self) -> bool {
-        if self.at_asof_join() {
+        if self.at_asof_join() || self.at_match_recognize() {
             return false;
         }
         matches!(self.peek_kind(), TokenKind::Word(word) if !self.reserved(word) && !self.clause_word(word))

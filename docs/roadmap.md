@@ -1934,7 +1934,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Stream-stream joins and late data (D55). **Code written, unbuilt** (code-only mode, 2026-11-12, D767), in
   `eggdb_streams`.
 - `MATCH_RECOGNIZE` for complex event processing (D55). The matcher and `eggdb_streams.match_recognize`: **code
-  written, unbuilt** (code-only mode, 2026-11-12, D768). Left: the clause in the parser, and `MEASURES`.
+  written, unbuilt** (code-only mode, 2026-11-12, D768); the clause in the parser with `MEASURES`, `ONE ROW PER
+  MATCH` and `PREV`/`NEXT` in `DEFINE`: **code written, unbuilt** (code-only mode, 2026-11-13, D1067). Left: `ALL ROWS
+  PER MATCH`, running measures, other `AFTER MATCH SKIP` modes, `SUBSET`, `PERMUTE`, anchors and exclusion.
 - ETL connectors, first scheduled copies from PostgreSQL, MySQL and SQL Server and from CSV and
   Parquet in object storage (D46, D229). Check: a CI copy from PostgreSQL 17, compared by row. Scheduled copies
   (`eggdb_etl`) from PostgreSQL, SQL Server and local CSV and Parquet files: **code written, unbuilt** (code-only

@@ -350,4 +350,29 @@ mod tests {
             "partition_key|starts|ends|classifiers\nEGG|1|5|{STRT,DOWN,DOWN,UP,UP}\nSELECT 1"
         );
     }
+
+    #[test]
+    fn the_match_recognize_clause_measures_each_match() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE TABLE ticks (symbol text, at integer, price integer)",
+            "INSERT INTO ticks VALUES ('EGG', 1, 10), ('EGG', 2, 8), ('EGG', 3, 7), ('EGG', 4, 9), ('EGG', 5, 12), ('HEN', 1, 5), ('HEN', 2, 6)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT * FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at \
+                 MEASURES FIRST(at) AS start_at, LAST(DOWN.price) AS bottom, LAST(at) AS end_at, COUNT(DOWN.*) AS downs, \
+                 MATCH_NUMBER() AS match_no, CLASSIFIER() AS last_kind, STRT.price AS opening, MAX(UP.price) - MIN(DOWN.price) AS rebound \
+                 ONE ROW PER MATCH AFTER MATCH SKIP PAST LAST ROW PATTERN (STRT DOWN+ UP{1,3}) \
+                 DEFINE DOWN AS price < PREV(price), UP AS price > PREV(price)) AS mr"
+            )
+            .unwrap(),
+            "symbol|start_at|bottom|end_at|downs|match_no|last_kind|opening|rebound\nEGG|1|7|5|2|1|UP|10|5\nSELECT 1"
+        );
+        assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at ALL ROWS PER MATCH PATTERN (A) DEFINE A AS price > 1) AS mr").is_err());
+    }
 }

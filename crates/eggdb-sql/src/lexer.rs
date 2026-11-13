@@ -207,7 +207,7 @@ fn is_identifier_part(byte: u8) -> bool {
 }
 
 fn is_operator_char(byte: u8) -> bool {
-    b"+-*/<>=~!@#%^&|`?".contains(&byte)
+    b"+-*/<>=~!@#%^&|`?{}".contains(&byte)
 }
 
 const COMMON_WORDS: [&str; 47] = [
