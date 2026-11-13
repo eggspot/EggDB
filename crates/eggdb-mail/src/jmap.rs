@@ -9,7 +9,8 @@ use crate::message::{addresses, decoded_words, headers, parse_rfc5322_date, utc_
 use crate::mime::{self, Part};
 use crate::store::{self, INBOX, Mailbox, MailError, StoredMessage};
 use crate::ServerConfig;
-use eggdb_http::{Request, Response};
+use eggdb_http::{BodyWriter, Reply, Request, Response, StreamedResponse};
+use std::io::Write as _;
 use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 
 const ACCOUNT: &str = "a";
@@ -21,6 +22,8 @@ const CORE: &str = "urn:ietf:params:jmap:core";
 const MAIL: &str = "urn:ietf:params:jmap:mail";
 const SUBMISSION: &str = "urn:ietf:params:jmap:submission";
 const IDENTITY_ID: &str = "i1";
+const STREAM_LIFETIME: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const STATE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 /// The largest JMAP request body.
 pub const MAX_REQUEST_BYTES: usize = 10 << 20;
 
@@ -305,6 +308,216 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             .map(|(mailbox, messages)| u64::from(mailbox.uid_next) + messages.len() as u64 * 7 + messages.iter().map(|message| message.flags.len() as u64).sum::<u64>())
             .sum();
         format!("s{total}")
+    }
+
+    fn states(&self) -> crate::push::States {
+        let mail = self.snapshot().map(|store| Self::state(&store)).unwrap_or_default();
+        let submissions = self.stored_submissions().map(|stored| Self::submission_state(stored.len())).unwrap_or_default();
+        vec![("Email", mail.clone()), ("Mailbox", mail.clone()), ("Thread", mail), ("EmailSubmission", submissions)]
+    }
+
+    fn fingerprint(states: &crate::push::States) -> String {
+        states.iter().map(|(kind, state)| format!("{kind}={state};")).collect()
+    }
+
+    /// Answers one HTTP request, streaming the EventSource (`/jmap/eventsource`) and answering
+    /// everything else whole as [`Endpoint::answer`] does.
+    pub fn reply(&self, request: &Request) -> Reply<'_> {
+        if request.path != "/jmap/eventsource" || !self.signed_in(request) {
+            return Reply::Whole(self.answer(request));
+        }
+        let query = request.query.clone().unwrap_or_default();
+        let parameter = |name: &str| query.split('&').find_map(|pair| pair.split_once('=').filter(|(key, _)| *key == name).map(|(_, value)| value.to_owned()));
+        let types: Option<Vec<String>> = parameter("types").filter(|types| types != "*").map(|types| types.split(',').map(str::to_owned).collect());
+        let close_after_state = parameter("closeafter").as_deref() == Some("state");
+        let ping = parameter("ping").and_then(|seconds| seconds.parse::<u64>().ok()).unwrap_or(0);
+        let ping = (ping > 0).then(|| std::time::Duration::from_secs(ping.clamp(5, 300)));
+        let last_event = request.header("last-event-id").map(str::to_owned);
+        let body = move |writer: &mut BodyWriter<'_>| -> std::io::Result<()> {
+            let started = std::time::Instant::now();
+            let mut last_ping = std::time::Instant::now();
+            let mut sent = last_event;
+            loop {
+                let states = self.states();
+                let fingerprint = Self::fingerprint(&states);
+                if sent.as_deref() != Some(fingerprint.as_str()) {
+                    let event = crate::push::state_change(ACCOUNT, &states, types.as_deref());
+                    writer.write_all(format!("event: state\nid: {fingerprint}\ndata: {event}\n\n").as_bytes())?;
+                    writer.flush()?;
+                    let first = sent.is_none();
+                    sent = Some(fingerprint);
+                    if close_after_state && !first {
+                        return Ok(());
+                    }
+                }
+                if let Some(interval) = ping
+                    && last_ping.elapsed() >= interval
+                {
+                    writer.write_all(format!("event: ping\ndata: {{\"@type\":\"Ping\",\"interval\":{}}}\n\n", interval.as_secs()).as_bytes())?;
+                    writer.flush()?;
+                    last_ping = std::time::Instant::now();
+                }
+                if started.elapsed() > STREAM_LIFETIME {
+                    return Ok(());
+                }
+                std::thread::sleep(STATE_POLL);
+            }
+        };
+        Reply::Streamed(StreamedResponse {
+            status: 200,
+            content_type: "text/event-stream".to_owned(),
+            headers: vec![("Cache-Control".to_owned(), "no-cache".to_owned())],
+            body: Box::new(body),
+            held_bytes: 0,
+            content_length: None,
+        })
+    }
+
+    /// Sends every verified PushSubscription a `StateChange` when the account's state moves,
+    /// checking once a second, until `stop` answers true.
+    pub fn run_push(&self, stop: &(dyn Fn() -> bool + Sync)) {
+        let mut sent = std::collections::BTreeMap::new();
+        while !stop() {
+            let states = self.states();
+            crate::push::deliver(self.keyspace, ACCOUNT, &states, crate::now_seconds(), &mut sent);
+            let waited = std::time::Instant::now();
+            while !stop() && waited.elapsed() < STATE_POLL {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    fn push_get(&self, arguments: &Json) -> Json {
+        let wanted = Self::wanted_ids(arguments);
+        let mut list = Vec::new();
+        for subscription in crate::push::subscriptions(self.keyspace) {
+            if wanted.as_ref().is_some_and(|ids| !ids.contains(&subscription.id)) {
+                continue;
+            }
+            let shown: Vec<(String, Json)> = match subscription.json {
+                Json::Object(members) => members.into_iter().filter(|(key, _)| matches!(key.as_str(), "id" | "deviceClientId" | "expires" | "types")).collect(),
+                _ => Vec::new(),
+            };
+            list.push(Json::Object(shown));
+        }
+        Json::Object(vec![("list".to_owned(), Json::Array(list)), ("notFound".to_owned(), Json::Array(Vec::new()))])
+    }
+
+    fn push_set(&self, arguments: &Json) -> Result<Json, String> {
+        let failure = |kind: &str, description: &str| {
+            Json::Object(vec![("type".to_owned(), Json::String(kind.to_owned())), ("description".to_owned(), Json::String(description.to_owned()))])
+        };
+        let existing = crate::push::subscriptions(self.keyspace);
+        let now = crate::now_seconds();
+        let mut created = Vec::new();
+        let mut not_created = Vec::new();
+        let mut count = existing.len();
+        if let Some(Json::Object(creations)) = arguments.get("create") {
+            for (creation_id, creation) in creations {
+                let outcome = (|| -> Result<Json, Json> {
+                    if count >= crate::push::MOST_SUBSCRIPTIONS {
+                        return Err(failure("overQuota", "the account holds the most push subscriptions it may"));
+                    }
+                    if creation.get("keys").is_some_and(|keys| *keys != Json::Null) {
+                        return Err(failure("invalidProperties", "encrypted push (keys) is not supported yet"));
+                    }
+                    let device = creation.get("deviceClientId").and_then(Json::as_str).ok_or_else(|| failure("invalidProperties", "deviceClientId is required"))?;
+                    let url = creation.get("url").and_then(Json::as_str).ok_or_else(|| failure("invalidProperties", "url is required"))?;
+                    eggdb_http::parse_http_url(url).map_err(|error| failure("invalidProperties", &error))?;
+                    let requested = creation.get("expires").and_then(Json::as_str).and_then(parse_rfc3339).unwrap_or(u64::MAX);
+                    let expires_at = requested.min(now + crate::push::MOST_SUBSCRIPTION_SECONDS);
+                    let code = crate::push::verification_code().ok_or_else(|| failure("serverFail", "no random bytes for the verification code"))?;
+                    let mut id = String::new();
+                    let types = creation.get("types").cloned().unwrap_or(Json::Null);
+                    self.change(&mut |keys| {
+                        id = format!("P{}", store::next_number(keys, "push")?);
+                        let record = Json::Object(vec![
+                            ("id".to_owned(), Json::String(id.clone())),
+                            ("deviceClientId".to_owned(), Json::String(device.to_owned())),
+                            ("url".to_owned(), Json::String(url.to_owned())),
+                            ("expires".to_owned(), Json::String(utc_date(expires_at))),
+                            ("expiresAt".to_owned(), Json::Number(expires_at as f64)),
+                            ("types".to_owned(), types.clone()),
+                            ("verificationCode".to_owned(), Json::String(code.clone())),
+                            ("verified".to_owned(), Json::Bool(false)),
+                        ]);
+                        store::put_push(keys, &id, &record.to_text())
+                    })
+                    .map_err(|_| failure("serverFail", "the subscription could not be kept"))?;
+                    crate::push::post(url, &format!("{{\"@type\":\"PushVerification\",\"pushSubscriptionId\":{},\"verificationCode\":{}}}", string(&id), string(&code)));
+                    count += 1;
+                    Ok(Json::Object(vec![("id".to_owned(), Json::String(id)), ("expires".to_owned(), Json::String(utc_date(expires_at)))]))
+                })();
+                match outcome {
+                    Ok(record) => created.push((creation_id.clone(), record)),
+                    Err(error) => not_created.push((creation_id.clone(), error)),
+                }
+            }
+        }
+        let mut updated = Vec::new();
+        let mut not_updated = Vec::new();
+        if let Some(Json::Object(updates)) = arguments.get("update") {
+            for (id, patch) in updates {
+                let Some(found) = existing.iter().find(|subscription| subscription.id == *id) else {
+                    not_updated.push((id.clone(), failure("notFound", "no such push subscription")));
+                    continue;
+                };
+                let Json::Object(mut members) = found.json.clone() else { continue };
+                let mut refused = None;
+                if let Json::Object(changes) = patch {
+                    for (key, value) in changes {
+                        match key.as_str() {
+                            "verificationCode" if value.as_str().is_some_and(|code| Some(code) == found.json.get("verificationCode").and_then(Json::as_str)) => {
+                                members.retain(|(member, _)| member != "verified");
+                                members.push(("verified".to_owned(), Json::Bool(true)));
+                            }
+                            "verificationCode" => refused = Some(failure("invalidProperties", "the verification code does not match")),
+                            "types" => {
+                                members.retain(|(member, _)| member != "types");
+                                members.push(("types".to_owned(), value.clone()));
+                            }
+                            "expires" => {
+                                let at = value.as_str().and_then(parse_rfc3339).unwrap_or(now).min(now + crate::push::MOST_SUBSCRIPTION_SECONDS);
+                                members.retain(|(member, _)| member != "expires" && member != "expiresAt");
+                                members.push(("expires".to_owned(), Json::String(utc_date(at))));
+                                members.push(("expiresAt".to_owned(), Json::Number(at as f64)));
+                            }
+                            _ => refused = Some(failure("invalidProperties", "only verificationCode, types and expires may change")),
+                        }
+                    }
+                }
+                if let Some(error) = refused {
+                    not_updated.push((id.clone(), error));
+                    continue;
+                }
+                let record = Json::Object(members).to_text();
+                match self.change(&mut |keys| store::put_push(keys, id, &record)) {
+                    Ok(()) => updated.push((id.clone(), Json::Null)),
+                    Err(_) => not_updated.push((id.clone(), failure("serverFail", "the subscription could not be kept"))),
+                }
+            }
+        }
+        let mut destroyed = Vec::new();
+        let mut not_destroyed = Vec::new();
+        for id in arguments.get("destroy").and_then(Json::as_array).unwrap_or_default().iter().filter_map(Json::as_str) {
+            let mut removed = false;
+            match self.change(&mut |keys| {
+                removed = store::remove_push(keys, id)?;
+                Ok(())
+            }) {
+                Ok(()) if removed => destroyed.push(Json::String(id.to_owned())),
+                _ => not_destroyed.push((id.to_owned(), failure("notFound", "no such push subscription"))),
+            }
+        }
+        let optional = |entries: Vec<(String, Json)>| if entries.is_empty() { Json::Null } else { Json::Object(entries) };
+        Ok(Json::Object(vec![
+            ("created".to_owned(), optional(created)),
+            ("notCreated".to_owned(), optional(not_created)),
+            ("updated".to_owned(), optional(updated)),
+            ("notUpdated".to_owned(), optional(not_updated)),
+            ("destroyed".to_owned(), Json::Array(destroyed)),
+            ("notDestroyed".to_owned(), optional(not_destroyed)),
+        ]))
     }
 
     /// Answers one HTTP request.
@@ -610,6 +823,8 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             "Identity/get" => Ok(self.identity_get(arguments)),
             "EmailSubmission/get" => self.submission_get(arguments),
             "EmailSubmission/query" => self.submission_query(),
+            "PushSubscription/get" => Ok(self.push_get(arguments)),
+            "PushSubscription/set" => self.push_set(arguments),
             _ => return method_error("unknownMethod"),
         };
         match outcome {
@@ -1533,5 +1748,81 @@ mod tests {
         assert!(delivered.starts_with("Delivered-To: eggdb@localhost, hidden@localhost\r\n"), "{delivered}");
         assert!(!delivered.contains("Bcc:"), "{delivered}");
         assert!(!inbox[0].flags.iter().any(|flag| flag == "\\Draft"), "{:?}", inbox[0].flags);
+    }
+
+    fn push_sink(posts: usize) -> (String, std::sync::mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/push", listener.local_addr().unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let sink = std::thread::spawn(move || {
+            for _ in 0..posts {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).unwrap();
+                let mut writer = stream;
+                writer.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n").unwrap();
+                sender.send(String::from_utf8(body).unwrap()).unwrap();
+            }
+        });
+        (url, receiver, sink)
+    }
+
+    #[test]
+    fn push_subscriptions_are_verified_then_sent_each_state_change() {
+        let keyspace = MemoryKeyspace::default();
+        let config = ServerConfig {
+            user: "eggdb".to_owned(),
+            password_sha256: eggdb_crypto::sha256(b"secret"),
+            max_connections: 4,
+            max_message_bytes: 1 << 20,
+            domain: "localhost".to_owned(),
+            relay: None,
+        };
+        let endpoint = Endpoint::new(&keyspace, config);
+        let (url, posts, sink) = push_sink(2);
+        let created = call(
+            &endpoint,
+            "POST",
+            "/jmap/api",
+            &format!(r#"{{"using":["urn:ietf:params:jmap:core"],"methodCalls":[["PushSubscription/set",{{"create":{{"p":{{"deviceClientId":"phone","url":"{url}","types":["Email"]}}}}}},"c"]]}}"#),
+        );
+        assert!(created.contains("\"id\":\"P1\""), "{created}");
+        let verification = posts.recv().unwrap();
+        assert!(verification.contains("\"@type\":\"PushVerification\""), "{verification}");
+        let code = parse(&verification).unwrap().get("verificationCode").and_then(Json::as_str).unwrap().to_owned();
+        let refused = call(&endpoint, "POST", "/jmap/api", r#"{"using":["urn:ietf:params:jmap:core"],"methodCalls":[["PushSubscription/set",{"update":{"P1":{"verificationCode":"wrong"}}},"u"]]}"#);
+        assert!(refused.contains("notUpdated"), "{refused}");
+        call(&endpoint, "POST", "/jmap/api", &format!(r#"{{"using":["urn:ietf:params:jmap:core"],"methodCalls":[["PushSubscription/set",{{"update":{{"P1":{{"verificationCode":"{code}"}}}}}},"u"]]}}"#));
+        let listed = call(&endpoint, "POST", "/jmap/api", r#"{"using":["urn:ietf:params:jmap:core"],"methodCalls":[["PushSubscription/get",{"ids":null},"g"]]}"#);
+        assert!(listed.contains("\"deviceClientId\":\"phone\"") && !listed.contains("/push"), "the url is not shown: {listed}");
+        let mut sent = std::collections::BTreeMap::new();
+        crate::push::deliver(&keyspace, ACCOUNT, &endpoint.states(), crate::now_seconds(), &mut sent);
+        keyspace
+            .write(0, &mut |keys| store::append(keys, INBOX, &[], 1, b"Subject: new\r\n\r\nx\r\n").map(drop).map_err(|error| error.0))
+            .unwrap();
+        crate::push::deliver(&keyspace, ACCOUNT, &endpoint.states(), crate::now_seconds(), &mut sent);
+        let change = posts.recv().unwrap();
+        assert!(change.contains("\"@type\":\"StateChange\"") && change.contains("\"Email\"") && !change.contains("Mailbox"), "{change}");
+        sink.join().unwrap();
+        assert!(matches!(endpoint.reply(&Request {
+            method: "GET".to_owned(),
+            path: "/jmap/eventsource".to_owned(),
+            query: Some("types=*&closeafter=state&ping=0".to_owned()),
+            headers: vec![("authorization".to_owned(), format!("Basic {}", eggdb_crypto::base64_encode(b"eggdb:secret")))],
+            body: Vec::new(),
+        }), Reply::Streamed(StreamedResponse { status: 200, .. })));
     }
 }

@@ -1490,10 +1490,15 @@ impl Session<'_> {
                 Some(listener) => eggdb_mail::serve_imap(&mail_database, listener, &mail_config, &stop_signals::requested),
                 None => Ok(()),
             });
+            let jmap_push = scope.spawn(|| {
+                if jmap_listener.is_some() {
+                    jmap_endpoint.run_push(&stop_signals::requested);
+                }
+            });
             let jmap_server = scope.spawn(|| match &jmap_listener {
-                Some(listener) => eggdb_http::serve_with_limits(
+                Some(listener) => eggdb_http::serve_replies_with_limits(
                     listener,
-                    &|request| jmap_endpoint.answer(request),
+                    &|request| jmap_endpoint.reply(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_mail::MAX_JMAP_REQUEST_BYTES, &memory_budget)
                         .with_rate_limit(rate_limiter.as_ref())
@@ -1983,6 +1988,7 @@ impl Session<'_> {
             let _ = smtp_server.join();
             let _ = imap_server.join();
             let _ = jmap_server.join();
+            let _ = jmap_push.join();
             let _ = dav_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = cdc_topic_delivery.join();

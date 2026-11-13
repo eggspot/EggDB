@@ -9,6 +9,7 @@ const MESSAGE: u8 = b'M';
 const UPLOAD: u8 = b'U';
 const SUBMISSION: u8 = b'S';
 const COUNTER: u8 = b'N';
+const PUSH: u8 = b'P';
 const MAX_MAILBOX_NAME_BYTES: usize = 1024;
 
 /// The mailbox every account has and new mail arrives in.
@@ -360,6 +361,30 @@ pub fn put_submission(keys: &mut dyn KeysWrite, id: &str, json: &str) -> MailRes
 pub fn submissions(keys: &dyn KeysRead) -> MailResult<Vec<(String, String)>> {
     Ok(keys
         .scan(&[SUBMISSION])
+        .map_err(storage)?
+        .into_iter()
+        .map(|(key, value)| (String::from_utf8_lossy(&key[1..]).into_owned(), String::from_utf8_lossy(&value).into_owned()))
+        .collect())
+}
+
+/// Keeps a JMAP PushSubscription as JSON.
+pub fn put_push(keys: &mut dyn KeysWrite, id: &str, json: &str) -> MailResult<()> {
+    let mut key = vec![PUSH];
+    key.extend_from_slice(id.as_bytes());
+    keys.put(&key, json.as_bytes()).map_err(storage)
+}
+
+/// Removes the PushSubscription `id`; whether it was kept.
+pub fn remove_push(keys: &mut dyn KeysWrite, id: &str) -> MailResult<bool> {
+    let mut key = vec![PUSH];
+    key.extend_from_slice(id.as_bytes());
+    keys.delete(&key).map_err(storage)
+}
+
+/// Every kept PushSubscription, as (id, JSON).
+pub fn pushes(keys: &dyn KeysRead) -> MailResult<Vec<(String, String)>> {
+    Ok(keys
+        .scan(&[PUSH])
         .map_err(storage)?
         .into_iter()
         .map(|(key, value)| (String::from_utf8_lossy(&key[1..]).into_owned(), String::from_utf8_lossy(&value).into_owned()))

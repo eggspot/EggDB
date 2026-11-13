@@ -10,6 +10,7 @@ mod jmap;
 mod json;
 pub mod message;
 pub mod mime;
+mod push;
 mod smtp;
 mod smtp_client;
 pub mod store;
