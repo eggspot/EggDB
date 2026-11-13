@@ -50,11 +50,13 @@ impl Parser<'_> {
             self.skip_clustering();
         }
         self.expect_word("index")?;
+        let mut online = false;
         if self.is_word("concurrently") {
             if !self.postgresql() {
                 return Err(self.not_supported("CREATE INDEX CONCURRENTLY"));
             }
             self.at += 1;
+            online = true;
         }
         let if_not_exists = if self.is_word("if") && self.is_word_at(1, "not") {
             self.at += 1;
@@ -114,6 +116,7 @@ impl Parser<'_> {
             table,
             only,
             if_not_exists,
+            online,
             sqlite_text: self.sqlite().then(|| {
                 let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
                 format!(

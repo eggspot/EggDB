@@ -63,6 +63,7 @@ const CONSTRAINT_INITIALLY_DEFERRED: u8 = 2;
 const FIRST_USER_TYPE_OID: u32 = 16_384;
 const MAX_NESTING: usize = 32;
 const UNIQUE_INDEX_WITHOUT_CONSTRAINT: u8 = 1;
+const INDEX_BUILDING: u8 = 2;
 const SEQUENCE_SPACE: u8 = 0x05;
 const REFERENCE_SPACE: u8 = 0x06;
 const NO_PRECISION: u8 = 0xFF;
@@ -418,6 +419,7 @@ pub(crate) struct IndexDefinition {
     pub(crate) method: IndexMethod,
     pub(crate) sort_options: SortOptions,
     pub(crate) backs_unique_constraint: bool,
+    pub(crate) building: bool,
 }
 
 impl IndexDefinition {
@@ -425,6 +427,7 @@ impl IndexDefinition {
         self.method != IndexMethod::BTree
             || !self.sort_options.is_default()
             || (self.unique && !self.backs_unique_constraint)
+            || self.building
     }
 }
 
@@ -1047,11 +1050,14 @@ impl TableDefinition {
         }
         for index in &self.indexes {
             out.push(index.method.code());
-            out.push(if index.unique && !index.backs_unique_constraint {
-                UNIQUE_INDEX_WITHOUT_CONSTRAINT
-            } else {
-                0
-            });
+            let mut flags = 0;
+            if index.unique && !index.backs_unique_constraint {
+                flags |= UNIQUE_INDEX_WITHOUT_CONSTRAINT;
+            }
+            if index.building {
+                flags |= INDEX_BUILDING;
+            }
+            out.push(flags);
             out.extend_from_slice(&index.sort_options.descending.to_le_bytes());
             out.extend_from_slice(&index.sort_options.nulls_first.to_le_bytes());
         }
@@ -1515,11 +1521,12 @@ fn decode_options(
     }
     for index in indexes.iter_mut() {
         let method = IndexMethod::of_code(reader.byte()?).ok_or_else(|| reader.damaged())?;
-        let without_constraint = match reader.byte()? {
-            0 => false,
-            UNIQUE_INDEX_WITHOUT_CONSTRAINT => true,
-            _ => return Err(reader.damaged()),
-        };
+        let flags = reader.byte()?;
+        if flags & !(UNIQUE_INDEX_WITHOUT_CONSTRAINT | INDEX_BUILDING) != 0 {
+            return Err(reader.damaged());
+        }
+        let without_constraint = flags & UNIQUE_INDEX_WITHOUT_CONSTRAINT != 0;
+        index.building = flags & INDEX_BUILDING != 0;
         let sort_options = SortOptions {
             descending: u32::from_le_bytes(reader.array()?),
             nulls_first: u32::from_le_bytes(reader.array()?),
@@ -1807,6 +1814,7 @@ fn decode_indexes(
             unique,
             columns,
             backs_unique_constraint: unique,
+            building: false,
             ..IndexDefinition::default()
         });
     }
@@ -3416,6 +3424,7 @@ mod tests {
                 unique: true,
                 columns: vec![1, 0],
                 backs_unique_constraint: true,
+                building: false,
                 ..IndexDefinition::default()
             },
         ];

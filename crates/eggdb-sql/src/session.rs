@@ -3744,6 +3744,23 @@ impl<'s> Session<'s> {
                     (outcome, _) => outcome,
                 }
             }
+            Statement::CreateIndex(create) if create.online && matches!(self.block, Block::None) => {
+                let mut build = None;
+                let started = self.write("CREATE INDEX", |writer, tables| {
+                    binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
+                    let (result, online) = crate::indexes::begin_online_index(writer, tables, create, dialect)?;
+                    build = online;
+                    Ok(result)
+                })?;
+                match build {
+                    Some(build) => self.build_index_online(build).map(|()| started),
+                    None => Ok(started),
+                }
+            }
+            Statement::CreateIndex(create) if create.online => Err(SqlError::new(
+                SqlState::ACTIVE_SQL_TRANSACTION,
+                "CREATE INDEX CONCURRENTLY cannot run inside a transaction block",
+            )),
             Statement::CreateIndex(create) => self.write("CREATE INDEX", |writer, tables| {
                 binding.names(writer, tables, std::slice::from_mut(&mut create.table))?;
                 crate::sqlite_schema_text::create_index(writer, tables, create, dialect)
@@ -4262,6 +4279,31 @@ impl<'s> Session<'s> {
             self.commit()?;
         }
         Ok(result)
+    }
+
+    fn build_index_online(&mut self, mut build: crate::indexes::OnlineBuild) -> SqlResult<()> {
+        loop {
+            let mut done = false;
+            let step = self.write("CREATE INDEX", |writer, tables| {
+                done = crate::indexes::backfill_online_step(writer, tables, &mut build)?;
+                Ok(QueryResult::command("CREATE INDEX"))
+            });
+            if let Err(error) = step {
+                let _ = self.write("CREATE INDEX", |writer, tables| {
+                    crate::indexes::abandon_online_index(writer, tables, &build)?;
+                    Ok(QueryResult::command("CREATE INDEX"))
+                });
+                return Err(error);
+            }
+            if done {
+                break;
+            }
+        }
+        self.write("CREATE INDEX", |writer, tables| {
+            crate::indexes::finish_online_index(writer, tables, &build)?;
+            Ok(QueryResult::command("CREATE INDEX"))
+        })
+        .map(|_| ())
     }
 
     fn write(

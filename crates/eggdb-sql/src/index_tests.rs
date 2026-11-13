@@ -1221,3 +1221,38 @@ fn mysql_index_names_match_in_any_letter_case_when_renamed_or_dropped() {
     let gone = fails(&mut session, "ALTER TABLE cased DROP KEY byb");
     assert_eq!(gone.vendor_code(), Some(1091), "{gone}");
 }
+
+#[test]
+fn an_index_built_concurrently_covers_every_row_and_then_serves_queries() {
+    let store = MemoryStore::new();
+    let mut session = Session::with_dialect(&store, Dialect::PostgreSql);
+    last(&mut session, "CREATE TABLE big (id integer PRIMARY KEY, tag integer)");
+    last(
+        &mut session,
+        "INSERT INTO big SELECT g, g % 97 FROM generate_series(1, 10000) AS g",
+    );
+    last(&mut session, "CREATE INDEX CONCURRENTLY big_tag ON big (tag)");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM big WHERE tag = 5"),
+        "count\n103\nSELECT 1"
+    );
+    last(&mut session, "INSERT INTO big VALUES (10001, 5)");
+    assert_eq!(
+        last(&mut session, "SELECT count(*) FROM big WHERE tag = 5"),
+        "count\n104\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_concurrent_unique_index_over_duplicates_fails_and_leaves_no_index() {
+    let store = MemoryStore::new();
+    let mut session = Session::with_dialect(&store, Dialect::PostgreSql);
+    last(&mut session, "CREATE TABLE d (id integer PRIMARY KEY, v integer)");
+    last(&mut session, "INSERT INTO d VALUES (1, 7), (2, 7)");
+    let error = fails(&mut session, "CREATE UNIQUE INDEX CONCURRENTLY d_v ON d (v)");
+    assert_eq!(error.state().code(), "23505");
+    last(&mut session, "CREATE UNIQUE INDEX d_v ON d (id)");
+    last(&mut session, "BEGIN");
+    let inside = fails(&mut session, "CREATE INDEX CONCURRENTLY d_w ON d (v)");
+    assert_eq!(inside.state().code(), "25001");
+}

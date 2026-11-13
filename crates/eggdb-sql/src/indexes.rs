@@ -456,6 +456,7 @@ pub(crate) fn define_index(
         method: spec.method,
         sort_options: spec.sort_options,
         backs_unique_constraint: spec.unique && (constraint || dialect == Dialect::MySql),
+        building: false,
     });
     Ok(table.indexes.len() - 1)
 }
@@ -506,6 +507,133 @@ pub(crate) fn create_index(
     dialect: Dialect,
 ) -> SqlResult<QueryResult> {
     create_index_as(writer, tables, create, dialect, false)
+}
+
+/// The rows each commit of an online index build backfills (D1122).
+pub(crate) const ONLINE_BACKFILL_ROWS: usize = 4096;
+
+/// Where an online index build (D1122) stands between its commits.
+#[derive(Debug, Clone)]
+pub(crate) struct OnlineBuild {
+    pub(crate) table: Name,
+    pub(crate) index_id: u32,
+    pub(crate) next_row: Vec<u8>,
+}
+
+/// The first commit of `CREATE INDEX CONCURRENTLY` (D1122): defines the index as building, so
+/// every write from now on maintains it while no query reads it, and backfills nothing.
+/// `None` when the index was made at once instead: an `IF NOT EXISTS` that found it, or a
+/// partitioned table, whose partitions' indexes are built in this one commit.
+pub(crate) fn begin_online_index(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    create: &CreateIndex,
+    dialect: Dialect,
+) -> SqlResult<(QueryResult, Option<OnlineBuild>)> {
+    let table = tables.require(writer, &create.table)?;
+    let partitioned = crate::partitions::catalog(writer, tables)?
+        .key_of(&table.name)
+        .is_some();
+    let exists = match (&create.index.name, create.if_not_exists) {
+        (Some(name), true) => name_taken(&other_tables(writer, &table)?, &table, &name.text, dialect),
+        _ => false,
+    };
+    if partitioned || exists {
+        return create_index_as(writer, tables, create, dialect, false).map(|result| (result, None));
+    }
+    let mut definition = (*table).clone();
+    let others = other_tables(writer, &table)?;
+    let position = define_index(&others, &mut definition, &create.index, dialect, false)?;
+    past_linked_ids(&*writer, &mut definition, position)?;
+    let leftover = index_prefix(definition.id, definition.indexes[position].id);
+    delete_index_entries(writer, &leftover, &prefix_end(&leftover))?;
+    definition.indexes[position].building = true;
+    writer.put(&table_key(&definition.name), &definition.encode())?;
+    let build = OnlineBuild {
+        table: create.table.clone(),
+        index_id: definition.indexes[position].id,
+        next_row: rows_prefix(definition.id),
+    };
+    Ok((QueryResult::command("CREATE INDEX"), Some(build)))
+}
+
+/// One later commit of an online index build: adds the entries of up to
+/// [`ONLINE_BACKFILL_ROWS`] rows from `build.next_row` on, and says whether every row is done.
+/// Rows written by others since the index was defined already have their entries, which this
+/// puts again unchanged.
+pub(crate) fn backfill_online_step(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    build: &mut OnlineBuild,
+) -> SqlResult<bool> {
+    let table = tables.require(writer, &build.table)?;
+    let Some(index) = table
+        .indexes
+        .iter()
+        .find(|index| index.id == build.index_id && index.building)
+        .cloned()
+    else {
+        return Err(SqlError::new(
+            SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "the index being built concurrently was dropped or changed by another session",
+        ));
+    };
+    let end = prefix_end(&rows_prefix(table.id));
+    let mut batch: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+    writer.scan(&build.next_row, &end, ScanDirection::Forward, &mut |key, bytes| {
+        batch.push((key.to_vec(), decode_row(bytes, &table.columns)?));
+        Ok(batch.len() < ONLINE_BACKFILL_ROWS)
+    })?;
+    let done = batch.len() < ONLINE_BACKFILL_ROWS;
+    for (key, row) in &batch {
+        if unique_conflict(writer, &table, &index, row, key)?.is_some() {
+            return Err(duplicate_in_backfill(&table, &index, row));
+        }
+        writer.put(&entry_key(&table, &index, row, key), &[])?;
+    }
+    if let Some((last, _)) = batch.last() {
+        build.next_row = last.clone();
+        build.next_row.push(0);
+    }
+    Ok(done)
+}
+
+/// The last commit of an online index build: the index becomes one that queries use.
+pub(crate) fn finish_online_index(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    build: &OnlineBuild,
+) -> SqlResult<()> {
+    let table = tables.require(writer, &build.table)?;
+    let mut definition = (*table).clone();
+    let Some(index) = definition
+        .indexes
+        .iter_mut()
+        .find(|index| index.id == build.index_id)
+    else {
+        return Ok(());
+    };
+    index.building = false;
+    writer.put(&table_key(&definition.name), &definition.encode())
+}
+
+/// Drops the index of an online build that failed, with every entry it had, as PostgreSQL
+/// leaves an invalid index for the user to drop; EggDB drops it itself.
+pub(crate) fn abandon_online_index(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    build: &OnlineBuild,
+) -> SqlResult<()> {
+    let table = tables.require(writer, &build.table)?;
+    let mut definition = (*table).clone();
+    let Some(position) = definition
+        .indexes
+        .iter()
+        .position(|index| index.id == build.index_id && index.building)
+    else {
+        return Ok(());
+    };
+    remove_index(writer, &mut definition, position)
 }
 
 pub(crate) fn create_index_as(

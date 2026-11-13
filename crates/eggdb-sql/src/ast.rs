@@ -1136,6 +1136,7 @@ pub(crate) struct CreateIndex {
     pub(crate) table: Name,
     pub(crate) only: bool,
     pub(crate) if_not_exists: bool,
+    pub(crate) online: bool,
     pub(crate) sqlite_text: Option<String>,
 }
 

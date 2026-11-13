@@ -429,7 +429,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   the upgrade, downgrade and mixed-version file tests in CI. **Code written, unbuilt** (code-only mode, 2026-11-13,
   D1121): `backup --for-release` and CI's `release-compat` job against the previous release.
 - Online schema changes and reindexing that block neither reads nor writes (D20). Check: a
-  concurrent workload test across an `ALTER TABLE` and a reindex.
+  concurrent workload test across an `ALTER TABLE` and a reindex. Index builds (`CREATE INDEX CONCURRENTLY`, built in commits of 4,096 rows while writers keep
+  going): **code written, unbuilt** (code-only mode, 2026-11-13, D1122); left: `REINDEX ... CONCURRENTLY`, the other
+  dialects' online index syntax, and `ALTER TABLE` rewrites in steps.
 - Learned indexes, first over the LSM tree's sealed runs, after the per-table LSM switch above,
   with a D35 review if they are stored (D40, D170). Check: point gets with and without them.
 

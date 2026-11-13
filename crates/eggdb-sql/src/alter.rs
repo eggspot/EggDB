@@ -324,6 +324,7 @@ fn apply(
                 },
                 only: false,
                 if_not_exists: false,
+                online: false,
                 sqlite_text: None,
             };
             indexes::create_index(writer, tables, &create, dialect).map(|_| None)
@@ -2237,6 +2238,7 @@ fn add_constraint(
                 },
                 only: false,
                 if_not_exists: false,
+                online: false,
                 sqlite_text: None,
             };
             indexes::create_index_as(writer, tables, &create, dialect, true).map(|_| ())

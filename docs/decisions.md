@@ -1146,3 +1146,4 @@ its full title with its status.
 - [D1119](decisions/D1119.md) Code-only batch 767 (M2): LSM trees per table with WITH (storage = lsm)
 - [D1120](decisions/D1120.md) Code-only batch 768 (M2): subpartitions in the partition ALTERs, SUBPARTITION TEMPLATE and DROP or TRUNCATE SUBPARTITION
 - [D1121](decisions/D1121.md) Code-only batch 770 (M2): the downgrade path with backup --for-release and upgrade, downgrade and mixed-version tests against the previous release
+- [D1122](decisions/D1122.md) Code-only batch 771 (M2): index builds that block neither reads nor writes with CREATE INDEX CONCURRENTLY
