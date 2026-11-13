@@ -428,8 +428,11 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   byte `0`, or `1`, a 4-byte length and the key) and the run numbers it merges. A component
   entry is its root page and its entry count, 8 bytes each, little-endian. Each value in a
   component starts with a tag byte: `1` and the value, or `0` alone for a deleted key.
-- **Tenant and shard prefixes (D20):** a later scheme encodes `(tenant, shard, key)` into the
-  same byte string, preserving order, and sets an incompatible feature bit.
+- **Tenant prefix (D20, D1047):** a tenant's key space is `FF 43 4F 4C 00 08`, the tenant's name
+  length (2 bytes, big-endian) and its name (UTF-8, 1 to 255 bytes), then the key. The length
+  keeps one tenant's range from running into another whose name it begins, and order within a
+  tenant is the order of its keys. Files without tenant keys need no feature flag; a release
+  before D1047 reads such keys as part of the reserved collections range and never shows them.
 - **Prefix truncation:** B+tree pages keep low and high fence keys and store the prefix those
   keys share only once. So an unused prefix costs nothing, and a used one costs about nothing
   per entry.

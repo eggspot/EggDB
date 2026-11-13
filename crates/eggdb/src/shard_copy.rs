@@ -16,7 +16,29 @@ pub struct ShardPage {
 }
 
 fn reserved(key: &[u8]) -> bool {
-    key.first() == Some(&0xFF)
+    key.first() == Some(&0xFF) && !key.starts_with(eggdb_cluster::tenants::TENANT_PREFIX)
+}
+
+/// The changes of `batch` to `tenant`'s keys, in the batch's order: what the new home of a
+/// moving tenant applies to catch up (D1047).
+pub fn tenant_changes(batch: &Batch, tenant: &str) -> Vec<ShardChange> {
+    let Some(prefix) = eggdb_cluster::tenants::tenant_prefix(tenant) else {
+        return Vec::new();
+    };
+    batch
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Put {
+                collection,
+                key,
+                value,
+            } if collection.is_empty() => Some((key.clone(), Some(value.clone()))),
+            Change::Delete { collection, key } if collection.is_empty() => Some((key.clone(), None)),
+            _ => None,
+        })
+        .filter(|(key, _)| key.starts_with(&prefix))
+        .collect()
 }
 
 /// The changes of `batch` to keys of `shard` under `map`, in the batch's order: what the new

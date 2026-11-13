@@ -17,6 +17,7 @@ pub mod merkle;
 pub mod quorum;
 pub mod regions;
 pub mod simulation;
+pub mod tenants;
 mod shards;
 pub mod transaction;
 

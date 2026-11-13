@@ -10,6 +10,7 @@ const HASH: u8 = 0;
 const RANGE: u8 = 1;
 const TIME: u8 = 2;
 const REGION: u8 = 3;
+const TENANT: u8 = 4;
 
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -82,6 +83,15 @@ impl ShardMap {
                     put_bytes(&mut out, region.as_bytes());
                 }
             }
+            Strategy::Tenant { shards, placed } => {
+                out.push(TENANT);
+                out.extend_from_slice(&shards.to_be_bytes());
+                out.extend_from_slice(&(placed.len() as u32).to_be_bytes());
+                for (tenant, shard) in placed {
+                    put_bytes(&mut out, tenant.as_bytes());
+                    out.extend_from_slice(&shard.to_be_bytes());
+                }
+            }
         }
         out.extend_from_slice(&(self.shards.len() as u32).to_be_bytes());
         for shard in self.shards.values() {
@@ -128,6 +138,17 @@ impl ShardMap {
                     regions.push(reader.text()?);
                 }
                 Strategy::Region { regions }
+            }
+            TENANT => {
+                let shards = reader.u32()?;
+                let count = reader.count(8)?;
+                let mut placed = BTreeMap::new();
+                for _ in 0..count {
+                    let tenant = reader.text()?;
+                    let shard = reader.u32()?;
+                    placed.insert(tenant, shard);
+                }
+                Strategy::Tenant { shards, placed }
             }
             _ => return None,
         };

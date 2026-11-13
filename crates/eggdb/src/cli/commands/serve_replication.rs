@@ -480,8 +480,16 @@ pub(super) fn client_tls(address: &str, ca_file: Option<&std::path::Path>) -> Re
     Ok(Some(eggdb_tls::ClientConfig::new(eggdb_tls::ServerVerification::Full { trust, server_name }, host)))
 }
 
-fn shard_request(rest: &[u8]) -> Option<(eggdb::cluster::ShardId, u64)> {
-    Some((u32::from_le_bytes(rest.get(..4)?.try_into().ok()?), number(rest, 4)?))
+fn shard_request(rest: &[u8]) -> Option<(eggdb::cluster::ShardId, u64, Option<String>)> {
+    let tenant = rest.get(12..).filter(|name| !name.is_empty()).map(|name| String::from_utf8(name.to_vec())).transpose().ok()?;
+    Some((u32::from_le_bytes(rest.get(..4)?.try_into().ok()?), number(rest, 4)?, tenant))
+}
+
+/// What a move copies: one shard of the map, or one tenant's key range (D1047).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum MoveTarget {
+    Shard(eggdb::cluster::ShardId),
+    Tenant(String),
 }
 
 pub(super) fn serve_shard_copy(
@@ -491,7 +499,7 @@ pub(super) fn serve_shard_copy(
     rest: &[u8],
 ) -> std::io::Result<()> {
     let failed = |error: eggdb::Error| std::io::Error::other(error.to_string());
-    let Some((shard, epoch)) = shard_request(rest) else {
+    let Some((shard, epoch, tenant)) = shard_request(rest) else {
         return write_frame(stream, REFUSED, b"the shard copy request is malformed");
     };
     let Some(primary) = primary else {
@@ -500,7 +508,7 @@ pub(super) fn serve_shard_copy(
     let Some(map) = db.shard_map().map_err(failed)? else {
         return write_frame(stream, REFUSED, b"this server has no shard map");
     };
-    if map.epoch != epoch || !map.shards.contains_key(&shard) {
+    if map.epoch != epoch || (tenant.is_none() && !map.shards.contains_key(&shard)) {
         return write_frame(
             stream,
             REFUSED,
@@ -510,10 +518,16 @@ pub(super) fn serve_shard_copy(
     let start = primary.last().map_err(failed)?;
     let mut after: Option<Vec<u8>> = None;
     loop {
-        let page = db.shard_page(&map, shard, after.as_deref(), KEYS_PER_SHARD_PAGE).map_err(failed)?;
-        let changes: Vec<eggdb::ShardChange> = page.entries.into_iter().map(|(key, value)| (key, Some(value))).collect();
+        let (entries, next) = match &tenant {
+            Some(tenant) => db.tenant_page(tenant, after.as_deref(), KEYS_PER_SHARD_PAGE).map_err(failed)?,
+            None => {
+                let page = db.shard_page(&map, shard, after.as_deref(), KEYS_PER_SHARD_PAGE).map_err(failed)?;
+                (page.entries, page.next_after)
+            }
+        };
+        let changes: Vec<eggdb::ShardChange> = entries.into_iter().map(|(key, value)| (key, Some(value))).collect();
         write_frame(stream, SHARD_PAGE, &eggdb::encode_shard_changes(&changes))?;
-        match page.next_after {
+        match next {
             Some(next) => after = Some(next),
             None => break,
         }
@@ -539,7 +553,10 @@ pub(super) fn serve_shard_copy(
         };
         let mut changes = Vec::new();
         for batch in &batches {
-            changes.extend(eggdb::shard_changes(batch, &map, shard));
+            match &tenant {
+                Some(tenant) => changes.extend(eggdb::tenant_changes(batch, tenant)),
+                None => changes.extend(eggdb::shard_changes(batch, &map, shard)),
+            }
             applied = batch.sequence;
         }
         write_frame(stream, SHARD_CHANGES, &eggdb::encode_shard_changes(&changes))?;
@@ -567,7 +584,7 @@ pub(super) fn copy_shard(
     from: &PrimaryAddress,
     credentials: &ReplicationCredentials,
     db: &Database,
-    shard: eggdb::cluster::ShardId,
+    target: &MoveTarget,
     owner: u64,
     stop: &(dyn Fn() -> bool + Sync),
 ) -> Result<ShardCopyReport, String> {
@@ -575,9 +592,20 @@ pub(super) fn copy_shard(
         .shard_map()
         .map_err(|error| error.to_string())?
         .ok_or("this server has no shard map; publish one before moving shards")?;
-    if !map.shards.contains_key(&shard) {
-        return Err(format!("the shard map has no shard {shard}"));
-    }
+    let (shard, tenant) = match target {
+        MoveTarget::Shard(shard) => {
+            if !map.shards.contains_key(shard) {
+                return Err(format!("the shard map has no shard {shard}"));
+            }
+            (*shard, None)
+        }
+        MoveTarget::Tenant(tenant) => {
+            if map.tenant_shard(tenant).is_none() {
+                return Err("the shard map does not route by tenant; publish one with the tenant strategy first".into());
+            }
+            (0, Some(tenant.as_str()))
+        }
+    };
     let mut stream = connect(from)?;
     let io = |error: std::io::Error| format!("the shard copy from {} failed: {error}", from.address);
     let (kind, nonce) = read_frame(stream.as_mut()).map_err(io)?;
@@ -586,6 +614,9 @@ pub(super) fn copy_shard(
     }
     let mut tail = shard.to_le_bytes().to_vec();
     tail.extend_from_slice(&map.epoch.to_le_bytes());
+    if let Some(tenant) = tenant {
+        tail.extend_from_slice(tenant.as_bytes());
+    }
     write_frame(stream.as_mut(), SHARD_COPY, &signed_greeting(credentials, &nonce, &tail)?).map_err(io)?;
     let mut report = ShardCopyReport::default();
     let start = loop {
@@ -632,13 +663,21 @@ pub(super) fn copy_shard(
         }
     }
     if !caught_up {
-        return Err(format!("shard {shard} kept changing faster than it could be copied; try the move again when it is quieter"));
+        return Err("the data kept changing faster than it could be copied; try the move again when it is quieter".into());
     }
     let mut moved = map.clone();
-    if let Some(entry) = moved.shards.get_mut(&shard) {
-        entry.owner = owner;
+    match tenant {
+        Some(tenant) => {
+            let new_shard = moved.shards.keys().max().map_or(0, |last| last + 1);
+            moved.place_tenant(tenant, new_shard, owner);
+        }
+        None => {
+            if let Some(entry) = moved.shards.get_mut(&shard) {
+                entry.owner = owner;
+            }
+            moved.epoch = map.epoch + 1;
+        }
     }
-    moved.epoch = map.epoch + 1;
     if !db.publish_shard_map(&moved, Some(map.epoch)).map_err(|error| error.to_string())? {
         return Err("the shard map changed while the shard was copied; the move was not cut over".into());
     }
@@ -648,7 +687,7 @@ pub(super) fn copy_shard(
     Ok(report)
 }
 
-type ShardMoveRequest = (eggdb::cluster::ShardId, String, std::sync::mpsc::Sender<Result<String, String>>);
+type ShardMoveRequest = (MoveTarget, String, std::sync::mpsc::Sender<Result<String, String>>);
 
 static SHARD_MOVES: std::sync::Mutex<Option<std::sync::mpsc::Sender<ShardMoveRequest>>> = std::sync::Mutex::new(None);
 
@@ -657,13 +696,22 @@ const SHARD_MOVE_REPLY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The hook `MOVE SHARD` calls in this process: it hands the move to the server's shard mover
 /// and waits for its answer.
 pub(super) fn request_shard_move(shard: eggdb::cluster::ShardId, from: &str) -> Result<String, String> {
+    request_move(MoveTarget::Shard(shard), from)
+}
+
+/// The hook `MOVE TENANT` calls in this process (D1047).
+pub(super) fn request_tenant_move(tenant: &str, from: &str) -> Result<String, String> {
+    request_move(MoveTarget::Tenant(tenant.to_owned()), from)
+}
+
+fn request_move(target: MoveTarget, from: &str) -> Result<String, String> {
     let sender = SHARD_MOVES
         .lock()
         .map_err(|_| "the shard mover failed".to_owned())?
         .clone()
         .ok_or("this server does not move shards")?;
     let (reply, answer) = std::sync::mpsc::channel();
-    sender.send((shard, from.to_owned(), reply)).map_err(|_| "the shard mover stopped".to_owned())?;
+    sender.send((target, from.to_owned(), reply)).map_err(|_| "the shard mover stopped".to_owned())?;
     answer.recv_timeout(SHARD_MOVE_REPLY).map_err(|_| "the shard move did not finish in time".to_owned())?
 }
 
@@ -681,15 +729,19 @@ pub(super) fn serve_shard_moves(
         *slot = Some(sender);
     }
     while !stop() {
-        let Ok((shard, from, reply)) = requests.recv_timeout(ACCEPT_POLL * 5) else {
+        let Ok((target, from, reply)) = requests.recv_timeout(ACCEPT_POLL * 5) else {
             continue;
+        };
+        let what = match &target {
+            MoveTarget::Shard(shard) => format!("shard {shard}"),
+            MoveTarget::Tenant(tenant) => format!("tenant {tenant}"),
         };
         let outcome = client_tls(&from, ca_file)
             .map(|tls| PrimaryAddress { address: from.clone(), tls })
-            .and_then(|address| copy_shard(&address, credentials, db, shard, owner, stop))
+            .and_then(|address| copy_shard(&address, credentials, db, &target, owner, stop))
             .map(|report| {
                 format!(
-                    "shard {shard} moved from {from}: {} keys copied, {} changes caught up, shard map epoch {}",
+                    "{what} moved from {from}: {} keys copied, {} changes caught up, shard map epoch {}",
                     report.keys, report.changes, report.epoch
                 )
             });

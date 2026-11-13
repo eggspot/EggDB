@@ -1181,6 +1181,7 @@ impl Session<'_> {
         let moves_shards = replicates || cluster.is_some();
         if moves_shards {
             eggdb_sql::set_shard_move_hook(super::serve_replication::request_shard_move);
+            eggdb_sql::set_tenant_move_hook(super::serve_replication::request_tenant_move);
         }
         let shard_owner = match &cluster {
             Some((settings, _)) => settings.node,

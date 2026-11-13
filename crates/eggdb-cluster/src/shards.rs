@@ -24,6 +24,14 @@ pub enum Strategy {
         /// The regions, one shard each, in shard order.
         regions: Vec<String>,
     },
+    /// By tenant: a tenant's keys (the tenant prefix of D1047) all go to one shard, the one
+    /// `placed` names for it, or else the one its name hashes to among `shards`.
+    Tenant {
+        /// The shards tenants without a placement hash over.
+        shards: u32,
+        /// Tenants placed on a shard of their own choosing, such as one moved online.
+        placed: BTreeMap<String, ShardId>,
+    },
 }
 
 /// One shard and where it lives.
@@ -91,6 +99,13 @@ pub fn route(strategy: &Strategy, key: &[u8]) -> Option<ShardId> {
                 .position(|region| region.as_bytes() == name)
                 .map(|at| at as ShardId)
         }
+        Strategy::Tenant { shards, placed } => {
+            let (tenant, _) = crate::tenants::split_tenant_key(key)?;
+            placed
+                .get(tenant)
+                .copied()
+                .or_else(|| route(&Strategy::Hash { shards: *shards }, tenant.as_bytes()))
+        }
     }
 }
 
@@ -104,6 +119,7 @@ impl ShardMap {
             Strategy::Range { bounds } => bounds.len() as u32 + 1,
             Strategy::Time { .. } => 0,
             Strategy::Region { regions } => regions.len() as u32,
+            Strategy::Tenant { shards, .. } => (*shards).max(1),
         };
         let mut shards = BTreeMap::new();
         for id in 0..count {
@@ -153,6 +169,31 @@ impl ShardMap {
             self.epoch += 1;
         }
         Some(id)
+    }
+
+    /// Places `tenant` on `shard`, owned by `owner` (a new shard is created for it when the map
+    /// has none of that id), raising the epoch: the cut-over of a tenant moved online. Returns
+    /// whether the map routes by tenant.
+    pub fn place_tenant(&mut self, tenant: &str, shard: ShardId, owner: NodeId) -> bool {
+        let Strategy::Tenant { placed, .. } = &mut self.strategy else {
+            return false;
+        };
+        placed.insert(tenant.to_owned(), shard);
+        self.shards.entry(shard).or_insert(Shard {
+            id: shard,
+            owner,
+            region: None,
+        });
+        self.epoch += 1;
+        true
+    }
+
+    /// The shard `tenant`'s keys go to, for a map that routes by tenant.
+    pub fn tenant_shard(&self, tenant: &str) -> Option<ShardId> {
+        let key = crate::tenants::tenant_key(tenant, b"")?;
+        matches!(self.strategy, Strategy::Tenant { .. })
+            .then(|| route(&self.strategy, &key))
+            .flatten()
     }
 
     /// Whether a request routed with `epoch` may be served: only the current epoch is.

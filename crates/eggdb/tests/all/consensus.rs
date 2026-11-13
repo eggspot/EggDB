@@ -219,3 +219,33 @@ fn a_shard_is_copied_page_by_page_and_caught_up_from_batches() {
     );
     assert_eq!(decode_shard_changes(&[9, 0, 0, 0]), None);
 }
+
+#[test]
+fn a_tenant_s_keys_are_one_range_hidden_from_the_default_key_space() {
+    let file = TempPath::new("tenant-space");
+    let db = Database::open(file.path()).unwrap();
+    let acme = db.tenant("acme").unwrap();
+    let other = db.tenant("acme2").unwrap();
+    for index in 0..30u32 {
+        acme.put(format!("order {index:02}"), format!("{index}")).unwrap();
+    }
+    other.put("order 00", "not acme's").unwrap();
+    assert_eq!(acme.get("order 07").unwrap(), Some(b"7".to_vec()));
+    assert!(acme.delete("order 07").unwrap());
+    assert_eq!(acme.get("order 07").unwrap(), None);
+    let entries = acme.entries().unwrap();
+    assert_eq!(entries.len(), 29);
+    assert_eq!(entries[0], (b"order 00".to_vec(), b"0".to_vec()));
+    assert_eq!(other.entries().unwrap().len(), 1);
+    assert_eq!(db.begin_read().unwrap().scan_prefix(b"").count(), 0);
+    let (page, next) = db.tenant_page("acme", None, 10).unwrap();
+    assert_eq!(page.len(), 10);
+    let (rest, _) = db.tenant_page("acme", next.as_deref(), 100).unwrap();
+    assert_eq!(rest.len(), 19);
+    assert!(db.tenant("").is_err());
+    let target_file = TempPath::new("tenant-target");
+    let target = Database::open(target_file.path()).unwrap();
+    let copied: Vec<eggdb::ShardChange> = page.into_iter().chain(rest).map(|(key, value)| (key, Some(value))).collect();
+    target.apply_shard_changes(&copied).unwrap();
+    assert_eq!(target.tenant("acme").unwrap().entries().unwrap(), entries);
+}

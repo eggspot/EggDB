@@ -844,3 +844,34 @@ fn rebalancing_under_load_and_faults_loses_nothing_and_ends_even() {
     assert!(moved > 0);
     assert!(refused_clocks > 0, "the clock skew never exceeded the allowed offset");
 }
+
+#[test]
+fn tenants_route_as_a_unit_and_move_to_a_shard_of_their_own() {
+    use crate::tenants::{split_tenant_key, tenant_key, tenant_prefix};
+    let nodes = placement(&[(1, "eu"), (2, "eu")]);
+    let mut map = ShardMap::new(
+        Strategy::Tenant {
+            shards: 4,
+            placed: BTreeMap::new(),
+        },
+        &nodes,
+    );
+    let first = tenant_key("acme", b"order 1").unwrap();
+    let second = tenant_key("acme", b"order 2").unwrap();
+    assert_eq!(route(&map.strategy, &first), route(&map.strategy, &second));
+    assert_eq!(route(&map.strategy, b"plain key"), None);
+    assert_eq!(split_tenant_key(&first), Some(("acme", &b"order 1"[..])));
+    assert!(first.starts_with(&tenant_prefix("acme").unwrap()));
+    assert!(!tenant_key("acmex", b"").unwrap().starts_with(&tenant_prefix("acme").unwrap()));
+    assert_eq!(tenant_prefix(""), None);
+    assert_eq!(tenant_prefix(&"x".repeat(256)), None);
+    let epoch = map.epoch;
+    assert!(map.place_tenant("acme", 9, 2));
+    assert_eq!(map.epoch, epoch + 1);
+    assert_eq!(map.tenant_shard("acme"), Some(9));
+    assert_eq!(map.owner(&first), Some((2, map.epoch)));
+    assert_eq!(ShardMap::decode(&map.encode()), Some(map.clone()));
+    let mut hashed = ShardMap::new(Strategy::Hash { shards: 2 }, &nodes);
+    assert!(!hashed.place_tenant("acme", 1, 1));
+    assert_eq!(hashed.tenant_shard("acme"), None);
+}
