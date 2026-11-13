@@ -49,6 +49,8 @@ pub const DYNAMODB_COLLECTIONS: &str = "dynamodb";
 pub const SYNC_COLLECTIONS: &str = "sync";
 /// The CouchDB-compatible databases (D1109).
 pub const COUCH_COLLECTIONS: &str = "couch";
+/// The fleet control plane's inventory and upgrades (D1112).
+pub const FLEET_COLLECTIONS: &str = "fleet";
 
 fn failed(error: &crate::Error) -> String {
     format!("ERR {error}")

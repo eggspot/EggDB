@@ -56,6 +56,7 @@ mod fs;
 mod io;
 pub mod local_socket;
 mod memory;
+pub mod machine;
 mod memory_file;
 mod net;
 mod os_cpus;

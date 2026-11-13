@@ -42,6 +42,7 @@ dependencies = [
  "eggdb-dynamodb",
  "eggdb-esrest",
  "eggdb-etcd",
+ "eggdb-fleet",
  "eggdb-flight",
  "eggdb-format",
  "eggdb-gremlin",
@@ -250,6 +251,16 @@ dependencies = [
  "eggdb-http2",
  "eggdb-keyspace",
  "eggdb-platform",
+]
+
+[[package]]
+name = "eggdb-fleet"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-http",
+ "eggdb-keyspace",
+ "eggdb-sql",
 ]
 
 [[package]]

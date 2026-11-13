@@ -619,6 +619,22 @@ impl Session<'_> {
             None => None,
         };
         let dynamodb_secret = dynamodb_listener.as_ref().map(|_| password.clone());
+        let fleet_listener = match options.fleet_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() && tls.is_none() {
+                    return Err(usage(format!(
+                        "--fleet-listen {address}: servers outside this machine report over HTTPS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for the fleet's servers on {address}: {error}"), Exit::DatabaseError)
+                })?)
+            }
+            None => None,
+        };
+        if options.fleet_report.is_none() && (options.fleet_cluster.is_some() || options.fleet_class.is_some()) {
+            return Err(usage("--fleet-cluster and --fleet-class go with --fleet-report".to_owned()));
+        }
         let couch_listener = match options.couch_listen {
             Some(address) => {
                 if !address.ip().is_loopback() && tls.is_none() {
@@ -1639,6 +1655,34 @@ impl Session<'_> {
                     jmap_endpoint.run_push(&stop_signals::requested);
                 }
             });
+            let fleet_server = scope.spawn(|| match &fleet_listener {
+                Some(listener) => {
+                    let keyspace = eggdb::keyspace::DatabaseKeyspace { db: &db, prefix: eggdb::keyspace::FLEET_COLLECTIONS };
+                    let endpoint = eggdb_fleet::FleetEndpoint::new(&keyspace, &password);
+                    eggdb_http::serve_with_limits(
+                        listener,
+                        &|request| endpoint.answer(request),
+                        &stop_signals::requested,
+                        &eggdb_http::Limits::new(1 << 20, &memory_budget)
+                            .with_rate_limit(rate_limiter.as_ref())
+                            .with_tls(tls.as_ref().map(|setup| &*setup.postgresql)),
+                    )
+                }
+                None => Ok(()),
+            });
+            let fleet_reporter = scope.spawn(|| {
+                if let Some(url) = &options.fleet_report {
+                    super::serve_jobs::report_to_fleet(
+                        url,
+                        &password,
+                        &config.database,
+                        options.fleet_cluster.as_deref(),
+                        options.fleet_class.as_deref(),
+                        options.region.as_deref(),
+                        &stop_signals::requested,
+                    );
+                }
+            });
             let couch_server = scope.spawn(|| match &couch_listener {
                 Some(listener) => {
                     let keyspace = eggdb::keyspace::DatabaseKeyspace { db: &db, prefix: eggdb::keyspace::COUCH_COLLECTIONS };
@@ -2258,6 +2302,8 @@ impl Session<'_> {
             let _ = edge_follower.join();
             let _ = sync_server.join();
             let _ = couch_server.join();
+            let _ = fleet_server.join();
+            let _ = fleet_reporter.join();
             let _ = placement_keeper.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();

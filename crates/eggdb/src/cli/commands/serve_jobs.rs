@@ -61,6 +61,57 @@ pub(super) fn app_user_of(store: &impl eggdb_sql::KeyValueStore, token: &str) ->
     user.and_then(|text| text.parse::<u32>().ok())
 }
 
+const REPORT_EVERY: Duration = Duration::from_secs(30);
+
+pub(super) fn report_to_fleet(
+    url: &str,
+    password: &str,
+    database: &str,
+    cluster: Option<&str>,
+    class: Option<&str>,
+    region: Option<&str>,
+    stop: &(dyn Fn() -> bool + Sync),
+) {
+    let host = std::env::var("HOSTNAME").ok().filter(|name| !name.is_empty()).unwrap_or_else(|| database.to_owned());
+    let member = eggdb_fleet::plan::Member {
+        id: host.clone(),
+        cluster: cluster.map_or_else(|| host.clone(), str::to_owned),
+        region: region.unwrap_or_default().to_owned(),
+        version: eggdb::VERSION.to_owned(),
+        hardware: eggdb_fleet::plan::Hardware {
+            arch: std::env::consts::ARCH.to_owned(),
+            cpus: std::thread::available_parallelism().map_or(1, |count| u32::try_from(count.get()).unwrap_or(u32::MAX)),
+            memory_gib: eggdb_platform::machine::total_memory_bytes().map_or(0, |bytes| u32::try_from(bytes >> 30).unwrap_or(u32::MAX)),
+            storage: String::new(),
+        },
+        class: class.map(str::to_owned),
+        healthy: true,
+        last_seen_ms: 0,
+    };
+    let mut waited = REPORT_EVERY;
+    let mut told: Option<Option<String>> = None;
+    while !stop() {
+        if waited >= REPORT_EVERY {
+            waited = Duration::ZERO;
+            match eggdb_fleet::report(url, password, &member, Duration::from_secs(10)) {
+                Ok(desired) => {
+                    if told.as_ref() != Some(&desired) {
+                        match &desired {
+                            Some(version) if version != eggdb::VERSION => eprintln!("eggdb serve: the fleet control plane wants this server on version {version}"),
+                            None => eprintln!("eggdb serve: the fleet control plane wants this server rolled back to its version before the upgrade"),
+                            Some(_) => {}
+                        }
+                        told = Some(desired);
+                    }
+                }
+                Err(message) => eprintln!("eggdb serve: --fleet-report {url}: {message}"),
+            }
+        }
+        std::thread::sleep(CHECK_EVERY);
+        waited += CHECK_EVERY;
+    }
+}
+
 const PREWARM_EVERY: Duration = Duration::from_secs(60);
 
 pub(super) fn keep_placement(

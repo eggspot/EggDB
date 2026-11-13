@@ -2098,7 +2098,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   in Trino's style (D18, D46, D229). **Code written, unbuilt** (code-only mode, 2026-11-13, D1111): `server.schema.table` names
   imported on first use, so one statement joins tables of several servers, each read with its filters pushed down.
 - A fleet control plane: inventory, upgrades in canary waves and placement by hardware class
-  (D58).
+  (D58). **Code written, unbuilt** (code-only mode, 2026-11-13, D1112): `eggdb-fleet`,
+  `eggdb serve --fleet-listen` and `--fleet-report`.
 - Tenant lifecycle APIs, and databases per user at millions of tenants (D58).
 
 ### Needs the owner (money or accounts, D58)

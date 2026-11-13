@@ -27,6 +27,7 @@ eggdb-cluster = { path = "../eggdb-cluster" }
 eggdb-commands = { path = "../eggdb-commands" }
 eggdb-consensus = { path = "../eggdb-consensus" }
 eggdb-couch = { path = "../eggdb-couch" }
+eggdb-fleet = { path = "../eggdb-fleet" }
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-http = { path = "../eggdb-http" }
 eggdb-mcp = { path = "../eggdb-mcp" }

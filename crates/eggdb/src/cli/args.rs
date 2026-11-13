@@ -311,6 +311,10 @@ impl CommandName {
             | OptionName::Region
             | OptionName::SyncListen
             | OptionName::CouchListen
+            | OptionName::FleetListen
+            | OptionName::FleetReport
+            | OptionName::FleetCluster
+            | OptionName::FleetClass
             | OptionName::EdgeCache
             | OptionName::PageStoreDisk
             | OptionName::MultiPrimary
@@ -569,6 +573,10 @@ enum OptionName {
     Region,
     SyncListen,
     CouchListen,
+    FleetListen,
+    FleetReport,
+    FleetCluster,
+    FleetClass,
     EdgeCache,
     PageStoreDisk,
     MultiPrimary,
@@ -765,6 +773,10 @@ impl OptionName {
             b"region" => Self::Region,
             b"sync-listen" => Self::SyncListen,
             b"couch-listen" => Self::CouchListen,
+            b"fleet-listen" => Self::FleetListen,
+            b"fleet-report" => Self::FleetReport,
+            b"fleet-cluster" => Self::FleetCluster,
+            b"fleet-class" => Self::FleetClass,
             b"edge-cache" => Self::EdgeCache,
             b"page-store-disk" => Self::PageStoreDisk,
             b"multi-primary" => Self::MultiPrimary,
@@ -1186,6 +1198,10 @@ pub(crate) struct ServeOptions {
     pub(crate) observability_listen: Option<SocketAddr>,
     pub(crate) sync_listen: Option<SocketAddr>,
     pub(crate) couch_listen: Option<SocketAddr>,
+    pub(crate) fleet_listen: Option<SocketAddr>,
+    pub(crate) fleet_report: Option<String>,
+    pub(crate) fleet_cluster: Option<String>,
+    pub(crate) fleet_class: Option<String>,
     pub(crate) restore_from: Option<String>,
     pub(crate) rest_listen: Option<SocketAddr>,
     pub(crate) clickhouse_listen: Option<SocketAddr>,
@@ -1938,6 +1954,25 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     )));
                 }
                 request.serve.restore_from = Some(url.to_owned());
+            }
+            OptionName::FleetListen => {
+                request.serve.fleet_listen = Some(parse_listen(&option.spelled, value, 7700).map_err(usage)?);
+            }
+            OptionName::FleetReport => {
+                let text = value.to_str().filter(|text| text.starts_with("http://") || text.starts_with("https://")).ok_or_else(|| usage(format!("{} takes the control plane's http:// or https:// URL", option.spelled)))?;
+                request.serve.fleet_report = Some(text.to_owned());
+            }
+            OptionName::FleetCluster | OptionName::FleetClass => {
+                let text = value
+                    .to_str()
+                    .filter(|text| !text.is_empty() && text.len() <= 128 && text.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')))
+                    .ok_or_else(|| usage(format!("{} takes a name of letters, digits, -, _ and .", option.spelled)))?
+                    .to_owned();
+                if option.name == OptionName::FleetCluster {
+                    request.serve.fleet_cluster = Some(text);
+                } else {
+                    request.serve.fleet_class = Some(text);
+                }
             }
             OptionName::CouchListen => {
                 request.serve.couch_listen = Some(parse_listen(&option.spelled, value, 5984).map_err(usage)?);

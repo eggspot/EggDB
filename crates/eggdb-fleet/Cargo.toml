@@ -1,0 +1,16 @@
+[package]
+name = "eggdb-fleet"
+description = "EggDB's fleet control plane: an inventory of servers from their heartbeats, upgrades in canary waves, and placement by hardware class."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http = { path = "../eggdb-http" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-sql = { path = "../eggdb-sql" }
