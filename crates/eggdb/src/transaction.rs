@@ -729,8 +729,9 @@ impl<'db> WriteTransaction<'db> {
             ..
         } = self;
         let committed = inner.commit().map_err(Error::storage);
+        let mut replicated = None;
         if let (Some(changes), Some(primary), Ok(_)) = (&archived, database.primary(), &committed) {
-            let _ = primary.committed(changes);
+            replicated = primary.committed(changes).ok().map(|sequence| (std::sync::Arc::clone(primary), sequence));
         }
         if let (Some(_), Some(archive)) = (&archived, database.change_archive()) {
             match &committed {
@@ -747,6 +748,18 @@ impl<'db> WriteTransaction<'db> {
             database.remember_tree(tree);
         }
         drop(turn);
+        if let Some((primary, sequence)) = replicated
+            && !primary.wait_durable(sequence, database.write_timeout())?
+        {
+            return Err(Error::new(
+                ErrorKind::TransactionFailed,
+                format!(
+                    "the commit stamped {} is durable on this primary, but its replicas did not acknowledge it within {} ms",
+                    stamp.bits(),
+                    database.write_timeout().as_millis()
+                ),
+            ));
+        }
         Ok(stamp)
     }
 

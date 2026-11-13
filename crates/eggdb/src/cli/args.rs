@@ -291,6 +291,7 @@ impl CommandName {
             | OptionName::ReplicationListen
             | OptionName::ReplicaOf
             | OptionName::ReplicaOfCa
+            | OptionName::SynchronousReplicas
             | OptionName::CdcWebhook
             | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
@@ -513,6 +514,7 @@ enum OptionName {
     ReplicationListen,
     ReplicaOf,
     ReplicaOfCa,
+    SynchronousReplicas,
     CdcWebhook,
     OtlpEndpoint,
     CdcQueue,
@@ -673,6 +675,7 @@ impl OptionName {
             b"replication-listen" => Self::ReplicationListen,
             b"replica-of" => Self::ReplicaOf,
             b"replica-of-ca" => Self::ReplicaOfCa,
+            b"synchronous-replicas" => Self::SynchronousReplicas,
             b"cdc-webhook" => Self::CdcWebhook,
             b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
@@ -1038,6 +1041,7 @@ pub(crate) struct ServeOptions {
     pub(crate) replication_listen: Option<SocketAddr>,
     pub(crate) replica_of: Option<String>,
     pub(crate) replica_of_ca: Option<PathBuf>,
+    pub(crate) synchronous_replicas: Option<usize>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1769,6 +1773,14 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.replica_of = Some(address);
             }
             OptionName::ReplicaOfCa => request.serve.replica_of_ca = Some(PathBuf::from(value)),
+            OptionName::SynchronousReplicas => {
+                request.serve.synchronous_replicas = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|count| (1..=64).contains(count))
+                        .and_then(|count| usize::try_from(count).ok())
+                        .ok_or_else(|| usage(format!("{} takes how many replicas acknowledge each commit, 1 to 64", option.spelled)))?,
+                );
+            }
             OptionName::MongoListen => {
                 request.serve.mongo_listen =
                     Some(parse_listen(&option.spelled, value, 27017).map_err(usage)?);

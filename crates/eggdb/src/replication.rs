@@ -28,6 +28,7 @@ fn decode_position(bytes: &[u8]) -> Option<(u64, u64)> {
 pub struct ReplicationPrimary {
     state: Mutex<Primary>,
     more: Condvar,
+    acknowledged: Condvar,
     retain: usize,
 }
 
@@ -78,7 +79,19 @@ impl ReplicationPrimary {
     /// Records that `replica` applied everything up to `sequence`.
     pub fn acknowledge(&self, replica: ReplicaId, sequence: u64) -> Result<()> {
         self.lock()?.acknowledge(replica, sequence);
+        self.acknowledged.notify_all();
         Ok(())
+    }
+
+    /// Waits up to `timeout` for the commit at `sequence` to be durable under the primary's
+    /// mode: at once when asynchronous, once enough replicas acknowledged it when synchronous.
+    pub fn wait_durable(&self, sequence: u64, timeout: Duration) -> Result<bool> {
+        let guard = self.lock()?;
+        let (guard, _) = self
+            .acknowledged
+            .wait_timeout_while(guard, timeout, |primary| !primary.is_durable(sequence))
+            .map_err(|_| replication_error("the replication state failed"))?;
+        Ok(guard.is_durable(sequence))
     }
 
     pub(crate) fn next_position(&self) -> Result<[u8; 16]> {
@@ -86,7 +99,7 @@ impl ReplicationPrimary {
         Ok(encode_position(primary.term(), primary.last() + 1))
     }
 
-    pub(crate) fn committed(&self, changes: &[crate::change_archive::ArchivedChange]) -> Result<()> {
+    pub(crate) fn committed(&self, changes: &[crate::change_archive::ArchivedChange]) -> Result<u64> {
         let changes = changes
             .iter()
             .map(|(key, value)| match value {
@@ -95,11 +108,11 @@ impl ReplicationPrimary {
             })
             .collect();
         let mut primary = self.lock()?;
-        primary.commit(changes);
+        let (batch, _) = primary.commit(changes);
         primary.retain_at_most(self.retain);
         drop(primary);
         self.more.notify_all();
-        Ok(())
+        Ok(batch.sequence)
     }
 }
 
@@ -122,6 +135,7 @@ impl Database {
         let primary = std::sync::Arc::new(ReplicationPrimary {
             state: Mutex::new(Primary::new(term.max(1), sequence, mode)),
             more: Condvar::new(),
+            acknowledged: Condvar::new(),
             retain: DEFAULT_RETAINED_BATCHES,
         });
         self.set_primary(std::sync::Arc::clone(&primary))?;

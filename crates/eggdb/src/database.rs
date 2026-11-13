@@ -380,6 +380,10 @@ impl Database {
         })
     }
 
+    pub(crate) fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
+
     pub(crate) fn primary(&self) -> Option<&Arc<crate::replication::ReplicationPrimary>> {
         self.primary.get()
     }

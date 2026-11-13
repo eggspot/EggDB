@@ -1076,7 +1076,10 @@ impl Session<'_> {
             .with_memory_budget(Arc::clone(&memory_budget))
             .with_search_users(es_readers, options.es_permission_field.as_deref().unwrap_or("readers"));
         let replication_primary = match &replication_listener {
-            Some(_) => Some(db.start_primary(eggdb::ReplicationMode::Asynchronous).map_err(|error| {
+            Some(_) => Some(db.start_primary(match options.synchronous_replicas {
+                Some(acknowledgements) => eggdb::ReplicationMode::Synchronous { acknowledgements },
+                None => eggdb::ReplicationMode::Asynchronous,
+            }).map_err(|error| {
                 Failure::database(format!("cannot start replicating {}: {error}", self.file), Exit::DatabaseError)
             })?),
             None => None,
