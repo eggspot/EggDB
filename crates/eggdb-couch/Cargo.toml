@@ -1,0 +1,17 @@
+[package]
+name = "eggdb-couch"
+description = "EggDB's CouchDB-compatible HTTP API and replication protocol: documents with revision trees, changes feeds, revs_diff, bulk_docs, bulk_get and replication checkpoints over EggDB's storage."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-http = { path = "../eggdb-http" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-platform = { path = "../eggdb-platform" }
+eggdb-sql = { path = "../eggdb-sql" }

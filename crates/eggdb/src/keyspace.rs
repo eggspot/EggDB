@@ -47,6 +47,8 @@ pub const OBJECT_COLLECTIONS: &str = "objects";
 pub const DYNAMODB_COLLECTIONS: &str = "dynamodb";
 /// The offline-first sync spaces, one per signed-in application user (D1106).
 pub const SYNC_COLLECTIONS: &str = "sync";
+/// The CouchDB-compatible databases (D1109).
+pub const COUCH_COLLECTIONS: &str = "couch";
 
 fn failed(error: &crate::Error) -> String {
     format!("ERR {error}")

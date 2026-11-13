@@ -2082,7 +2082,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Sync log compaction, partial sync, per-field merges and CRDTs, and end-to-end encryption (D228). **Code written, unbuilt**
   (code-only mode, 2026-11-13, D1108): `Replica::compact_log`, `prefix=` partial sync, `eggdb_sync::merge` (fields,
   counters, sets) and `eggdb_sync::seal::Sealer`.
-- CouchDB's replication protocol (D48).
+- CouchDB's replication protocol (D48). **Code written, unbuilt** (code-only mode, 2026-11-13, D1109): `eggdb-couch` and
+  `eggdb serve --couch-listen` (revision trees, `_changes`, `_revs_diff`, `_bulk_docs`, `_bulk_get`, `_local`).
 - Foreign tables with declared columns and filter pushdown (D29, D229). `CREATE SERVER` and `CREATE FOREIGN TABLE`
   with declared columns, as views over `eggdb_foreign`: **code written, unbuilt** (code-only mode, 2026-11-12, D916).
   `IMPORT FOREIGN SCHEMA`: **code written, unbuilt** (code-only mode, 2026-11-12, D917). Left: filter pushdown.

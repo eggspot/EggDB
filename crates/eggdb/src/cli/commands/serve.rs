@@ -619,6 +619,19 @@ impl Session<'_> {
             None => None,
         };
         let dynamodb_secret = dynamodb_listener.as_ref().map(|_| password.clone());
+        let couch_listener = match options.couch_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() && tls.is_none() {
+                    return Err(usage(format!(
+                        "--couch-listen {address}: replicators outside this machine connect over HTTPS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for CouchDB clients on {address}: {error}"), Exit::DatabaseError)
+                })?)
+            }
+            None => None,
+        };
         let sync_listener = match options.sync_listen {
             Some(address) => {
                 if !address.ip().is_loopback() && tls.is_none() {
@@ -1626,6 +1639,24 @@ impl Session<'_> {
                     jmap_endpoint.run_push(&stop_signals::requested);
                 }
             });
+            let couch_server = scope.spawn(|| match &couch_listener {
+                Some(listener) => {
+                    let keyspace = eggdb::keyspace::DatabaseKeyspace { db: &db, prefix: eggdb::keyspace::COUCH_COLLECTIONS };
+                    let authenticate = |name: &str, given: &str| {
+                        name == config.user && eggdb_crypto::constant_time_eq(&eggdb_crypto::sha256(given.as_bytes()), &server_password_sha256)
+                    };
+                    let endpoint = eggdb_couch::CouchEndpoint::new(&keyspace, &authenticate, &config.database);
+                    eggdb_http::serve_with_limits(
+                        listener,
+                        &|request| endpoint.answer(request),
+                        &stop_signals::requested,
+                        &eggdb_http::Limits::new(64 << 20, &memory_budget)
+                            .with_rate_limit(rate_limiter.as_ref())
+                            .with_tls(tls.as_ref().map(|setup| &*setup.postgresql)),
+                    )
+                }
+                None => Ok(()),
+            });
             let sync_server = scope.spawn(|| match &sync_listener {
                 Some(listener) => {
                     let keyspace = eggdb::keyspace::DatabaseKeyspace { db: &db, prefix: eggdb::keyspace::SYNC_COLLECTIONS };
@@ -2226,6 +2257,7 @@ impl Session<'_> {
             let _ = idle_stopper.join();
             let _ = edge_follower.join();
             let _ = sync_server.join();
+            let _ = couch_server.join();
             let _ = placement_keeper.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();

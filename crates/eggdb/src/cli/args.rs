@@ -310,6 +310,7 @@ impl CommandName {
             | OptionName::EdgeOf
             | OptionName::Region
             | OptionName::SyncListen
+            | OptionName::CouchListen
             | OptionName::EdgeCache
             | OptionName::PageStoreDisk
             | OptionName::MultiPrimary
@@ -567,6 +568,7 @@ enum OptionName {
     EdgeOf,
     Region,
     SyncListen,
+    CouchListen,
     EdgeCache,
     PageStoreDisk,
     MultiPrimary,
@@ -762,6 +764,7 @@ impl OptionName {
             b"edge-of" => Self::EdgeOf,
             b"region" => Self::Region,
             b"sync-listen" => Self::SyncListen,
+            b"couch-listen" => Self::CouchListen,
             b"edge-cache" => Self::EdgeCache,
             b"page-store-disk" => Self::PageStoreDisk,
             b"multi-primary" => Self::MultiPrimary,
@@ -1182,6 +1185,7 @@ pub(crate) struct ServeOptions {
     pub(crate) s3_listen: Option<SocketAddr>,
     pub(crate) observability_listen: Option<SocketAddr>,
     pub(crate) sync_listen: Option<SocketAddr>,
+    pub(crate) couch_listen: Option<SocketAddr>,
     pub(crate) restore_from: Option<String>,
     pub(crate) rest_listen: Option<SocketAddr>,
     pub(crate) clickhouse_listen: Option<SocketAddr>,
@@ -1934,6 +1938,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     )));
                 }
                 request.serve.restore_from = Some(url.to_owned());
+            }
+            OptionName::CouchListen => {
+                request.serve.couch_listen = Some(parse_listen(&option.spelled, value, 5984).map_err(usage)?);
             }
             OptionName::SyncListen => {
                 request.serve.sync_listen = Some(parse_listen(&option.spelled, value, 7600).map_err(usage)?);

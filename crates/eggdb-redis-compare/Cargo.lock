@@ -18,6 +18,7 @@ dependencies = [
  "eggdb-connect",
  "eggdb-consensus",
  "eggdb-content",
+ "eggdb-couch",
  "eggdb-cql",
  "eggdb-crypto",
  "eggdb-dav",
@@ -158,6 +159,17 @@ version = "0.5.0"
 [[package]]
 name = "eggdb-content"
 version = "0.5.0"
+
+[[package]]
+name = "eggdb-couch"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-http",
+ "eggdb-keyspace",
+ "eggdb-platform",
+ "eggdb-sql",
+]
 
 [[package]]
 name = "eggdb-cql"
@@ -546,6 +558,7 @@ dependencies = [
 name = "eggdb-sync"
 version = "0.5.0"
 dependencies = [
+ "eggdb-crypto",
  "eggdb-http",
  "eggdb-keyspace",
 ]
