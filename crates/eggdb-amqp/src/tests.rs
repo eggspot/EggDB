@@ -573,3 +573,45 @@ fn heartbeats_from_the_client_keep_its_connection_open() {
     assert!(elapsed >= Duration::from_millis(3_500), "{elapsed:?}");
     assert!(heartbeats(&frames) >= 4, "{frames:?}");
 }
+
+fn declare_with(channel: u16, queue: &str, durable: bool, arguments: &[(String, crate::field_table::FieldValue)]) -> Vec<u8> {
+    method(channel, 50, 10, |out| {
+        out.short(0)
+            .shortstr(queue)
+            .octet(if durable { 0b10 } else { 0 })
+            .longstr(&crate::field_table::encode_table(arguments));
+    })
+}
+
+#[test]
+fn quorum_queues_are_durable_and_drop_messages_past_their_delivery_limit() {
+    use crate::field_table::FieldValue;
+    let keyspace = MemoryKeyspace::default();
+    let quorum = vec![("x-queue-type".to_owned(), FieldValue::Bytes(b"quorum".to_vec()))];
+    let mut refused = login("secret");
+    refused.extend(declare_with(1, "transient", false, &quorum));
+    let frames = run(&keyspace, &refused);
+    assert!(frames.iter().any(|(_, class, id, _)| (*class, *id) == (20, 40)));
+    let mut limited = quorum.clone();
+    limited.push(("x-delivery-limit".to_owned(), FieldValue::Integer(0)));
+    let mut input = login("secret");
+    input.extend(declare_with(1, "jobs", true, &limited));
+    input.extend(publish(1, "", "jobs", b"poison"));
+    input.extend(method(1, 60, 70, |out| {
+        out.short(0).shortstr("jobs").octet(0);
+    }));
+    input.extend(method(1, 60, 90, |out| {
+        out.longlong(1).octet(1);
+    }));
+    input.extend(method(1, 60, 70, |out| {
+        out.short(0).shortstr("jobs").octet(0);
+    }));
+    let shapes: Vec<(u16, u16)> = run(&keyspace, &input)
+        .into_iter()
+        .filter(|(kind, _, _, _)| *kind == 1)
+        .map(|(_, class, id, _)| (class, id))
+        .collect();
+    assert!(shapes.contains(&(50, 11)), "{shapes:?}");
+    assert_eq!(shapes.iter().filter(|shape| **shape == (60, 71)).count(), 1, "{shapes:?}");
+    assert_eq!(shapes.last(), Some(&(60, 72)));
+}

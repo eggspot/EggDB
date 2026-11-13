@@ -86,6 +86,7 @@ struct QueuePolicy {
     dead_letter_routing_key: Option<String>,
     expires_ms: Option<u64>,
     max_priority: Option<u8>,
+    delivery_limit: Option<u64>,
 }
 
 impl QueuePolicy {
@@ -98,7 +99,23 @@ impl QueuePolicy {
             max_priority: integer_named(arguments, "x-max-priority")
                 .filter(|most| *most > 0)
                 .map(|most| u8::try_from(most).unwrap_or(u8::MAX)),
+            delivery_limit: integer_named(arguments, "x-delivery-limit"),
         }
+    }
+}
+
+/// Why a queue declaration's `x-queue-type` cannot be honoured, as RabbitMQ refuses it.
+fn queue_type_refusal(arguments: &[(String, FieldValue)], durable: bool, exclusive: bool, auto_delete: bool) -> Option<String> {
+    match text_named(arguments, "x-queue-type").as_deref() {
+        None | Some("classic") => None,
+        Some("quorum") if !durable || exclusive || auto_delete => Some(
+            "PRECONDITION_FAILED - a quorum queue is durable, and neither exclusive nor auto-delete".to_owned(),
+        ),
+        Some("quorum") => None,
+        Some("stream") => Some(
+            "PRECONDITION_FAILED - EggDB serves streams through its Kafka listener, not as AMQP queues".to_owned(),
+        ),
+        Some(other) => Some(format!("PRECONDITION_FAILED - unknown queue type '{other}'")),
     }
 }
 
@@ -280,6 +297,21 @@ impl<'s> Broker<'s> {
                 let _ = self.queues.send(target, &republished, 0, now);
             }
         }
+    }
+
+    /// Whether `message` has been delivered more times than the queue's `x-delivery-limit`
+    /// allows; such a message is dead-lettered (or dropped without a dead-letter exchange)
+    /// instead of being delivered again, as a quorum queue handles poison messages.
+    fn over_delivery_limit(&self, queue: &str, message: &eggdb_queues::Message, now: u64) -> bool {
+        let Some(limit) = self.policy_of(queue).delivery_limit else {
+            return false;
+        };
+        if u64::from(message.receive_count.saturating_sub(1)) <= limit {
+            return false;
+        }
+        let _ = self.queues.ack(queue, message.id);
+        self.dead_letter(queue, &message.body, now, "delivery_limit");
+        true
     }
 
     fn expired(&self, queue: &str, message: &eggdb_queues::Message, now: u64) -> bool {
@@ -725,7 +757,9 @@ impl Connection<'_, '_> {
         let mut messages = messages.into_iter();
         let dead_lettering = self.broker.policy_of(queue).dead_letter_exchange.is_some();
         while let Some(message) = messages.next() {
-            if self.broker.expired(queue, &message, now_ms()) {
+            if self.broker.expired(queue, &message, now_ms())
+                || self.broker.over_delivery_limit(queue, &message, now_ms())
+            {
                 continue;
             }
             let Some(state) = self.channels.get_mut(&channel) else {
@@ -1130,11 +1164,17 @@ impl Connection<'_, '_> {
                 let _reserved = args.short()?;
                 let mut name = args.shortstr()?;
                 let passive = args.bit()?;
-                let _durable = args.bit()?;
+                let durable = args.bit()?;
                 let exclusive = args.bit()?;
                 let auto_delete = args.bit()?;
                 let no_wait = args.bit()?;
                 let arguments = crate::field_table::decode_table(args.table()?)?;
+                if !passive
+                    && let Some(refusal) = queue_type_refusal(&arguments, durable, exclusive, auto_delete)
+                {
+                    self.close_channel(channel, PRECONDITION_FAILED, &refusal, 50, 10);
+                    return Ok(true);
+                }
                 self.broker.delete_expired_queues(now_ms());
                 if name.is_empty() {
                     name = format!(
@@ -1394,7 +1434,10 @@ impl Connection<'_, '_> {
                 match messages
                     .into_iter()
                     .next()
-                    .filter(|message| !self.broker.expired(&queue, message, now_ms()))
+                    .filter(|message| {
+                        !self.broker.expired(&queue, message, now_ms())
+                            && !self.broker.over_delivery_limit(&queue, message, now_ms())
+                    })
                 {
                     None => {
                         let mut out = Out::method(60, 72);
