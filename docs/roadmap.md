@@ -1876,7 +1876,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-12, D583). `ALTER TABLE`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D584). Secondary indexes: **code written, unbuilt** (code-only
   mode, 2026-11-12, D585).
-- A benchmark against ScyllaDB and Cassandra (D7, D218).
+- A benchmark against ScyllaDB and Cassandra (D7, D218). **Code written, unbuilt** (code-only mode, 2026-11-13,
+  D1063): `eggdb-cql-compare` in CI's `cql-compare` job.
 - DynamoDB, after D58's legal check: secondary indexes, filter and projection expressions,
   batches, transactions, streams, TTL, all conditions, and PartiQL (D48, D241).
 - The Bigtable and HBase APIs, and Cosmos DB's Table API, after D58's legal check (D48).
