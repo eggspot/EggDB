@@ -19,6 +19,24 @@ fun main() {
     EggDB(file.path, "postgresql").use { db ->
         check(db.execute("SELECT count(*) FROM eggs").single().rows[0][0] == Value.Integer(2))
     }
+    EggDB(file.path).use { db ->
+        db.prepare("INSERT INTO eggs (id, name, weight, shell) VALUES (?, ?, ?, ?)").use { insert ->
+            db.transaction {
+                insert.executeBatch((3L..102L).map { listOf(it, "egg $it", it * 0.5, byteArrayOf(it.toByte())) })
+            }
+            val refused = runCatching { db.transaction { insert.execute(3L, "again", null, null) } }.exceptionOrNull()
+            check(refused is EggDBException) { "a duplicate key must fail, got $refused" }
+        }
+        db.prepare("SELECT name, weight FROM eggs WHERE id = ?").use { select ->
+            val row = select.execute(42L).single().rows.single()
+            check(row == listOf(Value.Text("egg 42"), Value.Real(21.0))) { row }
+            check(select.execute(Value.Integer(1)).single().rows.single()[0] == Value.Text("brown 🥚"))
+        }
+        db.beginTransaction()
+        db.execute("DELETE FROM eggs")
+        db.rollback()
+        check(db.execute("SELECT count(*) FROM eggs").single().rows[0][0] == Value.Integer(102))
+    }
     file.delete()
     val store = File.createTempFile("eggdb-kotlin-kv", ".eggdb").apply { delete() }
     KeyValue(store.path).use { kv ->

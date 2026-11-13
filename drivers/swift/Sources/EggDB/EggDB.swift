@@ -139,4 +139,129 @@ public final class Database {
         }
         return gathered
     }
+
+    public func prepare(_ sql: String) throws -> Statement {
+        guard let session else { throw EggDBError(status: EGGDB_ERR_INVALID_ARGUMENT, sqlState: nil, message: "the database is closed") }
+        var statement: OpaquePointer?
+        let text = Array(numbered(sql).utf8)
+        try text.withUnsafeBufferPointer { bytes in
+            try bytes.withMemoryRebound(to: CChar.self) { chars in
+                try check(eggdb_sql_prepare(session, chars.baseAddress, chars.count, &statement))
+            }
+        }
+        return Statement(handle: statement)
+    }
+
+    public func beginTransaction() throws {
+        try execute("BEGIN")
+    }
+
+    public func commit() throws {
+        try execute("COMMIT")
+    }
+
+    public func rollback() throws {
+        try execute("ROLLBACK")
+    }
+
+    public func transaction<T>(_ work: (Database) throws -> T) throws -> T {
+        try beginTransaction()
+        do {
+            let result = try work(self)
+            try commit()
+            return result
+        } catch {
+            try? rollback()
+            throw error
+        }
+    }
+}
+
+public final class Statement {
+    private var handle: OpaquePointer?
+
+    init(handle: OpaquePointer?) {
+        self.handle = handle
+    }
+
+    deinit {
+        finalize()
+    }
+
+    public func finalize() {
+        if let handle {
+            eggdb_stmt_finalize(handle)
+            self.handle = nil
+        }
+    }
+
+    private func live() throws -> OpaquePointer {
+        guard let handle else { throw EggDBError(status: EGGDB_ERR_INVALID_ARGUMENT, sqlState: nil, message: "the statement is finalized") }
+        return handle
+    }
+
+    public func bind(_ values: [Value]) throws {
+        let statement = try live()
+        try check(eggdb_stmt_clear_bindings(statement))
+        for (offset, value) in values.enumerated() {
+            let index = offset + 1
+            switch value {
+            case .null:
+                try check(eggdb_stmt_bind_null(statement, index))
+            case .integer(let number):
+                try check(eggdb_stmt_bind_int64(statement, index, number))
+            case .real(let number):
+                try check(eggdb_stmt_bind_double(statement, index, number))
+            case .text(let text):
+                let bytes = Array(text.utf8)
+                try bytes.withUnsafeBufferPointer { buffer in
+                    try buffer.withMemoryRebound(to: CChar.self) { chars in
+                        try check(eggdb_stmt_bind_text(statement, index, chars.baseAddress, chars.count))
+                    }
+                }
+            case .blob(let bytes):
+                try bytes.withUnsafeBufferPointer { buffer in
+                    try check(eggdb_stmt_bind_blob(statement, index, buffer.baseAddress, buffer.count))
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    public func execute(_ values: [Value] = []) throws -> Int {
+        try bind(values)
+        var results: UnsafePointer<eggdb_result>?
+        var count = 0
+        try check(eggdb_stmt_execute(try live(), &results, &count))
+        return count
+    }
+
+    public func query(_ values: [Value] = []) throws -> [[Value]] {
+        let statement = try live()
+        try bind(values)
+        try check(eggdb_stmt_reset(statement))
+        var rows: [[Value]] = []
+        var hasRow: Int32 = 0
+        while true {
+            try check(eggdb_stmt_step(statement, &hasRow))
+            if hasRow == 0 { break }
+            var values: UnsafePointer<eggdb_value>?
+            var count = 0
+            try check(eggdb_stmt_row(statement, &values, &count))
+            var row: [Value] = []
+            for column in 0..<count {
+                let cell = values![column]
+                switch Int32(cell.kind) {
+                case EGGDB_INTEGER: row.append(.integer(cell.integer))
+                case EGGDB_REAL: row.append(.real(cell.real))
+                case EGGDB_TEXT:
+                    row.append(.text(String(decoding: UnsafeBufferPointer(start: cell.data, count: cell.len), as: UTF8.self)))
+                case EGGDB_BLOB: row.append(.blob(Array(UnsafeBufferPointer(start: cell.data, count: cell.len))))
+                default: row.append(.null)
+                }
+            }
+            rows.append(row)
+        }
+        return rows
+    }
 }

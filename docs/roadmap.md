@@ -2027,7 +2027,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-13, D1093): `scripts/apple/test-simulator.sh` in CI's `apple-mobile` job, and the release
   workflow's `xcframework` and `swift-package` jobs with `scripts/apple/swift-package.sh`.
 - Prepared statements and transactions in the mobile bindings, benchmarked against SQLite's
-  Android and iOS bindings (D17, D222).
+  Android and iOS bindings (D17, D222). **Code written, unbuilt** (code-only mode, 2026-11-13, D1094): Kotlin `Statement`
+  (`execute`, `executeBatch` in one JNI crossing) and `transaction`, Swift `Statement` and `transaction`, and the
+  `BindingBenchmark` and `testPreparedStatementsAgainstSQLitesLibrary` gates.
 - The rest of the crates tested on i686, armv7 and s390x under QEMU (PR #86).
 - Builds and tests on riscv64, powerpc64le and loongarch64 under QEMU (D8). Check: the
   emulated-CPU CI job on `main`.

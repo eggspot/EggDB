@@ -479,6 +479,22 @@ EggDB(File(context.filesDir, "app.eggdb").path).use { db ->
 }
 ```
 
+Statements run many times are prepared once, and a batch of rows crosses JNI in one call (D1094):
+
+```kotlin
+db.prepare("INSERT INTO notes (id, body) VALUES (?, ?)").use { insert ->
+    db.transaction { insert.executeBatch(notes.map { listOf(it.id, it.body) }) }
+}
+val body = db.prepare("SELECT body FROM notes WHERE id = ?").use { it.execute(7L).single().rows }
+```
+
+`beginTransaction`, `commit` and `rollback` are there too. The Swift driver has the same:
+`db.prepare(sql)` gives a `Statement` with `execute(values)` and `query(values)`, and
+`db.transaction { }` commits or rolls back. Both are benchmarked against SQLite's own binding on
+the same device on every PR, Android's `android.database.sqlite` in the `android` job and SQLite's C
+library from Swift in the `apple-mobile` job, and fail when EggDB is more than twice as slow at
+inserting 5,000 rows or at 2,000 lookups by key.
+
 Or take the Android Archive, which does all of that (D1092): `scripts/android/build-aar.sh` builds the
 C API for `arm64-v8a`, `armeabi-v7a`, `x86_64` and `x86` with the NDK's clang and assembles
 `drivers/android` (a Gradle library module over the same Kotlin sources and JNI file) into

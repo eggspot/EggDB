@@ -1118,3 +1118,4 @@ its full title with its status.
 - [D1091](decisions/D1091.md) Code-only batch 739 (M17): an IndexedDB-compatible API over EggDB SQL in the browser build
 - [D1092](decisions/D1092.md) Code-only batch 740 (M17): the Android Archive, emulator runs and the 32-bit ABIs in CI
 - [D1093](decisions/D1093.md) Code-only batch 741 (M17): iOS Simulator runs, and a Swift package that downloads each release's XCFramework
+- [D1094](decisions/D1094.md) Code-only batch 742 (M17): prepared statements and transactions in the mobile bindings, gated against SQLite's bindings
