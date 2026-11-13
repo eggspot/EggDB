@@ -207,6 +207,10 @@ impl<'db> ReadTransaction<'db> {
 
     /// The stamp of the commit this transaction sees, or [`CommitStamp::NONE`] when nothing
     /// was committed to the database before it began.
+    pub(crate) fn raw_scan(&self) -> Scan<'_> {
+        Scan::within_between(self.reader(), self.tree(), b"", &..)
+    }
+
     pub fn stamp(&self) -> CommitStamp {
         self.inner.stamp()
     }

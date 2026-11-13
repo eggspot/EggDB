@@ -156,6 +156,18 @@ pub struct CheckReport {
     pub leaked_pages: u64,
 }
 
+/// What [`Database::backup_differential_to`] wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct DifferentialReport {
+    /// The stamp of the base copy's commit the differential starts from.
+    pub base: CommitStamp,
+    /// The stamp of the commit the differential reaches.
+    pub stamp: CommitStamp,
+    /// The keys it changes or deletes.
+    pub changes: u64,
+}
+
 /// What [`Database::backup_to`] wrote: a new database file holding one commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -601,6 +613,57 @@ impl Database {
     /// # std::fs::remove_file(&copy)?;
     /// # Ok(()) }
     /// ```
+    /// Writes a differential backup of the last commit to the new file `path` (D1020): every
+    /// key whose stored value differs from `base`'s, a copy of this database taken earlier
+    /// (such as by [`Database::backup_to`]), and every key `base` has that this database no
+    /// longer has, in the change archive's format. [`replay_events`](crate::replay_events) of
+    /// [`read_change_file`](crate::read_change_file) applied to a restored `base` gives this
+    /// commit's state.
+    pub fn backup_differential_to(&self, base: &Database, path: impl AsRef<Path>) -> Result<DifferentialReport> {
+        let live = self.begin_read()?;
+        let old = base.begin_read()?;
+        let report = DifferentialReport { base: old.stamp(), stamp: live.stamp(), changes: 0 };
+        let mut writer = crate::change_archive::DeltaWriter::create(path.as_ref(), report.base, report.stamp)?;
+        let mut ours = live.raw_scan();
+        let mut theirs = old.raw_scan();
+        let mut mine = ours.next().transpose()?;
+        let mut other = theirs.next().transpose()?;
+        loop {
+            match (mine.take(), other.take()) {
+                (None, None) => break,
+                (Some((key, value)), None) => {
+                    writer.push(key, Some(value))?;
+                    mine = ours.next().transpose()?;
+                }
+                (None, Some((key, _))) => {
+                    writer.push(key, None)?;
+                    other = theirs.next().transpose()?;
+                }
+                (Some((key, value)), Some((old_key, old_value))) => match key.cmp(&old_key) {
+                    std::cmp::Ordering::Less => {
+                        writer.push(key, Some(value))?;
+                        mine = ours.next().transpose()?;
+                        other = Some((old_key, old_value));
+                    }
+                    std::cmp::Ordering::Greater => {
+                        writer.push(old_key, None)?;
+                        other = theirs.next().transpose()?;
+                        mine = Some((key, value));
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if value != old_value {
+                            writer.push(key, Some(value))?;
+                        }
+                        mine = ours.next().transpose()?;
+                        other = theirs.next().transpose()?;
+                    }
+                },
+            }
+        }
+        let changes = writer.finish()?;
+        Ok(DifferentialReport { changes, ..report })
+    }
+
     pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<BackupReport> {
         let copy = path.as_ref();
         let staging = staging_path(copy, BACKUP_STAGING_SUFFIX);

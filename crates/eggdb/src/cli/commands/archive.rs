@@ -29,12 +29,7 @@ fn choose(entries: &[Archived], at: Option<&str>, shown: &str) -> Result<Archive
         .iter()
         .filter(|entry| limit.is_none_or(|limit| entry.taken_at_ms <= limit))
         .max_by_key(|entry| entry.taken_at_ms)
-        .map(|entry| Archived {
-            file: entry.file.clone(),
-            taken_at_ms: entry.taken_at_ms,
-            sha256: entry.sha256.clone(),
-            stamp: entry.stamp,
-        })
+        .cloned()
         .ok_or_else(|| format!("{shown} holds no archived copy taken at or before that time"))
 }
 
@@ -261,11 +256,15 @@ fn file_sha256(path: &Path) -> std::io::Result<String> {
         .collect())
 }
 
+#[derive(Debug, Clone)]
 struct Archived {
     file: String,
     taken_at_ms: i64,
     sha256: String,
     stamp: Option<u64>,
+    differential: bool,
+    base: Option<String>,
+    encrypted: bool,
 }
 
 fn json_field<'l>(line: &'l str, name: &str) -> Option<&'l str> {
@@ -286,7 +285,9 @@ fn manifest(directory: &Path) -> std::io::Result<Vec<Archived>> {
 }
 
 fn parse_manifest(text: &str) -> Vec<Archived> {
+    let pruned: Vec<&str> = text.lines().filter_map(|line| json_field(line, "pruned")).collect();
     text.lines()
+        .filter(|line| json_field(line, "file").is_none_or(|file| !pruned.contains(&file)))
         .filter_map(|line| {
             let file = json_field(line, "file")?;
             if file.contains(['/', '\\']) || file.starts_with('.') {
@@ -297,6 +298,9 @@ fn parse_manifest(text: &str) -> Vec<Archived> {
                 taken_at_ms: json_field(line, "taken_at_ms")?.parse().ok()?,
                 sha256: json_field(line, "sha256")?.to_owned(),
                 stamp: json_field(line, "stamp").and_then(|stamp| stamp.parse().ok()),
+                differential: json_field(line, "kind") == Some("differential"),
+                base: json_field(line, "base").map(str::to_owned),
+                encrypted: json_field(line, "encrypted") == Some("true"),
             })
         })
         .collect()
@@ -342,8 +346,11 @@ fn replay_into(path: &Path, directory: &Path, stamp: Option<u64>, at: Option<&st
 /// checking its SHA-256 against the manifest.
 pub(super) fn archived_copy(directory: &Path, at: Option<&str>) -> Result<PathBuf, String> {
     let shown = render::text(directory.display().to_string().as_bytes());
-    let entries =
-        manifest(directory).map_err(|error| format!("cannot read {shown}/{MANIFEST}: {error}"))?;
+    let entries: Vec<Archived> = manifest(directory)
+        .map_err(|error| format!("cannot read {shown}/{MANIFEST}: {error}"))?
+        .into_iter()
+        .filter(|entry| !entry.differential && !entry.encrypted)
+        .collect();
     let chosen = choose(&entries, at, &shown)?;
     let source = directory.join(&chosen.file);
     let actual =
@@ -408,89 +415,97 @@ fn upload_copy(
 
 impl Session<'_> {
     pub(super) fn backup_into_directory(&mut self, directory: &Path) -> Result<Exit, Failure> {
-        let shown = render::text(directory.display().to_string().as_bytes());
-        let taken_at_ms = now_ms();
-        let stem = self
-            .request
-            .file
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "database".to_owned());
-        let stamp: String = rfc3339(taken_at_ms)
-            .chars()
-            .filter(|character| character.is_ascii_alphanumeric())
-            .collect();
-        let name = format!("{stem}-{stamp}.eggdb");
-        let target = directory.join(&name);
-        let db = self.open(Access::ReadOnly, None)?;
-        let copied = db.backup_to(&target);
-        drop(db);
-        let copied = copied.map_err(|error| {
-            Failure::database(
-                format!("cannot archive {} into {shown}: {error}", self.file),
-                Exit::DatabaseError,
-            )
-        })?;
-        let verified = eggdb::Database::open_with(
-            &target,
-            eggdb::Options::default().read_only(true),
-        )
-        .and_then(|copy| copy.check())
-        .map_err(|error| {
-            Failure::database(
-                format!(
-                    "the archived copy {name} does not verify: {error}; it was kept for inspection"
-                ),
-                Exit::DatabaseError,
-            )
-        })?;
-        let sha256 = file_sha256(&target).map_err(|error| {
-            Failure::database(
-                format!("cannot read back {name}: {error}"),
-                Exit::DatabaseError,
-            )
-        })?;
-        let bytes = std::fs::metadata(&target)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let line = JsonObject::new()
-            .string("file", &name)
-            .string("taken_at", &rfc3339(taken_at_ms))
-            .number("taken_at_ms", u64::try_from(taken_at_ms).unwrap_or(0))
-            .number("bytes", bytes)
-            .number("entries", verified.entries)
-            .string("sha256", &sha256)
-            .boolean("verified", true)
-            .number("stamp", copied.stamp.bits())
-            .line();
-        let mut manifest = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(directory.join(MANIFEST))
-            .map_err(|error| {
-                Failure::database(
-                    format!("cannot record {name} in {shown}/{MANIFEST}: {error}"),
-                    Exit::DatabaseError,
-                )
-            })?;
-        manifest
-            .write_all(line.as_bytes())
-            .and_then(|()| manifest.sync_all())
-            .map_err(|error| {
-                Failure::database(
-                    format!("cannot record {name} in {shown}/{MANIFEST}: {error}"),
-                    Exit::DatabaseError,
-                )
-            })?;
-        match self.format {
-            Format::Json => self.out.text(&line),
-            _ => self.out.text(&format!(
-                "archived {} into {shown}/{name} ({} entries, verified)\n",
-                self.file,
-                render::count(verified.entries)
-            )),
-        }
+        let settings = self.archive_settings();
+        let outcome = archive_database(&self.request.file, directory, &settings)
+            .map_err(|message| Failure::database(message, Exit::DatabaseError))?;
+        self.print_archived(&self.file.clone(), directory, &outcome);
         Ok(Exit::Done)
+    }
+
+    fn archive_settings(&self) -> ArchiveSettings {
+        ArchiveSettings {
+            differential: self.request.differential,
+            key: self.request.backup_key.as_ref().map(|key| key.0),
+            keep: self.request.keep_copies,
+            options: self.database_options(Access::ReadOnly, None),
+        }
+    }
+
+    fn print_archived(&mut self, file: &str, directory: &Path, outcome: &ArchiveOutcome) {
+        let shown = render::text(directory.display().to_string().as_bytes());
+        match self.format {
+            Format::Json => self.out.text(&outcome.line),
+            _ => {
+                let kind = if outcome.differential { "a differential backup of " } else { "" };
+                self.out.text(&format!(
+                    "archived {kind}{file} into {shown}/{} ({} {}, verified{})\n",
+                    outcome.name,
+                    render::count(outcome.entries),
+                    if outcome.differential { "changes" } else { "entries" },
+                    if outcome.encrypted { ", encrypted" } else { "" }
+                ));
+                for pruned in &outcome.pruned {
+                    self.out.text(&format!("pruned {pruned}\n"));
+                }
+            }
+        }
+    }
+
+    /// Archives every database of a served directory (`<name>.eggdb`, D1020) into its own
+    /// subdirectory of `archive`, several at once.
+    pub(super) fn backup_served_directory(&mut self, archive: &Path) -> Result<Exit, Failure> {
+        let failed = |message: String| Failure::database(message, Exit::DatabaseError);
+        let source = self.request.file.clone();
+        let mut databases: Vec<PathBuf> = std::fs::read_dir(&source)
+            .map_err(|error| failed(format!("cannot read {}: {error}", self.file)))?
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.extension().is_some_and(|extension| extension == "eggdb"))
+            .collect();
+        databases.sort();
+        if databases.is_empty() {
+            return Err(failed(format!("{} holds no databases (files named <name>.eggdb)", self.file)));
+        }
+        let settings = self.archive_settings();
+        let workers = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get).min(MOST_PARALLEL_BACKUPS).min(databases.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let outcomes: std::sync::Mutex<Vec<(usize, Result<ArchiveOutcome, String>)>> = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(database) = databases.get(index) else {
+                            break;
+                        };
+                        let name = database.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+                        let directory = archive.join(&name);
+                        let outcome = std::fs::create_dir_all(&directory)
+                            .map_err(|error| format!("cannot create {}: {error}", directory.display()))
+                            .and_then(|()| archive_database(database, &directory, &settings));
+                        if let Ok(mut outcomes) = outcomes.lock() {
+                            outcomes.push((index, outcome));
+                        }
+                    }
+                });
+            }
+        });
+        let mut outcomes = outcomes.into_inner().unwrap_or_default();
+        outcomes.sort_by_key(|(index, _)| *index);
+        let mut failures = Vec::new();
+        for (index, outcome) in outcomes {
+            let database = &databases[index];
+            let name = database.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+            match outcome {
+                Ok(outcome) => self.print_archived(&name, &archive.join(&name), &outcome),
+                Err(message) => failures.push(format!("{name}: {message}")),
+            }
+        }
+        if failures.is_empty() {
+            Ok(Exit::Done)
+        } else {
+            Err(failed(format!("{} of {} databases were not archived: {}", failures.len(), databases.len(), failures.join("; "))))
+        }
     }
 
     pub(super) fn backup_into_bucket(&mut self, url: &str) -> Result<Exit, Failure> {
@@ -565,64 +580,63 @@ impl Session<'_> {
         directory: &Path,
         at: Option<&str>,
     ) -> Result<Exit, Failure> {
-        let source = archived_copy(directory, at)
-            .map_err(|message| Failure::database(message, Exit::DatabaseError))?;
-        let chosen_file = source
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let (taken_at_ms, snapshot_stamp) = manifest(directory)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .into_iter()
-                    .find(|entry| entry.file == chosen_file)
-                    .map(|entry| (entry.taken_at_ms, entry.stamp))
-            })
-            .unwrap_or((0, None));
-        let chosen = Archived {
-            file: chosen_file,
-            taken_at_ms,
-            sha256: String::new(),
-            stamp: snapshot_stamp,
+        let failed = |message: String| Failure::database(message, Exit::DatabaseError);
+        let shown = render::text(directory.display().to_string().as_bytes());
+        let entries = manifest(directory).map_err(|error| failed(format!("cannot read {shown}/{MANIFEST}: {error}")))?;
+        let chosen = choose(&entries, at, &shown).map_err(failed)?;
+        let base = match (&chosen.differential, &chosen.base) {
+            (true, Some(base)) => entries
+                .iter()
+                .find(|entry| entry.file == *base)
+                .cloned()
+                .ok_or_else(|| failed(format!("{} is a differential backup of {base}, which is not in {shown}", chosen.file)))?,
+            _ => chosen.clone(),
         };
         let target = self.request.file.clone();
         if std::fs::symlink_metadata(&target).is_ok() {
             return Err(Failure::coded(
                 "already_exists",
-                format!(
-                    "{} exists; restoring an archived copy writes a new file",
-                    self.file
-                ),
+                format!("{} exists; restoring an archived copy writes a new file", self.file),
                 Exit::DatabaseError,
             ));
         }
+        let key = self.request.backup_key.as_ref().map(|key| key.0);
         let mut staging = target.clone().into_os_string();
         staging.push(STAGING_SUFFIX);
         let staging = PathBuf::from(staging);
-        std::fs::copy(&source, &staging)
-            .and_then(|_| std::fs::File::open(&staging)?.sync_all())
-            .map_err(|error| {
-                Failure::database(
-                    format!("cannot copy {}: {error}", chosen.file),
-                    Exit::DatabaseError,
-                )
-            })?;
-        let replayed = replay_into(&staging, directory, chosen.stamp, at);
-        let replayed = match replayed {
+        let (source, temporary) = plain_copy(directory, &base, key.as_ref()).map_err(failed)?;
+        let copied = match &temporary {
+            Some(temporary) => std::fs::rename(temporary, &staging),
+            None => std::fs::copy(&source, &staging).map(drop),
+        };
+        copied
+            .and_then(|()| std::fs::File::open(&staging)?.sync_all())
+            .map_err(|error| failed(format!("cannot copy {}: {error}", base.file)))?;
+        let mut replayed_commits = 0;
+        let mut reached = base.stamp;
+        if chosen.differential {
+            let applied = apply_differential(&staging, directory, &chosen, base.stamp, key.as_ref());
+            match applied {
+                Ok(()) => {
+                    replayed_commits += 1;
+                    reached = chosen.stamp;
+                }
+                Err(message) => {
+                    let _ = std::fs::remove_file(&staging);
+                    return Err(failed(message));
+                }
+            }
+        }
+        let replayed = match replay_into(&staging, directory, reached, at) {
             Ok(replayed) => replayed,
             Err(message) => {
                 let _ = std::fs::remove_file(&staging);
-                return Err(Failure::database(message, Exit::DatabaseError));
+                return Err(failed(message));
             }
         };
-        std::fs::rename(&staging, &target).map_err(|error| {
-            Failure::database(
-                format!("cannot move the restored copy into place: {error}"),
-                Exit::DatabaseError,
-            )
-        })?;
-        let replayed_commits = replayed.map_or(0, |report| report.commits);
+        replayed_commits += replayed.map_or(0, |report| report.commits);
+        std::fs::rename(&staging, &target)
+            .map_err(|error| failed(format!("cannot move the restored copy into place: {error}")))?;
         match self.format {
             Format::Json => self.out.text(
                 &JsonObject::new()
@@ -637,14 +651,183 @@ impl Session<'_> {
                 chosen.file,
                 rfc3339(chosen.taken_at_ms),
                 self.file,
-                match replayed {
-                    Some(report) => format!(", then replayed {} archived commits", render::count(report.commits)),
-                    None => String::new(),
-                }
+                if replayed_commits > 0 { format!(", then replayed {} archived commits", render::count(replayed_commits)) } else { String::new() }
             )),
         }
         Ok(Exit::Done)
     }
+}
+
+const MOST_PARALLEL_BACKUPS: usize = 8;
+
+/// How [`archive_database`] archives a database into a directory.
+struct ArchiveSettings {
+    differential: bool,
+    key: Option<[u8; 32]>,
+    keep: Option<u32>,
+    options: eggdb::Options,
+}
+
+/// What [`archive_database`] archived.
+struct ArchiveOutcome {
+    line: String,
+    name: String,
+    entries: u64,
+    differential: bool,
+    encrypted: bool,
+    pruned: Vec<String>,
+}
+
+/// Archives the database at `source` into `directory` (D208, D1020): a full copy, checked by
+/// opening it and reading every page, or with `differential` the changes since the newest
+/// full copy there; sealed with the backup key when one is given; recorded in the manifest
+/// with its commit stamp; and with `keep`, the older copies beyond it pruned.
+fn archive_database(source: &Path, directory: &Path, settings: &ArchiveSettings) -> Result<ArchiveOutcome, String> {
+    let shown = render::text(directory.display().to_string().as_bytes());
+    let file_shown = source.display().to_string();
+    let taken_at_ms = now_ms();
+    let stem = source.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| "database".to_owned());
+    let time: String = rfc3339(taken_at_ms).chars().filter(|character| character.is_ascii_alphanumeric()).collect();
+    let plain_name = format!("{stem}-{time}.{}", if settings.differential { "eggdelta" } else { "eggdb" });
+    let plain = directory.join(&plain_name);
+    let open_source = || eggdb::Database::open_with(source, settings.options.clone()).map_err(|error| format!("cannot open {file_shown}: {error}"));
+    let (entries, stamp, base) = if settings.differential {
+        let known = manifest(directory).unwrap_or_default();
+        let base = known
+            .iter()
+            .filter(|entry| !entry.differential)
+            .max_by_key(|entry| entry.taken_at_ms)
+            .cloned()
+            .ok_or_else(|| format!("{shown} holds no full copy to take a differential backup against; run eggdb backup without --differential first"))?;
+        let (base_path, temporary) = plain_copy(directory, &base, settings.key.as_ref())?;
+        let outcome = eggdb::Database::open_with(&base_path, eggdb::Options::default().read_only(true))
+            .map_err(|error| format!("cannot open the full copy {}: {error}", base.file))
+            .and_then(|base_db| {
+                let db = open_source()?;
+                db.backup_differential_to(&base_db, &plain)
+                    .map_err(|error| format!("cannot write a differential backup into {shown}: {error}"))
+            });
+        if let Some(temporary) = &temporary {
+            let _ = std::fs::remove_file(temporary);
+        }
+        let report = outcome?;
+        eggdb::read_change_file(&plain)
+            .map_err(|error| format!("the differential backup {plain_name} does not read back: {error}; it was kept for inspection"))?;
+        (report.changes, report.stamp.bits(), Some(base.file))
+    } else {
+        let db = open_source()?;
+        let copied = db.backup_to(&plain);
+        drop(db);
+        let copied = copied.map_err(|error| format!("cannot archive {file_shown} into {shown}: {error}"))?;
+        let verified = eggdb::Database::open_with(&plain, eggdb::Options::default().read_only(true))
+            .and_then(|copy| copy.check())
+            .map_err(|error| format!("the archived copy {plain_name} does not verify: {error}; it was kept for inspection"))?;
+        (verified.entries, copied.stamp.bits(), None)
+    };
+    let (name, stored) = match &settings.key {
+        Some(key) => {
+            let sealed_name = format!("{plain_name}.enc");
+            let sealed = directory.join(&sealed_name);
+            super::sealed::seal_file(&plain, &sealed, key)?;
+            std::fs::remove_file(&plain).map_err(|error| format!("cannot remove the unencrypted {plain_name}: {error}"))?;
+            (sealed_name, sealed)
+        }
+        None => (plain_name, plain),
+    };
+    let sha256 = file_sha256(&stored).map_err(|error| format!("cannot read back {name}: {error}"))?;
+    let bytes = std::fs::metadata(&stored).map(|metadata| metadata.len()).unwrap_or(0);
+    let mut line = JsonObject::new()
+        .string("file", &name)
+        .string("taken_at", &rfc3339(taken_at_ms))
+        .number("taken_at_ms", u64::try_from(taken_at_ms).unwrap_or(0))
+        .number("bytes", bytes)
+        .number("entries", entries)
+        .string("sha256", &sha256)
+        .boolean("verified", true)
+        .number("stamp", stamp)
+        .boolean("encrypted", settings.key.is_some());
+    if let Some(base) = &base {
+        line = line.string("kind", "differential").string("base", base);
+    }
+    let line = line.line();
+    append_manifest(directory, &line).map_err(|error| format!("cannot record {name} in {shown}/{MANIFEST}: {error}"))?;
+    let pruned = match settings.keep {
+        Some(keep) => prune(directory, keep).map_err(|error| format!("cannot prune {shown}: {error}"))?,
+        None => Vec::new(),
+    };
+    Ok(ArchiveOutcome { line, name, entries, differential: base.is_some(), encrypted: settings.key.is_some(), pruned })
+}
+
+/// The plain database file or differential backup an archive entry holds, after checking its
+/// SHA-256: the stored file itself, or a decrypted copy beside it (returned second, for the
+/// caller to move or remove) when the entry is encrypted.
+fn plain_copy(directory: &Path, entry: &Archived, key: Option<&[u8; 32]>) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let stored = directory.join(&entry.file);
+    let actual = file_sha256(&stored).map_err(|error| format!("cannot read {}: {error}", entry.file))?;
+    if actual != entry.sha256 {
+        return Err(format!(
+            "{} has changed since it was archived (its SHA-256 differs from the manifest); pick an earlier copy with --at",
+            entry.file
+        ));
+    }
+    if !entry.encrypted {
+        return Ok((stored, None));
+    }
+    let key = key.ok_or_else(|| format!("{} is encrypted; give the key with --backup-key-file", entry.file))?;
+    let opened = directory.join(format!(".{}.opened", entry.file));
+    super::sealed::open_file(&stored, &opened, key)?;
+    Ok((opened.clone(), Some(opened)))
+}
+
+fn apply_differential(staging: &Path, directory: &Path, delta: &Archived, base_stamp: Option<u64>, key: Option<&[u8; 32]>) -> Result<(), String> {
+    let base_stamp = base_stamp.ok_or("the full copy's manifest line has no stamp, so its differential cannot be applied")?;
+    let (path, temporary) = plain_copy(directory, delta, key)?;
+    let events = eggdb::read_change_file(&path).map_err(|error| format!("cannot read {}: {error}", delta.file));
+    if let Some(temporary) = &temporary {
+        let _ = std::fs::remove_file(temporary);
+    }
+    let events = events?;
+    let db = eggdb::Database::open(staging).map_err(|error| format!("cannot open the restored copy: {error}"))?;
+    let applied = eggdb::replay_events(&db, events, &path, eggdb::CommitStamp::from_bits(base_stamp), None)
+        .map_err(|error| format!("cannot apply {}: {error}", delta.file));
+    let closed = db.close().map_err(|error| format!("cannot close the restored copy: {error}"));
+    applied?;
+    closed
+}
+
+fn append_manifest(directory: &Path, line: &str) -> std::io::Result<()> {
+    let mut manifest = std::fs::OpenOptions::new().create(true).append(true).open(directory.join(MANIFEST))?;
+    manifest.write_all(line.as_bytes())?;
+    manifest.sync_all()
+}
+
+/// Keeps the newest `keep` full copies in `directory` and the differential backups taken
+/// against them; removes the rest and records each removal in the manifest. Returns the files
+/// removed.
+fn prune(directory: &Path, keep: u32) -> std::io::Result<Vec<String>> {
+    let entries = manifest(directory)?;
+    let mut fulls: Vec<&Archived> = entries.iter().filter(|entry| !entry.differential).collect();
+    fulls.sort_by_key(|entry| std::cmp::Reverse(entry.taken_at_ms));
+    let kept: Vec<&str> = fulls.iter().take(keep as usize).map(|entry| entry.file.as_str()).collect();
+    let mut pruned = Vec::new();
+    for entry in &entries {
+        let keeps = if entry.differential {
+            entry.base.as_deref().is_some_and(|base| kept.contains(&base))
+        } else {
+            kept.contains(&entry.file.as_str())
+        };
+        if keeps {
+            continue;
+        }
+        match std::fs::remove_file(directory.join(&entry.file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        append_manifest(directory, &JsonObject::new().string("pruned", &entry.file).line())?;
+        pruned.push(entry.file.clone());
+    }
+    Ok(pruned)
 }
 
 #[cfg(test)]

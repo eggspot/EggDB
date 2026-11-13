@@ -234,6 +234,8 @@ impl CommandName {
             OptionName::Kql | OptionName::Sparql => self == Self::Sql,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
             OptionName::LockDays => self == Self::Backup,
+            OptionName::Differential | OptionName::Keep => self == Self::Backup,
+            OptionName::BackupKeyFile => matches!(self, Self::Backup | Self::Restore),
             OptionName::ArchiveChanges => matches!(
                 self,
                 Self::Serve
@@ -583,6 +585,9 @@ enum OptionName {
     WholeDump,
     LockDays,
     ArchiveChanges,
+    Differential,
+    Keep,
+    BackupKeyFile,
     Table,
     Header,
     Delimiter,
@@ -621,6 +626,9 @@ impl OptionName {
             b"page-size" => Self::PageSize,
             b"lock-days" => Self::LockDays,
             b"archive-changes" => Self::ArchiveChanges,
+            b"differential" => Self::Differential,
+            b"keep" => Self::Keep,
+            b"backup-key-file" => Self::BackupKeyFile,
             b"compress" => Self::Compress,
             b"create" => Self::Create,
             b"prefix" => Self::Prefix,
@@ -802,6 +810,7 @@ impl OptionName {
                 | Self::Fips
                 | Self::IfAbsent
                 | Self::Delete
+                | Self::Differential
         )
     }
 }
@@ -896,6 +905,9 @@ pub(crate) struct Request {
     pub(crate) copy: Option<PathBuf>,
     pub(crate) lock_days: Option<u32>,
     pub(crate) archive_changes: Option<PathBuf>,
+    pub(crate) differential: bool,
+    pub(crate) keep_copies: Option<u32>,
+    pub(crate) backup_key: Option<EncryptionKey>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1368,6 +1380,12 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         swap: SwapOptions::default(),
         copy: None,
         lock_days: None,
+        memory: None,
+        rdf: None,
+        archive_changes: None,
+        differential: false,
+        keep_copies: None,
+        backup_key: None,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -1410,6 +1428,18 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.encryption_key = Some(read_key_file(value).map_err(usage)?);
             }
             OptionName::ArchiveChanges => request.archive_changes = Some(PathBuf::from(value)),
+            OptionName::Differential => request.differential = true,
+            OptionName::Keep => {
+                request.keep_copies = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|count| (1..=100_000).contains(count))
+                        .and_then(|count| u32::try_from(count).ok())
+                        .ok_or_else(|| usage(format!("{} takes how many full copies to keep, 1 to 100000", option.spelled)))?,
+                );
+            }
+            OptionName::BackupKeyFile => {
+                request.backup_key = Some(read_key_file(value).map_err(|message| usage(message.replace("--key-file", "--backup-key-file")))?);
+            }
             OptionName::LockDays => {
                 request.lock_days = Some(
                     parse_whole_number(value.as_encoded_bytes())

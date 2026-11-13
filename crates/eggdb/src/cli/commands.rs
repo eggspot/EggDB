@@ -32,6 +32,7 @@ mod model_endpoints;
 mod mcp;
 mod ndjson_io;
 mod rdf;
+mod sealed;
 mod xlsx_io;
 mod dbf_io;
 mod mainframe_io;

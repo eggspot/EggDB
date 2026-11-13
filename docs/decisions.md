@@ -1044,3 +1044,4 @@ its full title with its status.
 - [D1017](decisions/D1017.md) Code-only batch 665 (M13): GraphBinary for Gremlin and bytecode results as traversers
 - [D1018](decisions/D1018.md) Code-only batch 666 (M13): Gremlin sessions and remote transactions
 - [D1019](decisions/D1019.md) Code-only batch 667 (M14): continuous change archiving and restore to any commit
+- [D1020](decisions/D1020.md) Code-only batch 668 (M14): differential, encrypted and parallel backups with retention

@@ -27,6 +27,20 @@ fn uncovered(message: String) -> Error {
 /// kept.
 pub fn replay_changes(db: &Database, directory: &Path, after: CommitStamp, up_to: Option<CommitStamp>) -> Result<ReplayReport> {
     let events = read_change_archive(directory)?;
+    replay_events(db, events, directory, after, up_to)
+}
+
+/// Replays archived `events` (from [`read_change_archive`] or
+/// [`read_change_file`](crate::read_change_file)) onto `db` as [`replay_changes`] does;
+/// `source` names where they came from in messages.
+pub fn replay_events(
+    db: &Database,
+    events: Vec<ArchivedEvent>,
+    source: &Path,
+    after: CommitStamp,
+    up_to: Option<CommitStamp>,
+) -> Result<ReplayReport> {
+    let directory = source;
     let limit = up_to.map_or(u64::MAX, CommitStamp::bits);
     let covered = events.iter().any(|event| match event {
         ArchivedEvent::Base(stamp) | ArchivedEvent::Gap(stamp) | ArchivedEvent::Commit(stamp, _) => stamp.bits() <= after.bits(),

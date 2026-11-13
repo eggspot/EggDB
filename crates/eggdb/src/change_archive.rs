@@ -179,10 +179,25 @@ fn records(path: &Path) -> Result<Vec<(u8, Vec<u8>)>> {
 /// Reads a change archive directory into its events, in commit order. A commit whose changes
 /// were written but never confirmed (the process stopped between them) is left out.
 pub fn read_change_archive(directory: &Path) -> Result<Vec<ArchivedEvent>> {
+    let mut files = Vec::new();
+    for number in segment_numbers(directory)? {
+        files.push(directory.join(segment_name(number)));
+    }
+    events_of(&files, directory)
+}
+
+/// Reads one file in the change archive's format, such as a differential backup, into its
+/// events.
+pub fn read_change_file(path: &Path) -> Result<Vec<ArchivedEvent>> {
+    events_of(&[path.to_path_buf()], path)
+}
+
+fn events_of(files: &[PathBuf], shown: &Path) -> Result<Vec<ArchivedEvent>> {
+    let directory = shown;
     let mut events = Vec::new();
     let mut pending: Option<Vec<ArchivedChange>> = None;
-    for number in segment_numbers(directory)? {
-        for (kind, payload) in records(&directory.join(segment_name(number)))? {
+    for file in files {
+        for (kind, payload) in records(file)? {
             let stamp = || payload.get(..8).and_then(|bytes| bytes.try_into().ok()).map(u64::from_le_bytes).map(CommitStamp::from_bits);
             match kind {
                 PENDING => {
@@ -224,6 +239,67 @@ fn unconfirmed(directory: &Path) -> Result<bool> {
         }
     }
     Ok(open)
+}
+
+/// Writes a differential backup in the change archive's format: the stamp it starts from,
+/// then its changes in records of at most 64 MiB, each confirmed with the stamp it reaches.
+pub(crate) struct DeltaWriter {
+    file: File,
+    stamp: CommitStamp,
+    buffered: Vec<ArchivedChange>,
+    buffered_bytes: usize,
+    written: u64,
+}
+
+const DELTA_RECORD_BYTES: usize = 64 << 20;
+
+impl DeltaWriter {
+    pub(crate) fn create(path: &Path, base: CommitStamp, stamp: CommitStamp) -> Result<Self> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| archive_error(format!("cannot create {}: {error}", path.display())))?;
+        file.write_all(MAGIC)
+            .and_then(|()| file.write_all(&record(BASE, &base.bits().to_le_bytes())))
+            .map_err(|error| archive_error(format!("cannot write {}: {error}", path.display())))?;
+        Ok(Self { file, stamp, buffered: Vec::new(), buffered_bytes: 0, written: 0 })
+    }
+
+    pub(crate) fn push(&mut self, key: Vec<u8>, value: Option<Vec<u8>>) -> Result<()> {
+        self.buffered_bytes += key.len() + value.as_ref().map_or(0, Vec::len) + 17;
+        self.buffered.push((key, value));
+        if self.buffered_bytes >= DELTA_RECORD_BYTES {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if self.buffered.is_empty() {
+            return Ok(());
+        }
+        let changes = std::mem::take(&mut self.buffered);
+        self.written += changes.len() as u64;
+        self.buffered_bytes = 0;
+        self.file
+            .write_all(&record(PENDING, &changes_payload(&changes)))
+            .and_then(|()| self.file.write_all(&record(COMMITTED, &self.stamp.bits().to_le_bytes())))
+            .map_err(|error| archive_error(format!("cannot write a differential backup: {error}")))
+    }
+
+    /// Writes what is left, syncs, and returns how many keys the delta changes.
+    pub(crate) fn finish(mut self) -> Result<u64> {
+        self.flush()?;
+        if self.written == 0 {
+            self.file
+                .write_all(&record(PENDING, &changes_payload(&[])))
+                .and_then(|()| self.file.write_all(&record(COMMITTED, &self.stamp.bits().to_le_bytes())))
+                .map_err(|error| archive_error(format!("cannot write a differential backup: {error}")))?;
+        }
+        self.file.sync_all().map_err(|error| archive_error(format!("cannot sync a differential backup: {error}")))?;
+        Ok(self.written)
+    }
 }
 
 impl ChangeArchive {

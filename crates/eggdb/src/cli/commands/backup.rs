@@ -28,8 +28,23 @@ impl Session<'_> {
                 Some(crate::cli::args::CommandName::Backup),
             ));
         }
+        if self.request.file.is_dir() {
+            if !copy.is_dir() {
+                return Err(Failure::usage(
+                    "backing up a directory of databases needs an archive directory as its copy",
+                    Some(crate::cli::args::CommandName::Backup),
+                ));
+            }
+            return self.backup_served_directory(&copy);
+        }
         if copy.is_dir() {
             return self.backup_into_directory(&copy);
+        }
+        if self.request.differential || self.request.keep_copies.is_some() || self.request.backup_key.is_some() {
+            return Err(Failure::usage(
+                "--differential, --keep and --backup-key-file archive into a directory; give one as the copy",
+                Some(crate::cli::args::CommandName::Backup),
+            ));
         }
         self.refuse_backup_destination(&copy, &copy_shown)?;
         let started = Instant::now();

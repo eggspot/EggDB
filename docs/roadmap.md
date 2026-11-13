@@ -1657,7 +1657,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   restoring to a stamp. A logical change archive (`--archive-changes`) replayed by `restore --at`: **code written,
   unbuilt** (code-only mode, 2026-11-13, D1019). Left: the simulator test under crashes, archives in buckets, and
   retention.
-- Incremental and parallel backups, encrypted, with retention (D24, D208).
+- Incremental and parallel backups, encrypted, with retention (D24, D208). Differential backups, AES-256-GCM sealed
+  archives, `--keep` retention and parallel backup of served directories: **code written, unbuilt** (code-only mode,
+  2026-11-13, D1020). Left: retention of the change archive's segments.
 - Instant snapshots, and copy-on-write clones and branches of a whole database (D24, D28).
 - `eggdb dump`: one logical file of the whole database (schemas, rows, collections, roles,
   routines), where `eggdb export`'s eggdb-jsonl copies raw key-value entries (D24, D93). **Code written, unbuilt**

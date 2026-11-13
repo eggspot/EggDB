@@ -82,11 +82,11 @@ mod writer_slot;
 
 pub use collection::{Collection, CollectionStats, DropProgress, ReadCollection, WriteCollection};
 pub use concurrent::{ConcurrentTransaction, Isolation};
-pub use database::{BackupReport, CheckReport, CompactReport, Database, Stats};
+pub use database::{BackupReport, CheckReport, CompactReport, Database, DifferentialReport, Stats};
 pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;
-pub use change_archive::{ArchivedChange, ArchivedEvent, read_change_archive};
-pub use replay::{ReplayReport, replay_changes};
+pub use change_archive::{ArchivedChange, ArchivedEvent, read_change_archive, read_change_file};
+pub use replay::{ReplayReport, replay_changes, replay_events};
 pub use eggdb_storage::ValueCompression;
 pub use error::{Error, ErrorKind, Result};
 pub use options::{Durability, Options};
