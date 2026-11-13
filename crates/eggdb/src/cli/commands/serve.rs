@@ -2058,9 +2058,10 @@ impl Session<'_> {
                     exit_when_idle(&db, std::time::Duration::from_secs(seconds), archive_to, &self.request.file);
                 }
             });
+            let placement_keeper = scope.spawn(|| super::serve_jobs::keep_placement(&store, options.region.as_deref().filter(|_| !read_only), &stop_signals::requested));
             let edge_follower = scope.spawn(|| {
                 if let Some(url) = &options.edge_of {
-                    super::archive::follow_edge(&db, url, db.path(), options.edge_cache, &follow_options, &stop_signals::requested);
+                    super::archive::follow_edge(&db, url, options.region.as_deref(), db.path(), options.edge_cache, &follow_options, &stop_signals::requested);
                 }
             });
             let page_store_follower = scope.spawn(|| {
@@ -2195,6 +2196,7 @@ impl Session<'_> {
             let _ = page_store_follower.join();
             let _ = idle_stopper.join();
             let _ = edge_follower.join();
+            let _ = placement_keeper.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();
             let _ = database_arrivals.join();

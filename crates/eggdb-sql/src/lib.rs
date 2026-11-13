@@ -33,6 +33,7 @@ mod cancel;
 mod catalog;
 pub mod cdc;
 pub mod multi_primary;
+pub mod placement;
 mod citext;
 mod column_privileges;
 mod comments;
@@ -295,6 +296,8 @@ mod bulk_load_tests;
 mod citext_tests;
 #[cfg(test)]
 mod multi_primary_tests;
+#[cfg(test)]
+mod placement_tests;
 #[cfg(test)]
 mod constraint_tests;
 #[cfg(test)]

@@ -2924,6 +2924,7 @@ impl<'s> Session<'s> {
             "eggdb_iot" => ("eggdb_iot", crate::iot::IOT_SCRIPT),
             "eggdb_advisor" => ("eggdb_advisor", crate::advisor::ADVISOR_SCRIPT),
             "eggdb_multi_primary" => ("eggdb_mp", crate::multi_primary::MULTI_PRIMARY_SCRIPT),
+            "eggdb_placement" => ("eggdb_placement", crate::placement::PLACEMENT_SCRIPT),
             "pgrouting" => ("pgrouting", crate::pgrouting::PGROUTING_SCRIPT),
             _ => ("eggdb_cdc", crate::cdc::CDC_SCRIPT),
         };

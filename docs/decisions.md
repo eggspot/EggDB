@@ -1129,3 +1129,4 @@ its full title with its status.
 - [D1102](decisions/D1102.md) Code-only batch 750 (M18): serverless: stop when idle, wake by socket activation, and a timed cold start
 - [D1103](decisions/D1103.md) Code-only batch 751 (M18): tiered storage: memory, local disk and object storage by how recently pages were read
 - [D1104](decisions/D1104.md) Code-only batch 752 (M18): an edge server on archived copies that follows the manifest and evicts old copies
+- [D1105](decisions/D1105.md) Code-only batch 753 (M18): placement rules per table and residency per row

@@ -792,7 +792,7 @@ impl<'a> Session<'a> {
     ) -> Result<Database, Error> {
         let options = self.database_options(access, cache_for_command);
         if let Some(url) = &self.request.serve.edge_of {
-            let copy = archive::edge_copy(url, None)
+            let copy = archive::edge_copy_for(url, self.request.serve.region.as_deref())
                 .map_err(|message| Error::new(eggdb::ErrorKind::InvalidOption, format!("--edge-of {url}: {message}")))?;
             return Database::open_with(copy, options.read_only(true).create_if_missing(false));
         }

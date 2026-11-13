@@ -2069,8 +2069,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - An edge server on an edge copy, refreshed as its manifest grows, with cache limits and eviction
   (D227). **Code written, unbuilt** (code-only mode, 2026-11-13, D1104): `eggdb serve --edge-of s3://...
   [--edge-cache <size>]`, `Database::switch_to_copy`, and least-recently-used eviction of cached copies.
-- Placement rules per table, for tiers, edges and regions (D18, D227).
-- Data pinned to regions, and residency policies per row (D18, D53).
+- Placement rules per table, for tiers, edges and regions (D18, D227). **Code written, unbuilt** (code-only mode, 2026-11-13, D1105): the
+  `eggdb_placement` extension (`eggdb_placement.place`), pre-warming of hot and warm tables, and edge copies without
+  what an edge or region may not hold.
+- Data pinned to regions, and residency policies per row (D18, D53). **Code written, unbuilt** (code-only mode, 2026-11-13, D1105): `eggdb_placement.residency`, the
+  row trigger, `eggdb serve --region`, refused transfers logged in `eggdb_placement.transfers`.
 - Offline-first sync over HTTP with authentication per user, as the client sync API apps use (D37,
   D228).
 - Sync of SQL tables through change capture (D210, D228).

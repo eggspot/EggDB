@@ -308,6 +308,7 @@ impl CommandName {
             | OptionName::IdleExit
             | OptionName::PageStore
             | OptionName::EdgeOf
+            | OptionName::Region
             | OptionName::EdgeCache
             | OptionName::PageStoreDisk
             | OptionName::MultiPrimary
@@ -563,6 +564,7 @@ enum OptionName {
     IdleExit,
     PageStore,
     EdgeOf,
+    Region,
     EdgeCache,
     PageStoreDisk,
     MultiPrimary,
@@ -756,6 +758,7 @@ impl OptionName {
             b"idle-exit" => Self::IdleExit,
             b"page-store" => Self::PageStore,
             b"edge-of" => Self::EdgeOf,
+            b"region" => Self::Region,
             b"edge-cache" => Self::EdgeCache,
             b"page-store-disk" => Self::PageStoreDisk,
             b"multi-primary" => Self::MultiPrimary,
@@ -1155,6 +1158,7 @@ pub(crate) struct ServeOptions {
     pub(crate) idle_exit_seconds: Option<u64>,
     pub(crate) page_store: Option<String>,
     pub(crate) edge_of: Option<String>,
+    pub(crate) region: Option<String>,
     pub(crate) edge_cache: Option<u64>,
     pub(crate) page_store_disk: Option<u64>,
     pub(crate) multi_primary: Option<String>,
@@ -1998,6 +2002,13 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     .filter(|seconds| *seconds > 0)
                     .ok_or_else(|| usage(format!("{} needs a whole number of seconds above 0, not '{}'", option.spelled, shown(value))))?;
                 request.serve.idle_exit_seconds = Some(seconds);
+            }
+            OptionName::Region => {
+                let text = value
+                    .to_str()
+                    .filter(|text| !text.is_empty() && text.chars().all(|character| character.is_ascii_alphanumeric() || character == '-'))
+                    .ok_or_else(|| usage(format!("{} takes this server's region, such as eu-west-1: letters, digits and -", option.spelled)))?;
+                request.serve.region = Some(text.to_owned());
             }
             OptionName::EdgeOf => {
                 let text = value.to_str().filter(|text| text.starts_with("s3://")).ok_or_else(|| usage(format!("{} takes s3://bucket/prefix, where eggdb backup archives the copies", option.spelled)))?;

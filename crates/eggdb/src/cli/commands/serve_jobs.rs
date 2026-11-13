@@ -41,6 +41,33 @@ pub(super) fn run_scheduled_jobs(
     }
 }
 
+const PREWARM_EVERY: Duration = Duration::from_secs(60);
+
+pub(super) fn keep_placement(
+    store: &impl eggdb_sql::KeyValueStore,
+    region: Option<&str>,
+    stop: &(dyn Fn() -> bool + Sync),
+) {
+    if let Some(region) = region {
+        let mut session = eggdb_sql::Session::with_dialect(store, eggdb_sql::Dialect::PostgreSql);
+        let statement = format!(
+            "UPDATE eggdb_placement.settings SET value = '{}' WHERE name = 'region'",
+            region.replace('\'', "''")
+        );
+        let _ = session.execute(&statement, &mut |_| {});
+        let _ = session.close();
+    }
+    let mut waited = PREWARM_EVERY;
+    while !stop() {
+        if waited >= PREWARM_EVERY {
+            waited = Duration::ZERO;
+            let _ = eggdb_sql::placement::prewarm(store);
+        }
+        std::thread::sleep(CHECK_EVERY);
+        waited += CHECK_EVERY;
+    }
+}
+
 const POWER_CHECK_EVERY: Duration = Duration::from_secs(60);
 
 pub(super) fn follow_power_source(

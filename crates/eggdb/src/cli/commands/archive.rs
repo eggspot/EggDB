@@ -73,6 +73,42 @@ pub(super) fn archive_open_database(db: &eggdb::Database, url: &str, file: &Path
 
 const EDGE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The newest edge copy of the bucket at `url` as an edge server serves it (D1105): with no
+/// placement rules, the archived copy itself; otherwise a copy beside it, named for the
+/// region, without the tables kept off edges or out of `region` and without the rows whose
+/// residency leaves `region` out.
+pub(super) fn edge_copy_for(url: &str, region: Option<&str>) -> Result<PathBuf, String> {
+    let archived = edge_copy(url, None)?;
+    let suffix = region.map_or_else(|| "edge".to_owned(), |region| {
+        region.chars().filter(|character| character.is_ascii_alphanumeric() || *character == '-').collect()
+    });
+    let stem = archived.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    let placed = archived.with_file_name(format!("{stem}.{suffix}.placed"));
+    if placed.exists() {
+        return Ok(placed);
+    }
+    let mut staging = placed.clone().into_os_string();
+    staging.push(STAGING_SUFFIX);
+    let staging = PathBuf::from(staging);
+    let _ = std::fs::remove_file(&staging);
+    std::fs::copy(&archived, &staging).map_err(|error| format!("cannot copy {} for this edge: {error}", archived.display()))?;
+    let filtered = eggdb::Database::open_with(&staging, eggdb::Options::default().create_if_missing(false))
+        .map_err(|error| error.to_string())
+        .and_then(|db| {
+            let store = db.sql_store();
+            let report = eggdb_sql::placement::filter_for_region(&store, region, true).map_err(|error| error.message().to_owned());
+            drop(store);
+            db.close().map_err(|error| error.to_string())?;
+            report
+        });
+    if let Err(message) = filtered {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("cannot apply the placement rules to {}: {message}", archived.display()));
+    }
+    std::fs::rename(&staging, &placed).map_err(|error| format!("cannot keep the edge copy {}: {error}", placed.display()))?;
+    Ok(placed)
+}
+
 fn edge_cache_directory() -> PathBuf {
     std::env::var_os("EGGDB_EDGE_CACHE").map_or_else(|| std::env::temp_dir().join("eggdb-edge"), PathBuf::from)
 }
@@ -85,7 +121,7 @@ pub(super) fn evict_edge_copies(keep: &Path, limit: u64) -> usize {
     };
     let mut copies: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
         .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "eggdb"))
+        .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "eggdb" || extension == "placed"))
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
             let used = metadata.accessed().or_else(|_| metadata.modified()).ok()?;
@@ -113,7 +149,7 @@ pub(super) fn evict_edge_copies(keep: &Path, limit: u64) -> usize {
 /// Keeps a read-only edge server on the newest copy archived in the bucket at `url`, checking
 /// its manifest every 30 seconds until `stop`, and keeps the edge cache within `cache_limit`
 /// bytes when given (D1104).
-pub(super) fn follow_edge(db: &eggdb::Database, url: &str, serving: &Path, cache_limit: Option<u64>, options: &eggdb::Options, stop: &(dyn Fn() -> bool + Sync)) {
+pub(super) fn follow_edge(db: &eggdb::Database, url: &str, region: Option<&str>, serving: &Path, cache_limit: Option<u64>, options: &eggdb::Options, stop: &(dyn Fn() -> bool + Sync)) {
     let mut current = serving.to_path_buf();
     let mut waiting: Option<PathBuf> = None;
     let mut last_check: Option<std::time::Instant> = None;
@@ -124,7 +160,7 @@ pub(super) fn follow_edge(db: &eggdb::Database, url: &str, serving: &Path, cache
         }
         if waiting.is_none() {
             last_check = Some(std::time::Instant::now());
-            match edge_copy(url, None) {
+            match edge_copy_for(url, region) {
                 Ok(newest) if newest != current => waiting = Some(newest),
                 Ok(_) => {}
                 Err(message) => eprintln!("eggdb serve: --edge-of {url}: {message}"),
