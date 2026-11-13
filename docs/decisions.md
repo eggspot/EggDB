@@ -1099,3 +1099,4 @@ its full title with its status.
 - [D1072](decisions/D1072.md) Code-only batch 720 (M16): Sparkplug and Modbus ingest as messages arrive
 - [D1073](decisions/D1073.md) Code-only batch 721 (M16): JMAP submission
 - [D1074](decisions/D1074.md) Code-only batch 722 (M16): JMAP push
+- [D1075](decisions/D1075.md) Code-only batch 723 (M16): STARTTLS for SMTP and IMAP

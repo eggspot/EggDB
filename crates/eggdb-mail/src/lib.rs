@@ -13,6 +13,7 @@ pub mod mime;
 mod push;
 mod smtp;
 mod smtp_client;
+mod transport;
 pub mod store;
 
 pub use jmap::{Endpoint as JmapEndpoint, MAX_REQUEST_BYTES as MAX_JMAP_REQUEST_BYTES};
@@ -44,6 +45,9 @@ pub struct ServerConfig {
     /// The SMTP server (`host:port`) that JMAP submissions to other domains are relayed through;
     /// without one they are refused.
     pub relay: Option<String>,
+    /// The certificate and key `STARTTLS` secures SMTP and IMAP connections with; IMAP then
+    /// refuses to sign a client in before it has secured its connection.
+    pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
 }
 
 pub(crate) fn now_seconds() -> u64 {
@@ -136,6 +140,7 @@ mod tests {
             max_message_bytes: 1 << 20,
             domain: "localhost".to_owned(),
             relay: None,
+            tls: None,
         };
         let stopped = AtomicBool::new(false);
         let stop = || stopped.load(Ordering::Acquire);
@@ -181,6 +186,63 @@ mod tests {
         assert!(raw.ends_with("Subject: hello\r\n\r\n.dotted\r\n"), "{raw}");
     }
 
+    fn self_signed() -> std::sync::Arc<eggdb_tls::ServerConfig> {
+        use eggdb_tls::self_signed::{SelfSignedCertificateRequest, generate_self_signed_certificate};
+        use eggdb_tls::x509::SubjectAlternativeName;
+        let now = now_seconds() as i64;
+        let request = SelfSignedCertificateRequest {
+            common_name: "localhost".to_owned(),
+            subject_alternative_names: vec![SubjectAlternativeName::DnsName("localhost".to_owned())],
+            not_before_unix_seconds: now - 86_400,
+            not_after_unix_seconds: now + 86_400,
+        };
+        let (certificate, key) = generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill).unwrap();
+        std::sync::Arc::new(eggdb_tls::ServerConfig::new(vec![certificate], key).unwrap())
+    }
+
+    #[test]
+    fn imap_refuses_sign_in_until_starttls_secures_the_connection() {
+        let keyspace = MemoryKeyspace::default();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = ServerConfig {
+            user: "eggdb".to_owned(),
+            password_sha256: eggdb_crypto::sha256(b"secret"),
+            max_connections: 4,
+            max_message_bytes: 1 << 20,
+            domain: "localhost".to_owned(),
+            relay: None,
+            tls: Some(self_signed()),
+        };
+        let stopped = AtomicBool::new(false);
+        let stop = || stopped.load(Ordering::Acquire);
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_imap(&keyspace, &listener, &config, &stop));
+            let stream = TcpStream::connect(address).unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("STARTTLS") && line.contains("LOGINDISABLED"), "{line}");
+            writer.write_all(b"a1 LOGIN eggdb secret\r\n").unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("a1 NO [PRIVACYREQUIRED]"), "{line}");
+            writer.write_all(b"a2 STARTTLS\r\n").unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("a2 OK"), "{line}");
+            let client = eggdb_tls::ClientConfig::new(eggdb_tls::ServerVerification::EncryptionOnly, "localhost");
+            let secured = eggdb_tls::TlsStream::connect(reader.into_inner(), &client).unwrap();
+            let mut secured = BufReader::new(secured);
+            secured.get_mut().write_all(b"a3 LOGIN eggdb secret\r\n").unwrap();
+            let mut answer = String::new();
+            secured.read_line(&mut answer).unwrap();
+            assert!(answer.starts_with("a3 OK") && !answer.contains("LOGINDISABLED"), "{answer}");
+            stopped.store(true, Ordering::Release);
+        });
+    }
+
     #[test]
     fn imap_clients_sign_in_list_fetch_flag_and_expunge() {
         let keyspace = MemoryKeyspace::default();
@@ -199,6 +261,7 @@ mod tests {
             max_message_bytes: 1 << 20,
             domain: "localhost".to_owned(),
             relay: None,
+            tls: None,
         };
         let stopped = AtomicBool::new(false);
         let stop = || stopped.load(Ordering::Acquire);

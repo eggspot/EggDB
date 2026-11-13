@@ -51,8 +51,7 @@ fn timed_out(error: &io::Error) -> bool {
 struct Connection<'k> {
     keyspace: &'k dyn Keyspace,
     config: &'k ServerConfig,
-    reader: BufReader<TcpStream>,
-    writer: TcpStream,
+    reader: BufReader<crate::transport::Transport>,
     stop: &'k (dyn Fn() -> bool + Sync),
     signed_in: bool,
     selected: Option<(String, bool)>,
@@ -474,10 +473,23 @@ fn section_data(raw: &[u8], section: &str) -> io::Result<Vec<u8>> {
 }
 
 impl Connection<'_> {
+    fn needs_tls(&self) -> bool {
+        self.config.tls.is_some() && !self.reader.get_ref().secured()
+    }
+
+    fn capabilities(&self) -> String {
+        if self.needs_tls() {
+            CAPABILITIES.replace("AUTH=PLAIN", "STARTTLS LOGINDISABLED")
+        } else {
+            CAPABILITIES.to_owned()
+        }
+    }
+
     fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.write_all(b"\r\n")?;
-        self.writer.flush()
+        let stream = self.reader.get_mut();
+        stream.write_all(bytes)?;
+        stream.write_all(b"\r\n")?;
+        stream.flush()
     }
 
     fn read_raw_line(&mut self) -> io::Result<Option<Vec<u8>>> {
@@ -1062,7 +1074,7 @@ impl Connection<'_> {
         let verb = verb.to_ascii_uppercase();
         match verb.as_str() {
             "CAPABILITY" => {
-                self.send(format!("* CAPABILITY {CAPABILITIES}").as_bytes())?;
+                self.send(format!("* CAPABILITY {}", self.capabilities()).as_bytes())?;
                 self.send(format!("{tag} OK CAPABILITY completed").as_bytes())?;
             }
             "NOOP" | "CHECK" => self.send(format!("{tag} OK {verb} completed").as_bytes())?,
@@ -1075,6 +1087,18 @@ impl Connection<'_> {
                 self.send(format!("{tag} OK LOGOUT completed").as_bytes())?;
                 return Ok(false);
             }
+            "STARTTLS" => match &self.config.tls {
+                Some(tls) if !self.reader.get_ref().secured() => {
+                    let tls = std::sync::Arc::clone(tls);
+                    self.send(format!("{tag} OK Begin TLS negotiation now").as_bytes())?;
+                    crate::transport::start_tls(&mut self.reader, &tls)?;
+                }
+                Some(_) => self.send(format!("{tag} BAD The connection already runs TLS").as_bytes())?,
+                None => self.send(format!("{tag} BAD STARTTLS is not offered: the server has no certificate").as_bytes())?,
+            },
+            "LOGIN" | "AUTHENTICATE" if self.needs_tls() => {
+                self.send(format!("{tag} NO [PRIVACYREQUIRED] Secure the connection with STARTTLS first").as_bytes())?;
+            }
             "LOGIN" => {
                 let (Some(user), Some(password)) = (arguments.first().and_then(Item::text), arguments.get(1).and_then(Item::text)) else {
                     self.send(format!("{tag} BAD LOGIN needs a user and a password").as_bytes())?;
@@ -1082,7 +1106,7 @@ impl Connection<'_> {
                 };
                 if self.signed_in_as(&user, &password) {
                     self.signed_in = true;
-                    self.send(format!("{tag} OK [CAPABILITY {CAPABILITIES}] LOGIN completed").as_bytes())?;
+                    self.send(format!("{tag} OK [CAPABILITY {}] LOGIN completed", self.capabilities()).as_bytes())?;
                 } else {
                     self.send(format!("{tag} NO [AUTHENTICATIONFAILED] Authentication failed").as_bytes())?;
                 }
@@ -1190,17 +1214,16 @@ fn wildcard_matches(pattern: &str, name: &str) -> bool {
 
 /// Serves one IMAP connection until `LOGOUT`, the end of the stream or `stop`.
 pub(crate) fn serve_connection(keyspace: &dyn Keyspace, config: &ServerConfig, stream: TcpStream, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
-    let writer = stream.try_clone()?;
     let mut connection = Connection {
         keyspace,
         config,
-        reader: BufReader::new(stream),
-        writer,
+        reader: BufReader::new(crate::transport::Transport::Plain(stream)),
         stop,
         signed_in: false,
         selected: None,
     };
-    connection.send(format!("* OK [CAPABILITY {CAPABILITIES}] eggdb IMAP ready").as_bytes())?;
+    let greeting = format!("* OK [CAPABILITY {}] eggdb IMAP ready", connection.capabilities());
+    connection.send(greeting.as_bytes())?;
     loop {
         let command = match connection.read_command() {
             Ok(Some(command)) => command,

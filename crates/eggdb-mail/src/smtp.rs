@@ -106,16 +106,15 @@ fn deliver(keyspace: &dyn Keyspace, envelope: &Envelope, peer: &str, message: &[
 /// Serves one SMTP connection until `QUIT`, the end of the stream or `stop`.
 pub(crate) fn serve_connection(keyspace: &dyn Keyspace, config: &ServerConfig, stream: TcpStream, stop: &(dyn Fn() -> bool + Sync)) -> io::Result<()> {
     let peer = stream.peer_addr().map_or_else(|_| "unknown".to_owned(), |address| address.ip().to_string());
-    let mut writer = stream.try_clone()?;
-    let mut reader = BufReader::new(stream);
-    reply(&mut writer, "220 eggdb ESMTP ready")?;
+    let mut reader = BufReader::new(crate::transport::Transport::Plain(stream));
+    reply(reader.get_mut(), "220 eggdb ESMTP ready")?;
     let mut envelope = Envelope::default();
     while !stop() {
         let line = match read_line(&mut reader, MAX_COMMAND_BYTES, stop) {
             Ok(Some(line)) => line,
             Ok(None) => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                reply(&mut writer, "500 5.5.2 Line too long")?;
+                reply(reader.get_mut(), "500 5.5.2 Line too long")?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -126,7 +125,7 @@ pub(crate) fn serve_connection(keyspace: &dyn Keyspace, config: &ServerConfig, s
         match verb.to_ascii_uppercase().as_str() {
             "EHLO" | "HELO" => {
                 if argument.trim().is_empty() {
-                    reply(&mut writer, "501 5.5.4 Give your host name")?;
+                    reply(reader.get_mut(), "501 5.5.4 Give your host name")?;
                     continue;
                 }
                 envelope = Envelope {
@@ -134,19 +133,18 @@ pub(crate) fn serve_connection(keyspace: &dyn Keyspace, config: &ServerConfig, s
                     ..Envelope::default()
                 };
                 if verb.eq_ignore_ascii_case("EHLO") {
-                    reply(
-                        &mut writer,
-                        &format!("250-eggdb greets {}\r\n250-SIZE {}\r\n250-8BITMIME\r\n250 PIPELINING", argument.trim(), config.max_message_bytes),
-                    )?;
+                    let starttls = if config.tls.is_some() && !reader.get_ref().secured() { "250-STARTTLS\r\n" } else { "" };
+                    let greeting = format!("250-eggdb greets {}\r\n250-SIZE {}\r\n250-8BITMIME\r\n{starttls}250 PIPELINING", argument.trim(), config.max_message_bytes);
+                    reply(reader.get_mut(), &greeting)?;
                 } else {
-                    reply(&mut writer, "250 eggdb")?;
+                    reply(reader.get_mut(), "250 eggdb")?;
                 }
             }
             "MAIL" => {
                 if envelope.helo.is_none() {
-                    reply(&mut writer, "503 5.5.1 Say EHLO first")?;
+                    reply(reader.get_mut(), "503 5.5.1 Say EHLO first")?;
                 } else if envelope.sender.is_some() {
-                    reply(&mut writer, "503 5.5.1 Sender already given")?;
+                    reply(reader.get_mut(), "503 5.5.1 Sender already given")?;
                 } else {
                     match path_of(argument, "FROM:") {
                         Some(sender) => {
@@ -155,42 +153,42 @@ pub(crate) fn serve_connection(keyspace: &dyn Keyspace, config: &ServerConfig, s
                                 .find_map(|parameter| parameter.strip_prefix("SIZE=").or_else(|| parameter.strip_prefix("size=")))
                                 .and_then(|size| size.parse::<usize>().ok());
                             if declared.is_some_and(|size| size > config.max_message_bytes) {
-                                reply(&mut writer, "552 5.3.4 Message too large")?;
+                                reply(reader.get_mut(), "552 5.3.4 Message too large")?;
                             } else {
                                 envelope.sender = Some(sender);
-                                reply(&mut writer, "250 2.1.0 OK")?;
+                                reply(reader.get_mut(), "250 2.1.0 OK")?;
                             }
                         }
-                        None => reply(&mut writer, "501 5.5.4 Syntax: MAIL FROM:<address>")?,
+                        None => reply(reader.get_mut(), "501 5.5.4 Syntax: MAIL FROM:<address>")?,
                     }
                 }
             }
             "RCPT" => {
                 if envelope.sender.is_none() {
-                    reply(&mut writer, "503 5.5.1 Need MAIL first")?;
+                    reply(reader.get_mut(), "503 5.5.1 Need MAIL first")?;
                 } else if envelope.recipients.len() >= MAX_RECIPIENTS {
-                    reply(&mut writer, "452 4.5.3 Too many recipients")?;
+                    reply(reader.get_mut(), "452 4.5.3 Too many recipients")?;
                 } else {
                     match path_of(argument, "TO:").filter(|path| !path.is_empty()) {
                         Some(recipient) => {
                             envelope.recipients.push(recipient);
-                            reply(&mut writer, "250 2.1.5 OK")?;
+                            reply(reader.get_mut(), "250 2.1.5 OK")?;
                         }
-                        None => reply(&mut writer, "501 5.5.4 Syntax: RCPT TO:<address>")?,
+                        None => reply(reader.get_mut(), "501 5.5.4 Syntax: RCPT TO:<address>")?,
                     }
                 }
             }
             "DATA" => {
                 if envelope.recipients.is_empty() {
-                    reply(&mut writer, "503 5.5.1 Need RCPT first")?;
+                    reply(reader.get_mut(), "503 5.5.1 Need RCPT first")?;
                     continue;
                 }
-                reply(&mut writer, "354 End data with <CR><LF>.<CR><LF>")?;
+                reply(reader.get_mut(), "354 End data with <CR><LF>.<CR><LF>")?;
                 match read_data(&mut reader, config.max_message_bytes, stop)? {
-                    None => reply(&mut writer, "552 5.3.4 Message too large")?,
+                    None => reply(reader.get_mut(), "552 5.3.4 Message too large")?,
                     Some(message) => match deliver(keyspace, &envelope, &peer, &message) {
-                        Ok(()) => reply(&mut writer, "250 2.0.0 Stored")?,
-                        Err(_) => reply(&mut writer, "451 4.3.0 The message could not be stored")?,
+                        Ok(()) => reply(reader.get_mut(), "250 2.0.0 Stored")?,
+                        Err(_) => reply(reader.get_mut(), "451 4.3.0 The message could not be stored")?,
                     },
                 }
                 envelope = Envelope {
@@ -203,15 +201,24 @@ pub(crate) fn serve_connection(keyspace: &dyn Keyspace, config: &ServerConfig, s
                     helo: envelope.helo.take(),
                     ..Envelope::default()
                 };
-                reply(&mut writer, "250 2.0.0 OK")?;
+                reply(reader.get_mut(), "250 2.0.0 OK")?;
             }
-            "NOOP" => reply(&mut writer, "250 2.0.0 OK")?,
-            "VRFY" => reply(&mut writer, "252 2.5.2 Cannot verify, but will accept")?,
+            "STARTTLS" => match &config.tls {
+                Some(tls) if !reader.get_ref().secured() => {
+                    reply(reader.get_mut(), "220 2.0.0 Ready to start TLS")?;
+                    crate::transport::start_tls(&mut reader, tls)?;
+                    envelope = Envelope::default();
+                }
+                Some(_) => reply(reader.get_mut(), "503 5.5.1 TLS is already active")?,
+                None => reply(reader.get_mut(), "454 4.7.0 TLS not available")?,
+            },
+            "NOOP" => reply(reader.get_mut(), "250 2.0.0 OK")?,
+            "VRFY" => reply(reader.get_mut(), "252 2.5.2 Cannot verify, but will accept")?,
             "QUIT" => {
-                reply(&mut writer, "221 2.0.0 Bye")?;
+                reply(reader.get_mut(), "221 2.0.0 Bye")?;
                 return Ok(());
             }
-            _ => reply(&mut writer, "502 5.5.2 Command not recognized")?,
+            _ => reply(reader.get_mut(), "502 5.5.2 Command not recognized")?,
         }
     }
     Ok(())

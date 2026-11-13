@@ -1320,6 +1320,7 @@ impl Session<'_> {
             max_message_bytes: 25 << 20,
             domain: options.mail_domain.clone().unwrap_or_else(|| "localhost".to_owned()),
             relay: options.smtp_relay.clone(),
+            tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
         };
         let jmap_endpoint = eggdb_mail::JmapEndpoint::new(&mail_database, mail_config.clone());
         let dav_database = super::serve_resp::DatabaseKeyspace {

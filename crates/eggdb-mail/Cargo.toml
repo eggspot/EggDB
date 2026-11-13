@@ -14,3 +14,4 @@ eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-http = { path = "../eggdb-http" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
 eggdb-platform = { path = "../eggdb-platform" }
+eggdb-tls = { path = "../eggdb-tls" }

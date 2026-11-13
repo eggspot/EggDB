@@ -1592,6 +1592,7 @@ mod tests {
             max_message_bytes: 1 << 20,
             domain: "localhost".to_owned(),
             relay: None,
+            tls: None,
         };
         let endpoint = Endpoint::new(&keyspace, config);
         let session = call(&endpoint, "GET", "/.well-known/jmap", "");
@@ -1644,6 +1645,7 @@ mod tests {
             max_message_bytes: 1 << 20,
             domain: "localhost".to_owned(),
             relay: None,
+            tls: None,
         };
         let endpoint = Endpoint::new(&keyspace, config);
         let id = email_id(INBOX, 1);
@@ -1671,6 +1673,7 @@ mod tests {
             max_message_bytes: 1 << 20,
             domain: "localhost".to_owned(),
             relay: None,
+            tls: None,
         };
         let endpoint = Endpoint::new(&keyspace, config);
         let upload = endpoint.answer(&Request {
@@ -1715,6 +1718,7 @@ mod tests {
             max_message_bytes: 1 << 20,
             domain: "localhost".to_owned(),
             relay: None,
+            tls: None,
         };
         let endpoint = Endpoint::new(&keyspace, config);
         let session = call(&endpoint, "GET", "/.well-known/jmap", "");
@@ -1790,6 +1794,7 @@ mod tests {
             max_message_bytes: 1 << 20,
             domain: "localhost".to_owned(),
             relay: None,
+            tls: None,
         };
         let endpoint = Endpoint::new(&keyspace, config);
         let (url, posts, sink) = push_sink(2);
