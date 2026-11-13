@@ -246,10 +246,13 @@ pub enum IoBackend {
     /// Through Linux's io_uring, from kernel 5.6.
     IoUring,
     /// Through Windows' I/O completion ports, for reads and writes of uncached files; cached
-    /// files and syncs go to the queue's worker threads, or run inline without threads. Only
-    /// on request: the automatic choice on Windows is still the thread pool.
+    /// files and syncs go to the queue's worker threads, or run inline without threads. The
+    /// automatic choice on Windows (D1116), falling back to the thread pool when the port
+    /// cannot be made.
     Iocp,
 }
+
+pub(crate) const AUTOMATIC_PREFERS_COMPLETION_PORTS: bool = true;
 
 /// How [`FileSystem::io_queue`](crate::FileSystem::io_queue) builds a queue: how many
 /// operations it holds, how many threads it may use and, when the caller asks, which
@@ -293,8 +296,8 @@ impl IoQueueOptions {
 
     /// Sets how many worker threads an [`IoBackend::ThreadPool`] or an [`IoBackend::Iocp`] starts.
     /// When no backend is asked for and the queue has no asynchronous file I/O from the operating
-    /// system (everywhere but Linux for now, or after io_uring was refused), 0 runs the operations
-    /// [`IoBackend::Inline`]. A count above the capacity is lowered to it.
+    /// system (everywhere but Linux and Windows, or after io_uring or the completion port was
+    /// refused), 0 runs the operations [`IoBackend::Inline`]. A count above the capacity is lowered to it.
     pub fn threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self

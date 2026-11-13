@@ -57,21 +57,17 @@ impl Network for OsBackend {
 }
 
 fn os_backends() -> Vec<NetBackend> {
-    let automatic = OsNetwork::new()
-        .net_queue(NetQueueOptions::new())
-        .unwrap()
-        .backend();
     let mut backends = vec![NetBackend::Portable];
-    if automatic != NetBackend::Portable {
-        backends.push(automatic);
-    }
-    let poll = NetQueueOptions::new().backend(NetBackend::Poll);
-    if automatic != NetBackend::Poll && OsNetwork::new().net_queue(poll).is_ok() {
-        backends.push(NetBackend::Poll);
-    }
-    let io_uring = NetQueueOptions::new().backend(NetBackend::IoUring);
-    if OsNetwork::new().net_queue(io_uring).is_ok() {
-        backends.push(NetBackend::IoUring);
+    for backend in [
+        NetBackend::Epoll,
+        NetBackend::Kqueue,
+        NetBackend::Poll,
+        NetBackend::IoUring,
+    ] {
+        let asked = NetQueueOptions::new().backend(backend);
+        if OsNetwork::new().net_queue(asked).is_ok() {
+            backends.push(backend);
+        }
     }
     backends
 }

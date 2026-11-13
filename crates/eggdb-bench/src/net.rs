@@ -91,39 +91,43 @@ fn round_trips(connected: &mut Connected, iterations: u64) -> Result<(), String>
     Ok(())
 }
 
+fn readiness_backend() -> NetBackend {
+    [NetBackend::Epoll, NetBackend::Kqueue, NetBackend::Poll]
+        .into_iter()
+        .find(|backend| connected(*backend).is_ok())
+        .unwrap_or(NetBackend::Portable)
+}
+
 pub(crate) fn round_trip(_allocator: &CountingAllocator) -> Result<Vec<Metric>, String> {
-    let automatic_backend = OsNetwork::new()
-        .net_queue(NetQueueOptions::new())
-        .map_err(|error| error.to_string())?
-        .backend();
+    let readiness_backend = readiness_backend();
     let completion_backend = [NetBackend::IoUring, NetBackend::Iocp]
         .into_iter()
         .find(|backend| connected(*backend).is_ok());
-    let mut automatic = connected(automatic_backend)?;
+    let mut readiness = connected(readiness_backend)?;
     let Some(completion_backend) = completion_backend else {
-        let mut second = connected(automatic_backend)?;
+        let mut second = connected(readiness_backend)?;
         let measured = measure::paired(
-            &mut |iterations| round_trips(&mut automatic, iterations),
+            &mut |iterations| round_trips(&mut readiness, iterations),
             &mut |iterations| round_trips(&mut second, iterations),
         )?;
         return Ok(vec![Metric::reported(
             ROUND_TRIP,
-            "automatic_backend_ns",
+            "readiness_backend_ns",
             measured.subject_ns,
         )]);
     };
     let mut completion = connected(completion_backend)?;
     let measured = measure::paired(
         &mut |iterations| round_trips(&mut completion, iterations),
-        &mut |iterations| round_trips(&mut automatic, iterations),
+        &mut |iterations| round_trips(&mut readiness, iterations),
     )?;
     Ok(vec![
         Metric::ratio(
             ROUND_TRIP,
-            "completion_backend_to_automatic_backend",
+            "completion_backend_to_readiness_backend",
             measured.ratio,
         ),
         Metric::reported(ROUND_TRIP, "completion_backend_ns", measured.subject_ns),
-        Metric::reported(ROUND_TRIP, "automatic_backend_ns", measured.reference_ns),
+        Metric::reported(ROUND_TRIP, "readiness_backend_ns", measured.reference_ns),
     ])
 }

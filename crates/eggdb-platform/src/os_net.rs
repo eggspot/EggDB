@@ -19,15 +19,16 @@ use std::time::Duration;
 
 /// The operating system's network.
 ///
-/// Unless [`NetQueueOptions::backend`] asks for one, its queues wait for sockets to become
-/// ready in epoll on Linux and Android ([`NetBackend::Epoll`]) and in kqueue on Apple's
-/// systems ([`NetBackend::Kqueue`]), blocking inside `reap` until enough operations finish,
+/// Unless [`NetQueueOptions::backend`] asks for one, its queues run their operations as
+/// io_uring completions on Linux ([`NetBackend::IoUring`]) and through an I/O completion port
+/// on Windows ([`NetBackend::Iocp`]) (D1116). Where the kernel refuses io_uring, on Android and
+/// on Apple's systems they wait for sockets to become ready in epoll ([`NetBackend::Epoll`])
+/// or kqueue ([`NetBackend::Kqueue`]), blocking inside `reap` until enough operations finish,
 /// and connect without blocking. On FreeBSD, NetBSD, illumos and Solaris they wait in
 /// `poll(2)` ([`NetBackend::Poll`]), and a connect still waits for the operating system inside
-/// `reap`. Elsewhere they run [`NetBackend::Portable`]: `reap` retries the operations that
-/// would block, backing off between rounds, and a connect waits for the operating system inside
-/// `reap`. On Linux, [`NetBackend::IoUring`] runs a queue's operations as io_uring completions
-/// when asked for, and on Windows [`NetBackend::Iocp`] runs them through an I/O completion port.
+/// `reap`. Elsewhere, and on Windows when no completion port can be made, they run
+/// [`NetBackend::Portable`]: `reap` retries the operations that would block, backing off between
+/// rounds, and a connect waits for the operating system inside `reap`.
 /// [`OsNetQueue::backend`] says which one a queue runs.
 /// Connections have Nagle's algorithm turned off, as database protocols send small requests
 /// and answers, and never raise `SIGPIPE`, so a process embedding EggDB is not stopped by a
@@ -63,8 +64,9 @@ impl Network for OsNetwork {
 
     fn net_queue(&self, options: NetQueueOptions) -> Result<OsNetQueue> {
         let capacity = options.validated()?;
-        let engine = match options.requested_backend().or(NATIVE) {
-            Some(NetBackend::Portable) | None => Engine::Portable(Vec::new()),
+        let engine = match options.requested_backend() {
+            None => automatic_engine(capacity)?,
+            Some(NetBackend::Portable) => Engine::Portable(Vec::new()),
             Some(NetBackend::IoUring) => Engine::Uring(Box::new(NetRing::new(capacity)?)),
             Some(NetBackend::Iocp) => Engine::Port(Box::new(NetPort::new()?)),
             Some(backend) if supports(backend) => {
@@ -83,6 +85,29 @@ impl Network for OsNetwork {
     fn bind_datagram(&self, address: SocketAddr) -> Result<OsDatagramSocket> {
         OsDatagramSocket::bind(address)
     }
+}
+
+pub(crate) const AUTOMATIC_PREFERS_COMPLETION: bool = true;
+
+fn automatic_engine(capacity: usize) -> Result<Engine> {
+    if AUTOMATIC_PREFERS_COMPLETION {
+        if cfg!(target_os = "linux")
+            && let Ok(ring) = NetRing::new(capacity)
+        {
+            return Ok(Engine::Uring(Box::new(ring)));
+        }
+        if cfg!(windows)
+            && let Ok(port) = NetPort::new()
+        {
+            return Ok(Engine::Port(Box::new(port)));
+        }
+    }
+    Ok(match NATIVE {
+        Some(backend) if supports(backend) => {
+            Engine::Readiness(Box::new(ReadinessQueue::new(capacity, backend)?))
+        }
+        _ => Engine::Portable(Vec::new()),
+    })
 }
 
 /// A listener made by [`OsNetwork`].
@@ -604,9 +629,15 @@ mod tests {
     }
 
     #[test]
-    fn the_automatic_choice_is_the_systems_readiness_backend() {
+    fn the_automatic_choice_is_a_completion_backend_where_one_runs_and_the_readiness_backend_elsewhere() {
         let queue = OsNetwork::new().net_queue(NetQueueOptions::new()).unwrap();
-        assert_eq!(queue.backend(), NATIVE.unwrap_or(NetBackend::Portable));
+        let completion = [NetBackend::IoUring, NetBackend::Iocp]
+            .into_iter()
+            .find(|backend| OsNetwork::new().net_queue(options(*backend)).is_ok());
+        assert_eq!(
+            queue.backend(),
+            completion.or(NATIVE).unwrap_or(NetBackend::Portable)
+        );
         for backend in backends() {
             let queue = OsNetwork::new().net_queue(options(backend)).unwrap();
             assert_eq!(queue.backend(), backend);
@@ -775,11 +806,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn io_uring_is_chosen_only_on_request() {
+    fn io_uring_is_the_automatic_choice_wherever_the_kernel_allows_it() {
         let automatic = OsNetwork::new().net_queue(NetQueueOptions::new()).unwrap();
-        assert_ne!(automatic.backend(), NetBackend::IoUring);
-        if let Ok(queue) = OsNetwork::new().net_queue(options(NetBackend::IoUring)) {
-            assert_eq!(queue.backend(), NetBackend::IoUring);
+        match OsNetwork::new().net_queue(options(NetBackend::IoUring)) {
+            Ok(queue) => {
+                assert_eq!(queue.backend(), NetBackend::IoUring);
+                assert_eq!(automatic.backend(), NetBackend::IoUring);
+            }
+            Err(_) => assert_eq!(automatic.backend(), NetBackend::Epoll),
         }
     }
 

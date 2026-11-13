@@ -1140,3 +1140,4 @@ its full title with its status.
 - [D1113](decisions/D1113.md) Code-only batch 761 (M18): databases per tenant at millions of tenants, and a tenant lifecycle API
 - [D1114](decisions/D1114.md) Code-only batch 762 (M1): datagrams in a completion queue of their own with batched receives for QUIC
 - [D1115](decisions/D1115.md) Code-only batch 763 (M1): TDS attention on named pipes and local sockets
+- [D1116](decisions/D1116.md) Code-only batch 764 (M1): io_uring and completion ports as the automatic backends

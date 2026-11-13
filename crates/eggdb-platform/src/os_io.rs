@@ -80,6 +80,13 @@ impl OsIoQueue {
             None if crate::os_identity::on_eggos() => Backend::Pool(Pool::start(threads, Pool::no_wake())?),
             None => match Ring::new(capacity) {
                 Ok(ring) => Backend::Uring(ring),
+                Err(_) if cfg!(windows) && crate::io::AUTOMATIC_PREFERS_COMPLETION_PORTS => {
+                    match Port::new(threads) {
+                        Ok(port) => Backend::Port(port),
+                        Err(_) if threads == 0 => Backend::Inline(VecDeque::new()),
+                        Err(_) => Backend::Pool(Pool::start(threads, Pool::no_wake())?),
+                    }
+                }
                 Err(_) if threads == 0 => Backend::Inline(VecDeque::new()),
                 Err(_) => Backend::Pool(Pool::start(threads, Pool::no_wake())?),
             },
@@ -468,8 +475,12 @@ mod tests {
         let without_threads = fs.io_queue(IoQueueOptions::new().threads(0)).unwrap();
         let asked = fs.io_queue(IoQueueOptions::new().backend(IoBackend::IoUring));
         REFUSE_SETUP.with(|refuse| refuse.set(false));
-        assert_eq!(automatic.backend(), IoBackend::ThreadPool);
-        assert_eq!(without_threads.backend(), IoBackend::Inline);
+        if cfg!(windows) {
+            assert_eq!(automatic.backend(), IoBackend::Iocp);
+        } else {
+            assert_eq!(automatic.backend(), IoBackend::ThreadPool);
+            assert_eq!(without_threads.backend(), IoBackend::Inline);
+        }
         assert_eq!(asked.unwrap_err().kind(), ErrorKind::Unsupported);
     }
 

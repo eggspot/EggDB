@@ -396,13 +396,16 @@ fn an_asked_for_backend_is_given_or_refused() {
 }
 
 #[test]
-fn the_automatic_choice_is_io_uring_where_it_is_built_and_the_pool_elsewhere() {
+fn the_automatic_choice_is_io_uring_where_it_is_built_completion_ports_on_windows_and_the_pool_elsewhere() {
     let fs = OsFileSystem::new();
     let queue = fs.io_queue(IoQueueOptions::new()).unwrap();
     let without_threads = fs.io_queue(IoQueueOptions::new().threads(0)).unwrap();
     if io_uring_is_built() {
         assert_eq!(queue.backend(), IoBackend::IoUring);
         assert_eq!(without_threads.backend(), IoBackend::IoUring);
+    } else if cfg!(windows) {
+        assert_eq!(queue.backend(), IoBackend::Iocp);
+        assert_eq!(without_threads.backend(), IoBackend::Iocp);
     } else {
         assert_eq!(queue.backend(), IoBackend::ThreadPool);
         assert_eq!(without_threads.backend(), IoBackend::Inline);
