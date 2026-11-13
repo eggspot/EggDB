@@ -702,6 +702,13 @@ impl KeyValueRead for ConcurrentBoxed<'_> {
     }
 }
 
+fn lock_written_row(key: &[u8]) -> SqlResult<()> {
+    if crate::encoding::is_row_key(key) {
+        crate::advisory_locks::lock_row(key, true, crate::advisory_locks::RowWait::Wait)?;
+    }
+    Ok(())
+}
+
 impl KeyValueWrite for ConcurrentBoxed<'_> {
     fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
         self.0.put_with_expiry(key, value, ttl)
@@ -722,14 +729,17 @@ impl KeyValueWrite for ConcurrentBoxed<'_> {
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        lock_written_row(key)?;
         self.0.put(key, value)
     }
 
     fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        lock_written_row(key)?;
         self.0.put_if_absent(key, value)
     }
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
+        lock_written_row(key)?;
         self.0.delete(key)
     }
 

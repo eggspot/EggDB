@@ -50,6 +50,7 @@ fn source_select(computed: Vec<Expr>, query: Query, position: usize) -> Select {
         limit: None,
         offset: None,
         source_row_limit: None,
+        locking: None,
     }
 }
 

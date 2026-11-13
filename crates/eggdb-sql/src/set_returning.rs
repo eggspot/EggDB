@@ -1272,6 +1272,7 @@ pub(crate) fn expand_select_list(select: &mut Select) -> SqlResult<()> {
         limit: None,
         offset: None,
         source_row_limit: select.source_row_limit.take(),
+        locking: select.locking.take(),
         grouping_sets: select.grouping_sets.take(),
         distinct_on: Vec::new(),
     };

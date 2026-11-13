@@ -701,6 +701,7 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
                 limit: None,
                 offset: None,
                 source_row_limit: None,
+                locking: None,
                 grouping_sets: None,
                 distinct_on: Vec::new(),
             },
@@ -725,6 +726,7 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
         limit: None,
         offset: None,
         source_row_limit: None,
+        locking: None,
         grouping_sets: None,
         distinct_on: Vec::new(),
     };
@@ -2451,6 +2453,7 @@ fn lateral_source(reference: &TableReference) -> Option<LateralSource> {
         limit: None,
         offset: None,
         source_row_limit: None,
+        locking: None,
         grouping_sets: None,
         distinct_on: Vec::new(),
     };
@@ -2612,6 +2615,7 @@ fn lateral_rows(
             limit: None,
             offset: None,
             source_row_limit: None,
+            locking: None,
             grouping_sets: None,
             distinct_on: Vec::new(),
         };

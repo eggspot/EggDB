@@ -269,6 +269,8 @@ impl SqlState {
     pub const OBJECT_NOT_IN_PREREQUISITE_STATE: Self = Self(*b"55000");
     /// `55P03` lock_not_available: another writer holds the database.
     pub const LOCK_NOT_AVAILABLE: Self = Self(*b"55P03");
+    /// `40P01`: waiting for a lock would never end, so this transaction was chosen to fail.
+    pub const DEADLOCK_DETECTED: Self = Self(*b"40P01");
     /// `55P02` cant_change_runtime_param.
     pub const CANT_CHANGE_RUNTIME_PARAM: Self = Self(*b"55P02");
     /// `58030` io_error.

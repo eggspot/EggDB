@@ -1256,3 +1256,30 @@ fn a_concurrent_unique_index_over_duplicates_fails_and_leaves_no_index() {
     let inside = fails(&mut session, "CREATE INDEX CONCURRENTLY d_w ON d (v)");
     assert_eq!(inside.state().code(), "25001");
 }
+
+#[test]
+fn for_update_skip_locked_hands_each_session_its_own_queue_rows() {
+    let store = MemoryStore::new();
+    let mut setup = Session::with_dialect(&store, Dialect::PostgreSql);
+    last(&mut setup, "CREATE TABLE jobs (id integer PRIMARY KEY, done boolean)");
+    last(&mut setup, "INSERT INTO jobs VALUES (1, false), (2, false), (3, false)");
+    let mut first = Session::with_dialect(&store, Dialect::PostgreSql);
+    let mut second = Session::with_dialect(&store, Dialect::PostgreSql);
+    last(&mut first, "BEGIN");
+    assert_eq!(
+        last(&mut first, "SELECT id FROM jobs WHERE NOT done ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"),
+        "id\n1\nSELECT 1"
+    );
+    last(&mut second, "BEGIN");
+    assert_eq!(
+        last(&mut second, "SELECT id FROM jobs WHERE NOT done ORDER BY id LIMIT 1 FOR SHARE SKIP LOCKED"),
+        "id\n2\nSELECT 1"
+    );
+    let error = fails(&mut second, "SELECT id FROM jobs WHERE id = 1 FOR SHARE NOWAIT");
+    assert_eq!(error.state().code(), "55P03");
+    last(&mut first, "COMMIT");
+    assert_eq!(
+        last(&mut second, "SELECT id FROM jobs WHERE id = 1 FOR SHARE NOWAIT"),
+        "id\n1\nSELECT 1"
+    );
+}

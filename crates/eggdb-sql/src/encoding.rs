@@ -131,6 +131,12 @@ pub(crate) fn push_rows_prefix(key: &mut Vec<u8>, table_id: u32) {
     key.extend_from_slice(&table_id.to_be_bytes());
 }
 
+pub(crate) fn is_row_key(key: &[u8]) -> bool {
+    key.strip_prefix(NAMESPACE)
+        .and_then(|rest| rest.first())
+        .is_some_and(|space| *space == ROW_SPACE)
+}
+
 pub(crate) fn rows_prefix(table_id: u32) -> Vec<u8> {
     let mut key = Vec::with_capacity(TYPICAL_KEY_BYTES);
     push_rows_prefix(&mut key, table_id);

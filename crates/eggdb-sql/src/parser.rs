@@ -3670,6 +3670,7 @@ impl<'t> Parser<'t> {
             limit: None,
             offset: None,
             source_row_limit,
+            locking: None,
             grouping_sets,
             distinct_on,
         };

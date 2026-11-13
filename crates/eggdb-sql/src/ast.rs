@@ -2085,6 +2085,23 @@ pub(crate) struct Select {
     pub(crate) limit: Option<Expr>,
     pub(crate) offset: Option<Expr>,
     pub(crate) source_row_limit: Option<u64>,
+    pub(crate) locking: Option<RowLocking>,
+}
+
+/// A query's `FOR UPDATE` or `FOR SHARE` clause (D1126): the rows it returns are locked until
+/// the transaction ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowLocking {
+    pub(crate) exclusive: bool,
+    pub(crate) wait: RowLockWait,
+}
+
+/// What a row locking clause does with a row another transaction holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowLockWait {
+    Wait,
+    NoWait,
+    SkipLocked,
 }
 
 impl Select {

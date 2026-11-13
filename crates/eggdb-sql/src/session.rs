@@ -3338,6 +3338,7 @@ impl<'s> Session<'s> {
                 let began = self.begin(read_only)?;
                 if opens {
                     self.transaction_mode.isolation = isolation.clone();
+                    self.reopen_writer_for_isolation()?;
                 }
                 return Ok(began);
             }
@@ -3544,6 +3545,7 @@ impl<'s> Session<'s> {
             }
             Statement::Select(select) => self.read(|reader, tables| {
                 binding.select(reader, tables, select)?;
+                crate::row_locks::lock_selected_rows(reader, tables, select)?;
                 if matches!(dialect, Dialect::PostgreSql | Dialect::MySql)
                     || (dialect == Dialect::SqlServer
                         && crate::routines::select_calls_marked_routine(select))
@@ -4281,7 +4283,7 @@ impl<'s> Session<'s> {
         Ok(result)
     }
 
-    fn concurrent_isolation(&self) -> Option<crate::store::ConcurrentIsolation> {
+    pub(super) fn concurrent_isolation(&self) -> Option<crate::store::ConcurrentIsolation> {
         let requested = match self.transaction_mode.isolation.as_deref() {
             Some(level) => level.to_ascii_lowercase(),
             None => self.settings.get("eggdb.isolation").ok()?.to_ascii_lowercase(),
@@ -4291,6 +4293,16 @@ impl<'s> Session<'s> {
             "repeatable read" | "snapshot" => Some(crate::store::ConcurrentIsolation::Snapshot),
             _ => None,
         }
+    }
+
+    pub(super) fn begin_block_writer(&self) -> SqlResult<Box<dyn crate::store::BoxedWrite + 's>> {
+        let store = self.store;
+        if let Some(isolation) = self.concurrent_isolation()
+            && let Some(writer) = store.begin_boxed_concurrent_write(isolation)?
+        {
+            return Ok(writer);
+        }
+        store.begin_boxed_write()
     }
 
     fn begin_statement_writer(
@@ -4695,7 +4707,7 @@ impl<'s> Session<'s> {
                 self.block = if read_only {
                     Block::Reading(self.store.begin_boxed_read()?)
                 } else {
-                    Block::Writing(self.store.begin_boxed_write()?)
+                    Block::Writing(self.begin_block_writer()?)
                 };
                 Ok(QueryResult::command("BEGIN"))
             }

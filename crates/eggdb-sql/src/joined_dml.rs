@@ -146,6 +146,7 @@ pub(crate) fn every_column_select(
         limit: None,
         offset: None,
         source_row_limit: None,
+        locking: None,
         grouping_sets: None,
         distinct_on: Vec::new(),
     }

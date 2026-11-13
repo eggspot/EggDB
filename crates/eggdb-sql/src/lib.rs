@@ -211,6 +211,7 @@ mod restore;
 mod result_row_cap;
 mod retention;
 mod roles;
+mod row_locks;
 mod routine_settings;
 mod routines;
 mod row_security;

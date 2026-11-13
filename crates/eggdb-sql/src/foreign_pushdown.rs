@@ -226,6 +226,7 @@ mod tests {
             limit: None,
             offset: None,
             source_row_limit: None,
+            locking: None,
         }
     }
 

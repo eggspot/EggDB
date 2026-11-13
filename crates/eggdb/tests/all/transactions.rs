@@ -622,7 +622,7 @@ fn a_read_only_database_moves_to_a_newer_copy_when_no_reader_holds_the_old_one()
 }
 
 #[test]
-fn serializable_sql_blocks_write_side_by_side_and_the_second_conflicting_commit_fails_40001() {
+fn a_serializable_sql_block_that_read_a_row_another_block_changed_fails_its_commit_with_40001() {
     use eggdb::sql::Dialect;
     let file = TempPath::new("sql-concurrent");
     let db = Database::open(file.path()).unwrap();
@@ -645,10 +645,10 @@ fn serializable_sql_blocks_write_side_by_side_and_the_second_conflicting_commit_
     first
         .execute("UPDATE accounts SET balance = balance - 30 WHERE id = 1", &mut |_| {})
         .unwrap();
+    first.execute("COMMIT", &mut |_| {}).unwrap();
     second
         .execute("UPDATE accounts SET balance = balance - 50 WHERE id = 1", &mut |_| {})
         .unwrap();
-    first.execute("COMMIT", &mut |_| {}).unwrap();
     let error = second.execute("COMMIT", &mut |_| {}).unwrap_err();
     assert_eq!(error.state().code(), "40001");
     let mut balances = Vec::new();

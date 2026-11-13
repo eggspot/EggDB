@@ -63,5 +63,6 @@ pub(super) fn wrap(mut inner: Select, condition: Expr, dialect: Dialect) -> Sele
         limit: None,
         offset: None,
         source_row_limit: None,
+        locking: None,
     }
 }

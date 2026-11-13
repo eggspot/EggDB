@@ -18,6 +18,7 @@ pub(super) struct QueryTail {
     pub(super) siblings: Vec<OrderItem>,
     pub(super) limit: Option<Expr>,
     pub(super) offset: Option<Expr>,
+    pub(super) locking: Option<crate::ast::RowLocking>,
 }
 
 impl QueryTail {
@@ -26,6 +27,7 @@ impl QueryTail {
             && self.siblings.is_empty()
             && self.limit.is_none()
             && self.offset.is_none()
+            && self.locking.is_none()
     }
 }
 
@@ -102,6 +104,7 @@ impl Parser<'_> {
             limit: None,
             offset: None,
             source_row_limit: None,
+            locking: None,
         })
     }
 
@@ -282,6 +285,7 @@ impl Parser<'_> {
                 }
                 select.limit = tail.limit;
                 select.offset = tail.offset;
+                select.locking = tail.locking;
                 (SetExpr::Select(select), QueryTail::default())
             }
             body => {
@@ -629,6 +633,7 @@ impl Parser<'_> {
     pub(super) fn query_tail(&mut self) -> SqlResult<QueryTail> {
         let mut order_by = Vec::new();
         let mut siblings = Vec::new();
+        let mut locking: Option<crate::ast::RowLocking> = None;
         if self.take_word("order") {
             let in_siblings = self.oracle() && self.take_word("siblings");
             self.expect_word("by")?;
@@ -718,11 +723,15 @@ impl Parser<'_> {
                     .iter()
                     .any(|word| self.is_word_at(1, word))
             {
-                self.row_locking()?;
+                locking = Some(self.row_locking(locking)?);
             } else if self.mysql() && self.is_word("lock") && self.is_word_at(1, "in") {
                 self.at += 2;
                 self.expect_word("share")?;
                 self.expect_word("mode")?;
+                locking = Some(crate::ast::RowLocking {
+                    exclusive: locking.is_some_and(|held| held.exclusive),
+                    wait: crate::ast::RowLockWait::Wait,
+                });
             } else if self.sqlserver() && self.is_word("for") && self.is_word_at(1, "read") {
                 break;
             } else if self.is_word("for") || self.mysql() && self.is_word("lock") {
@@ -740,6 +749,7 @@ impl Parser<'_> {
             siblings,
             limit,
             offset,
+            locking,
         };
         if !tail.is_empty() && self.set_operator().is_some() {
             return Err(self.unexpected());
@@ -993,12 +1003,22 @@ fn is_cheap_to_repeat(expr: &Expr) -> bool {
 }
 
 impl Parser<'_> {
-    fn row_locking(&mut self) -> SqlResult<()> {
+    fn row_locking(
+        &mut self,
+        earlier: Option<crate::ast::RowLocking>,
+    ) -> SqlResult<crate::ast::RowLocking> {
+        let mut locking = earlier.unwrap_or(crate::ast::RowLocking {
+            exclusive: false,
+            wait: crate::ast::RowLockWait::Wait,
+        });
         while self.take_word("for") {
-            if !(self.take_word("update") || self.take_word("share")) {
+            if self.take_word("update") {
+                locking.exclusive = true;
+            } else if !self.take_word("share") {
                 if self.take_word("no") {
                     self.expect_word("key")?;
                     self.expect_word("update")?;
+                    locking.exclusive = true;
                 } else {
                     self.expect_word("key")?;
                     self.expect_word("share")?;
@@ -1017,15 +1037,16 @@ impl Parser<'_> {
             }
             if self.take_word("skip") {
                 self.expect_word("locked")?;
+                locking.wait = crate::ast::RowLockWait::SkipLocked;
             } else if self.oracle() && self.take_word("wait") {
                 if !matches!(self.peek_kind(), TokenKind::Integer(_)) {
                     return Err(self.unexpected());
                 }
                 self.at += 1;
-            } else {
-                self.take_word("nowait");
+            } else if self.take_word("nowait") {
+                locking.wait = crate::ast::RowLockWait::NoWait;
             }
         }
-        Ok(())
+        Ok(locking)
     }
 }

@@ -414,6 +414,7 @@ pub(super) fn connect_by(mut select: Select, clause: HierarchicalClause) -> SqlR
         limit: None,
         offset: None,
         source_row_limit: None,
+        locking: None,
     };
     let mut hierarchy = Hierarchy {
         inputs: 0,

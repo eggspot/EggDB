@@ -446,9 +446,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Collections and expiring keys inside concurrent transactions (D172). **Code written, unbuilt** (code-only mode, 2026-11-13, D1124).
 - Waiting on a predicate lock instead of failing at commit (D172).
 - Row locks that hold other writers: `FOR UPDATE`/`FOR SHARE` with `NOWAIT` and `SKIP LOCKED`
-  across concurrent sessions (D32, D173).
+  across concurrent sessions (D32, D173). **Code written, unbuilt** (code-only mode, 2026-11-13, D1126); left: joins, views
+  and tables without a primary key.
 - Deadlocks between PostgreSQL advisory locks and row locks detected with `40P01` (D173); SQL
-  Server's application locks already detect cycles among themselves (D291), the start to build on.
+  Server's application locks already detect cycles among themselves (D291), the start to build on. **Code
+  written, unbuilt** (code-only mode, 2026-11-13, D1126).
 - Two-phase commit and XA: `PREPARE TRANSACTION`, `COMMIT PREPARED`, MySQL's `XA` and TDS's
   distributed transactions (D32, D173).
 - A failing Oracle statement trigger or SQL Server `AFTER` trigger undoes only its own
@@ -470,7 +472,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-13, D950).
 - The locking clause kept in the statement's tree, so `FOR UPDATE` in a read-only transaction is
   found exactly: a column named `share` after `FOR`, `FOR UPDATE OF` naming only temporary
-  tables, and an outer clause over a `WITH` query, which PostgreSQL does not lock (D338).
+  tables, and an outer clause over a `WITH` query, which PostgreSQL does not lock (D338). The clause on a
+  single `SELECT` (`Select::locking`): **code written, unbuilt** (code-only mode, 2026-11-13, D1126); left: using it
+  for the read-only checks, `OF` lists and clauses over `WITH` queries.
 - `ROLLBACK TO SAVEPOINT` undoes key-value writes made through `eggdb serve`'s RESP and wire
   sessions once those share a block with SQL (D319).
 - The savepoint undo log bounded as a whole against the session's memory budget, or spilled to

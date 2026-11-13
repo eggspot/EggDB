@@ -1150,3 +1150,4 @@ its full title with its status.
 - [D1123](decisions/D1123.md) Code-only batch 772 (M3): SQL sessions on concurrent transactions for REPEATABLE READ and SERIALIZABLE blocks
 - [D1124](decisions/D1124.md) Code-only batch 773 (M3): collections and expiring keys inside concurrent transactions
 - [D1125](decisions/D1125.md) Code-only batch 774 (M3): isolation per request and per session with eggdb.isolation
+- [D1126](decisions/D1126.md) Code-only batch 775 (M3): row locks with FOR UPDATE, NOWAIT and SKIP LOCKED, and deadlocks between row and advisory locks

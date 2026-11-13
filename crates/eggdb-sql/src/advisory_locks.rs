@@ -14,6 +14,7 @@ enum Key {
     Single(i64),
     Pair(i32, i32),
     Application(String),
+    Row(Vec<u8>),
 }
 
 impl Key {
@@ -24,6 +25,7 @@ impl Key {
             Self::Application(resource) => {
                 format!("application lock '{}'", resource.replace('\'', "''"))
             }
+            Self::Row(_) => "row lock".to_owned(),
         }
     }
 }
@@ -566,9 +568,13 @@ fn take(
 
 fn wait(name: LockName, owner: u64, mode: Mode, lasts: Lasts) -> SqlResult<()> {
     let mut held = held();
+    if take(&mut held, name.clone(), owner, mode, lasts) {
+        return Ok(());
+    }
+    let waiting = ApplicationWait::start(owner, name.clone(), mode);
     loop {
-        if take(&mut held, name.clone(), owner, mode, lasts) {
-            return Ok(());
+        if waiting.is_deadlocked(&held) {
+            return Err(deadlock(&name));
         }
         held = registry()
             .released
@@ -576,6 +582,60 @@ fn wait(name: LockName, owner: u64, mode: Mode, lasts: Lasts) -> SqlResult<()> {
             .unwrap_or_else(PoisonError::into_inner)
             .0;
         crate::cancel::check()?;
+        if take(&mut held, name.clone(), owner, mode, lasts) {
+            return Ok(());
+        }
+    }
+}
+
+fn deadlock(name: &LockName) -> SqlError {
+    SqlError::new(SqlState::DEADLOCK_DETECTED, "deadlock detected")
+        .with_detail(format!(
+            "This transaction waited for a {} held by a transaction that waits, directly or through others, for a lock this one holds.",
+            name.key.shown()
+        ))
+        .with_hint("See server log for query details.")
+        .with_vendor_code(1213)
+}
+
+/// What a row lock request does when another transaction holds the row (D1126).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowWait {
+    Wait,
+    NoWait,
+    SkipLocked,
+}
+
+/// Locks the row stored under `key` for the active session's transaction until it ends, for
+/// `FOR UPDATE` (`exclusive`), `FOR SHARE` and writes in transactions that run beside others
+/// (D1126). Waiting detects deadlocks with every other wait, advisory and application locks
+/// included, and fails the waiter that closed the cycle with `40P01`. `NoWait` fails with
+/// `55P03` at once, and `SkipLocked` answers `false` instead of waiting. Outside a statement
+/// of a session, which has no transaction to hold the lock, it locks nothing and answers `true`.
+pub(crate) fn lock_row(key: &[u8], exclusive: bool, wait_for: RowWait) -> SqlResult<bool> {
+    let Ok(owner) = active() else {
+        return Ok(true);
+    };
+    let name = LockName {
+        database: owner.database,
+        key: Key::Row(key.to_vec()),
+    };
+    let mode = if exclusive { Mode::Exclusive } else { Mode::Shared };
+    match wait_for {
+        RowWait::Wait => wait(name, owner.owner, mode, Lasts::Transaction).map(|()| true),
+        RowWait::SkipLocked => Ok(take(&mut held(), name, owner.owner, mode, Lasts::Transaction)),
+        RowWait::NoWait => {
+            if take(&mut held(), name, owner.owner, mode, Lasts::Transaction) {
+                Ok(true)
+            } else {
+                Err(SqlError::new(
+                    SqlState::LOCK_NOT_AVAILABLE,
+                    "could not obtain lock on row in relation",
+                )
+                .with_vendor_code(3572)
+                .with_oracle_code(54))
+            }
+        }
     }
 }
 
@@ -1008,6 +1068,38 @@ mod tests {
         assert!(!waiter.is_finished());
         drop(holder);
         assert_eq!(waiter.join().unwrap(), Value::Text(String::new()));
+    }
+
+    #[test]
+    fn a_row_lock_wait_closing_a_cycle_with_an_advisory_lock_fails_with_40p01() {
+        use super::{RowWait, application_waits, lock_row};
+        let mine = AdvisoryLocks::new(9_292);
+        let entered = enter(&mine, true);
+        assert_eq!(call("pg_advisory_xact_lock", &[Value::BigInt(7)]), Value::Text(String::new()));
+        let (holding, held) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            let locks = AdvisoryLocks::new(9_292);
+            let _entered = enter(&locks, true);
+            assert!(lock_row(b"row-1", true, RowWait::Wait).unwrap());
+            holding.send(locks.owner).unwrap();
+            function("pg_advisory_xact_lock", &[Value::BigInt(7)]).unwrap().is_ok()
+        });
+        let other_owner = held.recv().unwrap();
+        let deadline = eggdb_platform_core::time::Instant::now() + Duration::from_secs(10);
+        while !application_waits().contains_key(&other_owner) {
+            assert!(eggdb_platform_core::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let error = lock_row(b"row-1", false, RowWait::Wait).unwrap_err();
+        assert_eq!(error.state().code(), "40P01");
+        assert_eq!(
+            lock_row(b"row-1", true, RowWait::NoWait).unwrap_err().state().code(),
+            "55P03"
+        );
+        assert!(!lock_row(b"row-1", true, RowWait::SkipLocked).unwrap());
+        mine.release_transaction_locks();
+        assert!(other.join().unwrap());
+        drop(entered);
     }
 
     #[test]

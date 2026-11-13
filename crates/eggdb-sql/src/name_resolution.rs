@@ -1009,6 +1009,7 @@ impl<'a> Resolver<'a> {
                 limit: None,
                 offset: None,
                 source_row_limit: None,
+                locking: None,
                 grouping_sets: None,
                 distinct_on: Vec::new(),
             })),
@@ -1155,6 +1156,7 @@ impl<'a> Resolver<'a> {
                 limit: None,
                 offset: None,
                 source_row_limit: None,
+                locking: None,
                 grouping_sets: None,
                 distinct_on: Vec::new(),
             }))
@@ -1580,6 +1582,7 @@ fn select_from(
         limit: None,
         offset: None,
         source_row_limit: None,
+        locking: None,
         grouping_sets: None,
         distinct_on: Vec::new(),
     }
@@ -2139,6 +2142,7 @@ impl Binding<'_> {
             limit: None,
             offset: None,
             source_row_limit: None,
+            locking: None,
             grouping_sets: None,
             distinct_on: Vec::new(),
         };

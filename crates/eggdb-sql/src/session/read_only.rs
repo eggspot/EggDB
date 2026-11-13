@@ -544,11 +544,29 @@ impl<'s> Session<'s> {
         }
         if let Some(level) = &characteristics.isolation {
             self.transaction_mode.isolation = Some(level.clone());
+            self.reopen_writer_for_isolation()?;
         }
         if let Some(read_only) = characteristics.read_only {
             self.change_transaction_access(read_only)?;
         }
         Ok(set)
+    }
+
+    pub(super) fn reopen_writer_for_isolation(&mut self) -> SqlResult<()> {
+        let untouched = !self.transaction_mode.has_read
+            && !self.savepoints.is_active()
+            && !self.block_is_implicit;
+        if !untouched
+            || !matches!(self.block, Block::Writing(_))
+            || self.concurrent_isolation().is_none()
+        {
+            return Ok(());
+        }
+        if let Block::Writing(previous) = std::mem::replace(&mut self.block, Block::None) {
+            previous.rollback()?;
+        }
+        self.block = Block::Writing(self.begin_block_writer()?);
+        Ok(())
     }
 
     fn change_transaction_access(&mut self, read_only: bool) -> SqlResult<()> {
