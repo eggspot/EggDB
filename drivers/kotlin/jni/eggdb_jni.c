@@ -272,6 +272,21 @@ JNIEXPORT void JNICALL Java_app_eggspot_eggdb_KeyValue_nativeClose(JNIEnv *env, 
     check_status(env, eggdb_close((eggdb_db *)(intptr_t)db), "EggDB could not close the database");
 }
 
+JNIEXPORT void JNICALL Java_app_eggspot_eggdb_KeyValue_nativeSuspend(JNIEnv *env, jclass type, jlong db) {
+    (void)type;
+    check_status(env, eggdb_suspend((eggdb_db *)(intptr_t)db), "EggDB could not suspend the database");
+}
+
+JNIEXPORT void JNICALL Java_app_eggspot_eggdb_KeyValue_nativeResume(JNIEnv *env, jclass type, jlong db) {
+    (void)type;
+    check_status(env, eggdb_resume((eggdb_db *)(intptr_t)db), "EggDB could not resume the database");
+}
+
+JNIEXPORT void JNICALL Java_app_eggspot_eggdb_KeyValue_nativeSetPowerSource(JNIEnv *env, jclass type, jlong db, jint source) {
+    (void)type;
+    check_status(env, eggdb_set_power_source((eggdb_db *)(intptr_t)db, (uint32_t)source), "EggDB could not take the power source");
+}
+
 JNIEXPORT jlong JNICALL Java_app_eggspot_eggdb_KeyValue_nativeBegin(JNIEnv *env, jclass type, jlong db, jboolean writing) {
     (void)type;
     eggdb_txn *txn = NULL;

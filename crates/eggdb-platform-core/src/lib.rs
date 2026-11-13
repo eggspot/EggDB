@@ -230,10 +230,17 @@ pub trait File: Send + Sync + core::fmt::Debug {
     /// handle is dropped, or until a crash in a simulation, and the operating system releases
     /// it when the process ends, so it never outlives its owner. Dropping the handle releases it
     /// at once, even while a child process started meanwhile still has a copy of the handle
-    /// because it has not yet started its own program. A handle takes one lock for
-    /// its life; a second call fails with [`ErrorKind::InvalidInput`]. Fails with
+    /// because it has not yet started its own program. A handle holds one lock at a time; a
+    /// second call before [`File::unlock`] fails with [`ErrorKind::InvalidInput`]. Fails with
     /// [`ErrorKind::Unsupported`] on targets without file locks.
     fn try_lock(&self, lock: FileLock) -> Result<()>;
+
+    /// Releases the lock [`File::try_lock`] took, so another program may take the file while
+    /// this one is suspended (D1088); `try_lock` may take it again afterwards. Does nothing when
+    /// no lock is held, and on files that have no locks of their own.
+    fn unlock(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// Makes the file's contents and size durable. Fails with
     /// [`ErrorKind::PermissionDenied`] through a handle opened with `OpenMode::Read` on every

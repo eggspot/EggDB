@@ -70,6 +70,9 @@ pub enum ErrorKind {
     /// An earlier write or sync failed, so the database refuses everything until it is
     /// opened again, which recovers its last durable state.
     NeedsReopen,
+    /// The database was suspended with [`Database::suspend`](crate::Database::suspend), as an
+    /// app does when it goes to the background, and is not resumed yet.
+    Suspended,
     /// The database can take no more commits: its file holds as many pages as page numbers
     /// allow, or every commit stamp has been handed out. Reads still work.
     DatabaseFull,
@@ -176,6 +179,7 @@ fn kind_of(error: &StorageError) -> ErrorKind {
         StorageError::Locked => ErrorKind::Locked,
         StorageError::ReadOnly => ErrorKind::ReadOnly,
         StorageError::NeedsReopen => ErrorKind::NeedsReopen,
+        StorageError::Suspended => ErrorKind::Suspended,
         StorageError::FileFull | StorageError::ClockExhausted => ErrorKind::DatabaseFull,
         StorageError::Truncated { .. }
         | StorageError::PageOutOfRange { .. }
@@ -244,7 +248,9 @@ impl From<Error> for std::io::Error {
         let kind = match error.kind {
             ErrorKind::NotFound => std::io::ErrorKind::NotFound,
             ErrorKind::PermissionDenied => std::io::ErrorKind::PermissionDenied,
-            ErrorKind::Locked | ErrorKind::WriterActive => std::io::ErrorKind::ResourceBusy,
+            ErrorKind::Locked | ErrorKind::WriterActive | ErrorKind::Suspended => {
+                std::io::ErrorKind::ResourceBusy
+            }
             ErrorKind::ReadOnly => std::io::ErrorKind::ReadOnlyFilesystem,
             ErrorKind::NotADatabase | ErrorKind::Incompatible | ErrorKind::Corrupt => {
                 std::io::ErrorKind::InvalidData

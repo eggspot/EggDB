@@ -39,6 +39,27 @@ class KeyValue(path: String, val readOnly: Boolean = false) : AutoCloseable {
             result
         }
 
+    /**
+     * Gives the file up while the app is in the background, from `onStop`: checkpoints, syncs
+     * and releases the file's lock; transactions fail until [resume].
+     */
+    fun suspend() {
+        if (handle == 0L) throw EggDBException("the store is closed")
+        nativeSuspend(handle)
+    }
+
+    /** Takes the file back, from `onStart`, after [suspend]. */
+    fun resume() {
+        if (handle == 0L) throw EggDBException("the store is closed")
+        nativeResume(handle)
+    }
+
+    /** Tells the store what the device runs on, so it checkpoints less often on a battery. */
+    fun setPowerSource(source: PowerSource) {
+        if (handle == 0L) throw EggDBException("the store is closed")
+        nativeSetPowerSource(handle, source.code)
+    }
+
     override fun close() {
         if (handle != 0L) {
             val closing = handle
@@ -60,7 +81,23 @@ class KeyValue(path: String, val readOnly: Boolean = false) : AutoCloseable {
 
         @JvmStatic
         private external fun nativeBegin(handle: Long, writing: Boolean): Long
+
+        @JvmStatic
+        private external fun nativeSuspend(handle: Long)
+
+        @JvmStatic
+        private external fun nativeResume(handle: Long)
+
+        @JvmStatic
+        private external fun nativeSetPowerSource(handle: Long, source: Int)
     }
+}
+
+/** What the device runs on: Android's `BatteryManager` and power-save mode say which. */
+enum class PowerSource(internal val code: Int) {
+    MAINS(0),
+    BATTERY(1),
+    LOW_BATTERY(2),
 }
 
 /**

@@ -486,3 +486,39 @@ fn a_low_battery_holds_automatic_checkpoints_until_the_mains_return() {
         assert_eq!(value.map(|value| value.len()), Some(4096), "key {index}");
     }
 }
+
+#[test]
+fn a_suspended_database_holds_no_lock_and_resumes_where_it_was() {
+    let file = TempPath::new("suspend");
+    let db = Database::open(file.path()).unwrap();
+    db.write(|tx| tx.put("before", "1")).unwrap();
+    db.suspend().unwrap();
+    db.suspend().unwrap();
+    assert!(db.is_suspended());
+    assert_eq!(db.begin_read().err().map(|error| error.kind()), Some(ErrorKind::Suspended));
+    assert_eq!(db.begin_write().err().map(|error| error.kind()), Some(ErrorKind::Suspended));
+    let reader = Database::open_with(file.path(), Options::new().read_only(true)).unwrap();
+    assert_eq!(reader.read(|tx| tx.get("before")).unwrap(), Some(b"1".to_vec()));
+    drop(reader);
+    db.resume().unwrap();
+    assert!(!db.is_suspended());
+    db.write(|tx| tx.put("after", "2")).unwrap();
+    assert_eq!(db.read(|tx| tx.get("before")).unwrap(), Some(b"1".to_vec()));
+    assert!(db.stats().unwrap().log_bytes_since_checkpoint > 0);
+}
+
+#[test]
+fn a_database_changed_by_another_program_while_suspended_must_be_reopened() {
+    let file = TempPath::new("suspend-changed");
+    let db = Database::open(file.path()).unwrap();
+    db.write(|tx| tx.put("k", "mine")).unwrap();
+    db.suspend().unwrap();
+    let extension = Database::open(file.path()).unwrap();
+    extension.write(|tx| tx.put("k", "theirs")).unwrap();
+    assert_eq!(db.resume().err().map(|error| error.kind()), Some(ErrorKind::Locked));
+    extension.close().unwrap();
+    assert_eq!(db.resume().err().map(|error| error.kind()), Some(ErrorKind::NeedsReopen));
+    drop(db);
+    let reopened = Database::open(file.path()).unwrap();
+    assert_eq!(reopened.read(|tx| tx.get("k")).unwrap(), Some(b"theirs".to_vec()));
+}

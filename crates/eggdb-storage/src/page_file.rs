@@ -100,6 +100,7 @@ pub struct PageFile<F: File> {
     damaged_header_slot: Option<usize>,
     older_slot_log_reaches: Option<core::ops::Range<u64>>,
     failed: bool,
+    suspended: Option<u32>,
 }
 
 impl<F: File> PageFile<F> {
@@ -251,6 +252,7 @@ impl<F: File> PageFile<F> {
             damaged_header_slot: None,
             older_slot_log_reaches: None,
             failed: false,
+            suspended: None,
         }
     }
 
@@ -618,6 +620,7 @@ impl<F: File> PageFile<F> {
     /// A page changed through [`PageFile::write_page`] since the last commit reads as changed,
     /// and a committed page whose image is still only in the log is read from there.
     pub fn read_page(&self, page_id: u64, page: &mut [u8]) -> Result<PageHeader, StorageError> {
+        self.check_not_suspended()?;
         self.check_data_page(page_id)?;
         self.check_length(page)?;
         if let Some((_, staged)) = self.staged.get(&page_id) {
@@ -1465,11 +1468,90 @@ impl<F: File> PageFile<F> {
             .filter(|&page| page < self.superblock.page_count && !self.reused.contains(&page))
     }
 
+    /// Gives the file up while the program is suspended, as iOS does to an app in the
+    /// background and Android in Doze (D1088): checkpoints, so the next open replays nothing,
+    /// syncs, and releases the file's lock, so the operating system never finds the program
+    /// holding a lock while suspended and another program, an app extension, may open the
+    /// file meanwhile. Every read and change then fails with [`StorageError::Suspended`] until
+    /// [`PageFile::resume`]. Changes since the last commit refuse it with
+    /// [`StorageError::UncommittedChanges`]. Suspending twice does nothing.
+    pub fn suspend(&mut self) -> Result<(), StorageError> {
+        if self.suspended.is_some() {
+            return Ok(());
+        }
+        if self.access == Access::ReadWrite && !self.failed {
+            self.checkpoint()?;
+            self.sync()?;
+        }
+        let fingerprint = self.fingerprint()?;
+        self.file.unlock()?;
+        self.suspended = Some(fingerprint);
+        Ok(())
+    }
+
+    /// Takes the file back after [`PageFile::suspend`]: locks it again, failing with
+    /// [`StorageError::Locked`] while another program holds it (call it again later), and
+    /// compares the header slots, the file's size and the log where the next commit would go
+    /// with what they were. When another program changed the file meanwhile, the file
+    /// refuses everything with [`StorageError::NeedsReopen`], since what this one holds in
+    /// memory is out of date. Does nothing when the file is not suspended.
+    pub fn resume(&mut self) -> Result<(), StorageError> {
+        let Some(before) = self.suspended else {
+            return Ok(());
+        };
+        let kind = match self.access {
+            Access::ReadOnly => FileLock::Shared,
+            Access::ReadWrite => FileLock::Exclusive,
+        };
+        lock(&self.file, kind)?;
+        self.suspended = None;
+        let after = self.fingerprint();
+        if after.as_ref().ok() != Some(&before) {
+            self.failed = true;
+            return Err(StorageError::NeedsReopen);
+        }
+        Ok(())
+    }
+
+    /// Whether [`PageFile::suspend`] gave the file up.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.is_some()
+    }
+
+    fn fingerprint(&self) -> Result<u32, StorageError> {
+        let mut slots = vec![0u8; 2 * HEADER_SLOT_SIZE];
+        let read = read_up_to(&self.file, &mut slots)?;
+        let mut crc = crate::crc32c(&slots[..read]);
+        crc = crate::crc32c_append(crc, &self.file.size()?.to_le_bytes());
+        if let Some(log) = &self.log {
+            let mut next = vec![0u8; LOG_BLOCK];
+            let offset = log.next_write_offset();
+            let mut filled = 0;
+            while filled < next.len() {
+                let got = self.file.read_at(&mut next[filled..], offset + filled as u64)?;
+                if got == 0 {
+                    break;
+                }
+                filled += got;
+            }
+            crc = crate::crc32c_append(crc, &next[..filled]);
+        }
+        Ok(crc)
+    }
+
+    pub(crate) fn check_not_suspended(&self) -> Result<(), StorageError> {
+        match self.suspended {
+            Some(_) => Err(StorageError::Suspended),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn has_failed(&self) -> bool {
         self.failed
     }
 
     pub(crate) fn check_writable(&self) -> Result<(), StorageError> {
+        self.check_not_suspended()?;
         if self.access == Access::ReadOnly {
             return Err(StorageError::ReadOnly);
         }

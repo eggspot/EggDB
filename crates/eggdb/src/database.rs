@@ -424,6 +424,36 @@ impl Database {
         Ok(())
     }
 
+    /// Gives the database file up while the app is suspended (D41, D1088). iOS suspends an
+    /// app soon after it leaves the screen and ends one that is suspended while holding a lock
+    /// on a file in a shared container; Android's Doze and app standby stop its work at any
+    /// moment. Call this when the app goes to the background
+    /// (`applicationDidEnterBackground`, `onStop`): it waits for the write transaction, as
+    /// [`Database::begin_write`] does, writes a checkpoint, syncs, and releases the file's
+    /// lock, so nothing is left to replay and no lock is held while the app sleeps. Until
+    /// [`Database::resume`], new transactions fail with
+    /// [`ErrorKind::Suspended`](crate::ErrorKind::Suspended); a read transaction already open
+    /// reads what the cache holds and fails with it on the first page the cache must read.
+    /// Suspending twice does nothing.
+    pub fn suspend(&self) -> Result<()> {
+        let _turn = self.writer.take(self.write_timeout)?;
+        self.store.suspend().map_err(Error::storage)
+    }
+
+    /// Takes the database file back after [`Database::suspend`], when the app returns to the
+    /// foreground. Fails with [`ErrorKind::Locked`] while another program, an app extension
+    /// sharing the file, holds it; call it again later. When another program changed the file
+    /// meanwhile, it fails with [`ErrorKind::NeedsReopen`], and the database must be opened
+    /// again to see the changes. Does nothing when the database is not suspended.
+    pub fn resume(&self) -> Result<()> {
+        self.store.resume().map_err(Error::storage)
+    }
+
+    /// Whether [`Database::suspend`] gave the file up.
+    pub fn is_suspended(&self) -> bool {
+        self.store.is_suspended().unwrap_or(false)
+    }
+
     /// What [`Database::set_power_source`] last set; [`PowerSource::Mains`] after opening.
     pub fn power_source(&self) -> PowerSource {
         *self

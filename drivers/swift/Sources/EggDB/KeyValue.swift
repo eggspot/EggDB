@@ -47,6 +47,12 @@ private func withOptionalBytes<T>(_ bytes: [UInt8]?, _ body: (UnsafePointer<UInt
     return try bytes.withUnsafeBufferPointer { try body($0.baseAddress, $0.count) }
 }
 
+public enum PowerSource: UInt32 {
+    case mains = 0
+    case battery = 1
+    case lowBattery = 2
+}
+
 public final class KeyValue {
     private var database: OpaquePointer?
     public let readOnly: Bool
@@ -70,6 +76,21 @@ public final class KeyValue {
         guard let closing = database else { return }
         database = nil
         try keyValueCheck(eggdb_close(closing))
+    }
+
+    public func suspend() throws {
+        guard let database else { throw ended("the store is closed") }
+        try keyValueCheck(eggdb_suspend(database))
+    }
+
+    public func resume() throws {
+        guard let database else { throw ended("the store is closed") }
+        try keyValueCheck(eggdb_resume(database))
+    }
+
+    public func setPowerSource(_ source: PowerSource) throws {
+        guard let database else { throw ended("the store is closed") }
+        try keyValueCheck(eggdb_set_power_source(database, source.rawValue))
     }
 
     public func begin(writing: Bool) throws -> Transaction {

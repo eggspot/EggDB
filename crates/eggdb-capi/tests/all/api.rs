@@ -561,6 +561,14 @@ fn keys_expire_and_counters_count() {
     // SAFETY: a live database handle.
     let unknown_source = unsafe { eggdb_capi::eggdb_set_power_source(db, 7) };
     assert_eq!(unknown_source, EGGDB_ERR_INVALID_ARGUMENT);
+    // SAFETY: a live database handle.
+    ok(unsafe { eggdb_capi::eggdb_suspend(db) });
+    let mut txn = ptr::null_mut();
+    // SAFETY: a live database handle and a place for the transaction.
+    let while_suspended = unsafe { eggdb_capi::eggdb_begin_read(db, &mut txn) };
+    assert_eq!(while_suspended, eggdb_capi::EGGDB_ERR_SUSPENDED);
+    // SAFETY: a live database handle.
+    ok(unsafe { eggdb_capi::eggdb_resume(db) });
     close(db);
 }
 

@@ -545,6 +545,10 @@ impl LogWriter {
         run.file_offset + (buffer_position - run.buffer_start) as u64
     }
 
+    pub(crate) fn next_write_offset(&self) -> u64 {
+        self.geometry.file_offset(self.segment.first_page) + self.offset as u64
+    }
+
     fn start_run(&mut self) {
         let file_offset = self.geometry.file_offset(self.segment.first_page) + self.offset as u64;
         self.runs.push(Run {

@@ -50,6 +50,9 @@ pub enum StorageError {
     /// An earlier write or sync failed, so the file accepts no more changes until it is opened
     /// again and recovered from its durable state (D59).
     NeedsReopen,
+    /// The file was given up with [`PageFile::suspend`](crate::PageFile::suspend) and is not
+    /// resumed yet.
+    Suspended,
     /// The file holds as many pages as page numbers allow.
     FileFull,
     /// A checkpoint was asked for while changes since the last commit are pending; commit or
@@ -181,6 +184,9 @@ impl fmt::Display for StorageError {
             Self::ReadOnly => f.write_str("the database was opened read-only"),
             Self::NeedsReopen => f.write_str(
                 "an earlier write or sync failed; reopen the database to recover its last durable state",
+            ),
+            Self::Suspended => f.write_str(
+                "the database is suspended while the app is in the background; resume it first",
             ),
             Self::FileFull => f.write_str("the file holds as many pages as page numbers allow"),
             Self::UncommittedChanges => f.write_str(

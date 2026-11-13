@@ -351,6 +351,40 @@ pub unsafe extern "C" fn eggdb_set_power_source(db: *mut EggdbDb, source: u32) -
     })
 }
 
+/// Gives the database file up while the app is in the background (D1088): waits for the
+/// write transaction, checkpoints, syncs and releases the file's lock, so iOS never suspends
+/// the app holding a lock and nothing is left to replay. New transactions then fail with
+/// `EGGDB_ERR_SUSPENDED` until `eggdb_resume`. Call it from `applicationDidEnterBackground` or
+/// `onStop`.
+///
+/// # Safety
+/// `db` is a handle from [`eggdb_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_suspend(db: *mut EggdbDb) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for a live handle from eggdb_open.
+        let db = unsafe { args::handle(db, "db") }?;
+        db.database.suspend()?;
+        Ok(())
+    })
+}
+
+/// Takes the database file back after `eggdb_suspend`. `EGGDB_ERR_LOCKED` while another
+/// program, such as an app extension, holds the file (try again later), and
+/// `EGGDB_ERR_NEEDS_REOPEN` when another program changed it meanwhile: close and open it again.
+///
+/// # Safety
+/// `db` is a handle from [`eggdb_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_resume(db: *mut EggdbDb) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for a live handle from eggdb_open.
+        let db = unsafe { args::handle(db, "db") }?;
+        db.database.resume()?;
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EGGDB_DURABILITY_NORMAL, EGGDB_OPEN_READ_ONLY, EggdbOptions, open_options};

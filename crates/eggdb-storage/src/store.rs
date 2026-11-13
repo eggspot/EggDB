@@ -92,6 +92,7 @@ impl<F: File> Store<F> {
     /// invisible to it, committed or not.
     pub fn begin_read(&self) -> Result<ReadTransaction<'_, F>, StorageError> {
         let mut state = self.lock()?;
+        state.cache.check_not_suspended()?;
         let version = state.cache.begin_snapshot()?;
         let superblock = state.cache.superblock();
         Ok(ReadTransaction {
@@ -109,6 +110,7 @@ impl<F: File> Store<F> {
     /// with [`StorageError::SnapshotTooOld`].
     pub fn begin_read_from(&self, token: SnapshotToken) -> Result<ReadTransaction<'_, F>, StorageError> {
         let mut state = self.lock()?;
+        state.cache.check_not_suspended()?;
         state.cache.join_snapshot(token.version)?;
         Ok(ReadTransaction {
             store: self,
@@ -197,6 +199,26 @@ impl<F: File> Store<F> {
     /// [`StorageError::UncommittedChanges`].
     pub fn checkpoint(&self) -> Result<(), StorageError> {
         self.lock()?.cache.checkpoint()
+    }
+
+    /// Gives the file up while the program is suspended (see [`PageCache::suspend`]); fails
+    /// with [`StorageError::WriterActive`] while a write transaction is open.
+    pub fn suspend(&self) -> Result<(), StorageError> {
+        let mut state = self.lock()?;
+        if state.writer_active {
+            return Err(StorageError::WriterActive);
+        }
+        state.cache.suspend()
+    }
+
+    /// Takes the file back after [`Store::suspend`] (see [`PageCache::resume`]).
+    pub fn resume(&self) -> Result<(), StorageError> {
+        self.lock()?.cache.resume()
+    }
+
+    /// Whether [`Store::suspend`] gave the file up.
+    pub fn is_suspended(&self) -> Result<bool, StorageError> {
+        Ok(self.lock()?.cache.is_suspended())
     }
 
     /// Checks the last commit's tree, as [`BTree::check`] does, with every chain of overflow

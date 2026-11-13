@@ -43,7 +43,8 @@ pub use database::{
     EGGDB_DURABILITY_FULL, EGGDB_DURABILITY_NORMAL, EGGDB_DURABILITY_OFF, EGGDB_OPEN_NO_CREATE,
     EGGDB_OPEN_READ_ONLY, EGGDB_POWER_BATTERY, EGGDB_POWER_LOW_BATTERY, EGGDB_POWER_MAINS,
     EggdbBackupReport, EggdbCompactReport, EggdbDb, EggdbOptions, eggdb_backup, eggdb_close,
-    eggdb_compact, eggdb_compact_file, eggdb_open, eggdb_remove_expired, eggdb_set_power_source,
+    eggdb_compact, eggdb_compact_file, eggdb_open, eggdb_remove_expired, eggdb_resume,
+    eggdb_set_power_source, eggdb_suspend,
 };
 pub use scan::{
     EGGDB_SCAN_END_INCLUSIVE, EGGDB_SCAN_PREFIX, EGGDB_SCAN_REVERSE, EggdbEntry, EggdbScan,
@@ -70,7 +71,7 @@ pub use status::{
     EGGDB_ERR_NOT_A_DATABASE, EGGDB_ERR_NOT_AN_INTEGER, EGGDB_ERR_NOT_FOUND, EGGDB_ERR_OTHER,
     EGGDB_ERR_OUT_OF_MEMORY, EGGDB_ERR_PERMISSION_DENIED, EGGDB_ERR_READ_ONLY,
     EGGDB_ERR_READ_TRANSACTION, EGGDB_ERR_RESERVED_KEY, EGGDB_ERR_SNAPSHOT_TOO_OLD, EGGDB_ERR_SQL,
-    EGGDB_ERR_TOO_LARGE, EGGDB_ERR_TRANSACTION_FAILED, EGGDB_ERR_WRITER_ACTIVE, EGGDB_OK,
+    EGGDB_ERR_SUSPENDED, EGGDB_ERR_TOO_LARGE, EGGDB_ERR_TRANSACTION_FAILED, EGGDB_ERR_WRITER_ACTIVE, EGGDB_OK,
     eggdb_last_error, eggdb_last_sqlstate, eggdb_status_name,
 };
 pub use transaction::{

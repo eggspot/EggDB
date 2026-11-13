@@ -70,6 +70,13 @@ impl File for DatabaseFile {
         }
     }
 
+    fn unlock(&self) -> Result<()> {
+        match self {
+            Self::Os(file) => file.unlock(),
+            Self::Memory(file) => file.unlock(),
+        }
+    }
+
     fn sync_data(&self) -> Result<()> {
         match self {
             Self::Os(file) => file.sync_data(),

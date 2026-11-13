@@ -52,6 +52,8 @@ pub const EGGDB_ERR_ALREADY_EXISTS: c_int = 21;
 pub const EGGDB_ERR_NOT_AN_INTEGER: c_int = 22;
 /// Any other failure of the database.
 pub const EGGDB_ERR_OTHER: c_int = 23;
+/// The database is suspended (`eggdb_suspend`); resume it with `eggdb_resume`.
+pub const EGGDB_ERR_SUSPENDED: c_int = 24;
 /// An argument is wrong: a NULL that must not be, text that is not UTF-8, an unknown flag or
 /// dialect.
 pub const EGGDB_ERR_INVALID_ARGUMENT: c_int = 100;
@@ -64,7 +66,7 @@ pub const EGGDB_ERR_SQL: c_int = 103;
 /// EggDB hit a bug of its own; the call did nothing it reports.
 pub const EGGDB_ERR_INTERNAL: c_int = 104;
 
-const STATUS_NAMES: [(c_int, &CStr); 29] = [
+const STATUS_NAMES: [(c_int, &CStr); 30] = [
     (EGGDB_OK, c"EGGDB_OK"),
     (EGGDB_ERR_NOT_FOUND, c"EGGDB_ERR_NOT_FOUND"),
     (EGGDB_ERR_PERMISSION_DENIED, c"EGGDB_ERR_PERMISSION_DENIED"),
@@ -98,6 +100,7 @@ const STATUS_NAMES: [(c_int, &CStr); 29] = [
     (EGGDB_ERR_ALREADY_EXISTS, c"EGGDB_ERR_ALREADY_EXISTS"),
     (EGGDB_ERR_NOT_AN_INTEGER, c"EGGDB_ERR_NOT_AN_INTEGER"),
     (EGGDB_ERR_OTHER, c"EGGDB_ERR_OTHER"),
+    (EGGDB_ERR_SUSPENDED, c"EGGDB_ERR_SUSPENDED"),
     (EGGDB_ERR_INVALID_ARGUMENT, c"EGGDB_ERR_INVALID_ARGUMENT"),
     (EGGDB_ERR_IN_USE, c"EGGDB_ERR_IN_USE"),
     (EGGDB_ERR_READ_TRANSACTION, c"EGGDB_ERR_READ_TRANSACTION"),
@@ -174,6 +177,7 @@ fn status_of(kind: ErrorKind) -> c_int {
         ErrorKind::ReservedKey => EGGDB_ERR_RESERVED_KEY,
         ErrorKind::AlreadyExists => EGGDB_ERR_ALREADY_EXISTS,
         ErrorKind::NotAnInteger => EGGDB_ERR_NOT_AN_INTEGER,
+        ErrorKind::Suspended => EGGDB_ERR_SUSPENDED,
         _ => EGGDB_ERR_OTHER,
     }
 }

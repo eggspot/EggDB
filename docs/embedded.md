@@ -458,7 +458,8 @@ for AI models; `error.kind()` is an `ErrorKind` to match on:
 | `WriterActive` | another writer stayed open for the whole wait |
 | `SnapshotTooOld` | a read transaction's snapshot expired; begin a new one |
 | `TransactionFailed` | the write transaction failed earlier; begin a new one |
-| `NeedsReopen` | a write or sync failed; open the database again to recover |
+| `NeedsReopen` | a write or sync failed, or another program changed the file while it was suspended; open the database again |
+| `Suspended` | the database is suspended (`suspend`); `resume` it first |
 | `CollectionNotFound`, `InvalidCollectionName` | no collection of that name, or a name no collection can have |
 | `ReservedKey` | a key of the default key space that starts with the bytes kept for collections |
 | `NotAnInteger` | `increment` on a value that is not a counter, or a sum outside `i64`'s range |
@@ -583,9 +584,12 @@ every `EggAllocator` in the process at the same number, on top of each one's own
 be changed while the program runs; `eggdb_platform::refused_allocations()` counts what the limits
 refused. `eggdb serve --memory-limit 256m` does all three for the server (docs/cli.md).
 
-```rust
-eggdb_platform::set_process_limit(64 << 20);
-let database = eggdb::Database::open_with("app.egg", eggdb::Options::new().memory_limit(64 << 20))?;
+```rust,no_run
+fn main() -> eggdb::Result<()> {
+    eggdb_platform::set_process_limit(64 << 20);
+    let db = eggdb::Database::open_with("app.db", eggdb::Options::new().memory_limit(64 << 20))?;
+    db.close()
+}
 ```
 
 ## Checking and measuring
@@ -665,7 +669,7 @@ blocks written atomically and spread over the chip's wear, `FlashFile` is the en
 `PageCache::with_frame_buffer` takes its frames from a buffer you own, so memory is fixed when the
 cache is made:
 
-```rust
+```rust,ignore
 let region = WearLevelled::format(my_flash_driver, 8)?;
 let file = PageFile::create_in(FlashFile::new(region), CreateOptions::default())?;
 let cache = PageCache::with_frame_buffer(file, frames)?;
@@ -699,8 +703,12 @@ one whole page of log: batch writes into fewer commits where you can.
 ## Battery-aware background work
 A database on a phone, a laptop or a battery-powered device can be told what it runs on (D1087):
 
-```rust
-db.set_power_source(eggdb::PowerSource::Battery)?;
+```rust,no_run
+fn main() -> eggdb::Result<()> {
+    let db = eggdb::Database::open("app.db")?;
+    db.set_power_source(eggdb::PowerSource::Battery)?;
+    db.close()
+}
 ```
 
 On a battery a commit leaves four times `Options::auto_checkpoint_log_bytes` of log before its
@@ -713,12 +721,37 @@ state on Linux, Android (from `/sys/class/power_supply`) and Windows (`GetSystem
 that use the platform's own battery API, pass what it reports, through the C API's
 `eggdb_set_power_source`.
 
+## In the background on iOS and Android
+iOS suspends an app shortly after it leaves the screen, and ends it (`0xdead10cc`) if it is
+suspended holding a lock on a file in a shared app-group container; Android's Doze and app standby
+stop an app's work at any moment, without warning (D1088). Suspend the database when the app goes to
+the background and resume it when it comes back:
+
+```rust,no_run
+fn main() -> eggdb::Result<()> {
+    let db = eggdb::Database::open("app.db")?;
+    db.suspend()?;
+    db.resume()?;
+    db.close()
+}
+```
+
+`suspend` waits for the write transaction, as `begin_write` does, writes a checkpoint, syncs and
+releases the file's lock: nothing is left to replay, and no lock is held while the app sleeps. Until
+`resume`, new transactions fail with `ErrorKind::Suspended`. `resume` takes the lock again; it fails
+with `Locked` while another program, such as an app extension sharing the file, holds it, and with
+`NeedsReopen` when another program changed the file meanwhile, since what the database holds in memory
+is then out of date: open it again. Through the C API they are `eggdb_suspend` and `eggdb_resume`, for
+`applicationDidEnterBackground` and `applicationWillEnterForeground`, or an activity's `onStop` and
+`onStart`. Every commit is already durable when it returns, so an app ended without `suspend` loses
+nothing it committed; `suspend` only makes the next start quick and keeps iOS from ending the app.
+
 ## Queues in process
 
 `eggdb::inbox::Inbox` sends to and consumes from the durable queues the AMQP, STOMP and SQS servers of `eggdb serve`
 use, inside the program, without a connection (D776):
 
-```rust
+```rust,ignore
 use eggdb::inbox::{Inbox, Outcome};
 use std::time::Duration;
 

@@ -451,6 +451,15 @@ impl File for SimFile {
         })
     }
 
+    fn unlock(&self) -> Result<()> {
+        self.with_inode(|inode, _| {
+            if let Some(lock) = lock_from_state(self.lock.swap(UNLOCKED, Ordering::AcqRel)) {
+                inode.release_lock(lock);
+            }
+            Ok(())
+        })
+    }
+
     fn sync_data(&self) -> Result<()> {
         self.with_inode(|inode, _| {
             self.require_writable()?;

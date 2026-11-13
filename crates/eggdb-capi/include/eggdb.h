@@ -32,6 +32,7 @@ extern "C" {
 #define EGGDB_ERR_ALREADY_EXISTS 21
 #define EGGDB_ERR_NOT_AN_INTEGER 22
 #define EGGDB_ERR_OTHER 23
+#define EGGDB_ERR_SUSPENDED 24
 #define EGGDB_ERR_INVALID_ARGUMENT 100
 #define EGGDB_ERR_IN_USE 101
 #define EGGDB_ERR_READ_TRANSACTION 102
@@ -138,6 +139,8 @@ int eggdb_compact(eggdb_db *db, eggdb_compact_report *report);
 int eggdb_compact_file(const char *path, eggdb_compact_report *report);
 int eggdb_remove_expired(eggdb_db *db, uint64_t *removed);
 int eggdb_set_power_source(eggdb_db *db, uint32_t source);
+int eggdb_suspend(eggdb_db *db);
+int eggdb_resume(eggdb_db *db);
 
 int eggdb_begin_read(eggdb_db *db, eggdb_txn **txn);
 int eggdb_begin_write(eggdb_db *db, eggdb_txn **txn);

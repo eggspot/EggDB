@@ -199,6 +199,7 @@ collection name; one that does not exist fails with `EGGDB_ERR_COLLECTION_NOT_FO
 | `eggdb_compare_and_set(..., expected, expected_len, new_value, new_value_len, &swapped)` | stores `new_value` (NULL: removes the key) only when the value is `expected` (NULL: absent) |
 | `eggdb_remove_expired(db, &removed)` | removes every expired key now; commits also remove up to 32 each |
 | `eggdb_set_power_source(db, source)` | `EGGDB_POWER_MAINS`, `EGGDB_POWER_BATTERY` or `EGGDB_POWER_LOW_BATTERY`: on a battery the database checkpoints less often, on a low one only when it must (D1087); pass what Android's `BatteryManager` and power-save mode or iOS's battery state and Low Power Mode report |
+| `eggdb_suspend(db)`, `eggdb_resume(db)` | when the app goes to the background and comes back: `eggdb_suspend` checkpoints, syncs and releases the file's lock, so iOS never suspends the app holding one, and new transactions fail with `EGGDB_ERR_SUSPENDED`; `eggdb_resume` takes the lock back, `EGGDB_ERR_LOCKED` while an app extension holds the file, `EGGDB_ERR_NEEDS_REOPEN` when another program changed it (D1088) |
 
 ## SQL
 
@@ -435,6 +436,7 @@ so programs reading it keep working. See [embedded.md](embedded.md#backup-and-co
 | 21 | `EGGDB_ERR_ALREADY_EXISTS` | a file is where a backup or compaction would put one |
 | 22 | `EGGDB_ERR_NOT_AN_INTEGER` | not a counter, or a sum out of range |
 | 23 | `EGGDB_ERR_OTHER` | any other failure of the database |
+| 24 | `EGGDB_ERR_SUSPENDED` | the database is suspended (`eggdb_suspend`); call `eggdb_resume` |
 | 100 | `EGGDB_ERR_INVALID_ARGUMENT` | a NULL that must not be, text that is not UTF-8, an unknown flag or dialect |
 | 101 | `EGGDB_ERR_IN_USE` | the database still has transactions or SQL sessions |
 | 102 | `EGGDB_ERR_READ_TRANSACTION` | a change through a read transaction |

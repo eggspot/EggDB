@@ -296,6 +296,13 @@ impl File for OsFile {
         locked
     }
 
+    fn unlock(&self) -> Result<()> {
+        if !self.locked.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        unlock_file(&self.file)
+    }
+
     fn sync_data(&self) -> Result<()> {
         self.require_writable()?;
         Ok(self.file.sync_data()?)
@@ -419,7 +426,18 @@ fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
 }
 
 #[cfg(target_os = "solaris")]
+fn unlock_file(file: &fs::File) -> Result<()> {
+    solaris_lock::release(file);
+    Ok(())
+}
+
+#[cfg(target_os = "solaris")]
 mod solaris_lock;
+
+#[cfg(not(any(windows, target_os = "solaris")))]
+fn unlock_file(file: &fs::File) -> Result<()> {
+    Ok(file.unlock()?)
+}
 
 #[cfg(not(any(windows, target_os = "solaris")))]
 fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
@@ -527,6 +545,19 @@ fn lock_file(file: &fs::File, lock: FileLock) -> Result<()> {
     } else {
         Err(Error::from(error))
     }
+}
+
+#[cfg(windows)]
+fn unlock_file(file: &fs::File) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    let mut overlapped = windows_lock::Overlapped::at_the_locked_byte();
+    // SAFETY: the handle is open for the duration of the call, and `overlapped` lives on this
+    // stack frame until the synchronous call returns.
+    let unlocked = unsafe { windows_lock::UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlapped) };
+    if unlocked == 0 {
+        return Err(Error::from(io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]

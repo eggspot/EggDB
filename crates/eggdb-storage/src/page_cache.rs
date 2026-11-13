@@ -528,6 +528,29 @@ impl<F: File> PageCache<F> {
         self.file.borrow().check_writable()
     }
 
+    pub(crate) fn check_not_suspended(&self) -> Result<(), StorageError> {
+        self.file.borrow().check_not_suspended()
+    }
+
+    /// Gives the file up while the program is suspended (see [`PageFile::suspend`]). The
+    /// pages in memory stay, so the commits after [`PageCache::resume`] find them warm.
+    pub fn suspend(&mut self) -> Result<(), StorageError> {
+        if self.dirty_pages.get() > 0 {
+            return Err(StorageError::UncommittedChanges);
+        }
+        self.file.get_mut().suspend()
+    }
+
+    /// Takes the file back (see [`PageFile::resume`]).
+    pub fn resume(&mut self) -> Result<(), StorageError> {
+        self.file.get_mut().resume()
+    }
+
+    /// Whether the file is suspended.
+    pub fn is_suspended(&self) -> bool {
+        self.file.borrow().is_suspended()
+    }
+
     pub(crate) fn frame_count(&self) -> usize {
         self.frames.count()
     }
