@@ -101,8 +101,8 @@ fn epoch_of(value: &Value) -> Option<i64> {
 }
 
 fn now_epoch() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    eggdb_platform_core::time::SystemTime::now()
+        .duration_since(eggdb_platform_core::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs() as i64)
 }
 

@@ -1,5 +1,6 @@
 use crate::cli::output::Output;
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 const SHOWN_EVERY: Duration = Duration::from_secs(1);
 

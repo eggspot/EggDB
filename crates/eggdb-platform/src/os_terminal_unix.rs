@@ -3,7 +3,8 @@ use std::ffi::{c_int, c_short, c_ulong, c_ushort, c_void};
 use std::io;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 const STDIN: c_int = 0;
 const STDOUT: c_int = 1;

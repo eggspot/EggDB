@@ -2014,7 +2014,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   tabs and a real `poll_oneoff` sleep (D221). **Code written, unbuilt** (code-only mode, 2026-11-13, D1089):
   `web/eggdb-worker.js` and `SharedEggDB` (a leader per database by Web Lock, other tabs over a
   `BroadcastChannel`), `OpfsSyncFiles`, a sleeping `poll_oneoff`, and `web/shared-test.html` in CI's `browser` job.
-- `wasm32-unknown-unknown` without WASI, and size budgets for the module (D6, D221).
+- `wasm32-unknown-unknown` without WASI, and size budgets for the module (D6, D221). **Code written, unbuilt** (code-only mode,
+  2026-11-13, D1090): `eggdb_platform_core::time` with host clocks, `Database::image` and `from_image`,
+  `eggdb_wasm_image` and `eggdb_wasm_open_image`, `web/eggdb-bare.js`, the bare build in CI's `browser` job, and
+  `scripts/footprint-wasm.sh` with the `wasm32` budgets.
 - An IndexedDB-compatible API in the browser build (D48).
 - Android emulator runs, a Gradle module and Android Archive, and the 32-bit ABIs in CI (D222).
 - iOS Simulator runs, and a Swift package once a release publishes the XCFramework (D222).

@@ -1,4 +1,5 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use eggdb_platform::time::{SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const CHECK_EVERY: Duration = Duration::from_millis(500);
 

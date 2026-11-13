@@ -397,7 +397,7 @@ fn nested_any_over_arrays_fails_fast() {
     for _ in 0..16 {
         nested = format!("1 = ANY(ARRAY[{nested},{nested}] || ARRAY[true])");
     }
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     assert_eq!(
         state(&mut session, &format!("SELECT {nested} FROM")),
         "42601"
@@ -529,7 +529,7 @@ fn a_long_concatenation_chain_with_null_operands_is_typed_once_per_node() {
             .unwrap();
         }
         let chain = columns.join(" || ");
-        let started = std::time::Instant::now();
+        let started = eggdb_platform_core::time::Instant::now();
         let joined = run(
             &mut session,
             &format!("SELECT {chain} AS joined FROM wide WHERE id = 1"),
@@ -560,7 +560,7 @@ fn concatenation_results_carry_their_array_type_to_the_enclosing_concatenation()
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     let numbers: Vec<String> = (1..=40).map(|number| number.to_string()).collect();
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     assert_eq!(
         run(
             &mut session,

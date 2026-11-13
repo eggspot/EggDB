@@ -59,7 +59,8 @@ mod ring {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
+    use eggdb_platform_core::time::Instant;
+    use std::time::Duration;
 
     mod net;
 
@@ -757,7 +758,7 @@ mod unsupported {
     use crate::os_fs::OsFile;
     use crate::os_net::{OsListener, OsStream};
     use std::convert::Infallible;
-    use std::time::Instant;
+    use eggdb_platform_core::time::Instant;
 
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) const BUILT: bool = false;

@@ -8,7 +8,8 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 /// How a queue admits statements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -456,7 +456,7 @@ fn a_huge_in_list_and_a_huge_subquery_stay_linear() {
         &format!("INSERT INTO t VALUES {}", values.join(", ")),
     );
     let list: Vec<String> = (0..50_000).map(|id| (id * 2).to_string()).collect();
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     assert_eq!(
         last(
             &mut session,

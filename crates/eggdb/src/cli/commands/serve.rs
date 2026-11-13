@@ -23,8 +23,8 @@ const PASSWORD_VARIABLE: &str = "EGGDB_PASSWORD";
 const DEFAULT_TCP_KEEPALIVE_SECONDS: u64 = 300;
 
 fn stamped(line: &str) -> String {
-    let micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let micros = eggdb_platform::time::SystemTime::now()
+        .duration_since(eggdb_platform::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_micros() as u64);
     let stamp = render::utc_time(micros - micros % 1_000_000, TimeStyle::Readable);
     let one_line: String = line
@@ -1547,7 +1547,7 @@ impl Session<'_> {
                 let mut reported_waiting = false;
                 while !stop_signals::requested() {
                     for invitation in eggdb_dav::waiting_invitations(&dav_database, &config.user).unwrap_or_default() {
-                        let message = eggdb_dav::imip_message(&from, &invitation, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs()));
+                        let message = eggdb_dav::imip_message(&from, &invitation, eggdb_platform::time::SystemTime::now().duration_since(eggdb_platform::time::UNIX_EPOCH).map_or(0, |since| since.as_secs()));
                         let (local, remote): (Vec<String>, Vec<String>) = invitation.recipients.iter().cloned().partition(|recipient| {
                             recipient.rsplit_once('@').is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(&mail_config.domain) || domain.eq_ignore_ascii_case("localhost"))
                         });
@@ -1582,7 +1582,7 @@ impl Session<'_> {
                             let _ = eggdb_dav::remove_invitation(&dav_database, &invitation.path);
                         }
                     }
-                    let waited = std::time::Instant::now();
+                    let waited = eggdb_platform::time::Instant::now();
                     while !stop_signals::requested() && waited.elapsed() < std::time::Duration::from_secs(10) {
                         std::thread::sleep(std::time::Duration::from_millis(200));
                     }

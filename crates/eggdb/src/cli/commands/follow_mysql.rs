@@ -10,7 +10,8 @@ use eggdb_mysqlwire::client::{MySqlClient, MySqlClientError, MySqlConnectOptions
 use eggdb_platform::stop_signals;
 use eggdb_sql::Dialect;
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 const PASSWORD_VARIABLE: &str = "MYSQL_PWD";
 const MYSQL: &str = "mysql";

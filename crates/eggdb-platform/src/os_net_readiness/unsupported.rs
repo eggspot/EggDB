@@ -28,7 +28,7 @@ impl ReadinessQueue {
         &mut self,
         _: &mut Vec<NetCompletion<OsListener, OsStream>>,
         _: usize,
-        _: Option<std::time::Instant>,
+        _: Option<eggdb_platform_core::time::Instant>,
     ) -> Result<()> {
         match *self {}
     }

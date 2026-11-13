@@ -47,7 +47,7 @@ pub(super) struct McpEndpoint<'d> {
     audit: PathBuf,
     sessions: Mutex<HashMap<String, McpSession<'d>>>,
     order: Mutex<Vec<String>>,
-    usage: Mutex<HashMap<usize, (std::time::Instant, u32)>>,
+    usage: Mutex<HashMap<usize, (eggdb_platform::time::Instant, u32)>>,
     oauth: Option<McpOAuth>,
 }
 
@@ -273,8 +273,8 @@ impl<'d> McpEndpoint<'d> {
         }
         let oauth = self.oauth.as_ref()?;
         let given = request.header("authorization").and_then(|value| value.strip_prefix("Bearer "))?.trim();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = eggdb_platform::time::SystemTime::now()
+            .duration_since(eggdb_platform::time::UNIX_EPOCH)
             .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
         eggdb_auth::jwt::verify(given, &oauth.keys, &oauth.policy, now)
             .ok()
@@ -327,7 +327,7 @@ impl<'d> McpEndpoint<'d> {
             .usage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = std::time::Instant::now();
+        let now = eggdb_platform::time::Instant::now();
         let entry = usage.entry(index).or_insert((now, 0));
         if now.duration_since(entry.0) >= QUOTA_WINDOW {
             *entry = (now, 0);

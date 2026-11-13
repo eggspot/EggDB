@@ -6,7 +6,8 @@ use crate::cli::reports::{self, Copied};
 use eggdb::{Error, ErrorKind};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 

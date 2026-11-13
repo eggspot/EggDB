@@ -19,7 +19,7 @@ mod port {
     use std::ptr;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Weak};
-    use std::time::Instant;
+    use eggdb_platform_core::time::Instant;
 
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
@@ -869,7 +869,7 @@ mod unsupported {
             &mut self,
             _completions: &mut Vec<IoCompletion<OsFile>>,
             _min: usize,
-            _deadline: Option<std::time::Instant>,
+            _deadline: Option<eggdb_platform_core::time::Instant>,
         ) -> Result<()> {
             match self.0 {}
         }

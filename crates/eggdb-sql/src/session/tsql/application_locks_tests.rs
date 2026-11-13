@@ -125,7 +125,7 @@ fn a_lock_held_elsewhere_times_out_after_lock_timeout_milliseconds() {
         status(&mut holder, "sp_getapplock 'job', 'Exclusive', 'Session'"),
         (Value::Integer(0), vec![])
     );
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     assert_eq!(
         status(&mut waiter, "sp_getapplock 'job', 'Shared', 'Session', 40"),
         (Value::Integer(-1), vec![])

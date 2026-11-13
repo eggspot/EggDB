@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RowTimes {

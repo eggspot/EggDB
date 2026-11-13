@@ -638,6 +638,31 @@ const db = await EggDB.open({ wasm: "eggdb.wasm", path: "/app.eggdb", dialect: "
 const out = await db.execute("SELECT 1 AS one");
 ```
 
+**Without WASI.** The same crate builds for `wasm32-unknown-unknown`, for hosts that run plain
+WebAssembly (D1090). The module then imports only two functions from `eggdb_host`,
+`monotonic_nanos` and `wall_clock_nanos`, and has no file system: it opens a database in memory, or
+from an image, and hands the image back after a checkpoint, for the host to keep where it likes.
+`web/eggdb-bare.js` is such a host:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build --release -p eggdb-wasm --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/eggdb_wasm.wasm web/eggdb-bare.wasm
+```
+
+```js
+import { BareEggDB } from "./eggdb-bare.js";
+const db = await BareEggDB.open({ wasm: "eggdb-bare.wasm", dialect: "sqlite", image: savedBytes });
+db.execute("INSERT INTO notes VALUES ('kept')");
+const bytes = db.image();
+```
+
+In Rust the same pair is `Database::image` and `Database::from_image`. Every clock the engine and
+SQL read goes through `eggdb_platform_core::time`, the standard library's clocks everywhere else,
+since the standard library's panic on this target. `scripts/footprint-wasm.sh` measures both
+modules, plain and gzipped, against their budgets in `benchmarks/footprint.txt` (`wasm32 wasi` and
+`wasm32 bare`), in the weekly performance pass.
+
 The desktop client's connect card runs in the browser too (D256): build with
 `--features gui`, copy the module to `web/eggdb-gui.wasm` and open `web/card.html`
 (`?theme=dark`, `?theme=high-contrast`, `?font=<url of a .ttf>`). `web/card.js` draws the

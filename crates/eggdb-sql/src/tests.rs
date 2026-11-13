@@ -3082,7 +3082,7 @@ fn statement_timeout_stops_a_long_statement_with_57014() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     run(&mut session, "SET statement_timeout = 50").unwrap();
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     let error = fails(&mut session, "SELECT pg_sleep(5)");
     assert_eq!(error.state(), crate::SqlState::QUERY_CANCELED);
     assert_eq!(
@@ -3817,7 +3817,7 @@ fn a_large_oracle_decode_stays_linear_and_obeys_the_argument_limit() {
     let ones = vec!["1"; 2000].join(", ");
     let pairs = vec!["1, 2"; 126].join(", ");
     let sql = format!("SELECT DECODE(COALESCE({ones}), {pairs}, 0) d FROM dual");
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     assert_eq!(last(&mut oracle, &sql), "D\n2\nSELECT 1");
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     let too_many = format!(

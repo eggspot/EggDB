@@ -142,8 +142,8 @@ pub(crate) fn enter_zone(zone: TimeZone) -> StatementClockGuard {
 }
 
 fn system_now() -> i64 {
-    let since = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let since = eggdb_platform_core::time::SystemTime::now()
+        .duration_since(eggdb_platform_core::time::UNIX_EPOCH)
         .map_or(0, |since| {
             i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
         });

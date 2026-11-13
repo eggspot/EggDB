@@ -326,6 +326,32 @@ impl Database {
         Self::with_page_file(file, path, options)
     }
 
+    /// Opens a database in memory from `image`, the bytes [`Database::image`] gave, for hosts
+    /// that keep the database themselves: a browser module without WASI keeps it in IndexedDB
+    /// or OPFS through its own JavaScript (D1090). Changes stay in memory until the next
+    /// `image`. Bytes that are not a database fail with
+    /// [`ErrorKind::NotADatabase`](crate::ErrorKind::NotADatabase) or
+    /// [`ErrorKind::Corrupt`](crate::ErrorKind::Corrupt).
+    pub fn from_image(image: Vec<u8>, options: Options) -> Result<Self> {
+        if options.read_only {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "a database opened from an image lives in memory and is opened for writing",
+            ));
+        }
+        let opened = PageFile::open_in(DatabaseFile::memory_with(image), Access::ReadWrite)
+            .map_err(Error::storage)?;
+        Self::with_page_file(opened, Path::new(MEMORY_NAME), &options)
+    }
+
+    /// The database's bytes, after a checkpoint so they need no replay: what
+    /// [`Database::from_image`] opens, and a copy of the file as of the last commit. Waits for
+    /// the write transaction, as [`Database::begin_write`] does.
+    pub fn image(&self) -> Result<Vec<u8>> {
+        let _turn = self.writer.take(self.write_timeout)?;
+        self.store.image().map_err(Error::storage)
+    }
+
     fn with_page_file(
         mut file: PageFile<DatabaseFile>,
         path: &Path,
@@ -1145,11 +1171,11 @@ fn open_waiting_while_busy(
     if !busy || options.busy_timeout.is_zero() {
         return first;
     }
-    let give_up = std::time::Instant::now().checked_add(options.busy_timeout);
+    let give_up = eggdb_platform::time::Instant::now().checked_add(options.busy_timeout);
     let mut pause = FIRST_BUSY_PAUSE;
     loop {
         let remaining = match give_up {
-            Some(give_up) => give_up.saturating_duration_since(std::time::Instant::now()),
+            Some(give_up) => give_up.saturating_duration_since(eggdb_platform::time::Instant::now()),
             None => LONGEST_BUSY_PAUSE,
         };
         if remaining.is_zero() {

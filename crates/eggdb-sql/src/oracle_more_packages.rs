@@ -646,8 +646,8 @@ fn evaluate(name: &str, values: &[Value]) -> SqlResult<Value> {
             Ok(Value::Bytea(done))
         }
         ("oracle_dbms_utility_get_time", []) => {
-            let hundredths = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let hundredths = eggdb_platform_core::time::SystemTime::now()
+                .duration_since(eggdb_platform_core::time::UNIX_EPOCH)
                 .map_or(0, |since| i64::try_from(since.as_millis() / 10).unwrap_or(0));
             Ok(number(hundredths.rem_euclid(GET_TIME_WRAP)))
         }

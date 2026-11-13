@@ -371,7 +371,7 @@ mod tests {
             let _ = std::fs::remove_file(&fifo);
             let made = std::process::Command::new("mkfifo").arg(&fifo).status();
             if made.is_ok_and(|status| status.success()) {
-                let start = std::time::Instant::now();
+                let start = eggdb_platform_core::time::Instant::now();
                 assert!(open_private_append_no_follow(&fifo).is_err());
                 assert!(start.elapsed() < std::time::Duration::from_secs(5));
                 let _ = std::fs::remove_file(&fifo);
@@ -397,11 +397,11 @@ mod tests {
         drop(first);
         let reader = std::fs::File::open(&path).unwrap();
         let mut second = open_private_append_no_follow(&path).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = eggdb_platform_core::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match second.try_lock() {
                 Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                Err(std::fs::TryLockError::WouldBlock) if eggdb_platform_core::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(error) => panic!("{error:?}"),

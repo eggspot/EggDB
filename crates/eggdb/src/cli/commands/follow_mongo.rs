@@ -9,7 +9,8 @@ use eggdb_keyspace::{Overlay, StagedChanges};
 use eggdb_mongowire::client::{MongoClient, MongoClientError, MongoUrl, parse_mongodb_url};
 use eggdb_platform::stop_signals;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 const PASSWORD_VARIABLE: &str = "MONGODB_PASSWORD";
 const STATE_DATABASE: &str = "eggdb_follow";

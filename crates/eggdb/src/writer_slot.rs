@@ -76,7 +76,7 @@ impl Drop for WriterTurn<'_> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::time::Instant;
+    use eggdb_platform::time::Instant;
 
     const LONG_WAIT: Duration = Duration::from_secs(30);
 

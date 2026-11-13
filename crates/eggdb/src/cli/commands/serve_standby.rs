@@ -1,6 +1,7 @@
 use eggdb::{ArchivedEvent, Database};
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use eggdb_platform::time::{SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const POLL: Duration = Duration::from_secs(1);
 

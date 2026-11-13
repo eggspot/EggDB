@@ -11,7 +11,8 @@ use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const LONGEST_COUNT_STEP: Duration = Duration::from_millis(20);
@@ -519,7 +520,8 @@ mod tests {
     use std::ops::Bound;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, mpsc};
-    use std::time::{Duration, Instant};
+    use eggdb_platform::time::Instant;
+    use std::time::Duration;
 
     struct TempFile(PathBuf);
 

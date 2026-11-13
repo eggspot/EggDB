@@ -4,7 +4,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 const WAIT_SLICE: Duration = Duration::from_millis(10);
 
@@ -1037,9 +1038,9 @@ mod tests {
             (taken, waited)
         });
         let first_owner = held.recv().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = eggdb_platform_core::time::Instant::now() + Duration::from_secs(10);
         while !application_waits().contains_key(&first_owner) {
-            assert!(std::time::Instant::now() < deadline);
+            assert!(eggdb_platform_core::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(
@@ -1093,9 +1094,9 @@ mod tests {
             (taken, waited)
         });
         let first_owner = held.recv().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = eggdb_platform_core::time::Instant::now() + Duration::from_secs(10);
         while !application_waits().contains_key(&first_owner) {
-            assert!(std::time::Instant::now() < deadline);
+            assert!(eggdb_platform_core::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
         let refused =

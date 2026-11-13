@@ -11,7 +11,8 @@ use eggdb_tdswire::client::{
     TdsClient, TdsClientError, TdsConnectOptions, TextRows, parse_sql_server_url, quote_name,
     quote_unicode,
 };
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 const PASSWORD_VARIABLE: &str = "SQLCMDPASSWORD";
 const DEFAULT_POLL_SECONDS: u64 = 5;

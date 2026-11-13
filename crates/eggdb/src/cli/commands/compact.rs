@@ -5,7 +5,7 @@ use crate::cli::failure::{Exit, Failure};
 use crate::cli::reports::{self, Copied};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::time::Instant;
+use eggdb_platform::time::Instant;
 
 const COMPACTION_STAGING_SUFFIX: &str = ".compacting";
 

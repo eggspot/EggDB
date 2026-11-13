@@ -10,7 +10,8 @@ use crate::threads::{SpawnedThread, ThreadOptions};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 /// The operating system's asynchronous file I/O, made by
 /// [`OsFileSystem::io_queue`](crate::FileSystem::io_queue).

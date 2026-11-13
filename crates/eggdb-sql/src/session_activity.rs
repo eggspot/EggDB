@@ -7,7 +7,7 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::SystemTime;
+use eggdb_platform_core::time::SystemTime;
 
 const MAX_QUERY_CHARS: usize = 1024;
 const MAX_SESSIONS: usize = 65_536;

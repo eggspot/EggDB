@@ -40,7 +40,7 @@ fn a_function_in_from_stops_at_a_plain_outer_limit_instead_of_building_every_row
     let _shared = share_statement_memory();
     let mut held = WorkMemory::new();
     held.charge(WORK_MEMORY_LIMIT - 100_000).unwrap();
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     for (sql, expected) in [
         (
             "SELECT * FROM generate_series(1, 1000000000000) LIMIT 3",

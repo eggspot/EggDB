@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+eggdb-platform-core = { path = "../eggdb-platform-core" }
 eggdb-auth = { path = "../eggdb-auth" }
 eggdb-cluster = { path = "../eggdb-cluster" }
 eggdb-columnar = { path = "../eggdb-columnar" }

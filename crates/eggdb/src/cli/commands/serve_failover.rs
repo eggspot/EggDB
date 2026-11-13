@@ -3,7 +3,8 @@ use eggdb::{Database, ReplicaId, ReplicationMode, ReplicationPrimary};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use eggdb_platform::time::{SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const TICK: Duration = Duration::from_secs(1);
 const SWITCHOVER_CATCH_UP: Duration = Duration::from_secs(30);
@@ -230,7 +231,7 @@ impl<'d> ReplicationNode<'d> {
         self.db.checkpoint().map_err(|error| undo(format!("cannot settle the last commit: {error}")))?;
         let last = primary.last().map_err(|error| undo(error.to_string()))?;
         let term = primary.term().map_err(|error| undo(error.to_string()))?;
-        let started = std::time::Instant::now();
+        let started = eggdb_platform::time::Instant::now();
         loop {
             let status = query_status(&peer, &self.credentials).map_err(|message| undo(message))?;
             if status.applied >= last {
@@ -340,7 +341,7 @@ fn applied_position() -> (u64, u64) {
 }
 
 fn wait_until(timeout: Duration, mut fresh: impl FnMut() -> bool, why: impl Fn() -> String) -> Result<(), String> {
-    let started = std::time::Instant::now();
+    let started = eggdb_platform::time::Instant::now();
     while !fresh() {
         if started.elapsed() >= timeout {
             return Err(why());

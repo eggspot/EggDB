@@ -19,7 +19,8 @@ use eggdb_platform::stop_signals;
 use eggdb_sql::{
     CopyChannel, CopyStart, Dialect, RelationKind, SqlError, SqlResult, SqlState, Value,
 };
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 const DEFAULT_PUBLICATION: &str = "eggdb_follow";
 const STATUS_INTERVAL: Duration = Duration::from_secs(10);
@@ -200,8 +201,8 @@ fn client_failure(target: &str, error: &ClientError) -> Failure {
 }
 
 fn now_unix_micros() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    eggdb_platform::time::SystemTime::now()
+        .duration_since(eggdb_platform::time::UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }

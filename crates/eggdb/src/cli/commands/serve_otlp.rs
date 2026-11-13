@@ -1,7 +1,8 @@
 use super::report_delivery::WebTarget;
 use super::serve_metrics::Family;
 use std::fmt::Write as _;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use eggdb_platform::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const EXPORT_EVERY: Duration = Duration::from_secs(60);
 const CHECK_EVERY: Duration = Duration::from_millis(500);

@@ -4,7 +4,8 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 use super::cocoa::{self, CgPoint, CgRect, CgSize};
 use super::{

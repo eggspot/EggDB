@@ -14,7 +14,8 @@ use crate::os_net_readiness::{
 };
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 /// The operating system's network.
 ///
@@ -430,7 +431,8 @@ mod tests {
     use std::io::{self, Read};
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use eggdb_platform_core::time::Instant;
+    use std::time::Duration;
 
     fn backends() -> Vec<NetBackend> {
         let mut backends = vec![NetBackend::Portable];

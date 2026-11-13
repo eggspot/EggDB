@@ -2,7 +2,8 @@ use super::snapshot::{BUILDS, LOADS};
 use crate::memory_store::MemoryStore;
 use crate::tests::render;
 use crate::{Dialect, Session, SqlError};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 fn session(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::new(store);

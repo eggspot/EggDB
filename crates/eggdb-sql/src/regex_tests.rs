@@ -243,7 +243,7 @@ fn matches_report_the_leftmost_then_preferred_length_and_their_groups() {
 fn back_references_stop_at_the_step_budget() {
     let regex = Regex::compile("^(a*)*\\1b$", CaseSensitivity::Sensitive).unwrap();
     let text = "a".repeat(40);
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     let found = regex.is_match(&text, &mut StepBudget::new(2_000_000));
     assert!(found.is_err() || found == Ok(false));
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
@@ -252,7 +252,7 @@ fn back_references_stop_at_the_step_budget() {
 #[test]
 fn nested_stars_run_in_linear_time() {
     let text = "a".repeat(100_000);
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     assert!(!matches(&text, "(a*)*b"));
     assert!(!matches(&text, "(a|a)*b"));
     assert!(!matches(&text, "(a+)+b"));

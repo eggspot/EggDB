@@ -1513,6 +1513,17 @@ impl<F: File> PageFile<F> {
         Ok(())
     }
 
+    /// Every byte of the file as it is now: after [`PageFile::checkpoint`], an image another
+    /// open can start from without replaying anything.
+    pub fn image(&self) -> Result<Vec<u8>, StorageError> {
+        self.check_not_suspended()?;
+        let size = usize::try_from(self.file.size()?).map_err(|_| StorageError::FileFull)?;
+        let mut bytes = vec![0u8; size];
+        let read = read_up_to(&self.file, &mut bytes)?;
+        bytes.truncate(read);
+        Ok(bytes)
+    }
+
     /// Whether [`PageFile::suspend`] gave the file up.
     pub fn is_suspended(&self) -> bool {
         self.suspended.is_some()

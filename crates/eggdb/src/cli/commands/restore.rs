@@ -18,7 +18,8 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 const STAGING_SUFFIX: &str = ".restoring";
 const READ_BUFFER_BYTES: usize = 64 * 1024;

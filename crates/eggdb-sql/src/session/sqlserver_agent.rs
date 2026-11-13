@@ -286,8 +286,8 @@ fn agent_error(code: u16, message: String) -> SqlError {
 }
 
 fn today_date() -> i64 {
-    let days = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let days = eggdb_platform_core::time::SystemTime::now()
+        .duration_since(eggdb_platform_core::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs() as i64 / 86_400);
     let (year, month, day) = crate::jobs::civil_from_days(days);
     year * 10_000 + i64::from(month) * 100 + i64::from(day)

@@ -4,7 +4,8 @@ use super::{
 };
 use eggdb_storage::BTree;
 use std::io::Read;
-use std::time::{Duration, Instant};
+use eggdb_platform::time::Instant;
+use std::time::Duration;
 
 struct Rng(u64);
 

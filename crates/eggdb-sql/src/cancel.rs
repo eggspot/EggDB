@@ -2,7 +2,8 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 const SLEEP_SLICE: Duration = Duration::from_millis(10);
 
@@ -175,7 +176,7 @@ pub(crate) fn sleep(seconds: f64) -> SqlResult<()> {
             },
             None => SLEEP_SLICE,
         };
-        std::thread::sleep(slice);
+        eggdb_platform_core::time::sleep(slice);
         check()?;
         if past_deadline(true) {
             return Err(timed_out());
@@ -187,7 +188,8 @@ pub(crate) fn sleep(seconds: f64) -> SqlResult<()> {
 mod tests {
     use super::{CLOCK_EVERY, CancelSignal, check, enter, enter_deadline, sleep, watch};
     use crate::error::SqlState;
-    use std::time::{Duration, Instant};
+    use eggdb_platform_core::time::Instant;
+    use std::time::Duration;
 
     #[test]
     fn a_raised_signal_stops_only_the_statements_that_entered_it() {
@@ -268,7 +270,7 @@ mod tests {
         sleep(f64::NAN).unwrap();
         let raised = signal.clone();
         let canceller = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
+            eggdb_platform_core::time::sleep(Duration::from_millis(50));
             raised.cancel();
         });
         let started = Instant::now();

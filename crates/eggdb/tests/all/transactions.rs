@@ -522,3 +522,21 @@ fn a_database_changed_by_another_program_while_suspended_must_be_reopened() {
     let reopened = Database::open(file.path()).unwrap();
     assert_eq!(reopened.read(|tx| tx.get("k")).unwrap(), Some(b"theirs".to_vec()));
 }
+
+#[test]
+fn an_image_reopens_in_memory_with_every_commit() {
+    let db = Database::in_memory().unwrap();
+    db.write(|tx| tx.put("kept", "yes")).unwrap();
+    let image = db.image().unwrap();
+    let copy = Database::from_image(image, Options::new()).unwrap();
+    assert!(copy.is_in_memory());
+    assert_eq!(copy.read(|tx| tx.get("kept")).unwrap(), Some(b"yes".to_vec()));
+    copy.write(|tx| tx.put("more", "1")).unwrap();
+    assert_eq!(db.read(|tx| tx.get("more")).unwrap(), None);
+    let again = Database::from_image(copy.image().unwrap(), Options::new()).unwrap();
+    assert_eq!(again.read(|tx| tx.get("more")).unwrap(), Some(b"1".to_vec()));
+    assert_eq!(
+        Database::from_image(b"not a database".to_vec(), Options::new()).err().map(|error| error.kind()),
+        Some(ErrorKind::NotADatabase)
+    );
+}

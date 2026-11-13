@@ -546,6 +546,12 @@ impl<F: File> PageCache<F> {
         self.file.get_mut().resume()
     }
 
+    /// The file's bytes after a checkpoint (see [`PageFile::image`]).
+    pub fn image(&mut self) -> Result<Vec<u8>, StorageError> {
+        self.checkpoint()?;
+        self.file.borrow().image()
+    }
+
     /// Whether the file is suspended.
     pub fn is_suspended(&self) -> bool {
         self.file.borrow().is_suspended()

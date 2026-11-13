@@ -10,8 +10,8 @@ const MANIFEST_SUFFIX: &str = ".manifest";
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    eggdb_platform::time::SystemTime::now()
+        .duration_since(eggdb_platform::time::UNIX_EPOCH)
         .map_or(0, |since| {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })

@@ -2,7 +2,8 @@ use std::ffi::{c_int, c_short};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 use super::atspi::{self, AtspiApplication};
 use super::{AccessNode, AccessRequest};

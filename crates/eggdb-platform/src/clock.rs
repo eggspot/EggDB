@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use eggdb_platform_core::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub use eggdb_platform_core::Clock;
 

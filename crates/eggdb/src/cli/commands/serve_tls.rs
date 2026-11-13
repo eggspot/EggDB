@@ -92,8 +92,8 @@ fn usage(message: String) -> Failure {
 }
 
 fn now_unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    eggdb_platform::time::SystemTime::now()
+        .duration_since(eggdb_platform::time::UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }

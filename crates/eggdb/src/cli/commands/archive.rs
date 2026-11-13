@@ -4,7 +4,7 @@ use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use eggdb_platform::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const MANIFEST: &str = "manifest.jsonl";
 const STAGING_SUFFIX: &str = ".restoring";

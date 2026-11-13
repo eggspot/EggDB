@@ -3,7 +3,8 @@ use crate::cli::args::{CommandName, Format};
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::render::{self, JsonObject};
 use eggdb::{Database, ErrorKind};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use eggdb_platform::time::{SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const SHOWN_VALUE_BYTES: usize = 64;
 

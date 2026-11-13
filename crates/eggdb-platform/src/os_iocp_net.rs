@@ -18,7 +18,7 @@ mod port {
     };
     use std::ptr;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
+    use eggdb_platform_core::time::Instant;
 
     const AF_INET: i32 = 2;
     const AF_INET6: i32 = 23;
@@ -861,7 +861,7 @@ mod unsupported {
     use crate::net::{NetCompletion, NetOp};
     use crate::os_net::{OsListener, OsStream};
     use std::convert::Infallible;
-    use std::time::Instant;
+    use eggdb_platform_core::time::Instant;
 
     #[derive(Debug)]
     pub(crate) struct NetPort(Infallible);

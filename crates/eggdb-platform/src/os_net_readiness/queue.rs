@@ -8,7 +8,7 @@ use std::io;
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
-use std::time::Instant;
+use eggdb_platform_core::time::Instant;
 
 pub(crate) const NATIVE: Option<NetBackend> = Some(native::BACKEND);
 

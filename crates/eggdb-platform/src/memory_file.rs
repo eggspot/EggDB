@@ -15,6 +15,13 @@ impl MemoryFile {
         Self::default()
     }
 
+    /// A file holding `bytes`, such as a database image a host kept (D1090).
+    pub fn with_bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes: RwLock::new(bytes),
+        }
+    }
+
     fn read_bytes<T>(&self, body: impl FnOnce(&Vec<u8>) -> T) -> T {
         let guard = self
             .bytes

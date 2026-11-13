@@ -1,7 +1,7 @@
 use crate::memory_store::MemoryStore;
 use crate::types::Value;
 use crate::{QueryResult, Session, SqlError};
-use std::time::Instant;
+use eggdb_platform_core::time::Instant;
 
 fn last(session: &mut Session<'_>, sql: &str) -> Result<QueryResult, SqlError> {
     let mut results = Vec::new();

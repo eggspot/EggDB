@@ -424,8 +424,8 @@ impl Session<'_> {
             Ok(found) => found,
             Err(exit) => return Ok(exit),
         };
-        let now_millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_millis = eggdb_platform::time::SystemTime::now()
+            .duration_since(eggdb_platform::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_millis() as i64);
         write_table(location, &columns, now_millis)
             .map_err(|error| Failure::database(format!("cannot write {shown}: {error}"), Exit::DatabaseError))?;

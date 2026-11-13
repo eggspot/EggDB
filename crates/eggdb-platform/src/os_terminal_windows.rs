@@ -3,7 +3,8 @@ use std::ffi::c_void;
 use std::io::{self, Write};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 type Handle = *mut c_void;
 

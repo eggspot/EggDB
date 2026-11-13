@@ -6,7 +6,8 @@
 use crate::Database;
 use crate::keyspace::{DatabaseKeyspace, QUEUE_COLLECTIONS};
 use eggdb_queues::{DEAD_LETTER_SUFFIX, Message, QueueError, Queues};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use eggdb_platform::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const DEFAULT_LEASE: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_RECEIVES: u32 = 5;

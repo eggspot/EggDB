@@ -216,6 +216,16 @@ impl<F: File> Store<F> {
         self.lock()?.cache.resume()
     }
 
+    /// The file's bytes after a checkpoint (see [`PageCache::image`]); fails with
+    /// [`StorageError::WriterActive`] while a write transaction is open.
+    pub fn image(&self) -> Result<Vec<u8>, StorageError> {
+        let mut state = self.lock()?;
+        if state.writer_active {
+            return Err(StorageError::WriterActive);
+        }
+        state.cache.image()
+    }
+
     /// Whether [`Store::suspend`] gave the file up.
     pub fn is_suspended(&self) -> Result<bool, StorageError> {
         Ok(self.lock()?.cache.is_suspended())

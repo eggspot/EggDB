@@ -6,7 +6,8 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 use super::win32::{self, Utf16Characters};
 use super::{

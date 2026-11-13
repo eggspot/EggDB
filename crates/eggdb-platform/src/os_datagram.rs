@@ -107,7 +107,8 @@ mod tests {
     use crate::ErrorKind;
     use crate::net::DatagramSocket;
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::time::{Duration, Instant};
+    use eggdb_platform_core::time::Instant;
+    use std::time::Duration;
 
     fn loopback() -> OsDatagramSocket {
         OsDatagramSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap()

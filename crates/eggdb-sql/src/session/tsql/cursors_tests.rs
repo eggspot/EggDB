@@ -2,7 +2,8 @@ use crate::dialect::Dialect;
 use crate::memory_store::MemoryStore;
 use crate::types::Value;
 use crate::{BatchStep, Session};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 fn session(store: &MemoryStore) -> Session<'_> {
     Session::with_dialect(store, Dialect::SqlServer)

@@ -559,7 +559,7 @@ pub struct Session<'s> {
     transaction_settings: crate::settings::TransactionSettings,
     max_value_bytes: usize,
     max_row_bytes: usize,
-    deadline: Option<std::time::Instant>,
+    deadline: Option<eggdb_platform_core::time::Instant>,
     max_result_rows: Option<u64>,
     batch_resume: Option<(usize, usize)>,
     sqlserver_status: crate::sqlserver_functions::SessionStatus,
@@ -734,7 +734,7 @@ impl<'s> Session<'s> {
     /// engine itself as it works through rows, so a statement that reads nothing from the
     /// store stops too. `None` (the default) sets no deadline. A server
     /// that runs untrusted statements under a time limit sets it.
-    pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
+    pub fn set_deadline(&mut self, deadline: Option<eggdb_platform_core::time::Instant>) {
         self.deadline = deadline;
     }
 
@@ -926,7 +926,7 @@ impl<'s> Session<'s> {
         &self,
         tokens: Option<&[crate::lexer::Token<'_>]>,
         text: &str,
-        started: Option<std::time::Instant>,
+        started: Option<eggdb_platform_core::time::Instant>,
         result: &SqlResult<QueryResult>,
     ) {
         let (Some(tokens), Some(started), Ok(result)) = (tokens, started, result) else {
@@ -2207,7 +2207,7 @@ impl<'s> Session<'s> {
                 crate::mysql_errors::set_strict_write(self.mysql());
                 self.enter_sequences(false);
                 crate::deferred_checks::enter(&self.deferred.modes);
-                let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
+                let started = crate::statement_statistics::wanted().then(eggdb_platform_core::time::Instant::now);
                 let result = self.insert_literal_rows(&mut rows);
                 let routine_changes = crate::routine_settings::take_for_session(result.is_ok());
                 let routine_applied = self.apply_routine_setting_changes(routine_changes);
@@ -2352,7 +2352,7 @@ impl<'s> Session<'s> {
                 text.get(self.statement_start..end)
                     .map_or_else(String::new, |shown| shown.trim().trim_end_matches(';').trim_end().to_owned())
             });
-            let started = crate::statement_statistics::wanted().then(std::time::Instant::now);
+            let started = crate::statement_statistics::wanted().then(eggdb_platform_core::time::Instant::now);
             let audited = crate::audit_events::wanted()
                 .then(|| {
                     crate::audit_events::statement_kind(&statement).or_else(|| {
@@ -3146,7 +3146,7 @@ impl<'s> Session<'s> {
                 .then(|| store.erased_page_lookups())
                 .flatten()
         };
-        let planning = std::time::Instant::now();
+        let planning = eggdb_platform_core::time::Instant::now();
         let before_planning = lookups();
         let mut planned = (*explain.statement).clone();
         let (style, dialect) = (explain.style, self.dialect);
@@ -3156,7 +3156,7 @@ impl<'s> Session<'s> {
         })?;
         let planning = planning.elapsed();
         let before_execution = lookups();
-        let started = std::time::Instant::now();
+        let started = eggdb_platform_core::time::Instant::now();
         let mut statement = (*explain.statement).clone();
         let (result, selects, subplans) = if crate::explain::PlannedStatement::of(&statement)
             == Some(crate::explain::PlannedStatement::Select)

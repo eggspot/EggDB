@@ -25,8 +25,8 @@ fn mixed(mut value: u64) -> u64 {
 
 fn next_draw(seed: i64) -> u64 {
     if seed == NO_SEED {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = eggdb_platform_core::time::SystemTime::now()
+            .duration_since(eggdb_platform_core::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos() as u64);
         let counter = UNSEEDED.with(|held| {
             held.set(held.get().wrapping_add(1));

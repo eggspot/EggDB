@@ -9,7 +9,13 @@
 //! returns a handle, or 0; opening a path that is already open starts another session on the
 //! same database, so the browser worker serves every tab's session from one engine (D1089); [`eggdb_wasm_execute`] runs the SQL in the input on a handle;
 //! [`eggdb_wasm_output`] and [`eggdb_wasm_output_len`] locate the last answer;
-//! [`eggdb_wasm_close`] ends a handle; [`eggdb_wasm_version`] answers the version.
+//! [`eggdb_wasm_close`] ends a handle; [`eggdb_wasm_version`] answers the version;
+//! [`eggdb_wasm_image`] puts a database's bytes in the output and [`eggdb_wasm_open_image`]
+//! opens such bytes from the input, in memory.
+//!
+//! The same module builds for `wasm32-unknown-unknown`, with no WASI (D1090): there it has no
+//! file system, so a host opens `:memory:` or an image, keeps the image itself, and supplies
+//! the two clock functions `eggdb_platform_core::time` imports from `eggdb_host`.
 //!
 //! With the `gui` feature the module also carries the desktop client's connect card for the
 //! browser loader in `web/card.js` (D256): `eggdb_wasm_card_render` draws its RGBA frame,
@@ -27,12 +33,13 @@ use std::cell::RefCell;
 mod card;
 
 type OpenSession = Session<'static>;
+type Opened = (&'static Database, &'static Store<'static>);
 
 thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    static SESSIONS: RefCell<Vec<Option<OpenSession>>> = const { RefCell::new(Vec::new()) };
-    static STORES: RefCell<Vec<(String, &'static Store<'static>)>> = const { RefCell::new(Vec::new()) };
+    static SESSIONS: RefCell<Vec<Option<(OpenSession, &'static Database)>>> = const { RefCell::new(Vec::new()) };
+    static STORES: RefCell<Vec<(String, Opened)>> = const { RefCell::new(Vec::new()) };
 }
 
 const DIALECTS: [Dialect; 5] = [
@@ -141,38 +148,57 @@ pub extern "C" fn eggdb_wasm_version() -> u32 {
     ))
 }
 
-fn open(path: &str, dialect: u32) -> Result<OpenSession, String> {
-    let dialect = *DIALECTS
+fn dialect_of(dialect: u32) -> Result<Dialect, String> {
+    DIALECTS
         .get(usize::try_from(dialect).unwrap_or(usize::MAX))
-        .ok_or_else(|| format!("dialect {dialect} is not one of 0 to 4"))?;
-    Ok(store_at(path)?.session(dialect))
+        .copied()
+        .ok_or_else(|| format!("dialect {dialect} is not one of 0 to 4"))
 }
 
-fn store_at(path: &str) -> Result<&'static Store<'static>, String> {
+fn open(path: &str, dialect: u32) -> Result<(OpenSession, &'static Database), String> {
+    let dialect = dialect_of(dialect)?;
+    let (database, store) = opened_at(path)?;
+    Ok((store.session(dialect), database))
+}
+
+fn leak(database: eggdb::Result<Database>) -> Result<Opened, String> {
+    let database: &'static Database =
+        Box::leak(Box::new(database.map_err(|error| error.to_string())?));
+    let store: &'static Store<'static> = Box::leak(Box::new(database.sql_store()));
+    Ok((database, store))
+}
+
+fn opened_at(path: &str) -> Result<Opened, String> {
     let shared = path != ":memory:";
     if shared
-        && let Some(store) = STORES.with(|stores| {
+        && let Some(found) = STORES.with(|stores| {
             stores
                 .borrow()
                 .iter()
                 .find(|(opened, _)| opened == path)
-                .map(|(_, store)| *store)
+                .map(|(_, found)| *found)
         })
     {
-        return Ok(store);
+        return Ok(found);
     }
-    let database = if shared {
+    let opened = leak(if shared {
         Database::open_with(path, eggdb::Options::default().create_if_missing(true))
     } else {
         Database::in_memory()
-    };
-    let database: &'static Database =
-        Box::leak(Box::new(database.map_err(|error| error.to_string())?));
-    let store: &'static Store<'static> = Box::leak(Box::new(database.sql_store()));
+    })?;
     if shared {
-        STORES.with(|stores| stores.borrow_mut().push((path.to_owned(), store)));
+        STORES.with(|stores| stores.borrow_mut().push((path.to_owned(), opened)));
     }
-    Ok(store)
+    Ok(opened)
+}
+
+fn register(session: OpenSession, database: &'static Database) -> u32 {
+    let handle = SESSIONS.with(|sessions| {
+        let mut sessions = sessions.borrow_mut();
+        sessions.push(Some((session, database)));
+        sessions.len()
+    });
+    u32::try_from(handle).unwrap_or(0)
 }
 
 /// Opens the database at the path in the input in `dialect` and returns its handle, or 0 with
@@ -180,18 +206,63 @@ fn store_at(path: &str) -> Result<&'static Store<'static>, String> {
 #[unsafe(no_mangle)]
 pub extern "C" fn eggdb_wasm_open(dialect: u32) -> u32 {
     match input_text().and_then(|path| open(&path, dialect)) {
-        Ok(session) => {
-            let handle = SESSIONS.with(|sessions| {
-                let mut sessions = sessions.borrow_mut();
-                sessions.push(Some(session));
-                sessions.len()
-            });
+        Ok((session, database)) => {
             answer("{}".to_owned());
-            u32::try_from(handle).unwrap_or(0)
+            register(session, database)
         }
         Err(message) => {
             answer(format!("{{\"error\":{}}}", json_string(&message)));
             0
+        }
+    }
+}
+
+/// Opens a database in memory from the image in the input, the bytes [`eggdb_wasm_image`]
+/// gave, in `dialect`, and returns its handle, or 0 with `{"error":"..."}` as the answer: how a
+/// host without WASI keeps a database between visits (D1090).
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_open_image(dialect: u32) -> u32 {
+    let image = INPUT.with(|input| input.borrow().clone());
+    let opened = dialect_of(dialect).and_then(|dialect| {
+        let (database, store) = leak(Database::from_image(image, eggdb::Options::default()))?;
+        Ok((store.session(dialect), database))
+    });
+    match opened {
+        Ok((session, database)) => {
+            answer("{}".to_owned());
+            register(session, database)
+        }
+        Err(message) => {
+            answer(format!("{{\"error\":{}}}", json_string(&message)));
+            0
+        }
+    }
+}
+
+/// Puts the image of `handle`'s database in the output, after a checkpoint, and returns its
+/// length; on failure returns `u32::MAX` with `{"error":"..."}` as the answer.
+#[unsafe(no_mangle)]
+pub extern "C" fn eggdb_wasm_image(handle: u32) -> u32 {
+    let index = usize::try_from(handle).unwrap_or(0).wrapping_sub(1);
+    let database = SESSIONS.with(|sessions| {
+        sessions
+            .borrow()
+            .get(index)
+            .and_then(|slot| slot.as_ref().map(|(_, database)| *database))
+    });
+    let image = match database {
+        Some(database) => database.image().map_err(|error| error.to_string()),
+        None => Err("the database handle is not open".to_owned()),
+    };
+    match image {
+        Ok(bytes) => {
+            let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+            OUTPUT.with(|output| *output.borrow_mut() = bytes);
+            length
+        }
+        Err(message) => {
+            answer(format!("{{\"error\":{}}}", json_string(&message)));
+            u32::MAX
         }
     }
 }
@@ -213,7 +284,7 @@ pub extern "C" fn eggdb_wasm_execute(handle: u32) -> u32 {
     let index = usize::try_from(handle).unwrap_or(0).wrapping_sub(1);
     let json = SESSIONS.with(|sessions| {
         let mut sessions = sessions.borrow_mut();
-        let Some(Some(session)) = sessions.get_mut(index) else {
+        let Some(Some((session, _))) = sessions.get_mut(index) else {
             return format!(
                 "{{\"results\":[],\"error\":{}}}",
                 json_string("the database handle is not open")
@@ -292,6 +363,32 @@ mod tests {
         assert_eq!(eggdb_wasm_open(9), 0);
         eggdb_wasm_version();
         assert!(output().starts_with("{\"version\":\""));
+    }
+
+    #[test]
+    fn an_image_opens_again_with_its_data() {
+        write_input(":memory:");
+        let first = eggdb_wasm_open(0);
+        write_input("CREATE TABLE kept (name text); INSERT INTO kept VALUES ('egg')");
+        eggdb_wasm_execute(first);
+        let length = eggdb_wasm_image(first);
+        assert_ne!(length, u32::MAX, "{}", output());
+        let image = OUTPUT.with(|output| output.borrow().clone());
+        assert_eq!(image.len(), length as usize);
+        let start = eggdb_wasm_input(length);
+        INPUT.with(|input| {
+            assert_eq!(input.borrow().as_ptr(), start.cast_const());
+            input.borrow_mut().copy_from_slice(&image);
+        });
+        let second = eggdb_wasm_open_image(1);
+        assert_ne!(second, 0, "{}", output());
+        write_input("SELECT name FROM kept");
+        eggdb_wasm_execute(second);
+        assert!(output().contains("[[\"egg\"]]"), "{}", output());
+        write_input("not a database");
+        assert_eq!(eggdb_wasm_open_image(0), 0);
+        assert!(output().contains("error"));
+        assert_eq!(eggdb_wasm_image(999), u32::MAX);
     }
 
     #[test]

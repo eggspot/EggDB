@@ -121,8 +121,8 @@ fn jwt_sign(claims: &str, key_bytes: &[u8]) -> SqlResult<String> {
 }
 
 fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    eggdb_platform_core::time::SystemTime::now()
+        .duration_since(eggdb_platform_core::time::UNIX_EPOCH)
         .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
 }
 

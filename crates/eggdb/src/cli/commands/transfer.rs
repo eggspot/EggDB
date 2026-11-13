@@ -14,7 +14,8 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use eggdb_platform::time::SystemTime;
+use std::time::Duration;
 
 const OUTPUT_BUFFER_BYTES: usize = 256 * 1024;
 const BATCH_BYTES: usize = 4 << 20;

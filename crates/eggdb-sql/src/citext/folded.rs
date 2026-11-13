@@ -155,7 +155,7 @@ mod tests {
     fn misaligned_candidates_everywhere_stay_linear() {
         let text = "ß".repeat(200_000);
         let needle = format!("s{}", "ß".repeat(100_000));
-        let started = std::time::Instant::now();
+        let started = eggdb_platform_core::time::Instant::now();
         assert!(
             FoldedText::new(&text)
                 .matches(&needle, usize::MAX)

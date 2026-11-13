@@ -7,7 +7,8 @@
 //! code only moves their chunks and the protocol is tested without a server.
 
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 use super::WindowError;
 

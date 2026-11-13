@@ -250,7 +250,7 @@ fn a_function_setting_one_name_many_times_runs_in_linear_time() {
            RETURN got; \
          END $$",
     );
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     assert_eq!(
         answer(&mut session, "SELECT many_sets(10000)"),
         "many_sets\nz\nSELECT 1"

@@ -1866,7 +1866,7 @@ jobs:
       - name: Install the pinned toolchain and the WASI target
         run: |
           rustup show active-toolchain || rustup toolchain install
-          rustup target add wasm32-wasip1
+          rustup target add wasm32-wasip1 wasm32-unknown-unknown
       - uses: ./.github/actions/cargo-cache
         with:
           path: |
@@ -1875,12 +1875,16 @@ jobs:
             target
           key: cargo-v2-browser-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: cargo-v2-browser-${{ runner.os }}-
-      - name: Build EggDB for WebAssembly and run it and the connect card under Node and in headless Chrome
+      - name: Build EggDB for WebAssembly, with and without WASI, and run it and the connect card under Node and in headless Chrome
         run: |
           cargo build --release -p eggdb-wasm --target wasm32-wasip1
           cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb.wasm
           ls -l web/eggdb.wasm
           node web/test.mjs web/eggdb.wasm
+          cargo build --release -p eggdb-wasm --target wasm32-unknown-unknown
+          cp target/wasm32-unknown-unknown/release/eggdb_wasm.wasm web/eggdb-bare.wasm
+          ls -l web/eggdb-bare.wasm
+          node web/test-bare.mjs web/eggdb-bare.wasm
           python3 -m http.server 8000 --bind 127.0.0.1 --directory web &
           for _ in $(seq 1 50); do curl -sf http://127.0.0.1:8000/test.html > /dev/null && break; sleep 0.2; done
           google-chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8000/test.html > "$RUNNER_TEMP/dom.html"

@@ -21,3 +21,7 @@ cortex-m3 engine heap_peak_bytes 524288
 cortex-m3 engine ram_floor_bytes 786432
 cortex-m3 engine flash_write_amplification_milli 128000
 cortex-m3 engine flash_erased_sectors 512
+wasm32 wasi module_bytes 16777216
+wasm32 wasi module_gzip_bytes 6291456
+wasm32 bare module_bytes 16777216
+wasm32 bare module_gzip_bytes 6291456

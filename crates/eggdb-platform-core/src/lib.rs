@@ -9,6 +9,9 @@
 use core::fmt;
 use core::time::Duration;
 
+#[cfg(feature = "std")]
+pub mod time;
+
 /// The result of a platform operation.
 pub type Result<T> = core::result::Result<T, Error>;
 

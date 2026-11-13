@@ -21,6 +21,11 @@ impl DatabaseFile {
         Ok(Self::Memory(MemoryFile::new()))
     }
 
+    /// A file in memory holding `bytes`, opened for writing.
+    pub fn memory_with(bytes: Vec<u8>) -> Self {
+        Self::Memory(MemoryFile::with_bytes(bytes))
+    }
+
     /// Whether the file lives in memory.
     pub fn is_memory(&self) -> bool {
         matches!(self, Self::Memory(_))

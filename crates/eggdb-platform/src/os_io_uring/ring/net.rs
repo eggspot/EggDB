@@ -9,7 +9,8 @@ use std::io;
 use std::net::TcpStream;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 const IORING_OP_POLL_ADD: u8 = 6;
 const IORING_OP_ACCEPT: u8 = 13;

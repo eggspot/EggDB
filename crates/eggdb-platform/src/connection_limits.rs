@@ -14,7 +14,8 @@ use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use eggdb_platform_core::time::Instant;
+use std::time::Duration;
 
 /// How long a client has from connecting to finishing its login, unless a server is told
 /// otherwise.
@@ -341,7 +342,8 @@ mod tests {
     use super::{LoginSlots, MemoryBudget, UNCOUNTED_BUFFER_BYTES};
     use std::net::IpAddr;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use eggdb_platform_core::time::Instant;
+    use std::time::Duration;
 
     fn address(text: &str) -> Option<IpAddr> {
         text.parse().ok()

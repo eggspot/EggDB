@@ -47,7 +47,7 @@ impl Limits {
         query: &str,
         row: &mut dyn FnMut(String) -> Result<(), String>,
     ) -> Result<(), String> {
-        let started = std::time::Instant::now();
+        let started = eggdb_platform::time::Instant::now();
         let mut counted = 0u64;
         let limits = *self;
         read(prefixes, source, query, &mut |text| {

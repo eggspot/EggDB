@@ -935,7 +935,7 @@ fn progress_reports_lines_tables_and_rows_during_a_long_copy() {
 fn a_line_of_a_million_empty_statements_is_read_in_one_pass() {
     let mut line = ";".repeat(1_000_000);
     line.push_str(" SELECT 1; SELECT 2;\n");
-    let started = std::time::Instant::now();
+    let started = eggdb_platform_core::time::Instant::now();
     let found = statements_of(&line);
     assert_eq!(
         found,

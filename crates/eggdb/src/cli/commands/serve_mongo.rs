@@ -32,8 +32,8 @@ pub(super) fn config(
 pub(super) fn store_seed() -> [u8; 8] {
     let mut seed = [0u8; 8];
     if eggdb_platform::secure_random::fill(&mut seed).is_err() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = eggdb_platform::time::SystemTime::now()
+            .duration_since(eggdb_platform::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos() as u64);
         seed = (nanos ^ u64::from(std::process::id()).rotate_left(32)).to_le_bytes();
     }
