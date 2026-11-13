@@ -6,7 +6,8 @@
 //! The functions: [`eggdb_wasm_input`] sizes the input buffer and returns where it starts;
 //! [`eggdb_wasm_open`] opens (or creates) the database at the path in the input, `:memory:` for
 //! one in memory, in a dialect (0 PostgreSQL, 1 SQLite, 2 MySQL, 3 SQL Server, 4 Oracle) and
-//! returns a handle, or 0; [`eggdb_wasm_execute`] runs the SQL in the input on a handle;
+//! returns a handle, or 0; opening a path that is already open starts another session on the
+//! same database, so the browser worker serves every tab's session from one engine (D1089); [`eggdb_wasm_execute`] runs the SQL in the input on a handle;
 //! [`eggdb_wasm_output`] and [`eggdb_wasm_output_len`] locate the last answer;
 //! [`eggdb_wasm_close`] ends a handle; [`eggdb_wasm_version`] answers the version.
 //!
@@ -31,6 +32,7 @@ thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static SESSIONS: RefCell<Vec<Option<OpenSession>>> = const { RefCell::new(Vec::new()) };
+    static STORES: RefCell<Vec<(String, &'static Store<'static>)>> = const { RefCell::new(Vec::new()) };
 }
 
 const DIALECTS: [Dialect; 5] = [
@@ -143,15 +145,34 @@ fn open(path: &str, dialect: u32) -> Result<OpenSession, String> {
     let dialect = *DIALECTS
         .get(usize::try_from(dialect).unwrap_or(usize::MAX))
         .ok_or_else(|| format!("dialect {dialect} is not one of 0 to 4"))?;
-    let database = if path == ":memory:" {
-        Database::in_memory()
-    } else {
+    Ok(store_at(path)?.session(dialect))
+}
+
+fn store_at(path: &str) -> Result<&'static Store<'static>, String> {
+    let shared = path != ":memory:";
+    if shared
+        && let Some(store) = STORES.with(|stores| {
+            stores
+                .borrow()
+                .iter()
+                .find(|(opened, _)| opened == path)
+                .map(|(_, store)| *store)
+        })
+    {
+        return Ok(store);
+    }
+    let database = if shared {
         Database::open_with(path, eggdb::Options::default().create_if_missing(true))
+    } else {
+        Database::in_memory()
     };
     let database: &'static Database =
         Box::leak(Box::new(database.map_err(|error| error.to_string())?));
     let store: &'static Store<'static> = Box::leak(Box::new(database.sql_store()));
-    Ok(store.session(dialect))
+    if shared {
+        STORES.with(|stores| stores.borrow_mut().push((path.to_owned(), store)));
+    }
+    Ok(store)
 }
 
 /// Opens the database at the path in the input in `dialect` and returns its handle, or 0 with
@@ -271,5 +292,25 @@ mod tests {
         assert_eq!(eggdb_wasm_open(9), 0);
         eggdb_wasm_version();
         assert!(output().starts_with("{\"version\":\""));
+    }
+
+    #[test]
+    fn two_sessions_on_one_path_share_one_database_in_their_own_dialects() {
+        let path = std::env::temp_dir().join(format!("eggdb-wasm-shared-{}.eggdb", std::process::id()));
+        let path = path.to_str().unwrap().to_owned();
+        write_input(&path);
+        let postgres = eggdb_wasm_open(0);
+        assert_ne!(postgres, 0, "{}", output());
+        write_input(&path);
+        let sqlite = eggdb_wasm_open(1);
+        assert_ne!(sqlite, 0, "{}", output());
+        write_input("CREATE TABLE shared (id integer PRIMARY KEY); INSERT INTO shared VALUES (7)");
+        eggdb_wasm_execute(postgres);
+        write_input("SELECT id FROM shared");
+        eggdb_wasm_execute(sqlite);
+        assert!(output().contains("[[\"7\"]]"), "{}", output());
+        eggdb_wasm_close(postgres);
+        eggdb_wasm_close(sqlite);
+        let _ = std::fs::remove_file(&path);
     }
 }

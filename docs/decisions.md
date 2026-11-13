@@ -1113,3 +1113,4 @@ its full title with its status.
 - [D1086](decisions/D1086.md) Code-only batch 734 (M17): a fixed-memory mode with one limit split across the engine and capped in the allocator
 - [D1087](decisions/D1087.md) Code-only batch 735 (M17): write-amplification and flash-wear budgets, and battery-aware checkpoints
 - [D1088](decisions/D1088.md) Code-only batch 736 (M17): suspend and resume for iOS background limits and Android Doze
+- [D1089](decisions/D1089.md) Code-only batch 737 (M17): the browser build in a worker with OPFS sync access handles, one database for every tab, and a real sleep

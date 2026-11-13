@@ -125,7 +125,7 @@ SELECT id, name FROM customers ORDER BY id;</textarea>
   <div class="buttons"><button class="secondary" id="cancel" autofocus>Cancel</button><button class="primary" id="confirm-reset">Reset database</button></div>
 </dialog>
 <script type="module">
-import { EggDB } from "./eggdb.js";
+import { EggDB, SharedEggDB } from "./eggdb.js";
 const $ = (id) => document.getElementById(id);
 const PATH = "/playground.eggdb";
 const MAX_ROWS = 1000;
@@ -200,7 +200,9 @@ function storage() {
 }
 async function open(dialect) {
   try {
-    db = await EggDB.open({ wasm: "eggdb.wasm", path: PATH, dialect, persist: true });
+    db = typeof Worker === "function" && navigator.locks
+      ? await SharedEggDB.open({ wasm: "eggdb.wasm", path: PATH, dialect })
+      : await EggDB.open({ wasm: "eggdb.wasm", path: PATH, dialect, persist: true });
   } catch {
     db = await EggDB.open({ wasm: "eggdb.wasm", path: PATH, dialect, persist: false });
   }

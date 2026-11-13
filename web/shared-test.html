@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>EggDB shared-database test</title></head>
+<body>
+<pre id="result">running</pre>
+<script type="module">
+import { SharedEggDB } from "./eggdb.js";
+const result = document.getElementById("result");
+const path = `/shared-test-${Date.now()}.eggdb`;
+function check(condition, what) {
+  if (!condition) throw new Error(what);
+}
+try {
+  const first = await SharedEggDB.open({ wasm: "eggdb.wasm", path, dialect: "postgresql" });
+  const second = await SharedEggDB.open({ wasm: "eggdb.wasm", path, dialect: "postgresql" });
+  check(first.leader && !second.leader, `one leader: ${first.leader} ${second.leader}`);
+  let out = await first.execute("CREATE TABLE t (id integer PRIMARY KEY, tab text); INSERT INTO t VALUES (1, 'first')");
+  check(!out.error, JSON.stringify(out));
+  out = await second.execute("INSERT INTO t VALUES (2, 'second'); SELECT count(*) FROM t");
+  check(!out.error && out.results[1].rows[0][0] === "2", JSON.stringify(out));
+  first.close();
+  for (let tries = 0; tries < 100 && !second.leader; tries++) await new Promise((done) => setTimeout(done, 50));
+  check(second.leader, "the second tab took the database over");
+  out = await second.execute("SELECT tab FROM t ORDER BY id");
+  check(!out.error && JSON.stringify(out.results[0].rows) === '[["first"],["second"]]', JSON.stringify(out));
+  result.textContent = `eggdb-shared-test: passed (durable: ${second.durable})`;
+  second.close();
+} catch (error) {
+  result.textContent = `eggdb-shared-test: failed ${error}`;
+}
+</script>
+</body>
+</html>

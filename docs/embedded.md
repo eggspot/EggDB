@@ -644,6 +644,27 @@ The desktop client's connect card runs in the browser too (D256): build with
 card on a canvas and keeps a hidden ARIA copy of its accessibility tree over it, so screen
 readers and the `Tab` key work as in the native window.
 
+In a page, `SharedEggDB` runs the engine in a worker instead (D1089), so a long statement never
+blocks the page, and every tab of the site shares one database:
+
+```js
+import { SharedEggDB } from "./eggdb.js";
+const db = await SharedEggDB.open({ wasm: "eggdb.wasm", path: "/app.eggdb", dialect: "sqlite" });
+const out = await db.execute("SELECT count(*) FROM orders");
+```
+
+Each tab starts `web/eggdb-worker.js`. The first to take the Web Lock named after the database
+leads: it opens the file through OPFS synchronous access handles, so every write goes straight
+to the file and a sync makes it durable, with nothing saved afterwards. The other tabs send their
+statements to the leader over a `BroadcastChannel` and get the answers back; each tab has its own
+session in its own dialect. When the leading tab closes, the next one waiting for the lock opens the
+file and leads. A statement a tab sent to a leader that closed before answering fails with a
+message saying it may or may not have run, since only the closed tab knew. `db.leader` says
+whether this tab leads, and `db.durable` whether the file has synchronous access handles; a
+browser without them falls back to the in-page database below. A statement that sleeps
+(`pg_sleep`) really waits, with `Atomics.wait` where the page allows it and a timed loop where it
+does not.
+
 `out.results` holds one `{ tag, columns, rows }` per statement (`columns` is `null` for a
 command such as `CREATE TABLE`), and `out.error` is set when a statement fails.
 

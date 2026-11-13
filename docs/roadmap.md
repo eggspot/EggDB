@@ -2011,7 +2011,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Write-amplification and flash-wear budgets, and battery-aware background work (D41). **Code written, unbuilt** (code-only mode, 2026-11-13, D1087): `WearStats`, `blocks_left`, the Cortex-M run's `flash_write_amplification_milli` budget, and `Database::set_power_source` (`eggdb serve` follows the system's power source; `eggdb_set_power_source` in the C API).
 - Correct behavior under iOS background limits and Android Doze (D41). **Code written, unbuilt** (code-only mode, 2026-11-13, D1088): `Database::suspend` and `resume` (checkpoint, sync and release the file lock in the background; `NeedsReopen` when another program changed the file), `ErrorKind::Suspended`, `eggdb_suspend` and `eggdb_resume`, and the Swift and Kotlin `KeyValue` calls.
 - The browser build in a worker with OPFS synchronous access handles, a database shared between
-  tabs and a real `poll_oneoff` sleep (D221).
+  tabs and a real `poll_oneoff` sleep (D221). **Code written, unbuilt** (code-only mode, 2026-11-13, D1089):
+  `web/eggdb-worker.js` and `SharedEggDB` (a leader per database by Web Lock, other tabs over a
+  `BroadcastChannel`), `OpfsSyncFiles`, a sleeping `poll_oneoff`, and `web/shared-test.html` in CI's `browser` job.
 - `wasm32-unknown-unknown` without WASI, and size budgets for the module (D6, D221).
 - An IndexedDB-compatible API in the browser build (D48).
 - Android emulator runs, a Gradle module and Android Archive, and the 32-bit ABIs in CI (D222).

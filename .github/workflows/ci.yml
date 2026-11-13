@@ -1886,6 +1886,9 @@ jobs:
           google-chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8000/test.html > "$RUNNER_TEMP/dom.html"
           cat "$RUNNER_TEMP/dom.html"
           grep -q "eggdb-browser-test: passed" "$RUNNER_TEMP/dom.html"
+          google-chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=30000 --dump-dom http://127.0.0.1:8000/shared-test.html > "$RUNNER_TEMP/shared.html"
+          grep -o "eggdb-shared-test: [^<]*" "$RUNNER_TEMP/shared.html" || true
+          grep -q "eggdb-shared-test: passed" "$RUNNER_TEMP/shared.html"
           cargo build --release -p eggdb-wasm --target wasm32-wasip1 --features gui
           cp target/wasm32-wasip1/release/eggdb_wasm.wasm web/eggdb-gui.wasm
           ls -l web/eggdb-gui.wasm
