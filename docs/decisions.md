@@ -1120,3 +1120,4 @@ its full title with its status.
 - [D1093](decisions/D1093.md) Code-only batch 741 (M17): iOS Simulator runs, and a Swift package that downloads each release's XCFramework
 - [D1094](decisions/D1094.md) Code-only batch 742 (M17): prepared statements and transactions in the mobile bindings, gated against SQLite's bindings
 - [D1095](decisions/D1095.md) Code-only batch 743 (M17): the whole workspace tested on six other CPUs under QEMU, in shards
+- [D1096](decisions/D1096.md) Code-only batch 744 (M17): the container image's download size and pull time measured at every release and budgeted

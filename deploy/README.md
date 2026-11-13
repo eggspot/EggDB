@@ -30,3 +30,12 @@ Clouds, each a starting point to adapt (network, sizes, backups):
 
 CI lints the three (cfn-lint, `az bicep build`, shellcheck). An operator and a Terraform
 provider come with replication and clusters (D18).
+
+## Image size
+
+The image is `FROM scratch` with the one static binary, so its download is the binary's
+compressed size. Each release measures it for amd64 and arm64, and the time a cold `docker pull`
+takes, with `scripts/footprint-image.sh`, and adds them to the release notes under "Container
+image", with the change from the previous release (D1096). Their budgets are the `container` lines
+of `benchmarks/footprint.txt`, which the weekly performance pass lowers to what was measured, so the
+image is kept from growing.

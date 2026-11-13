@@ -25,3 +25,6 @@ wasm32 wasi module_bytes 16777216
 wasm32 wasi module_gzip_bytes 6291456
 wasm32 bare module_bytes 16777216
 wasm32 bare module_gzip_bytes 6291456
+container amd64 image_compressed_bytes 33554432
+container arm64 image_compressed_bytes 33554432
+container amd64 pull_ms 15000

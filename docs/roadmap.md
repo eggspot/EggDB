@@ -2034,7 +2034,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-13, D1095): `scripts/qemu-test.sh` and the `other-cpus` matrix of six CPUs by three shards.
 - Builds and tests on riscv64, powerpc64le and loongarch64 under QEMU (D8). Check: the
   emulated-CPU CI job on `main`. **Code written, unbuilt** (code-only mode, 2026-11-13, D1095): the same matrix.
-- The container image's size and pull time measured and kept from growing (D14, D224).
+- The container image's size and pull time measured and kept from growing (D14, D224). **Code written, unbuilt** (code-only mode,
+  2026-11-13, D1096): `scripts/footprint-image.sh`, the release's "Container image" notes, and the `container` budgets.
 
 ### M18 The other ways of scaling
 - Leaderless quorums over the network, wired under `eggdb serve` (D225).

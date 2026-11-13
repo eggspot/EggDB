@@ -361,7 +361,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@v7
@@ -404,4 +404,23 @@ jobs:
             docker buildx imagetools create -t "$image:$version" "$image:$version-amd64" "$image:$version-arm64"
           fi
           docker run --rm "$image:$version" --version | grep -F "$version"
+      - name: Measure the image's download size and pull time, and add them to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${TAG#v}"
+          before=$(git ls-remote --tags origin 'refs/tags/v*' | sed -n 's|.*refs/tags/\(v[0-9][0-9.]*\)$|\1|p' | sort -V | awk -v tag="$TAG" '$0 == tag { print last; exit } { last = $0 }')
+          previous=$([ -n "$before" ] && echo "ghcr.io/${GITHUB_REPOSITORY,,}:${before#v}" || true)
+          scripts/footprint-image.sh "$image" "$previous" "$RUNNER_TEMP/image-footprint.txt" \
+            || echo "::warning::the image is over a budget in benchmarks/footprint.txt; the weekly performance pass trims it (D354)"
+          {
+            gh release view "$TAG" --json body --jq .body | sed '/^## Container image$/,$d'
+            echo
+            echo '## Container image'
+            echo
+            echo '| Measure | Value |'
+            echo '|---------|-------|'
+            awk '{ printf "| %s %s | %s |\n", $2, $3, $4 }' "$RUNNER_TEMP/image-footprint.txt"
+          } > "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
 
