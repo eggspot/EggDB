@@ -1781,7 +1781,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D743), with notifications on `eggdb_services` and the ZooKeeper watches of D742.
 - JsonLogic targeting and fractional rollouts for feature flags (D247). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D440).
-- Benchmarks at scale: TPC-C and YCSB on a cluster (D7, D18).
+- Benchmarks at scale: TPC-C and YCSB on a cluster (D7, D18). **Code written, unbuilt** (code-only mode,
+  2026-11-13, D1053): `eggdb-cluster-bench` (YCSB A, B, C and a TPC-C mix on `serve --cluster`), weekly in
+  `cluster-bench.yml`. Left: several machines, and an audited TPC-C (owner: cost).
 
 ### M16 Messaging, wide-column, objects and observability
 - Kafka consumer groups (D33, D213). **Code written, unbuilt** (code-only mode, 2026-11-11, D525). Static

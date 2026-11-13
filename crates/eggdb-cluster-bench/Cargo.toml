@@ -1,0 +1,14 @@
+[package]
+name = "eggdb-cluster-bench"
+description = "Benchmarks EggDB at scale: YCSB workloads A, B and C and a TPC-C mix against a Raft cluster of eggdb serve --cluster processes, over the PostgreSQL protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+eggdb-pgwire = { path = "../eggdb-pgwire" }
+
+[lints]
+workspace = true

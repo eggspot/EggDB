@@ -260,3 +260,17 @@ Budgets raised under D253 before D354, with their reasons:
   10,625,048 on Linux (5.3%) and 7,916,000 to 8,333,552 on macOS (5.3%). The new budgets are
   those sizes plus about 1%. The client's work of this batch (D329) is linked only into
   `eggdb-gui`.
+
+## Cluster benchmarks (D1053)
+
+`eggdb-cluster-bench <eggdb binary> <work directory> --workload ycsb-a|ycsb-b|ycsb-c|tpcc` starts a
+Raft cluster of `eggdb serve --cluster` processes (three by default) on one machine, loads YCSB's
+`usertable` or a TPC-C schema through the leader, and runs the workload from several clients over
+the PostgreSQL protocol: YCSB updates go to the leader and reads are spread over every node, with
+Zipfian key choice; TPC-C runs New-Order, Payment, Order-Status, Delivery and Stock-Level in the
+specification's mix, each client at home in one warehouse. It prints throughput, p50 and p99 per
+operation, and tpmC (New-Order transactions per minute) for TPC-C. The cardinalities are reduced
+(10,000 items, 300 customers per district) so a run loads in seconds, and the result is not an
+audited TPC-C number. `cluster-bench.yml` runs all four workloads weekly, in the Saturday
+performance pass, and keeps the results as an artifact.
+

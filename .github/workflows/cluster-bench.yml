@@ -1,0 +1,65 @@
+name: cluster-bench
+
+on:
+  schedule:
+    - cron: "17 6 * * 6"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "How long each workload runs, in seconds"
+        required: false
+        default: "60"
+
+concurrency:
+  group: cluster-bench
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  BENCH_SECONDS: ${{ inputs.seconds || '60' }}
+
+jobs:
+  cluster-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-cluster-bench-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-cluster-bench-${{ runner.os }}-
+      - name: YCSB A, B and C and a TPC-C mix on a three-node Raft cluster (D7, D18, D1053)
+        run: |
+          cargo build --release -p eggdb -p eggdb-cluster-bench
+          set -o pipefail
+          for workload in ycsb-a ycsb-b ycsb-c tpcc; do
+            target/release/eggdb-cluster-bench target/release/eggdb "$RUNNER_TEMP/cluster-$workload" --workload "$workload" --seconds "$BENCH_SECONDS" --nodes 3 --clients 8 | tee -a "$RUNNER_TEMP/cluster-bench.txt"
+          done
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Cluster benchmarks"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/cluster-bench.txt" 2>/dev/null || echo "no results"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cluster-bench-${{ github.run_number }}
+          path: ${{ runner.temp }}/cluster-bench.txt
+          retention-days: 90
