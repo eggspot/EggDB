@@ -1058,3 +1058,4 @@ its full title with its status.
 - [D1031](decisions/D1031.md) Code-only batch 679 (M14): PostgreSQL's logical replication protocol served
 - [D1032](decisions/D1032.md) Code-only batch 680 (M14): invisible columns for HIDDEN and INVISIBLE
 - [D1033](decisions/D1033.md) Code-only batch 681 (M14): materialized views kept up to date at commit and continuous queries
+- [D1034](decisions/D1034.md) Code-only batch 682 (M14): eggdb follow of pgoutput protocols 3 and 4, more binary types, moved and replaced tables

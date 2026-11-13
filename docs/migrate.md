@@ -174,7 +174,14 @@ PostgreSQL commits, until you stop it. From PostgreSQL 14 it reads `pgoutput`'s 
 large transaction is streamed while it runs and kept (in memory up to 64 MiB, then in a
 `<file>.follow-<xid>.spool` file next to the database file) until it commits, and dropped, with
 any rolled-back savepoint, when it aborts; tuples come in binary when every followed column's type
-is one follow reads in binary, and in text otherwise:
+is one follow reads in binary (the built-in scalar, network and geometric types, arrays, ranges
+and multiranges of them, and the source's enums and domains), and in text otherwise. From
+PostgreSQL 15 it asks for two-phase messages: a transaction prepared with `PREPARE TRANSACTION`
+is kept in the file's follow state until its `COMMIT PREPARED` applies it or its
+`ROLLBACK PREPARED` drops it; from PostgreSQL 16 large transactions stream in the parallel form
+(protocol 4). A table renamed or moved to another schema on the source is renamed or moved in
+the file; a table dropped and created again under the same name is replaced and copied again
+from its own snapshot:
 
 ```sh
 PGPASSWORD=... eggdb follow --create app.db 'postgres://ada@db.example.com/app?sslmode=verify-full&sslrootcert=ca.pem'

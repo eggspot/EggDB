@@ -1,7 +1,9 @@
 //! The text form of a column value that `pgoutput` sent in its type's binary send format
-//! (`binary 'true'`), for the built-in types EggDB maps.
+//! (`binary 'true'`), for the built-in types EggDB maps, arrays, ranges and multiranges of them,
+//! network and geometric types, and the source's own enums and domains.
 
 use super::ReplicationError;
+use std::collections::HashMap;
 
 const BOOL: u32 = 16;
 const BYTEA: u32 = 17;
@@ -23,8 +25,19 @@ const TIMETZ: u32 = 1266;
 const NUMERIC: u32 = 1700;
 const UUID: u32 = 2950;
 const JSONB: u32 = 3802;
+const CIDR: u32 = 650;
+const INET: u32 = 869;
+const MACADDR: u32 = 829;
+const MACADDR8: u32 = 774;
+const POINT: u32 = 600;
+const LSEG: u32 = 601;
+const PATH: u32 = 602;
+const BOX: u32 = 603;
+const POLYGON: u32 = 604;
+const LINE: u32 = 628;
+const CIRCLE: u32 = 718;
 
-const DECODED: [u32; 20] = [
+const DECODED: &[u32] = &[
     BOOL,
     BYTEA,
     INT8,
@@ -45,7 +58,86 @@ const DECODED: [u32; 20] = [
     NUMERIC,
     UUID,
     JSONB,
+    CIDR,
+    INET,
+    MACADDR,
+    MACADDR8,
+    POINT,
+    LSEG,
+    PATH,
+    BOX,
+    POLYGON,
+    LINE,
+    CIRCLE,
 ];
+
+const BUILTIN_ARRAYS: &[(u32, u32)] = &[
+    (1000, BOOL),
+    (1001, BYTEA),
+    (1005, INT2),
+    (1007, INT4),
+    (1016, INT8),
+    (1009, TEXT),
+    (199, JSON),
+    (1021, FLOAT4),
+    (1022, FLOAT8),
+    (1014, BPCHAR),
+    (1015, VARCHAR),
+    (1182, DATE),
+    (1183, TIME),
+    (1115, TIMESTAMP),
+    (1185, TIMESTAMPTZ),
+    (1187, INTERVAL),
+    (1270, TIMETZ),
+    (1231, NUMERIC),
+    (2951, UUID),
+    (3807, JSONB),
+    (651, CIDR),
+    (1041, INET),
+    (1040, MACADDR),
+    (775, MACADDR8),
+    (1017, POINT),
+    (1018, LSEG),
+    (1019, PATH),
+    (1020, BOX),
+    (1027, POLYGON),
+    (629, LINE),
+    (719, CIRCLE),
+    (3905, 3904),
+    (3907, 3906),
+    (3909, 3908),
+    (3911, 3910),
+    (3913, 3912),
+    (3927, 3926),
+];
+
+const BUILTIN_RANGES: &[(u32, u32)] = &[
+    (3904, INT4),
+    (3906, NUMERIC),
+    (3908, TIMESTAMP),
+    (3910, TIMESTAMPTZ),
+    (3912, DATE),
+    (3926, INT8),
+];
+
+const BUILTIN_MULTIRANGES: &[(u32, u32)] = &[
+    (4451, 3904),
+    (4532, 3906),
+    (4533, 3908),
+    (4534, 3910),
+    (4535, 3912),
+    (4536, 3926),
+];
+
+const MAX_TYPE_DEPTH: usize = 8;
+const MAX_ARRAY_DIMENSIONS: usize = 6;
+const PGSQL_AF_INET: u8 = 2;
+const PGSQL_AF_INET6: u8 = 3;
+const RANGE_EMPTY: u8 = 0x01;
+const RANGE_LOWER_INCLUSIVE: u8 = 0x02;
+const RANGE_UPPER_INCLUSIVE: u8 = 0x04;
+const RANGE_LOWER_INFINITE: u8 = 0x08;
+const RANGE_UPPER_INFINITE: u8 = 0x10;
 
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 const DAYS_FROM_CIVIL_EPOCH_TO_POSTGRES_EPOCH: i64 = 10_957;
@@ -57,9 +149,499 @@ const NUMERIC_NEGATIVE_INFINITY: u16 = 0xF000;
 const NUMERIC_BASE: u16 = 10_000;
 const JSONB_VERSION: u8 = 1;
 
-/// Whether a value of this type, sent in its binary send format, can be read back into text.
+/// Whether a value of this built-in type, sent in its binary send format, can be read back
+/// into text.
 pub fn decodes_binary(type_oid: u32) -> bool {
-    DECODED.contains(&type_oid)
+    BinaryTypes::default().decodes(type_oid)
+}
+
+/// What one of the source's own types is, as its catalog (`pg_type`, `pg_range`) says, so that
+/// its binary values can be read back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserType {
+    /// An enum: its binary form is the label.
+    Enum,
+    /// A domain: its binary form is its base type's.
+    Domain {
+        /// The base type's OID.
+        base: u32,
+    },
+    /// An array of `element`.
+    Array {
+        /// The element type's OID.
+        element: u32,
+    },
+    /// A range of `subtype`.
+    Range {
+        /// The subtype's OID.
+        subtype: u32,
+    },
+    /// A multirange of the range type `range`.
+    Multirange {
+        /// The range type's OID.
+        range: u32,
+    },
+}
+
+/// The types whose binary values can be read back: the built-in ones, their arrays, ranges
+/// and multiranges, and the source's own types added with [`BinaryTypes::add`].
+#[derive(Debug, Clone, Default)]
+pub struct BinaryTypes {
+    user: HashMap<u32, UserType>,
+}
+
+fn builtin_kind(type_oid: u32) -> Option<UserType> {
+    let find = |table: &[(u32, u32)]| {
+        table
+            .iter()
+            .find(|(oid, _)| *oid == type_oid)
+            .map(|(_, inner)| *inner)
+    };
+    find(BUILTIN_ARRAYS)
+        .map(|element| UserType::Array { element })
+        .or_else(|| find(BUILTIN_RANGES).map(|subtype| UserType::Range { subtype }))
+        .or_else(|| find(BUILTIN_MULTIRANGES).map(|range| UserType::Multirange { range }))
+}
+
+fn too_deep(type_oid: u32) -> ReplicationError {
+    ReplicationError(format!(
+        "the type {type_oid} nests other types more than {MAX_TYPE_DEPTH} deep"
+    ))
+}
+
+impl BinaryTypes {
+    /// Only the built-in types.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one of the source's own types.
+    pub fn add(&mut self, type_oid: u32, kind: UserType) {
+        self.user.insert(type_oid, kind);
+    }
+
+    fn kind(&self, type_oid: u32) -> Option<UserType> {
+        self.user
+            .get(&type_oid)
+            .copied()
+            .or_else(|| builtin_kind(type_oid))
+    }
+
+    /// Whether a value of this type, sent in its binary send format, can be read back.
+    pub fn decodes(&self, type_oid: u32) -> bool {
+        self.decodes_at(type_oid, 0)
+    }
+
+    fn decodes_at(&self, type_oid: u32, depth: usize) -> bool {
+        if depth > MAX_TYPE_DEPTH {
+            return false;
+        }
+        if DECODED.contains(&type_oid) {
+            return true;
+        }
+        match self.kind(type_oid) {
+            Some(UserType::Enum) => true,
+            Some(UserType::Domain { base: inner })
+            | Some(UserType::Array { element: inner })
+            | Some(UserType::Range { subtype: inner })
+            | Some(UserType::Multirange { range: inner }) => self.decodes_at(inner, depth + 1),
+            None => false,
+        }
+    }
+
+    /// The text form PostgreSQL's input function accepts for a value of `type_oid` sent in
+    /// its binary send format.
+    pub fn text(&self, type_oid: u32, bytes: &[u8]) -> Result<String, ReplicationError> {
+        self.text_at(type_oid, bytes, 0)
+    }
+
+    fn text_at(
+        &self,
+        type_oid: u32,
+        bytes: &[u8],
+        depth: usize,
+    ) -> Result<String, ReplicationError> {
+        if depth > MAX_TYPE_DEPTH {
+            return Err(too_deep(type_oid));
+        }
+        if DECODED.contains(&type_oid) {
+            return scalar_text(type_oid, bytes);
+        }
+        match self.kind(type_oid) {
+            Some(UserType::Enum) => utf8(bytes, type_oid),
+            Some(UserType::Domain { base }) => self.text_at(base, bytes, depth + 1),
+            Some(UserType::Array { .. }) => self.array_text(type_oid, bytes, depth),
+            Some(UserType::Range { subtype }) => self.range_text(subtype, bytes, depth),
+            Some(UserType::Multirange { range }) => {
+                self.multirange_text(type_oid, range, bytes, depth)
+            }
+            None => scalar_text(type_oid, bytes),
+        }
+    }
+
+    fn array_text(
+        &self,
+        type_oid: u32,
+        bytes: &[u8],
+        depth: usize,
+    ) -> Result<String, ReplicationError> {
+        let mut reader = Reader::new(bytes, type_oid);
+        let dimensions = usize::try_from(reader.i32()?).map_err(|_| malformed(type_oid))?;
+        if dimensions > MAX_ARRAY_DIMENSIONS {
+            return Err(malformed(type_oid));
+        }
+        reader.i32()?;
+        let element = reader.u32()?;
+        let mut lengths = Vec::with_capacity(dimensions);
+        let mut lower_bounds = Vec::with_capacity(dimensions);
+        let mut count = 1usize;
+        for _ in 0..dimensions {
+            let length = usize::try_from(reader.i32()?).map_err(|_| malformed(type_oid))?;
+            lower_bounds.push(i64::from(reader.i32()?));
+            count = count.checked_mul(length).ok_or_else(|| malformed(type_oid))?;
+            lengths.push(length);
+        }
+        if dimensions == 0 {
+            return Ok("{}".to_owned());
+        }
+        if count > reader.remaining() / 4 {
+            return Err(malformed(type_oid));
+        }
+        let delimiter = if element == BOX { ';' } else { ',' };
+        let mut elements = Vec::with_capacity(count);
+        for _ in 0..count {
+            elements.push(match reader.value()? {
+                None => "NULL".to_owned(),
+                Some(value) => array_element(&self.text_at(element, value, depth + 1)?, delimiter),
+            });
+        }
+        if reader.remaining() != 0 {
+            return Err(malformed(type_oid));
+        }
+        let mut text = String::new();
+        if lower_bounds.iter().any(|bound| *bound != 1) {
+            for (length, lower) in lengths.iter().zip(&lower_bounds) {
+                text.push_str(&format!("[{lower}:{}]", lower + *length as i64 - 1));
+            }
+            text.push('=');
+        }
+        let mut next = 0;
+        nest_array(&mut text, &lengths, &elements, &mut next, delimiter);
+        Ok(text)
+    }
+
+    fn range_text(
+        &self,
+        subtype: u32,
+        bytes: &[u8],
+        depth: usize,
+    ) -> Result<String, ReplicationError> {
+        let mut reader = Reader::new(bytes, subtype);
+        let flags = reader.u8()?;
+        if flags & RANGE_EMPTY != 0 {
+            return if reader.remaining() == 0 {
+                Ok("empty".to_owned())
+            } else {
+                Err(malformed(subtype))
+            };
+        }
+        let mut bound = |infinite: u8| -> Result<String, ReplicationError> {
+            if flags & infinite != 0 {
+                return Ok(String::new());
+            }
+            let value = reader.value()?.ok_or_else(|| malformed(subtype))?;
+            Ok(range_bound(&self.text_at(subtype, value, depth + 1)?))
+        };
+        let lower = bound(RANGE_LOWER_INFINITE)?;
+        let upper = bound(RANGE_UPPER_INFINITE)?;
+        if reader.remaining() != 0 {
+            return Err(malformed(subtype));
+        }
+        Ok(format!(
+            "{}{lower},{upper}{}",
+            if flags & RANGE_LOWER_INCLUSIVE != 0 { '[' } else { '(' },
+            if flags & RANGE_UPPER_INCLUSIVE != 0 { ']' } else { ')' }
+        ))
+    }
+
+    fn multirange_text(
+        &self,
+        type_oid: u32,
+        range: u32,
+        bytes: &[u8],
+        depth: usize,
+    ) -> Result<String, ReplicationError> {
+        let mut reader = Reader::new(bytes, type_oid);
+        let count = usize::try_from(reader.i32()?).map_err(|_| malformed(type_oid))?;
+        if count > reader.remaining() / 4 {
+            return Err(malformed(type_oid));
+        }
+        let mut ranges = Vec::with_capacity(count);
+        for _ in 0..count {
+            let value = reader.value()?.ok_or_else(|| malformed(type_oid))?;
+            ranges.push(self.text_at(range, value, depth + 1)?);
+        }
+        if reader.remaining() != 0 {
+            return Err(malformed(type_oid));
+        }
+        Ok(format!("{{{}}}", ranges.join(",")))
+    }
+}
+
+struct Reader<'a> {
+    bytes: &'a [u8],
+    type_oid: u32,
+}
+
+impl<'a> Reader<'a> {
+    fn new(bytes: &'a [u8], type_oid: u32) -> Self {
+        Self { bytes, type_oid }
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], ReplicationError> {
+        let (taken, rest) = self
+            .bytes
+            .split_at_checked(count)
+            .ok_or_else(|| malformed(self.type_oid))?;
+        self.bytes = rest;
+        Ok(taken)
+    }
+
+    fn u8(&mut self) -> Result<u8, ReplicationError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn i32(&mut self) -> Result<i32, ReplicationError> {
+        Ok(i32::from_be_bytes(fixed(self.take(4)?, self.type_oid)?))
+    }
+
+    fn u32(&mut self) -> Result<u32, ReplicationError> {
+        Ok(u32::from_be_bytes(fixed(self.take(4)?, self.type_oid)?))
+    }
+
+    fn f64(&mut self) -> Result<f64, ReplicationError> {
+        Ok(f64::from_bits(u64::from_be_bytes(fixed(
+            self.take(8)?,
+            self.type_oid,
+        )?)))
+    }
+
+    fn value(&mut self) -> Result<Option<&'a [u8]>, ReplicationError> {
+        let length = self.i32()?;
+        if length == -1 {
+            return Ok(None);
+        }
+        let length = usize::try_from(length).map_err(|_| malformed(self.type_oid))?;
+        self.take(length).map(Some)
+    }
+
+    fn finish(&self) -> Result<(), ReplicationError> {
+        if self.bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(malformed(self.type_oid))
+        }
+    }
+}
+
+fn needs_quotes(text: &str, special: &[char]) -> bool {
+    text.is_empty()
+        || text.chars().any(|character| {
+            special.contains(&character)
+                || character.is_ascii_whitespace()
+                || character == '\u{0B}'
+        })
+}
+
+fn array_element(text: &str, delimiter: char) -> String {
+    let special = ['"', '\\', '{', '}', delimiter];
+    if !needs_quotes(text, &special) && !text.eq_ignore_ascii_case("NULL") {
+        return text.to_owned();
+    }
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        if character == '"' || character == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn range_bound(text: &str) -> String {
+    let special = ['"', '\\', '(', ')', '[', ']', ','];
+    if !needs_quotes(text, &special) {
+        return text.to_owned();
+    }
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        if character == '"' || character == '\\' {
+            quoted.push(character);
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn nest_array(
+    text: &mut String,
+    lengths: &[usize],
+    elements: &[String],
+    next: &mut usize,
+    delimiter: char,
+) {
+    let Some((length, inner)) = lengths.split_first() else {
+        if let Some(element) = elements.get(*next) {
+            text.push_str(element);
+        }
+        *next += 1;
+        return;
+    };
+    text.push('{');
+    for index in 0..*length {
+        if index > 0 {
+            text.push(delimiter);
+        }
+        nest_array(text, inner, elements, next, delimiter);
+    }
+    text.push('}');
+}
+
+fn ipv6_text(address: &[u8; 16]) -> String {
+    let groups: Vec<u16> = address
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_be_bytes(*pair))
+        .collect();
+    let mut best = (0usize, 0usize);
+    let mut index = 0;
+    while index < groups.len() {
+        if groups[index] == 0 {
+            let start = index;
+            while index < groups.len() && groups[index] == 0 {
+                index += 1;
+            }
+            if index - start > best.1 {
+                best = (start, index - start);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    let hex = |range: &[u16]| {
+        range
+            .iter()
+            .map(|group| format!("{group:x}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    if best.1 < 2 {
+        return hex(&groups);
+    }
+    format!(
+        "{}::{}",
+        hex(&groups[..best.0]),
+        hex(&groups[best.0 + best.1..])
+    )
+}
+
+fn network_text(type_oid: u32, bytes: &[u8]) -> Result<String, ReplicationError> {
+    let mut reader = Reader::new(bytes, type_oid);
+    let family = reader.u8()?;
+    let bits = reader.u8()?;
+    reader.u8()?;
+    let length = usize::from(reader.u8()?);
+    let address = reader.take(length)?;
+    reader.finish()?;
+    let (text, maximum) = match (family, address.len()) {
+        (PGSQL_AF_INET, 4) => (
+            format!("{}.{}.{}.{}", address[0], address[1], address[2], address[3]),
+            32,
+        ),
+        (PGSQL_AF_INET6, 16) => (ipv6_text(&fixed(address, type_oid)?), 128),
+        _ => return Err(malformed(type_oid)),
+    };
+    if bits > maximum {
+        return Err(malformed(type_oid));
+    }
+    Ok(if type_oid == CIDR || bits != maximum {
+        format!("{text}/{bits}")
+    } else {
+        text
+    })
+}
+
+fn mac_text(bytes: &[u8], length: usize, type_oid: u32) -> Result<String, ReplicationError> {
+    if bytes.len() != length {
+        return Err(malformed(type_oid));
+    }
+    Ok(bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":"))
+}
+
+fn point_text(reader: &mut Reader<'_>) -> Result<String, ReplicationError> {
+    let x = reader.f64()?;
+    let y = reader.f64()?;
+    Ok(format!("({},{})", float_text(x), float_text(y)))
+}
+
+fn points_text(reader: &mut Reader<'_>, count: usize) -> Result<String, ReplicationError> {
+    if count > reader.remaining() / 16 {
+        return Err(malformed(reader.type_oid));
+    }
+    (0..count)
+        .map(|_| point_text(reader))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|points| points.join(","))
+}
+
+fn geometric_text(type_oid: u32, bytes: &[u8]) -> Result<String, ReplicationError> {
+    let mut reader = Reader::new(bytes, type_oid);
+    let text = match type_oid {
+        POINT => point_text(&mut reader)?,
+        LSEG => format!("[{}]", points_text(&mut reader, 2)?),
+        BOX => points_text(&mut reader, 2)?,
+        PATH => {
+            let closed = reader.u8()? != 0;
+            let count = usize::try_from(reader.i32()?).map_err(|_| malformed(type_oid))?;
+            let points = points_text(&mut reader, count)?;
+            if closed {
+                format!("({points})")
+            } else {
+                format!("[{points}]")
+            }
+        }
+        POLYGON => {
+            let count = usize::try_from(reader.i32()?).map_err(|_| malformed(type_oid))?;
+            format!("({})", points_text(&mut reader, count)?)
+        }
+        LINE => {
+            let a = reader.f64()?;
+            let b = reader.f64()?;
+            let c = reader.f64()?;
+            format!("{{{},{},{}}}", float_text(a), float_text(b), float_text(c))
+        }
+        CIRCLE => {
+            let center = point_text(&mut reader)?;
+            let radius = reader.f64()?;
+            format!("<{center},{}>", float_text(radius))
+        }
+        _ => return Err(malformed(type_oid)),
+    };
+    reader.finish()?;
+    Ok(text)
 }
 
 fn malformed(type_oid: u32) -> ReplicationError {
@@ -266,10 +848,14 @@ fn bytea_text(bytes: &[u8]) -> String {
     text
 }
 
-/// The text form PostgreSQL's input function accepts for a value of `type_oid` sent in its
-/// binary send format; an error for a type [`decodes_binary`] refuses or bytes that do not have
-/// the type's layout.
+/// The text form PostgreSQL's input function accepts for a value of the built-in `type_oid`
+/// sent in its binary send format; an error for a type [`decodes_binary`] refuses or bytes that
+/// do not have the type's layout.
 pub fn binary_value_text(type_oid: u32, bytes: &[u8]) -> Result<String, ReplicationError> {
+    BinaryTypes::default().text(type_oid, bytes)
+}
+
+fn scalar_text(type_oid: u32, bytes: &[u8]) -> Result<String, ReplicationError> {
     Ok(match type_oid {
         BOOL => match fixed::<1>(bytes, type_oid)? {
             [0] => "false".to_owned(),
@@ -320,6 +906,10 @@ pub fn binary_value_text(type_oid: u32, bytes: &[u8]) -> Result<String, Replicat
         INTERVAL => interval_text(bytes)?,
         NUMERIC => numeric_text(bytes)?,
         UUID => uuid_text(bytes)?,
+        INET | CIDR => network_text(type_oid, bytes)?,
+        MACADDR => mac_text(bytes, 6, type_oid)?,
+        MACADDR8 => mac_text(bytes, 8, type_oid)?,
+        POINT | LSEG | PATH | BOX | POLYGON | LINE | CIRCLE => geometric_text(type_oid, bytes)?,
         _ => {
             return Err(ReplicationError(format!(
                 "values of type {type_oid} arrived in binary, which follow cannot read; follow again to read them as text"
@@ -462,7 +1052,7 @@ mod tests {
 
     #[test]
     fn wrong_lengths_and_unknown_types_are_errors_not_panics() {
-        for type_oid in DECODED {
+        for &type_oid in DECODED {
             for length in 0..20 {
                 let bytes = vec![0xFFu8; length];
                 let _ = binary_value_text(type_oid, &bytes);
@@ -471,8 +1061,156 @@ mod tests {
         assert!(binary_value_text(INT4, &[0, 1]).is_err());
         assert!(binary_value_text(TIME, &(-1i64).to_be_bytes()).is_err());
         assert!(binary_value_text(JSONB, b"\x02{}").is_err());
-        assert!(binary_value_text(600, &[0; 16]).is_err());
-        assert!(!decodes_binary(600));
+        assert!(binary_value_text(142, &[0; 16]).is_err());
+        assert!(!decodes_binary(142));
         assert!(decodes_binary(NUMERIC));
+    }
+
+    fn array(element: u32, lengths: &[(i32, i32)], values: &[Option<&[u8]>]) -> Vec<u8> {
+        let mut bytes = (lengths.len() as i32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&i32::from(values.iter().any(Option::is_none)).to_be_bytes());
+        bytes.extend_from_slice(&element.to_be_bytes());
+        for (length, lower) in lengths {
+            bytes.extend_from_slice(&length.to_be_bytes());
+            bytes.extend_from_slice(&lower.to_be_bytes());
+        }
+        for value in values {
+            match value {
+                None => bytes.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(value) => {
+                    bytes.extend_from_slice(&(value.len() as i32).to_be_bytes());
+                    bytes.extend_from_slice(value);
+                }
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn arrays_print_with_their_dimensions_quotes_and_nulls() {
+        let one = 1i32.to_be_bytes();
+        let two = 2i32.to_be_bytes();
+        let three = 3i32.to_be_bytes();
+        let four = 4i32.to_be_bytes();
+        assert_eq!(
+            binary_value_text(1007, &array(INT4, &[(3, 1)], &[Some(&one[..]), None, Some(&three[..])]))
+                .unwrap(),
+            "{1,NULL,3}"
+        );
+        assert_eq!(
+            binary_value_text(
+                1007,
+                &array(INT4, &[(2, 1), (2, 1)], &[Some(&one[..]), Some(&two[..]), Some(&three[..]), Some(&four[..])])
+            )
+            .unwrap(),
+            "{{1,2},{3,4}}"
+        );
+        assert_eq!(
+            binary_value_text(1007, &array(INT4, &[(2, 0)], &[Some(&one[..]), Some(&two[..])])).unwrap(),
+            "[0:1]={1,2}"
+        );
+        assert_eq!(
+            binary_value_text(
+                1009,
+                &array(TEXT, &[(4, 1)], &[Some(&b"a b"[..]), Some(&b""[..]), Some(&b"null"[..]), Some(&b"q\"x"[..])])
+            )
+            .unwrap(),
+            "{\"a b\",\"\",\"null\",\"q\\\"x\"}"
+        );
+        assert_eq!(binary_value_text(1007, &array(INT4, &[], &[])).unwrap(), "{}");
+        let mut lying = array(INT4, &[(1, 1)], &[Some(&one[..])]);
+        lying[12..16].copy_from_slice(&i32::MAX.to_be_bytes());
+        assert!(binary_value_text(1007, &lying).is_err());
+    }
+
+    fn range(flags: u8, bounds: &[&[u8]]) -> Vec<u8> {
+        let mut bytes = vec![flags];
+        for bound in bounds {
+            bytes.extend_from_slice(&(bound.len() as i32).to_be_bytes());
+            bytes.extend_from_slice(bound);
+        }
+        bytes
+    }
+
+    #[test]
+    fn ranges_and_multiranges_print_their_bounds() {
+        let one = 1i32.to_be_bytes();
+        let five = 5i32.to_be_bytes();
+        let closed_open = range(RANGE_LOWER_INCLUSIVE, &[&one[..], &five[..]]);
+        assert_eq!(binary_value_text(3904, &closed_open).unwrap(), "[1,5)");
+        assert_eq!(binary_value_text(3904, &[RANGE_EMPTY]).unwrap(), "empty");
+        assert_eq!(
+            binary_value_text(3904, &range(RANGE_LOWER_INFINITE | RANGE_UPPER_INCLUSIVE, &[&five[..]]))
+                .unwrap(),
+            "(,5]"
+        );
+        let mut multirange = 2i32.to_be_bytes().to_vec();
+        for _ in 0..2 {
+            multirange.extend_from_slice(&(closed_open.len() as i32).to_be_bytes());
+            multirange.extend_from_slice(&closed_open);
+        }
+        assert_eq!(binary_value_text(4451, &multirange).unwrap(), "{[1,5),[1,5)}");
+        assert!(binary_value_text(3904, &range(0, &[&one[..]])).is_err());
+    }
+
+    #[test]
+    fn enums_domains_and_their_arrays_read_through_the_source_types() {
+        let mut types = BinaryTypes::new();
+        types.add(70_000, UserType::Enum);
+        types.add(70_001, UserType::Array { element: 70_000 });
+        types.add(70_002, UserType::Domain { base: INT4 });
+        types.add(70_003, UserType::Domain { base: 70_003 });
+        assert!(types.decodes(70_001));
+        assert!(!types.decodes(70_003));
+        assert!(!decodes_binary(70_000));
+        assert_eq!(types.text(70_000, b"happy").unwrap(), "happy");
+        assert_eq!(
+            types
+                .text(70_001, &array(70_000, &[(2, 1)], &[Some(&b"sad"[..]), Some(&b"so so"[..])]))
+                .unwrap(),
+            "{sad,\"so so\"}"
+        );
+        assert_eq!(types.text(70_002, &7i32.to_be_bytes()).unwrap(), "7");
+        assert!(types.text(70_003, &7i32.to_be_bytes()).is_err());
+    }
+
+    #[test]
+    fn network_and_geometric_values_print_as_postgresql_reads_them() {
+        assert_eq!(
+            binary_value_text(INET, &[PGSQL_AF_INET, 32, 0, 4, 10, 0, 0, 1]).unwrap(),
+            "10.0.0.1"
+        );
+        assert_eq!(
+            binary_value_text(CIDR, &[PGSQL_AF_INET, 24, 1, 4, 10, 0, 0, 0]).unwrap(),
+            "10.0.0.0/24"
+        );
+        let mut v6 = vec![PGSQL_AF_INET6, 64, 0, 16, 0x20, 0x01, 0x0d, 0xb8];
+        v6.extend_from_slice(&[0; 11]);
+        v6.push(1);
+        assert_eq!(binary_value_text(INET, &v6).unwrap(), "2001:db8::1/64");
+        assert_eq!(
+            binary_value_text(MACADDR, &[8, 0, 0x2b, 1, 2, 3]).unwrap(),
+            "08:00:2b:01:02:03"
+        );
+        let mut point = 1.5f64.to_be_bytes().to_vec();
+        point.extend_from_slice(&(-2.0f64).to_be_bytes());
+        assert_eq!(binary_value_text(POINT, &point).unwrap(), "(1.5,-2)");
+        let mut circle = point.clone();
+        circle.extend_from_slice(&3.0f64.to_be_bytes());
+        assert_eq!(binary_value_text(CIRCLE, &circle).unwrap(), "<(1.5,-2),3>");
+        let mut polygon = 2i32.to_be_bytes().to_vec();
+        polygon.extend_from_slice(&point);
+        polygon.extend_from_slice(&point);
+        assert_eq!(
+            binary_value_text(POLYGON, &polygon).unwrap(),
+            "((1.5,-2),(1.5,-2))"
+        );
+        let mut path = vec![0u8];
+        path.extend_from_slice(&polygon);
+        assert_eq!(binary_value_text(PATH, &path).unwrap(), "[(1.5,-2),(1.5,-2)]");
+        assert!(binary_value_text(INET, &[PGSQL_AF_INET, 40, 0, 4, 1, 2, 3, 4]).is_err());
+        let mut huge = i32::MAX.to_be_bytes().to_vec();
+        huge.extend_from_slice(&point);
+        assert!(binary_value_text(POLYGON, &huge).is_err());
     }
 }

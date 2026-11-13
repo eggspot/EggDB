@@ -9,9 +9,9 @@ use crate::cli::render::{self, JsonObject};
 use eggdb::sql::Store as DatabaseStore;
 use eggdb_pgwire::client::{ClientError, ConnectOptions, PgClient, QueryRows, parse_postgres_url};
 use eggdb_pgwire::replication::{
-    Change, ChangeApplier, LogicalMessage, Lsn, Relation, RelationColumn, ReplicationError,
-    ReshapeStep, SpooledChanges, StreamMessage, StreamOptions, StreamedMessage,
-    StreamedTransactions, builtin_type_name, decodes_binary, format_lsn, parse_logical_message,
+    BinaryTypes, Change, ChangeApplier, LogicalMessage, Lsn, Relation, RelationColumn,
+    ReplicationError, ReshapeStep, SpooledChanges, StreamMessage, StreamOptions, StreamedMessage,
+    StreamedTransactions, UserType, builtin_type_name, format_lsn, parse_logical_message,
     parse_lsn, parse_stream_message, parse_streamed_message, quote_identifier, quote_literal,
     server_major_version, standby_status_update,
 };
@@ -1515,9 +1515,10 @@ impl Session<'_> {
         let failed =
             |error: ClientError| source_failed(format!("the replication stream failed: {error}"));
         let major_version = server_major_version(catalog.server_version());
+        let binary_types = source_binary_types(catalog);
         let mut options = StreamOptions::for_server(
             major_version,
-            self.followed_types_decode_binary(catalog, publication),
+            self.followed_types_decode_binary(catalog, publication, &binary_types),
         );
         start_replication(stream, slot_name, publication, start, options).map_err(failed)?;
         self.stream_options_event(options);
@@ -1526,8 +1527,11 @@ impl Session<'_> {
         let mut session = store.session(Dialect::PostgreSql);
         let schemas = self.request.follow.schemas.clone();
         let (copied, foreign_keys) = self.copied_tables(&mut session)?;
+        let mut applier = applier_for_target(&mut session, &schemas, &self.file_display)?;
+        applier.set_binary_types(binary_types.clone());
         let mut applying = Applying {
-            applier: applier_for_target(&mut session, &schemas, &self.file_display)?,
+            applier,
+            binary_types,
             session,
             pending: Vec::new(),
             in_transaction: false,
@@ -1649,6 +1653,7 @@ impl Session<'_> {
                             LogicalMessage::StreamAbort {
                                 xid,
                                 subtransaction,
+                                ..
                             } => {
                                 streamed.abort(xid, subtransaction).map_err(unreadable)?;
                                 Applied::Done
@@ -1666,13 +1671,34 @@ impl Session<'_> {
                                     replication_options,
                                     counts,
                                     options,
-                                    xid,
                                     changes,
+                                    LogicalMessage::Begin {
+                                        final_lsn: commit_lsn,
+                                        xid,
+                                    },
                                     LogicalMessage::Commit {
                                         commit_lsn,
                                         end_lsn,
                                         commit_unix_micros,
                                     },
+                                )?
+                            }
+                            LogicalMessage::StreamPrepare(prepared) => {
+                                let changes = streamed.commit(prepared.xid).map_err(unreadable)?;
+                                self.apply_streamed(
+                                    &mut applying,
+                                    catalog,
+                                    replication_options,
+                                    counts,
+                                    options,
+                                    changes,
+                                    LogicalMessage::BeginPrepare {
+                                        prepare_lsn: prepared.prepare_lsn,
+                                        end_lsn: prepared.end_lsn,
+                                        xid: prepared.xid,
+                                        gid: prepared.gid.clone(),
+                                    },
+                                    LogicalMessage::Prepare(prepared),
                                 )?
                             }
                             message => self.apply_message(
@@ -1714,7 +1740,12 @@ impl Session<'_> {
         }
     }
 
-    fn followed_types_decode_binary(&self, catalog: &mut PgClient, publication: &str) -> bool {
+    fn followed_types_decode_binary(
+        &self,
+        catalog: &mut PgClient,
+        publication: &str,
+        types: &BinaryTypes,
+    ) -> bool {
         let filter = self.schema_filter();
         catalog
             .simple_query(&format!(
@@ -1730,7 +1761,7 @@ impl Session<'_> {
                     row.first()
                         .map(text)
                         .and_then(|oid| oid.parse::<u32>().ok())
-                        .is_some_and(decodes_binary)
+                        .is_some_and(|oid| types.decodes(oid))
                 })
             })
             .unwrap_or(false)
@@ -1742,14 +1773,23 @@ impl Session<'_> {
                 .string("event", "stream")
                 .number("protocol", u64::from(options.protocol_version))
                 .boolean("streaming", options.streaming)
+                .boolean("parallel_streaming", options.parallel_streaming)
+                .boolean("two_phase", options.two_phase)
                 .boolean("binary", options.binary),
             &format!(
-                "  stream          pgoutput protocol {}, {}, {} tuples\n",
+                "  stream          pgoutput protocol {}, {}{}, {} tuples\n",
                 options.protocol_version,
-                if options.streaming {
+                if options.parallel_streaming {
+                    "large transactions streamed in parallel form"
+                } else if options.streaming {
                     "large transactions streamed"
                 } else {
                     "whole transactions"
+                },
+                if options.two_phase {
+                    ", prepared transactions kept until they commit"
+                } else {
+                    ""
                 },
                 if options.binary { "binary" } else { "text" }
             ),
@@ -1791,21 +1831,17 @@ impl Session<'_> {
         replication_options: &ConnectOptions,
         counts: &mut FollowCounts,
         options: StreamOptions,
-        xid: u32,
         changes: SpooledChanges,
-        commit: LogicalMessage,
+        opening: LogicalMessage,
+        closing: LogicalMessage,
     ) -> Result<Applied, Failure> {
-        let final_lsn = match &commit {
-            LogicalMessage::Commit { commit_lsn, .. } => *commit_lsn,
-            _ => applying.applied,
-        };
         self.apply_message(
             applying,
             catalog,
             replication_options,
             counts,
             options,
-            LogicalMessage::Begin { final_lsn, xid },
+            opening,
         )?;
         for change in changes {
             let message = change
@@ -1829,7 +1865,7 @@ impl Session<'_> {
             replication_options,
             counts,
             options,
-            commit,
+            closing,
         )
     }
 
@@ -1844,10 +1880,7 @@ impl Session<'_> {
     ) -> Result<Applied, Failure> {
         if let LogicalMessage::Relation(relation) = &message
             && options.binary
-            && relation
-                .columns
-                .iter()
-                .any(|column| !decodes_binary(column.type_oid))
+            && !self.relation_decodes_binary(applying, catalog, relation)
         {
             return Ok(Applied::ReadAsText);
         }
@@ -1898,44 +1931,259 @@ impl Session<'_> {
                 self.add_new_table(applying, catalog, replication_options, counts, &relation)?
             }
             Change::Commit { end_lsn, .. } => {
-                let mut script = String::from("BEGIN;\n");
-                for statement in &applying.pending {
-                    counts.count(statement);
-                    script.push_str(statement);
-                    script.push_str(";\n");
-                }
-                let (ready, waiting): (Vec<PendingForeignKey>, Vec<PendingForeignKey>) =
-                    std::mem::take(&mut applying.foreign_keys)
-                        .into_iter()
-                        .partition(|key| end_lsn >= key.snapshot_lsn);
-                for key in &ready {
-                    script.push_str(&key.statement);
-                    script.push_str(";\n");
-                    script.push_str(&delete_state_statement(&key.item));
-                    script.push_str(";\n");
-                }
-                script.push_str(&update_statement(LSN, &format_lsn(end_lsn)));
-                script.push_str(";\nCOMMIT;");
-                let outcome = applying.session.execute(&script, &mut |_| {});
-                if let Err(error) = outcome {
-                    let _ = applying.session.execute("ROLLBACK", &mut |_| {});
-                    return Err(source_failed(format!(
-                        "a source transaction could not be applied: {}; {} is consistent at {}",
-                        error.message(),
-                        self.file_display,
-                        format_lsn(applying.applied)
-                    )));
-                }
-                applying.foreign_keys = waiting;
+                let statements = std::mem::take(&mut applying.pending);
+                self.commit_applied(applying, counts, end_lsn, &statements, &[])?;
                 counts.transactions += 1;
-                applying.pending.clear();
-                applying.in_transaction = false;
-                applying.applied = end_lsn;
-                applying.server_end = applying.server_end.max(end_lsn);
+            }
+            Change::Prepare { gid, end_lsn } => {
+                let kept: Vec<String> = std::mem::take(&mut applying.pending)
+                    .iter()
+                    .enumerate()
+                    .map(|(index, statement)| {
+                        insert_state_statement(&prepared_item(&gid, index), statement)
+                    })
+                    .collect();
+                self.commit_applied(applying, counts, end_lsn, &[], &kept)?;
+                self.follow_event(
+                    JsonObject::new()
+                        .string("event", "prepared")
+                        .string("gid", &gid)
+                        .number("statements", kept.len() as u64),
+                    &format!(
+                        "  prepared        {gid}: {} statements kept until it commits\n",
+                        kept.len()
+                    ),
+                );
+            }
+            Change::CommitPrepared { gid, end_lsn, .. } => {
+                let kept = self.prepared_statements(applying, &gid)?;
+                let statements: Vec<String> =
+                    kept.iter().map(|(_, statement)| statement.clone()).collect();
+                let forget: Vec<String> = kept
+                    .iter()
+                    .map(|(item, _)| delete_state_statement(item))
+                    .collect();
+                self.commit_applied(applying, counts, end_lsn, &statements, &forget)?;
+                counts.transactions += 1;
+            }
+            Change::RollbackPrepared { gid, end_lsn } => {
+                let forget: Vec<String> = self
+                    .prepared_statements(applying, &gid)?
+                    .iter()
+                    .map(|(item, _)| delete_state_statement(item))
+                    .collect();
+                self.commit_applied(applying, counts, end_lsn, &[], &forget)?;
+                self.follow_event(
+                    JsonObject::new()
+                        .string("event", "prepared_rolled_back")
+                        .string("gid", &gid),
+                    &format!("  rolled back     {gid}: its prepared changes were dropped\n"),
+                );
+            }
+            Change::RecreatedTable { previous, relation } => {
+                self.replace_recreated_table(
+                    applying,
+                    catalog,
+                    replication_options,
+                    counts,
+                    &previous,
+                    &relation,
+                )?;
             }
             Change::Nothing => {}
         }
         Ok(Applied::Done)
+    }
+
+    fn commit_applied(
+        &mut self,
+        applying: &mut Applying<'_>,
+        counts: &mut FollowCounts,
+        end_lsn: Lsn,
+        statements: &[String],
+        state_statements: &[String],
+    ) -> Result<(), Failure> {
+        let mut script = String::from("BEGIN;\n");
+        for statement in statements {
+            counts.count(statement);
+            script.push_str(statement);
+            script.push_str(";\n");
+        }
+        for statement in state_statements {
+            script.push_str(statement);
+            script.push_str(";\n");
+        }
+        let (ready, waiting): (Vec<PendingForeignKey>, Vec<PendingForeignKey>) =
+            std::mem::take(&mut applying.foreign_keys)
+                .into_iter()
+                .partition(|key| end_lsn >= key.snapshot_lsn);
+        for key in &ready {
+            script.push_str(&key.statement);
+            script.push_str(";\n");
+            script.push_str(&delete_state_statement(&key.item));
+            script.push_str(";\n");
+        }
+        script.push_str(&update_statement(LSN, &format_lsn(end_lsn)));
+        script.push_str(";\nCOMMIT;");
+        let outcome = applying.session.execute(&script, &mut |_| {});
+        if let Err(error) = outcome {
+            let _ = applying.session.execute("ROLLBACK", &mut |_| {});
+            return Err(source_failed(format!(
+                "a source transaction could not be applied: {}; {} is consistent at {}",
+                error.message(),
+                self.file_display,
+                format_lsn(applying.applied)
+            )));
+        }
+        applying.foreign_keys = waiting;
+        applying.pending.clear();
+        applying.in_transaction = false;
+        applying.applied = end_lsn;
+        applying.server_end = applying.server_end.max(end_lsn);
+        Ok(())
+    }
+
+    fn prepared_statements(
+        &mut self,
+        applying: &mut Applying<'_>,
+        gid: &str,
+    ) -> Result<Vec<(String, String)>, Failure> {
+        let mut rows = Vec::new();
+        applying
+            .session
+            .execute(PREPARED_STATEMENTS_STATEMENT, &mut |result| rows = result.rows)
+            .map_err(|error| {
+                source_failed(format!(
+                    "cannot read the prepared transaction {gid} kept in {}: {}",
+                    self.file_display,
+                    error.message()
+                ))
+            })?;
+        let items: Vec<(String, String)> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let mut values = row.into_iter();
+                match (values.next(), values.next()) {
+                    (Some(Value::Text(item)), Some(Value::Text(value))) => Some((item, value)),
+                    _ => None,
+                }
+            })
+            .collect();
+        Ok(prepared_items_of(&items, gid))
+    }
+
+    fn relation_decodes_binary(
+        &mut self,
+        applying: &mut Applying<'_>,
+        catalog: &mut PgClient,
+        relation: &Relation,
+    ) -> bool {
+        let decodable = |types: &BinaryTypes| {
+            relation
+                .columns
+                .iter()
+                .all(|column| types.decodes(column.type_oid))
+        };
+        if decodable(applying.applier.binary_types()) {
+            return true;
+        }
+        let reloaded = source_binary_types(catalog);
+        let decodes = decodable(&reloaded);
+        applying.applier.set_binary_types(reloaded.clone());
+        applying.binary_types = reloaded;
+        decodes
+    }
+
+    fn replace_recreated_table(
+        &mut self,
+        applying: &mut Applying<'_>,
+        catalog: &mut PgClient,
+        replication_options: &ConnectOptions,
+        counts: &mut FollowCounts,
+        previous: &Relation,
+        relation: &Relation,
+    ) -> Result<(), Failure> {
+        let shown = format!("{}.{}", previous.namespace, previous.name);
+        let target = qualified(&previous.namespace, &previous.name);
+        let now_named = rows_of(
+            catalog
+                .simple_query(&format!(
+                    "SELECT n.nspname, c.relname FROM pg_catalog.pg_class c                      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = {}",
+                    previous.id
+                ))
+                .map_err(|error| {
+                    source_failed(format!("cannot read the table {shown} on the source: {error}"))
+                })?,
+        )
+        .into_iter()
+        .next()
+        .map(|row| {
+            (
+                row.first().map(text).unwrap_or_default(),
+                row.get(1).map(text).unwrap_or_default(),
+            )
+        });
+        let (statements, event) = match now_named {
+            Some((namespace, name)) => {
+                let mut steps = Vec::new();
+                if namespace != previous.namespace {
+                    steps.push(ReshapeStep::MoveTable {
+                        from_namespace: previous.namespace.clone(),
+                        name: previous.name.clone(),
+                    });
+                }
+                if name != previous.name {
+                    steps.push(ReshapeStep::RenameTable {
+                        from: previous.name.clone(),
+                    });
+                }
+                let statements = steps
+                    .iter()
+                    .map(|step| step.sql(&namespace, &name, None))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| source_failed(error.to_string()))?;
+                let renamed_target = qualified(&namespace, &name);
+                for statement in &mut applying.pending {
+                    if changes_table(statement, &target) {
+                        *statement = statement.replacen(&target, &renamed_target, 1);
+                    }
+                }
+                let mut renamed = previous.clone();
+                renamed.namespace = namespace.clone();
+                renamed.name = name.clone();
+                applying.applier.remember_relation(renamed);
+                (statements, format!("renamed to {namespace}.{name}"))
+            }
+            None => {
+                applying
+                    .pending
+                    .retain(|statement| !changes_table(statement, &target));
+                (
+                    vec![format!("DROP TABLE {target}")],
+                    "dropped on the source".to_owned(),
+                )
+            }
+        };
+        for statement in &statements {
+            applying
+                .session
+                .execute(statement, &mut |_| {})
+                .map_err(|error| {
+                    source_failed(format!(
+                        "cannot make room in {} for the source's new table {shown}: {} ({statement})",
+                        self.file_display,
+                        error.message()
+                    ))
+                })?;
+        }
+        self.follow_event(
+            JsonObject::new()
+                .string("event", "table_replaced")
+                .string("table", &shown)
+                .string("previous", &event),
+            &format!("  table replaced  {shown}: the old table was {event}\n"),
+        );
+        self.add_new_table(applying, catalog, replication_options, counts, relation)
     }
 
     fn add_new_table(
@@ -2288,6 +2536,16 @@ const SLOT_IN_USE: &str = "55006";
 const COPIED_ITEM_PREFIX: &str = "copied ";
 const FOREIGN_KEY_ITEM_PREFIX: &str = "foreign key ";
 const COPIED_TABLES_STATEMENT: &str = "SELECT item, value FROM eggdb_follow.state WHERE item LIKE 'copied %' OR item LIKE 'foreign key %'";
+const PREPARED_ITEM_PREFIX: &str = "prepared ";
+const PREPARED_STATEMENTS_STATEMENT: &str =
+    "SELECT item, value FROM eggdb_follow.state WHERE item LIKE 'prepared %'";
+const PREPARED_INDEX_DIGITS: usize = 10;
+const SOURCE_TYPES_STATEMENT: &str = "SELECT t.oid::text, t.typtype::text, t.typbasetype::text, t.typelem::text, \
+     t.typcategory::text, COALESCE(r.rngsubtype, 0)::text, COALESCE(m.rngtypid, 0)::text \
+     FROM pg_catalog.pg_type t \
+     LEFT JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
+     LEFT JOIN pg_catalog.pg_range m ON m.rngmultitypid = t.oid \
+     WHERE t.oid >= 16384";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Applied {
@@ -2320,6 +2578,7 @@ struct TableDefinition {
 struct Applying<'d> {
     session: eggdb_sql::Session<'d>,
     applier: ChangeApplier,
+    binary_types: BinaryTypes,
     pending: Vec<String>,
     in_transaction: bool,
     applied: Lsn,
@@ -2339,6 +2598,7 @@ impl Applying<'_> {
         self.pending.clear();
         self.in_transaction = false;
         self.applier = applier_for_target(&mut self.session, schemas, file_display)?;
+        self.applier.set_binary_types(self.binary_types.clone());
         self.restore_copied();
         Ok(())
     }
@@ -2352,6 +2612,11 @@ fn ends_stream_block(message: &LogicalMessage) -> Result<bool, String> {
         LogicalMessage::StreamStart { .. } => "Stream Start",
         LogicalMessage::StreamCommit { .. } => "Stream Commit",
         LogicalMessage::StreamAbort { .. } => "Stream Abort",
+        LogicalMessage::BeginPrepare { .. } => "Begin Prepare",
+        LogicalMessage::Prepare(_) => "Prepare",
+        LogicalMessage::StreamPrepare(_) => "Stream Prepare",
+        LogicalMessage::CommitPrepared { .. } => "Commit Prepared",
+        LogicalMessage::RollbackPrepared { .. } => "Rollback Prepared",
         _ => return Ok(false),
     };
     Err(format!(
@@ -2375,6 +2640,72 @@ fn spill_prefix(file: &std::path::Path) -> String {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default()
     )
+}
+
+fn prepared_item(gid: &str, index: usize) -> String {
+    format!("{PREPARED_ITEM_PREFIX}{gid} {index:0width$}", width = PREPARED_INDEX_DIGITS)
+}
+
+fn prepared_items_of(items: &[(String, String)], gid: &str) -> Vec<(String, String)> {
+    let mut kept: Vec<(String, String)> = items
+        .iter()
+        .filter(|(item, _)| {
+            item.strip_prefix(PREPARED_ITEM_PREFIX)
+                .and_then(|rest| rest.rsplit_once(' '))
+                .is_some_and(|(item_gid, index)| {
+                    item_gid == gid
+                        && index.len() == PREPARED_INDEX_DIGITS
+                        && index.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
+        .cloned()
+        .collect();
+    kept.sort();
+    kept
+}
+
+fn changes_table(statement: &str, qualified_name: &str) -> bool {
+    [
+        format!("INSERT INTO {qualified_name} "),
+        format!("UPDATE {qualified_name} "),
+        format!("DELETE FROM {qualified_name} "),
+        format!("TRUNCATE {qualified_name}"),
+    ]
+    .iter()
+    .any(|prefix| statement.starts_with(prefix.as_str()))
+}
+
+fn source_type_of(row: &[Option<String>]) -> Option<(u32, UserType)> {
+    let number = |index: usize| -> Option<u32> { row.get(index)?.as_deref()?.parse().ok() };
+    let kind = row.get(1)?.as_deref()?;
+    let oid = number(0)?;
+    let user_type = match kind {
+        "e" => UserType::Enum,
+        "d" => UserType::Domain { base: number(2)? },
+        "r" => UserType::Range {
+            subtype: number(5).filter(|subtype| *subtype != 0)?,
+        },
+        "m" => UserType::Multirange {
+            range: number(6).filter(|range| *range != 0)?,
+        },
+        "b" if row.get(4)?.as_deref()? == "A" => UserType::Array {
+            element: number(3).filter(|element| *element != 0)?,
+        },
+        _ => return None,
+    };
+    Some((oid, user_type))
+}
+
+fn source_binary_types(catalog: &mut PgClient) -> BinaryTypes {
+    let mut types = BinaryTypes::new();
+    if let Ok(results) = catalog.simple_query(SOURCE_TYPES_STATEMENT) {
+        for row in rows_of(results) {
+            if let Some((oid, kind)) = source_type_of(&row) {
+                types.add(oid, kind);
+            }
+        }
+    }
+    types
 }
 
 fn copied_item(relation: u32) -> String {
@@ -2893,5 +3224,74 @@ mod tests {
             spill_directory(std::path::Path::new("app.eggdb")),
             std::path::PathBuf::from(".")
         );
+    }
+
+    #[test]
+    fn a_prepared_transaction_s_statements_are_read_back_in_order_for_its_gid_only() {
+        let items = vec![
+            (prepared_item("g 1", 1), "B".to_owned()),
+            (prepared_item("g 1", 0), "A".to_owned()),
+            (prepared_item("g", 0), "other".to_owned()),
+            ("prepared g 1 x".to_owned(), "not an index".to_owned()),
+            (copied_item(5), "0/10".to_owned()),
+        ];
+        assert_eq!(prepared_item("g 1", 7), "prepared g 1 0000000007");
+        assert_eq!(
+            prepared_items_of(&items, "g 1")
+                .into_iter()
+                .map(|(_, statement)| statement)
+                .collect::<Vec<_>>(),
+            vec!["A".to_owned(), "B".to_owned()]
+        );
+        assert!(prepared_items_of(&items, "missing").is_empty());
+    }
+
+    #[test]
+    fn statements_that_change_a_table_are_recognised_by_its_qualified_name() {
+        let table = qualified("public", "orders");
+        assert!(changes_table(
+            "INSERT INTO \"public\".\"orders\" (\"id\") VALUES ('1')",
+            &table
+        ));
+        assert!(changes_table(
+            "DELETE FROM \"public\".\"orders\" WHERE \"id\" = '1'",
+            &table
+        ));
+        assert!(!changes_table(
+            "INSERT INTO \"public\".\"orders2\" (\"id\") VALUES ('1')",
+            &table
+        ));
+    }
+
+    #[test]
+    fn source_types_become_binary_type_descriptions() {
+        let row = |values: [&str; 7]| -> Vec<Option<String>> {
+            values.iter().map(|value| Some((*value).to_owned())).collect()
+        };
+        assert_eq!(
+            source_type_of(&row(["70000", "e", "0", "0", "E", "0", "0"])),
+            Some((70_000, UserType::Enum))
+        );
+        assert_eq!(
+            source_type_of(&row(["70001", "d", "23", "0", "N", "0", "0"])),
+            Some((70_001, UserType::Domain { base: 23 }))
+        );
+        assert_eq!(
+            source_type_of(&row(["70002", "b", "0", "70000", "A", "0", "0"])),
+            Some((70_002, UserType::Array { element: 70_000 }))
+        );
+        assert_eq!(
+            source_type_of(&row(["70003", "r", "0", "0", "R", "701", "0"])),
+            Some((70_003, UserType::Range { subtype: 701 }))
+        );
+        assert_eq!(
+            source_type_of(&row(["70004", "m", "0", "0", "R", "0", "70003"])),
+            Some((70_004, UserType::Multirange { range: 70_003 }))
+        );
+        assert_eq!(
+            source_type_of(&row(["70005", "c", "0", "0", "C", "0", "0"])),
+            None
+        );
+        assert_eq!(source_type_of(&[None]), None);
     }
 }

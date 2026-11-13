@@ -1725,7 +1725,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   table, with `LISTEN <view>_changes`. Left: joins.
 - `eggdb follow` of `pgoutput`'s parallel streaming and two-phase messages, binary arrays,
   domains, enums, ranges, network and geometric types, and tables renamed, moved or recreated
-  during a follow (D296).
+  during a follow (D296). **Code written, unbuilt** (code-only mode, 2026-11-13, D1034): protocols 3 and 4,
+  prepared transactions kept in the follow state, `BinaryTypes` from the source's catalog, `SET SCHEMA`
+  and replaced tables.
 - `eggdb follow` of SQL Server CDC: column type changes, capture instances keyed by a unique index
   with net changes, a table dropped and re-added between polls, and a lost connection during the
   first copy (D282).

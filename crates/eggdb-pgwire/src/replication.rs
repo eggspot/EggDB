@@ -1,14 +1,15 @@
 //! PostgreSQL's logical replication stream as a subscriber reads it: the copy-both messages of
 //! the streaming replication protocol (XLogData, keepalives, standby status updates), the
-//! `pgoutput` plugin's messages (protocol versions 1 and 2, with streamed in-progress
-//! transactions and binary tuples), and the SQL that applies each change to an EggDB database in
-//! the PostgreSQL dialect, including the `ALTER TABLE` that follows a change to a table's
-//! columns on the source and the tables the source creates while it is followed.
+//! `pgoutput` plugin's messages (protocol versions 1 to 4, with streamed in-progress
+//! transactions, two-phase commit, parallel streaming and binary tuples), and the SQL that
+//! applies each change to an EggDB database in the PostgreSQL dialect, including the
+//! `ALTER TABLE` that follows a change to a table's columns, name or schema on the source and the
+//! tables the source creates, or drops and creates again, while it is followed.
 
 mod binary;
 mod spool;
 
-pub use binary::{binary_value_text, decodes_binary};
+pub use binary::{BinaryTypes, UserType, binary_value_text, decodes_binary};
 pub use spool::{SpooledChanges, StreamedTransactions};
 
 use std::collections::HashMap;
@@ -274,7 +275,63 @@ pub enum LogicalMessage {
         xid: u32,
         /// The aborted subtransaction's ID; `xid` when the whole transaction aborts.
         subtransaction: u32,
+        /// The abort record's position, sent with parallel streaming (protocol 4).
+        abort_lsn: Option<Lsn>,
     },
+    /// A transaction that will be prepared for two-phase commit starts (protocol 3).
+    BeginPrepare {
+        /// The prepare record's position.
+        prepare_lsn: Lsn,
+        /// The end of the prepared transaction's WAL.
+        end_lsn: Lsn,
+        /// The transaction ID.
+        xid: u32,
+        /// The global transaction ID given to `PREPARE TRANSACTION`.
+        gid: String,
+    },
+    /// The transaction begun by Begin Prepare is prepared: keep its changes until its
+    /// Commit Prepared or Rollback Prepared.
+    Prepare(Prepared),
+    /// A streamed transaction is prepared: keep what it streamed until its Commit Prepared or
+    /// Rollback Prepared.
+    StreamPrepare(Prepared),
+    /// A prepared transaction commits: apply what it prepared.
+    CommitPrepared {
+        /// The commit record's position.
+        commit_lsn: Lsn,
+        /// The end of the commit's WAL.
+        end_lsn: Lsn,
+        /// The commit time, microseconds since the Unix epoch.
+        commit_unix_micros: i64,
+        /// The transaction ID.
+        xid: u32,
+        /// The global transaction ID.
+        gid: String,
+    },
+    /// A prepared transaction rolls back: drop what it prepared.
+    RollbackPrepared {
+        /// The end of the prepared transaction's WAL.
+        prepare_end_lsn: Lsn,
+        /// The end of the rollback's WAL.
+        rollback_end_lsn: Lsn,
+        /// The transaction ID.
+        xid: u32,
+        /// The global transaction ID.
+        gid: String,
+    },
+}
+
+/// A transaction prepared for two-phase commit, as its Prepare or Stream Prepare names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prepared {
+    /// The prepare record's position.
+    pub prepare_lsn: Lsn,
+    /// The end of the prepared transaction's WAL.
+    pub end_lsn: Lsn,
+    /// The transaction ID.
+    pub xid: u32,
+    /// The global transaction ID given to `PREPARE TRANSACTION`.
+    pub gid: String,
 }
 
 /// A message inside a block of streamed changes.
@@ -339,8 +396,23 @@ pub fn parse_streamed_message(bytes: &[u8]) -> Result<StreamedMessage, Replicati
     Ok(StreamedMessage::Change { xid, message })
 }
 
+fn prepared(cursor: &mut Cursor<'_>) -> Result<Prepared, ReplicationError> {
+    cursor.u8("flags")?;
+    let prepare_lsn = cursor.u64("prepare position")?;
+    let end_lsn = cursor.u64("end position")?;
+    cursor.u64("prepare time")?;
+    let xid = cursor.u32("transaction ID")?;
+    let gid = cursor.string("global transaction ID")?;
+    Ok(Prepared {
+        prepare_lsn,
+        end_lsn,
+        xid,
+        gid,
+    })
+}
+
 /// Reads one `pgoutput` message outside a block of streamed changes (protocol versions 1
-/// and 2), or a streamed change once [`parse_streamed_message`] took its transaction ID off.
+/// to 4), or a streamed change once [`parse_streamed_message`] took its transaction ID off.
 pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, ReplicationError> {
     let mut cursor = Cursor { bytes };
     match cursor.u8("message kind")? {
@@ -366,9 +438,62 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
         b'A' => {
             let xid = cursor.u32("transaction ID")?;
             let subtransaction = cursor.u32("subtransaction ID")?;
+            let abort_lsn = if cursor.bytes.is_empty() {
+                None
+            } else {
+                let abort_lsn = cursor.u64("abort position")?;
+                cursor.u64("abort time")?;
+                Some(abort_lsn)
+            };
             Ok(LogicalMessage::StreamAbort {
                 xid,
                 subtransaction,
+                abort_lsn,
+            })
+        }
+        b'b' => {
+            let prepare_lsn = cursor.u64("prepare position")?;
+            let end_lsn = cursor.u64("end position")?;
+            cursor.u64("prepare time")?;
+            let xid = cursor.u32("transaction ID")?;
+            let gid = cursor.string("global transaction ID")?;
+            Ok(LogicalMessage::BeginPrepare {
+                prepare_lsn,
+                end_lsn,
+                xid,
+                gid,
+            })
+        }
+        b'P' => Ok(LogicalMessage::Prepare(prepared(&mut cursor)?)),
+        b'p' => Ok(LogicalMessage::StreamPrepare(prepared(&mut cursor)?)),
+        b'K' => {
+            cursor.u8("flags")?;
+            let commit_lsn = cursor.u64("commit position")?;
+            let end_lsn = cursor.u64("end position")?;
+            let commit_time = cursor.u64("commit time")? as i64;
+            let xid = cursor.u32("transaction ID")?;
+            let gid = cursor.string("global transaction ID")?;
+            Ok(LogicalMessage::CommitPrepared {
+                commit_lsn,
+                end_lsn,
+                commit_unix_micros: commit_time.saturating_add(POSTGRES_EPOCH_MICROS),
+                xid,
+                gid,
+            })
+        }
+        b'r' => {
+            cursor.u8("flags")?;
+            let prepare_end_lsn = cursor.u64("prepare end position")?;
+            let rollback_end_lsn = cursor.u64("rollback end position")?;
+            cursor.u64("prepare time")?;
+            cursor.u64("rollback time")?;
+            let xid = cursor.u32("transaction ID")?;
+            let gid = cursor.string("global transaction ID")?;
+            Ok(LogicalMessage::RollbackPrepared {
+                prepare_end_lsn,
+                rollback_end_lsn,
+                xid,
+                gid,
             })
         }
         b'B' => {
@@ -480,17 +605,30 @@ pub fn parse_logical_message(bytes: &[u8]) -> Result<LogicalMessage, Replication
 /// What the subscriber asks `pgoutput` for when it starts the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamOptions {
-    /// The protocol version: 1, or 2 for streamed in-progress transactions.
+    /// The protocol version: 1; 2 for streamed in-progress transactions; 3 for two-phase
+    /// messages; 4 for parallel streaming.
     pub protocol_version: u32,
     /// Whether large in-progress transactions are streamed before they commit
     /// (`streaming 'on'`).
     pub streaming: bool,
+    /// Whether streamed transactions come as for parallel apply, with the abort position on
+    /// each Stream Abort (`streaming 'parallel'`).
+    pub parallel_streaming: bool,
+    /// Whether prepared transactions come at their `PREPARE TRANSACTION` with their own
+    /// Commit Prepared and Rollback Prepared (`two_phase 'on'`).
+    pub two_phase: bool,
     /// Whether tuples come in each type's binary send format (`binary 'true'`).
     pub binary: bool,
 }
 
 /// The first PostgreSQL major version with protocol version 2, streaming and binary tuples.
 pub const STREAMING_MAJOR_VERSION: u32 = 14;
+
+/// The first PostgreSQL major version with protocol version 3 and two-phase messages.
+pub const TWO_PHASE_MAJOR_VERSION: u32 = 15;
+
+/// The first PostgreSQL major version with protocol version 4 and parallel streaming.
+pub const PARALLEL_STREAMING_MAJOR_VERSION: u32 = 16;
 
 /// The major version in a `server_version` such as `17.2` or `16.4 (Debian 16.4-1)`; 0 when
 /// it has none.
@@ -504,13 +642,26 @@ pub fn server_major_version(server_version: &str) -> u32 {
 
 impl StreamOptions {
     /// What a server of this major version offers: protocol 2 with streaming from
-    /// PostgreSQL 14, and binary tuples there too when `binary_decodable` says every followed
+    /// PostgreSQL 14, protocol 3 with two-phase messages from 15, protocol 4 with parallel
+    /// streaming from 16, and binary tuples from 14 when `binary_decodable` says every followed
     /// column's type can be read back from its binary form.
     pub fn for_server(major_version: u32, binary_decodable: bool) -> Self {
         let modern = major_version >= STREAMING_MAJOR_VERSION;
+        let two_phase = major_version >= TWO_PHASE_MAJOR_VERSION;
+        let parallel_streaming = major_version >= PARALLEL_STREAMING_MAJOR_VERSION;
         Self {
-            protocol_version: if modern { 2 } else { 1 },
+            protocol_version: if parallel_streaming {
+                4
+            } else if two_phase {
+                3
+            } else if modern {
+                2
+            } else {
+                1
+            },
             streaming: modern,
+            parallel_streaming,
+            two_phase,
             binary: modern && binary_decodable,
         }
     }
@@ -530,8 +681,13 @@ impl StreamOptions {
             self.protocol_version,
             quote_literal(&quote_identifier(publication))
         );
-        if self.streaming {
+        if self.parallel_streaming {
+            options.push_str(", streaming 'parallel'");
+        } else if self.streaming {
             options.push_str(", streaming 'on'");
+        }
+        if self.two_phase {
+            options.push_str(", two_phase 'on'");
         }
         if self.binary {
             options.push_str(", binary 'true'");
@@ -563,21 +719,30 @@ fn qualified(relation: &Relation) -> String {
 }
 
 fn value_text(
+    types: &BinaryTypes,
     value: &TupleValue,
     column: &RelationColumn,
 ) -> Result<Option<String>, ReplicationError> {
     match value {
         TupleValue::Null | TupleValue::Unchanged => Ok(None),
         TupleValue::Text(text) => Ok(Some(text.clone())),
-        TupleValue::Binary(bytes) => binary_value_text(column.type_oid, bytes)
+        TupleValue::Binary(bytes) => types
+            .text(column.type_oid, bytes)
             .map(Some)
             .map_err(|error| ReplicationError(format!("column {}: {error}", column.name))),
     }
 }
 
-fn value_sql(value: &TupleValue, column: &RelationColumn) -> Result<String, ReplicationError> {
-    Ok(value_text(value, column)?.map_or_else(|| "NULL".to_owned(), |text| quote_literal(&text)))
+fn value_sql(
+    types: &BinaryTypes,
+    value: &TupleValue,
+    column: &RelationColumn,
+) -> Result<String, ReplicationError> {
+    Ok(value_text(types, value, column)?
+        .map_or_else(|| "NULL".to_owned(), |text| quote_literal(&text)))
 }
+
+type SavedShapes = HashMap<u32, Option<Relation>>;
 
 /// The SQL that applies the changes of a logical stream, keeping each table's shape as
 /// `Relation` messages describe it.
@@ -589,11 +754,22 @@ pub struct ChangeApplier {
     skipped: std::collections::HashSet<u32>,
     copied_at: HashMap<u32, Lsn>,
     final_lsn: Lsn,
+    binary_types: BinaryTypes,
+    preparing: Option<SavedShapes>,
+    prepared_shapes: HashMap<String, SavedShapes>,
 }
 
 /// One change to a table's shape that a `Relation` message shows was made on the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReshapeStep {
+    /// The table was moved to its current schema from `from_namespace`, keeping the name
+    /// `name` it had there.
+    MoveTable {
+        /// The old schema.
+        from_namespace: String,
+        /// The table's name in the old schema.
+        name: String,
+    },
     /// The table was renamed within its schema; it was called `from`.
     RenameTable {
         /// The old name.
@@ -655,6 +831,15 @@ impl ReshapeStep {
             })
         };
         Ok(match self {
+            Self::MoveTable {
+                from_namespace,
+                name: old_name,
+            } => format!(
+                "ALTER TABLE {}.{} SET SCHEMA {}",
+                quote_identifier(from_namespace),
+                quote_identifier(old_name),
+                quote_identifier(namespace)
+            ),
             Self::RenameTable { from } => format!(
                 "ALTER TABLE {}.{} RENAME TO {}",
                 quote_identifier(namespace),
@@ -804,6 +989,40 @@ pub enum Change {
         /// The source's commit time.
         commit_unix_micros: i64,
     },
+    /// Keep the statements of the transaction begun by Begin Prepare under `gid`, durably,
+    /// without applying them, then report `end_lsn` as applied.
+    Prepare {
+        /// The global transaction ID.
+        gid: String,
+        /// The end of the prepared transaction's WAL.
+        end_lsn: Lsn,
+    },
+    /// Apply the statements kept under `gid` and forget them, then report `end_lsn` as
+    /// applied.
+    CommitPrepared {
+        /// The global transaction ID.
+        gid: String,
+        /// The end of the commit's WAL.
+        end_lsn: Lsn,
+        /// The source's commit time.
+        commit_unix_micros: i64,
+    },
+    /// Forget the statements kept under `gid`, then report `end_lsn` as applied.
+    RollbackPrepared {
+        /// The global transaction ID.
+        gid: String,
+        /// The end of the rollback's WAL.
+        end_lsn: Lsn,
+    },
+    /// The source dropped the table `previous` and created another under the same name:
+    /// drop the target's table, then create and copy the new one as for
+    /// [`Change::NewTable`].
+    RecreatedTable {
+        /// The dropped table, as last described.
+        previous: Relation,
+        /// The new table.
+        relation: Relation,
+    },
     /// The source has a table the target does not, created or published after the copy:
     /// create it, and copy it with [`ChangeApplier::copied`] when the source still has it.
     NewTable(Relation),
@@ -866,16 +1085,67 @@ impl ChangeApplier {
         self.schemas = schemas;
     }
 
+    /// Reads binary values of the source's own types (enums, domains, ranges and arrays of
+    /// them) as these describe them.
+    pub fn set_binary_types(&mut self, types: BinaryTypes) {
+        self.binary_types = types;
+    }
+
+    /// The source's own types that binary values are read with.
+    pub fn binary_types(&self) -> &BinaryTypes {
+        &self.binary_types
+    }
+
+    /// Records `relation` as the source's current description of its table, after the
+    /// target's table was renamed or moved to match it outside a `Relation` message.
+    pub fn remember_relation(&mut self, relation: Relation) {
+        self.relations.insert(relation.id, relation);
+    }
+
+    fn followed(&self, namespace: &str) -> bool {
+        self.schemas.is_empty() || self.schemas.iter().any(|schema| schema == namespace)
+    }
+
+    fn remember_shape(&mut self, id: u32) {
+        let previous = self.relations.get(&id).cloned();
+        if let Some(saved) = &mut self.preparing {
+            saved.entry(id).or_insert(previous);
+        }
+    }
+
+    fn restore_shapes(&mut self, saved: SavedShapes) {
+        for (id, previous) in saved {
+            match previous {
+                Some(relation) => {
+                    self.relations.insert(id, relation);
+                }
+                None => {
+                    self.relations.remove(&id);
+                }
+            }
+        }
+    }
+
+    fn recreated_from(&self, relation: &Relation) -> Option<u32> {
+        if self.relations.contains_key(&relation.id) {
+            return None;
+        }
+        self.relations
+            .iter()
+            .find(|(_, known)| known.namespace == relation.namespace && known.name == relation.name)
+            .map(|(id, _)| *id)
+    }
+
     fn reshape(&mut self, relation: &Relation) -> Result<Vec<ReshapeStep>, ReplicationError> {
         if let Some(previous) = self.relations.get(&relation.id) {
             let mut steps = Vec::new();
-            if previous.name != relation.name || previous.namespace != relation.namespace {
-                if previous.namespace != relation.namespace {
-                    return Err(ReplicationError(format!(
-                        "the source moved the table {}.{} to the schema {}; follow cannot move tables between schemas",
-                        previous.namespace, previous.name, relation.namespace
-                    )));
-                }
+            if previous.namespace != relation.namespace {
+                steps.push(ReshapeStep::MoveTable {
+                    from_namespace: previous.namespace.clone(),
+                    name: previous.name.clone(),
+                });
+            }
+            if previous.name != relation.name {
                 steps.push(ReshapeStep::RenameTable {
                     from: previous.name.clone(),
                 });
@@ -911,6 +1181,7 @@ impl ChangeApplier {
     }
 
     fn key_condition(
+        types: &BinaryTypes,
         relation: &Relation,
         row: &[TupleValue],
         whole_row: bool,
@@ -920,7 +1191,7 @@ impl ChangeApplier {
             if !whole_row && !column.key {
                 continue;
             }
-            match (value, value_text(value, column)?) {
+            match (value, value_text(types, value, column)?) {
                 (_, Some(text)) => {
                     conditions.push(format!(
                         "{} = {}",
@@ -955,6 +1226,7 @@ impl ChangeApplier {
         Ok(match message {
             LogicalMessage::Begin { final_lsn, .. } => {
                 self.final_lsn = final_lsn;
+                self.preparing = None;
                 Change::Begin
             }
             LogicalMessage::Commit {
@@ -965,14 +1237,68 @@ impl ChangeApplier {
                 end_lsn,
                 commit_unix_micros,
             },
+            LogicalMessage::BeginPrepare { prepare_lsn, .. } => {
+                self.final_lsn = prepare_lsn;
+                self.preparing = Some(SavedShapes::new());
+                Change::Begin
+            }
+            LogicalMessage::Prepare(prepared) => {
+                if let Some(saved) = self.preparing.take().filter(|saved| !saved.is_empty()) {
+                    self.prepared_shapes.insert(prepared.gid.clone(), saved);
+                }
+                Change::Prepare {
+                    gid: prepared.gid,
+                    end_lsn: prepared.end_lsn,
+                }
+            }
+            LogicalMessage::CommitPrepared {
+                end_lsn,
+                commit_unix_micros,
+                gid,
+                ..
+            } => {
+                self.prepared_shapes.remove(&gid);
+                Change::CommitPrepared {
+                    gid,
+                    end_lsn,
+                    commit_unix_micros,
+                }
+            }
+            LogicalMessage::RollbackPrepared {
+                rollback_end_lsn,
+                gid,
+                ..
+            } => {
+                if let Some(saved) = self.prepared_shapes.remove(&gid) {
+                    self.restore_shapes(saved);
+                }
+                Change::RollbackPrepared {
+                    gid,
+                    end_lsn: rollback_end_lsn,
+                }
+            }
             LogicalMessage::Relation(relation) => {
-                if !self.schemas.is_empty() && !self.schemas.contains(&relation.namespace) {
+                self.remember_shape(relation.id);
+                if !self.followed(&relation.namespace) {
+                    self.relations.remove(&relation.id);
                     self.skipped.insert(relation.id);
                     return Ok(Change::Nothing);
+                }
+                if self.skipped.remove(&relation.id) {
+                    self.relations.remove(&relation.id);
                 }
                 if self.in_copy(relation.id) {
                     self.relations.insert(relation.id, relation);
                     return Ok(Change::Nothing);
+                }
+                if let Some(previous_id) = self.recreated_from(&relation) {
+                    self.remember_shape(previous_id);
+                    let previous = self.relations.remove(&previous_id);
+                    self.copied_at.remove(&previous_id);
+                    self.relations.insert(relation.id, relation.clone());
+                    if let Some(previous) = previous {
+                        return Ok(Change::RecreatedTable { previous, relation });
+                    }
                 }
                 let new_table = !self.relations.contains_key(&relation.id)
                     && self.target_tables.as_ref().is_some_and(|tables| {
@@ -1014,7 +1340,7 @@ impl ChangeApplier {
                     .columns
                     .iter()
                     .zip(&new)
-                    .map(|(column, value)| value_sql(value, column))
+                    .map(|(column, value)| value_sql(&self.binary_types, value, column))
                     .collect::<Result<Vec<String>, _>>()?;
                 Change::Statement(format!(
                     "INSERT INTO {} ({}) VALUES ({})",
@@ -1034,14 +1360,14 @@ impl ChangeApplier {
                         Ok(format!(
                             "{} = {}",
                             quote_identifier(&column.name),
-                            value_sql(value, column)?
+                            value_sql(&self.binary_types, value, column)?
                         ))
                     })
                     .collect::<Result<Vec<String>, ReplicationError>>()?;
                 let whole_row = relation.replica_identity == b'f';
                 let condition = match &old {
-                    Some(old) => Self::key_condition(relation, old, whole_row)?,
-                    None => Self::key_condition(relation, &new, false)?,
+                    Some(old) => Self::key_condition(&self.binary_types, relation, old, whole_row)?,
+                    None => Self::key_condition(&self.binary_types, relation, &new, false)?,
                 };
                 if assignments.is_empty() {
                     Change::Nothing
@@ -1056,8 +1382,12 @@ impl ChangeApplier {
             }
             LogicalMessage::Delete { relation, old } => {
                 let relation = self.relation(relation)?;
-                let condition =
-                    Self::key_condition(relation, &old, relation.replica_identity == b'f')?;
+                let condition = Self::key_condition(
+                    &self.binary_types,
+                    relation,
+                    &old,
+                    relation.replica_identity == b'f',
+                )?;
                 Change::Statement(format!(
                     "DELETE FROM {} WHERE {}",
                     qualified(relation),
@@ -1086,7 +1416,8 @@ impl ChangeApplier {
             LogicalMessage::StreamStart { .. }
             | LogicalMessage::StreamStop
             | LogicalMessage::StreamCommit { .. }
-            | LogicalMessage::StreamAbort { .. } => {
+            | LogicalMessage::StreamAbort { .. }
+            | LogicalMessage::StreamPrepare(_) => {
                 return Err(ReplicationError(
                     "a message about streamed transactions arrived where a change was expected"
                         .to_owned(),
@@ -1498,7 +1829,8 @@ mod tests {
             abort,
             LogicalMessage::StreamAbort {
                 xid: 900,
-                subtransaction: 901
+                subtransaction: 901,
+                abort_lsn: None
             }
         );
         transactions.abort(900, 901).unwrap();
@@ -1641,8 +1973,16 @@ mod tests {
             "START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '1', publication_names '\"p\"')"
         );
         assert_eq!(
-            StreamOptions::for_server(17, true).start_replication_command("s", 0x10, "p"),
+            StreamOptions::for_server(14, true).start_replication_command("s", 0x10, "p"),
             "START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '2', publication_names '\"p\"', streaming 'on', binary 'true')"
+        );
+        assert_eq!(
+            StreamOptions::for_server(15, false).start_replication_command("s", 0x10, "p"),
+            "START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '3', publication_names '\"p\"', streaming 'on', two_phase 'on')"
+        );
+        assert_eq!(
+            StreamOptions::for_server(17, true).start_replication_command("s", 0x10, "p"),
+            "START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '4', publication_names '\"p\"', streaming 'parallel', two_phase 'on', binary 'true')"
         );
         assert!(!StreamOptions::for_server(17, false).binary);
         assert!(!StreamOptions::for_server(17, true).without_binary().binary);
@@ -1725,5 +2065,217 @@ mod tests {
             let _ = parse_logical_message(&mutated);
             let _ = parse_stream_message(&mutated);
         }
+    }
+
+    fn two_phase_message(kind: u8, lsns: &[Lsn], xid: u32, gid: &str) -> Vec<u8> {
+        let mut message = vec![kind];
+        if kind != b'b' {
+            message.push(0);
+        }
+        for lsn in lsns {
+            message.extend_from_slice(&lsn.to_be_bytes());
+        }
+        message.extend_from_slice(&xid.to_be_bytes());
+        message.extend_from_slice(gid.as_bytes());
+        message.push(0);
+        message
+    }
+
+    #[test]
+    fn two_phase_messages_read_back() {
+        assert_eq!(
+            parse_logical_message(&two_phase_message(b'b', &[0x10, 0x20, 0], 7, "g1")).unwrap(),
+            LogicalMessage::BeginPrepare {
+                prepare_lsn: 0x10,
+                end_lsn: 0x20,
+                xid: 7,
+                gid: "g1".to_owned()
+            }
+        );
+        let prepared = Prepared {
+            prepare_lsn: 0x10,
+            end_lsn: 0x20,
+            xid: 7,
+            gid: "g1".to_owned(),
+        };
+        assert_eq!(
+            parse_logical_message(&two_phase_message(b'P', &[0x10, 0x20, 0], 7, "g1")).unwrap(),
+            LogicalMessage::Prepare(prepared.clone())
+        );
+        assert_eq!(
+            parse_logical_message(&two_phase_message(b'p', &[0x10, 0x20, 0], 7, "g1")).unwrap(),
+            LogicalMessage::StreamPrepare(prepared)
+        );
+        assert_eq!(
+            parse_logical_message(&two_phase_message(b'K', &[0x30, 0x40, 0], 7, "g1")).unwrap(),
+            LogicalMessage::CommitPrepared {
+                commit_lsn: 0x30,
+                end_lsn: 0x40,
+                commit_unix_micros: POSTGRES_EPOCH_MICROS,
+                xid: 7,
+                gid: "g1".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_logical_message(&two_phase_message(b'r', &[0x20, 0x50, 0, 0], 7, "g1"))
+                .unwrap(),
+            LogicalMessage::RollbackPrepared {
+                prepare_end_lsn: 0x20,
+                rollback_end_lsn: 0x50,
+                xid: 7,
+                gid: "g1".to_owned()
+            }
+        );
+        for kind in [b'b', b'P', b'p', b'K', b'r'] {
+            let message = two_phase_message(kind, &[1, 2, 3, 4], 7, "gid");
+            for cut in 1..message.len() {
+                let _ = parse_logical_message(&message[..cut]);
+            }
+        }
+        let mut parallel = stream_abort(5, 6);
+        parallel.extend_from_slice(&0x99u64.to_be_bytes());
+        parallel.extend_from_slice(&0u64.to_be_bytes());
+        assert_eq!(
+            parse_logical_message(&parallel).unwrap(),
+            LogicalMessage::StreamAbort {
+                xid: 5,
+                subtransaction: 6,
+                abort_lsn: Some(0x99)
+            }
+        );
+        assert!(parse_logical_message(&parallel[..parallel.len() - 3]).is_err());
+    }
+
+    #[test]
+    fn a_prepared_transaction_is_kept_and_its_shape_change_undone_at_rollback() {
+        let mut applier = ChangeApplier::new();
+        let first = vec![column("id", 23), column("note", 25)];
+        applier.apply(orders_with(first.clone())).unwrap();
+        assert_eq!(
+            applier
+                .apply(LogicalMessage::BeginPrepare {
+                    prepare_lsn: 0x10,
+                    end_lsn: 0x20,
+                    xid: 7,
+                    gid: "g1".to_owned()
+                })
+                .unwrap(),
+            Change::Begin
+        );
+        let wider = vec![column("id", 23), column("note", 25), column("rank", 23)];
+        assert!(matches!(
+            applier.apply(orders_with(wider)).unwrap(),
+            Change::Reshape { .. }
+        ));
+        assert_eq!(
+            applier
+                .apply(LogicalMessage::Prepare(Prepared {
+                    prepare_lsn: 0x10,
+                    end_lsn: 0x20,
+                    xid: 7,
+                    gid: "g1".to_owned()
+                }))
+                .unwrap(),
+            Change::Prepare {
+                gid: "g1".to_owned(),
+                end_lsn: 0x20
+            }
+        );
+        assert_eq!(
+            applier
+                .apply(LogicalMessage::RollbackPrepared {
+                    prepare_end_lsn: 0x20,
+                    rollback_end_lsn: 0x30,
+                    xid: 7,
+                    gid: "g1".to_owned()
+                })
+                .unwrap(),
+            Change::RollbackPrepared {
+                gid: "g1".to_owned(),
+                end_lsn: 0x30
+            }
+        );
+        assert_eq!(applier.apply(orders_with(first)).unwrap(), Change::Nothing);
+    }
+
+    #[test]
+    fn a_table_moved_to_another_schema_is_moved_then_renamed() {
+        let mut applier = ChangeApplier::new();
+        applier.apply(orders_with(vec![column("id", 23)])).unwrap();
+        let change = applier
+            .apply(LogicalMessage::Relation(Relation {
+                id: 16_384,
+                namespace: "archive".to_owned(),
+                name: "old_orders".to_owned(),
+                replica_identity: b'd',
+                columns: vec![column("id", 23)],
+            }))
+            .unwrap();
+        let Change::Reshape {
+            namespace,
+            name,
+            steps,
+            ..
+        } = change
+        else {
+            panic!("expected a reshape, got {change:?}");
+        };
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.sql(&namespace, &name, None).unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "ALTER TABLE \"public\".\"orders\" SET SCHEMA \"archive\"".to_owned(),
+                "ALTER TABLE \"archive\".\"orders\" RENAME TO \"old_orders\"".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_table_under_a_known_name_is_a_recreated_table() {
+        let mut applier = ChangeApplier::new();
+        applier.apply(orders_with(vec![column("id", 23)])).unwrap();
+        let recreated = Relation {
+            id: 20_000,
+            namespace: "public".to_owned(),
+            name: "orders".to_owned(),
+            replica_identity: b'd',
+            columns: vec![column("id", 20)],
+        };
+        let change = applier
+            .apply(LogicalMessage::Relation(recreated.clone()))
+            .unwrap();
+        let Change::RecreatedTable { previous, relation } = change else {
+            panic!("expected a recreated table, got {change:?}");
+        };
+        assert_eq!(previous.id, 16_384);
+        assert_eq!(relation, recreated);
+        assert!(applier.relation(16_384).is_err());
+    }
+
+    #[test]
+    fn a_table_moved_out_of_the_followed_schemas_is_skipped_from_then_on() {
+        let mut applier = ChangeApplier::new();
+        applier.only_schemas(vec!["public".to_owned()]);
+        applier.apply(orders_with(vec![column("id", 23)])).unwrap();
+        applier
+            .apply(LogicalMessage::Relation(Relation {
+                id: 16_384,
+                namespace: "archive".to_owned(),
+                name: "orders".to_owned(),
+                replica_identity: b'd',
+                columns: vec![column("id", 23)],
+            }))
+            .unwrap();
+        assert_eq!(
+            applier
+                .apply(LogicalMessage::Delete {
+                    relation: 16_384,
+                    old: vec![TupleValue::Text("1".to_owned())],
+                })
+                .unwrap(),
+            Change::Nothing
+        );
     }
 }
