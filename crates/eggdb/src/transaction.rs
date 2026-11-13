@@ -3,10 +3,12 @@ use crate::collection_counts::{EntryCount, KeptCounts};
 use crate::database::Database;
 use crate::error::{Error, ErrorKind, Result};
 use crate::expiry::{self, Moment};
+use crate::lsm_tables::{self, LsmRoutes};
 use crate::scan::{KeyRange, Reader, Scan};
 use crate::writer_slot::WriterTurn;
 use eggdb_platform::DatabaseFile;
-use eggdb_storage::{BTree, CommitStamp, Features};
+use eggdb_storage::{BTree, CommitStamp, Features, LsmTree};
+use std::ops::Bound;
 
 /// A consistent, read-only view of a [`Database`]: the last commit before
 /// [`Database::begin_read`], unchanged by any commit after it, for as long as it lives.
@@ -35,6 +37,7 @@ use eggdb_storage::{BTree, CommitStamp, Features};
 pub struct ReadTransaction<'db> {
     inner: eggdb_storage::ReadTransaction<'db, DatabaseFile>,
     tree: Option<BTree>,
+    lsm: LsmRoutes,
     expiry_now: Option<Moment>,
     database_address: usize,
 }
@@ -68,9 +71,15 @@ impl<'db> ReadTransaction<'db> {
         let expiry_now = database
             .has_expiring_keys()
             .then(|| database.now_after(inner.stamp()));
+        let lsm = if database.has_lsm_tables() {
+            LsmRoutes::load(Reader::Snapshot(&inner), tree)?
+        } else {
+            LsmRoutes::default()
+        };
         Ok(Self {
             inner,
             tree,
+            lsm,
             expiry_now,
             database_address: std::ptr::from_ref(database).addr(),
         })
@@ -92,6 +101,9 @@ impl<'db> ReadTransaction<'db> {
     }
 
     pub(crate) fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        if let Some(lsm) = self.lsm.route(key) {
+            return self.reader().lsm_get(&lsm, key);
+        }
         let Some(tree) = &self.tree else {
             return Ok(None);
         };
@@ -145,6 +157,9 @@ impl<'db> ReadTransaction<'db> {
         stored: &[u8],
         read: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>> {
+        if let Some(lsm) = self.lsm.route(stored) {
+            return Ok(self.reader().lsm_get(&lsm, stored)?.map(|value| read(&value)));
+        }
         let Some(tree) = &self.tree else {
             return Ok(None);
         };
@@ -194,6 +209,7 @@ impl<'db> ReadTransaction<'db> {
     /// [`KeyRange`].
     pub fn scan(&self, range: impl KeyRange) -> Scan<'_> {
         Scan::between(Reader::Snapshot(&self.inner), self.tree, &range)
+            .over_lsm_tables(&self.lsm)
             .hiding_expired(self.expiry_now)
     }
 
@@ -202,13 +218,21 @@ impl<'db> ReadTransaction<'db> {
     /// are left out.
     pub fn scan_prefix(&self, prefix: impl AsRef<[u8]>) -> Scan<'_> {
         Scan::prefix(Reader::Snapshot(&self.inner), self.tree, prefix.as_ref())
+            .over_lsm_tables(&self.lsm)
             .hiding_expired(self.expiry_now)
     }
 
     /// The stamp of the commit this transaction sees, or [`CommitStamp::NONE`] when nothing
     /// was committed to the database before it began.
     pub(crate) fn raw_scan(&self) -> Scan<'_> {
-        Scan::within_between(self.reader(), self.tree(), b"", &..)
+        if self.lsm.is_empty() {
+            return Scan::within_between(self.reader(), self.tree(), b"", &..);
+        }
+        let segments = vec![
+            (Bound::Unbounded, Bound::Excluded(lsm_tables::routes_start())),
+            (Bound::Included(lsm_tables::routes_end()), Bound::Unbounded),
+        ];
+        Scan::over_segments(self.reader(), self.tree(), segments).over_lsm_tables(&self.lsm)
     }
 
     pub fn stamp(&self) -> CommitStamp {
@@ -260,6 +284,8 @@ pub struct WriteTransaction<'db> {
     database: &'db Database,
     inner: eggdb_storage::WriteTransaction<'db, DatabaseFile>,
     tree: Option<BTree>,
+    lsm: LsmRoutes,
+    adds_lsm_tables: bool,
     created_tree: bool,
     now: Moment,
     adds_expiring_keys: bool,
@@ -279,10 +305,17 @@ impl<'db> WriteTransaction<'db> {
         let inner = database.store().begin_write().map_err(Error::storage)?;
         let tree = database.tree_at(inner.catalog_root(), |root| inner.open_tree(root))?;
         let now = database.now_after(inner.began_after());
+        let lsm = if database.has_lsm_tables() {
+            LsmRoutes::load(Reader::Writer(&inner), tree)?
+        } else {
+            LsmRoutes::default()
+        };
         Ok(Self {
             database,
             inner,
             tree,
+            lsm,
+            adds_lsm_tables: false,
             created_tree: false,
             now,
             adds_expiring_keys: false,
@@ -307,6 +340,9 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub(crate) fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        if let Some(lsm) = self.lsm.route(key) {
+            return self.reader().lsm_get(&lsm, key);
+        }
         let Some(tree) = &self.tree else {
             return Ok(None);
         };
@@ -373,6 +409,10 @@ impl<'db> WriteTransaction<'db> {
                 ErrorKind::ReservedKey,
                 "a collection's entry count is written whole by EggDB, never streamed",
             ));
+        }
+        if let Some(lsm) = self.lsm.route(key) {
+            let value = read_whole(len, source)?;
+            return self.put_in_lsm(lsm, key, &value);
         }
         self.note_captured(key)?;
         let previous = self.previous_for_journal(key)?;
@@ -448,6 +488,7 @@ impl<'db> WriteTransaction<'db> {
     /// out. See [`Scan`] and [`KeyRange`].
     pub fn scan(&self, range: impl KeyRange) -> Scan<'_> {
         Scan::between(Reader::Writer(&self.inner), self.tree, &range)
+            .over_lsm_tables(&self.lsm)
             .hiding_expired(self.expiry_now())
     }
 
@@ -456,6 +497,7 @@ impl<'db> WriteTransaction<'db> {
     /// scans every entry. Expired keys are left out.
     pub fn scan_prefix(&self, prefix: impl AsRef<[u8]>) -> Scan<'_> {
         Scan::prefix(Reader::Writer(&self.inner), self.tree, prefix.as_ref())
+            .over_lsm_tables(&self.lsm)
             .hiding_expired(self.expiry_now())
     }
 
@@ -483,6 +525,9 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub(crate) fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        if let Some(lsm) = self.lsm.route(key) {
+            return self.put_in_lsm(lsm, key, value);
+        }
         self.note_captured(key)?;
         let previous = self.previous_for_journal(key)?;
         let kept = self.kept_entry(key)?;
@@ -502,6 +547,72 @@ impl<'db> WriteTransaction<'db> {
                 .change(number, key_bytes, before, Some(value.len() as u64));
         }
         self.note_count_record(key, Some(value))
+    }
+
+    pub(crate) fn lsm_route(&self, key: &[u8]) -> Option<LsmTree> {
+        self.lsm.route(key)
+    }
+
+    fn put_in_lsm(&mut self, lsm: LsmTree, key: &[u8], value: &[u8]) -> Result<()> {
+        self.note_captured(key)?;
+        let previous = self.previous_for_journal(key)?;
+        self.inner
+            .lsm_put(&lsm, key, value)
+            .map_err(Error::storage)?;
+        self.note_change(key, previous);
+        self.note_archived(key);
+        Ok(())
+    }
+
+    fn delete_in_lsm(&mut self, lsm: LsmTree, key: &[u8]) -> Result<bool> {
+        self.note_captured(key)?;
+        let previous = self.previous_for_journal(key)?;
+        let deleted = self.inner.lsm_delete(&lsm, key).map_err(Error::storage)?;
+        if deleted {
+            self.note_change(key, previous);
+            self.note_archived(key);
+        }
+        Ok(deleted)
+    }
+
+    /// Keeps every key that starts with `prefix` in an LSM tree of its own from now on, for a
+    /// table created `WITH (storage = lsm)` (D1119): `false` when the prefix already has one.
+    /// Refuses an empty or reserved prefix, one that overlaps another LSM table's, and one
+    /// that already has keys, with [`ErrorKind::Other`].
+    pub(crate) fn store_prefix_in_lsm_tree(&mut self, prefix: &[u8]) -> Result<bool> {
+        if prefix.is_empty() || collection::is_reserved(prefix) {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "an LSM table needs a key prefix of its own outside the reserved keys",
+            ));
+        }
+        if self.lsm.has(prefix) {
+            return Ok(false);
+        }
+        if self.lsm.overlaps(prefix) {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "the key prefix overlaps another LSM table's",
+            ));
+        }
+        let has_keys = Scan::prefix(self.reader(), self.tree, prefix)
+            .next_entry()?
+            .is_some();
+        if has_keys {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "only an empty table moves to an LSM tree",
+            ));
+        }
+        if self.tree.is_none() {
+            self.create_tree()?;
+        }
+        let lsm = self.inner.create_lsm_tree().map_err(Error::storage)?;
+        self.put_raw(&lsm_tables::route_key(prefix), &lsm.root().to_be_bytes())?;
+        self.lsm.add(prefix.to_vec(), lsm);
+        self.adds_lsm_tables = true;
+        self.database.note_lsm_tables();
+        Ok(true)
     }
 
     fn note_captured(&mut self, key: &[u8]) -> Result<()> {
@@ -680,6 +791,13 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub(crate) fn put_if_absent_raw(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        if let Some(lsm) = self.lsm.route(key) {
+            if self.reader().lsm_get(&lsm, key)?.is_some() {
+                return Ok(false);
+            }
+            self.put_in_lsm(lsm, key, value)?;
+            return Ok(true);
+        }
         self.note_captured(key)?;
         let tree = match self.tree {
             Some(tree) => tree,
@@ -716,6 +834,9 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub(crate) fn delete_raw(&mut self, key: &[u8]) -> Result<bool> {
+        if let Some(lsm) = self.lsm.route(key) {
+            return self.delete_in_lsm(lsm, key);
+        }
         let Some(tree) = self.tree else {
             return Ok(false);
         };
@@ -762,6 +883,12 @@ impl<'db> WriteTransaction<'db> {
         if self.adds_collection_counts {
             self.inner.add_features(Features {
                 read_only_compatible: Features::COLLECTION_COUNTS,
+                ..Features::default()
+            });
+        }
+        if self.adds_lsm_tables {
+            self.inner.add_features(Features {
+                incompatible: Features::LSM_TABLES,
                 ..Features::default()
             });
         }
@@ -831,6 +958,22 @@ impl<'db> WriteTransaction<'db> {
         self.created_tree = true;
         Ok(tree)
     }
+}
+
+fn read_whole(len: u64, source: &mut dyn std::io::Read) -> Result<Vec<u8>> {
+    let length = usize::try_from(len)
+        .ok()
+        .filter(|length| *length <= LsmTree::MAX_VALUE_BYTES)
+        .ok_or_else(|| Error::new(ErrorKind::TooLarge, "the value is larger than an LSM table holds"))?;
+    let mut value = vec![0u8; length];
+    source
+        .read_exact(&mut value)
+        .map_err(|error| Error::new(ErrorKind::Io, format!("reading the value: {error}")))?;
+    let mut extra = [0u8; 1];
+    if source.read(&mut extra).map_err(|error| Error::new(ErrorKind::Io, format!("reading the value: {error}")))? != 0 {
+        return Err(Error::new(ErrorKind::Other, "the source holds more than the length given"));
+    }
+    Ok(value)
 }
 
 impl std::fmt::Debug for WriteTransaction<'_> {

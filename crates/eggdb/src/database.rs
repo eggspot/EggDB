@@ -79,6 +79,7 @@ pub struct Database {
     write_timeout: Duration,
     clock: ClockHandle,
     expiring_keys: AtomicBool,
+    lsm_tables: AtomicBool,
     collection_drops: AtomicU8,
     change_archive: Option<crate::change_archive::ChangeArchive>,
     encrypted: bool,
@@ -502,6 +503,7 @@ impl Database {
         let store = Store::new(cache, Arc::clone(&clock));
         let features = store.superblock().map_err(Error::storage)?.features;
         let expiring_keys = features.read_only_compatible & Features::EXPIRING_KEYS != 0;
+        let lsm_tables = features.incompatible & Features::LSM_TABLES != 0;
         let configured = store
             .set_durability(options.durability.to_storage())
             .and_then(|()| store.set_auto_checkpoint_bytes(options.auto_checkpoint_log_bytes))
@@ -524,6 +526,7 @@ impl Database {
             write_timeout: options.write_timeout,
             clock: ClockHandle(clock),
             expiring_keys: AtomicBool::new(expiring_keys),
+            lsm_tables: AtomicBool::new(lsm_tables),
             collection_drops: AtomicU8::new(crate::collection::DROPS_UNKNOWN),
             change_archive,
             encrypted: options.encryption_key.is_some(),
@@ -837,7 +840,14 @@ impl Database {
     /// # Ok(()) }
     /// ```
     pub fn check(&self) -> Result<CheckReport> {
-        let file = self.store.check().map_err(Error::storage)?;
+        let file = if self.has_lsm_tables() {
+            let start = crate::lsm_tables::routes_start();
+            let end = crate::lsm_tables::routes_end();
+            self.store.check_with_lsm_roots(Some((&start, &end)))
+        } else {
+            self.store.check()
+        }
+        .map_err(Error::storage)?;
         self.begin_read()?.check_collection_counts()?;
         let tree = file.tree.unwrap_or_default();
         Ok(CheckReport {
@@ -1284,6 +1294,14 @@ impl Database {
 
     pub(crate) fn remember_tree(&self, tree: BTree) {
         let _ = self.tree.set(tree);
+    }
+
+    pub(crate) fn has_lsm_tables(&self) -> bool {
+        self.lsm_tables.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn note_lsm_tables(&self) {
+        self.lsm_tables.store(true, Ordering::Release);
     }
 
     pub(crate) fn has_expiring_keys(&self) -> bool {

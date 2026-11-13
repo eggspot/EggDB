@@ -217,6 +217,9 @@ impl WriteTransaction<'_> {
         stored: &[u8],
         read: impl FnOnce(&[u8]) -> R,
     ) -> Result<Option<R>> {
+        if let Some(lsm) = self.lsm_route(stored) {
+            return Ok(self.reader().lsm_get(&lsm, stored)?.map(|value| read(&value)));
+        }
         let Some(tree) = self.tree() else {
             return Ok(None);
         };

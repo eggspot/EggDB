@@ -1143,3 +1143,4 @@ its full title with its status.
 - [D1116](decisions/D1116.md) Code-only batch 764 (M1): io_uring and completion ports as the automatic backends
 - [D1117](decisions/D1117.md) Code-only batch 765 (M1): EggDB's own allocator in the default build
 - [D1118](decisions/D1118.md) Code-only batch 766 (M1): CXL and persistent memory as memory-only NUMA nodes for the page cache, and the GPU decision
+- [D1119](decisions/D1119.md) Code-only batch 767 (M2): LSM trees per table with WITH (storage = lsm)

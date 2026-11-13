@@ -519,6 +519,9 @@ pub(crate) fn create_table(
     crate::roles::forget_relation_access(writer, &table.name)?;
     crate::comments::store_created(writer, &table.name, create)?;
     writer.put(&table_key(&table.name), &table.encode())?;
+    if create.lsm_storage {
+        writer.store_prefix_in_lsm_tree(&rows_prefix(table.id))?;
+    }
     constraints::register_references(writer, tables, &table)?;
     Ok(QueryResult::command("CREATE TABLE"))
 }

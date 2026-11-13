@@ -261,9 +261,20 @@ impl<F: File> Store<F> {
     /// seen. The store is held for the whole walk, so the writer and readers wait until it
     /// ends.
     pub fn check(&self) -> Result<FileReport, StorageError> {
+        self.check_with_lsm_roots(None)
+    }
+
+    /// Like [`Store::check`], also checking the LSM trees whose manifest roots the catalog tree
+    /// holds under keys from `start` (inclusive) to `end` (exclusive), each value an 8-byte
+    /// big-endian root, and counting their pages as used: how a file with LSM tables (D1119)
+    /// is checked. A value that is not 8 bytes is reported as damage.
+    pub fn check_with_lsm_roots(
+        &self,
+        roots_between: Option<(&[u8], &[u8])>,
+    ) -> Result<FileReport, StorageError> {
         let mut state = self.lock()?;
         let version = state.cache.begin_snapshot()?;
-        let checked = check_committed(&state, version);
+        let checked = check_committed(&state, version, roots_between);
         state.cache.end_snapshot(version);
         checked
     }
@@ -273,7 +284,11 @@ impl<F: File> Store<F> {
     }
 }
 
-fn check_committed<F: File>(state: &State<F>, version: u64) -> Result<FileReport, StorageError> {
+fn check_committed<F: File>(
+    state: &State<F>,
+    version: u64,
+    roots_between: Option<(&[u8], &[u8])>,
+) -> Result<FileReport, StorageError> {
     let snapshot = Snapshot {
         cache: &state.cache,
         version,
@@ -282,7 +297,16 @@ fn check_committed<F: File>(state: &State<F>, version: u64) -> Result<FileReport
     let mut reachable = PageSet::for_pages(snapshot.page_count())?;
     let tree = match superblock.catalog_root {
         NO_PAGE => None,
-        root => Some(BTree::open_in(&snapshot, root)?.check_marking(&snapshot, &mut reachable)?),
+        root => {
+            let catalog = BTree::open_in(&snapshot, root)?;
+            let report = catalog.check_marking(&snapshot, &mut reachable)?;
+            if let Some((start, end)) = roots_between {
+                for lsm_root in lsm_roots(&snapshot, &catalog, start, end)? {
+                    LsmTree::open_in(&snapshot, lsm_root)?.check_marking(&snapshot, &mut reachable)?;
+                }
+            }
+            Some(report)
+        }
     };
     let uses = state.cache.account_pages(&reachable)?;
     Ok(FileReport {
@@ -294,6 +318,29 @@ fn check_committed<F: File>(state: &State<F>, version: u64) -> Result<FileReport
         log_pages: uses.log,
         leaked_pages: uses.leaked,
     })
+}
+
+fn lsm_roots(
+    snapshot: &impl PageSource,
+    catalog: &BTree,
+    start: &[u8],
+    end: &[u8],
+) -> Result<Vec<u64>, StorageError> {
+    let mut cursor = catalog.scan(
+        core::ops::Bound::Included(start),
+        core::ops::Bound::Excluded(end),
+        crate::cursor::ScanOrder::Ascending,
+    );
+    let mut roots = Vec::new();
+    while let Some((_, value)) = cursor.next_in(snapshot)? {
+        let bytes: [u8; 8] = value
+            .try_into()
+            .map_err(|_| StorageError::from(crate::error::FormatError::CorruptLsm {
+                problem: "an LSM table's root is not 8 bytes",
+            }))?;
+        roots.push(u64::from_be_bytes(bytes));
+    }
+    Ok(roots)
 }
 
 impl<F: File> fmt::Debug for Store<F> {

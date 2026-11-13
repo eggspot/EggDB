@@ -152,6 +152,13 @@ pub trait KeyValueWrite: KeyValueRead {
     /// Removes `key`; whether it was there.
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool>;
 
+    /// Keeps every key that starts with `prefix` in an LSM tree of its own from now on, for a
+    /// table created `WITH (storage = lsm)` (D1119); `false` when it already is. The keys read,
+    /// scan and write as before. A store without LSM trees, the default, refuses with `0A000`.
+    fn store_prefix_in_lsm_tree(&mut self, _prefix: &[u8]) -> SqlResult<bool> {
+        Err(SqlError::not_supported("tables stored in an LSM tree on this store"))
+    }
+
     /// Stores `value` under `key` with a time to live of `ttl` from now, replacing any value
     /// and time to live there, for the key-value tools (D328); SQL never calls it. A store
     /// without times to live, the default, refuses with `0A000`.

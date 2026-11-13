@@ -95,7 +95,9 @@ impl Parser<'_> {
         } else {
             if self.postgresql() {
                 self.table_access_method()?;
-                self.storage_parameters()?;
+                if self.storage_parameters()? {
+                    return Err(self.not_supported("CREATE TABLE ... AS with WITH (storage = lsm)"));
+                }
             }
             on_commit = self.on_commit_clause(temporary)?;
             if self.postgresql() {
@@ -283,16 +285,17 @@ impl Parser<'_> {
         Err(error.at(space.position))
     }
 
-    pub(super) fn storage_parameters(&mut self) -> SqlResult<()> {
+    pub(super) fn storage_parameters(&mut self) -> SqlResult<bool> {
         if self.is_word("without") && self.is_word_at(1, "oids") {
             self.at += 2;
-            return Ok(());
+            return Ok(false);
         }
         if !(self.is_word("with") && self.peek_kind_at(1) == &TokenKind::LeftParen) {
-            return Ok(());
+            return Ok(false);
         }
         self.at += 2;
         let mut seen: Vec<String> = Vec::new();
+        let mut lsm_storage = false;
         loop {
             let position = self.position();
             let first = self.name()?.text;
@@ -306,13 +309,18 @@ impl Parser<'_> {
             } else {
                 None
             };
-            check_storage_parameter(namespace.as_deref(), &name, value.as_deref(), &mut seen)
-                .map_err(|error| error.at(position))?;
+            if namespace.is_none() && name == "storage" {
+                lsm_storage = table_storage(value.as_deref(), &mut seen).map_err(|error| error.at(position))?;
+            } else {
+                check_storage_parameter(namespace.as_deref(), &name, value.as_deref(), &mut seen)
+                    .map_err(|error| error.at(position))?;
+            }
             if !self.take(&TokenKind::Comma) {
                 break;
             }
         }
-        self.expect(&TokenKind::RightParen)
+        self.expect(&TokenKind::RightParen)?;
+        Ok(lsm_storage)
     }
 
     fn storage_parameter_value(&mut self) -> SqlResult<String> {
@@ -392,6 +400,21 @@ fn option_boolean(text: &str) -> Option<bool> {
 
 fn invalid_option(message: String) -> SqlError {
     SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message)
+}
+
+fn table_storage(value: Option<&str>, seen: &mut Vec<String>) -> SqlResult<bool> {
+    if seen.iter().any(|name| name == "storage") {
+        return Err(invalid_option("parameter \"storage\" specified more than once".to_owned()));
+    }
+    seen.push("storage".to_owned());
+    match value.map(str::to_ascii_lowercase).as_deref() {
+        Some("lsm") => Ok(true),
+        Some("btree" | "heap") => Ok(false),
+        _ => Err(invalid_option(format!(
+            "invalid value for parameter \"storage\": \"{}\"; EggDB stores a table in a B-tree (btree, the default) or an LSM tree (lsm)",
+            value.unwrap_or_default()
+        ))),
+    }
 }
 
 fn check_storage_parameter(

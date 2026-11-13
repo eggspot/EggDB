@@ -104,6 +104,7 @@ fn shell_table(
     Ok(CreateTable {
         system_versioning: None,
         rowversion_column: None,
+        lsm_storage: false,
         name,
         temporary: None,
         if_not_exists: false,

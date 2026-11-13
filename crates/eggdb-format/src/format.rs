@@ -198,10 +198,14 @@ impl Features {
     /// The incompatible bit of a file with at least one value compressed with Zstandard
     /// (overflow layout 3, D357): a release that does not know it would refuse the layout.
     pub const ZSTD_VALUES: u64 = 1 << 2;
-    /// The incompatible features this release knows: [`Features::COMPRESSED_VALUES`] and
-    /// [`Features::ENCRYPTED_PAGES`].
+    /// The incompatible bit of a file with at least one table stored in an LSM tree of its own
+    /// (D1119): a release that does not know it would not see those tables' rows, and would
+    /// count the trees' pages as leaked.
+    pub const LSM_TABLES: u64 = 1 << 3;
+    /// The incompatible features this release knows: [`Features::COMPRESSED_VALUES`],
+    /// [`Features::ENCRYPTED_PAGES`], [`Features::ZSTD_VALUES`] and [`Features::LSM_TABLES`].
     pub const KNOWN_INCOMPATIBLE: u64 =
-        Self::COMPRESSED_VALUES | Self::ENCRYPTED_PAGES | Self::ZSTD_VALUES;
+        Self::COMPRESSED_VALUES | Self::ENCRYPTED_PAGES | Self::ZSTD_VALUES | Self::LSM_TABLES;
 
     /// Whether this release may open a file with these features for `access`. Unknown
     /// compatible bits are ignored, unknown read-only-compatible bits refuse a write, and

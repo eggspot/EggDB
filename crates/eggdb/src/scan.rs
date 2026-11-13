@@ -2,7 +2,7 @@ use crate::collection;
 use crate::error::{Error, Result};
 use crate::expiry::{self, Moment};
 use eggdb_platform::DatabaseFile;
-use eggdb_storage::{BTree, Cursor, ScanOrder, StorageError};
+use eggdb_storage::{BTree, Cursor, LsmCursor, LsmTree, ScanOrder, StorageError};
 use std::iter::FusedIterator;
 use std::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
 
@@ -132,6 +132,40 @@ impl Reader<'_> {
         found.map_err(Error::storage)
     }
 
+    pub(crate) fn open_lsm(self, root: u64) -> Result<LsmTree> {
+        let opened = match self {
+            Self::Snapshot(transaction) => transaction.open_lsm_tree(root),
+            Self::Writer(transaction) => transaction.open_lsm_tree(root),
+        };
+        opened.map_err(Error::storage)
+    }
+
+    pub(crate) fn lsm_get(self, tree: &LsmTree, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let found = match self {
+            Self::Snapshot(transaction) => transaction.lsm_get(tree, key),
+            Self::Writer(transaction) => transaction.lsm_get(tree, key),
+        };
+        found.map_err(Error::storage)
+    }
+
+    fn lsm_cursor(self, tree: &LsmTree, segment: &Segment, order: ScanOrder) -> Result<LsmCursor> {
+        let start = segment.0.as_ref().map(Vec::as_slice);
+        let end = segment.1.as_ref().map(Vec::as_slice);
+        let cursor = match self {
+            Self::Snapshot(transaction) => transaction.lsm_scan(tree, start, end, order),
+            Self::Writer(transaction) => transaction.lsm_scan(tree, start, end, order),
+        };
+        cursor.map_err(Error::storage)
+    }
+
+    fn lend_lsm(self, cursor: &mut LsmCursor) -> Result<Option<Lent<'_>>> {
+        let next = match self {
+            Self::Snapshot(transaction) => transaction.lsm_next(cursor),
+            Self::Writer(transaction) => transaction.lsm_next(cursor),
+        };
+        Ok(next.map_err(Error::storage)?.map(Lent::with_value))
+    }
+
     fn lend(
         self,
         cursor: &mut Cursor,
@@ -186,16 +220,6 @@ fn cursor_over(segment: &Segment, tree: &BTree, order: ScanOrder) -> Cursor {
     )
 }
 
-fn segment_of(segments: &[Segment], order: ScanOrder, far: bool) -> Option<&Segment> {
-    let index = match (order, far) {
-        (ScanOrder::Ascending, false) => 0,
-        (ScanOrder::Ascending, true) => 1,
-        (ScanOrder::Descending, false) => segments.len().checked_sub(1)?,
-        (ScanOrder::Descending, true) => segments.len().checked_sub(2)?,
-    };
-    segments.get(index)
-}
-
 pub(crate) fn keys_after_prefix(prefix: &[u8]) -> Bound<Vec<u8>> {
     let mut end = prefix.to_vec();
     while let Some(last) = end.pop() {
@@ -246,11 +270,15 @@ fn outside_collections(start: Bound<Vec<u8>>, end: Bound<Vec<u8>>) -> Vec<Segmen
     segments
 }
 
+enum AnyCursor {
+    Tree(Cursor),
+    Lsm(LsmCursor),
+}
+
 #[derive(Default)]
 struct End {
-    near: Option<Cursor>,
-    far: Option<Cursor>,
-    in_far: bool,
+    passed: usize,
+    cursors: Vec<Option<AnyCursor>>,
     returned_any: bool,
     last_key: Vec<u8>,
 }
@@ -309,6 +337,7 @@ pub struct Scan<'t> {
     reader: Reader<'t>,
     tree: Option<BTree>,
     segments: Vec<Segment>,
+    sources: Vec<Option<LsmTree>>,
     base_bytes: usize,
     live_at: Option<Moment>,
     front: End,
@@ -325,6 +354,14 @@ impl<'t> Scan<'t> {
             outside_collections(owned(start), owned(end)),
             0,
         )
+    }
+
+    pub(crate) fn over_segments(
+        reader: Reader<'t>,
+        tree: Option<BTree>,
+        segments: Vec<(Bound<Vec<u8>>, Bound<Vec<u8>>)>,
+    ) -> Self {
+        Self::new(reader, tree, segments, 0)
     }
 
     pub(crate) fn prefix(reader: Reader<'t>, tree: Option<BTree>, prefix: &[u8]) -> Self {
@@ -380,6 +417,7 @@ impl<'t> Scan<'t> {
             reader,
             finished: tree.is_none() || segments.is_empty(),
             tree,
+            sources: vec![None; segments.len()],
             segments,
             base_bytes,
             live_at: None,
@@ -390,6 +428,17 @@ impl<'t> Scan<'t> {
 
     pub(crate) fn hiding_expired(mut self, now: Option<Moment>) -> Self {
         self.live_at = now;
+        self
+    }
+
+    pub(crate) fn over_lsm_tables(mut self, routes: &crate::lsm_tables::LsmRoutes) -> Self {
+        if routes.is_empty() {
+            return self;
+        }
+        let pieces = routes.split(std::mem::take(&mut self.segments));
+        self.sources = pieces.iter().map(|piece| piece.2).collect();
+        self.segments = pieces.into_iter().map(|(start, end, _)| (start, end)).collect();
+        self.finished = self.tree.is_none() || self.segments.is_empty();
         self
     }
 
@@ -517,40 +566,61 @@ impl<'t> Scan<'t> {
             ScanOrder::Descending => (&mut self.back, &self.front),
         };
         let segments = &self.segments;
+        let sources = &self.sources;
+        let reader = self.reader;
+        let live_at = self.live_at;
+        let count = segments.len();
+        if this.cursors.len() < count {
+            this.cursors.resize_with(count, || None);
+        }
+        let first = this.passed;
+        let mut passed = first;
         let mut found = None;
-        if !this.in_far {
-            let Some(segment) = segment_of(segments, order, false) else {
-                self.finished = true;
-                return Ok(None);
+        let mut failure = None;
+        for (position, slot) in this.cursors.iter_mut().enumerate().skip(first) {
+            let index = match order {
+                ScanOrder::Ascending => position,
+                ScanOrder::Descending => count - 1 - position,
             };
-            let cursor = this
-                .near
-                .get_or_insert_with(|| cursor_over(segment, &tree, order));
-            match lend_live(self.reader, cursor, wanted, &tree, self.live_at) {
-                Ok(Some(entry)) => found = Some(entry),
-                Ok(None) => this.in_far = true,
+            let (Some(segment), Some(source)) = (segments.get(index), sources.get(index)) else {
+                break;
+            };
+            if slot.is_none() {
+                let opened = match source {
+                    None => Ok(AnyCursor::Tree(cursor_over(segment, &tree, order))),
+                    Some(lsm) => reader.lsm_cursor(lsm, segment, order).map(AnyCursor::Lsm),
+                };
+                match opened {
+                    Ok(cursor) => *slot = Some(cursor),
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+            }
+            let Some(cursor) = slot.as_mut() else {
+                break;
+            };
+            let lent = match cursor {
+                AnyCursor::Tree(cursor) => lend_live(reader, cursor, wanted, &tree, live_at),
+                AnyCursor::Lsm(cursor) => reader.lend_lsm(cursor),
+            };
+            match lent {
+                Ok(Some(entry)) => {
+                    found = Some(entry);
+                    break;
+                }
+                Ok(None) => passed = position + 1,
                 Err(error) => {
-                    self.finished = true;
-                    return Err(error);
+                    failure = Some(error);
+                    break;
                 }
             }
         }
-        if found.is_none() {
-            let Some(segment) = segment_of(segments, order, true) else {
-                self.finished = true;
-                return Ok(None);
-            };
-            let cursor = this
-                .far
-                .get_or_insert_with(|| cursor_over(segment, &tree, order));
-            match lend_live(self.reader, cursor, wanted, &tree, self.live_at) {
-                Ok(Some(entry)) => found = Some(entry),
-                Ok(None) => {}
-                Err(error) => {
-                    self.finished = true;
-                    return Err(error);
-                }
-            }
+        this.passed = passed;
+        if let Some(error) = failure {
+            self.finished = true;
+            return Err(error);
         }
         let Some(entry) = found else {
             self.finished = true;

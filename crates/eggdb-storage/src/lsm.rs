@@ -547,17 +547,25 @@ impl LsmTree {
     }
 
     pub(crate) fn check_in(&self, pages: &impl PageSource) -> Result<LsmReport, StorageError> {
-        let manifest = Manifest::read(pages, &self.manifest)?;
         let mut used = PageSet::for_pages(pages.page_count())?;
+        self.check_marking(pages, &mut used)
+    }
+
+    pub(crate) fn check_marking(
+        &self,
+        pages: &impl PageSource,
+        used: &mut PageSet,
+    ) -> Result<LsmReport, StorageError> {
+        let manifest = Manifest::read(pages, &self.manifest)?;
         let mut report = LsmReport::default();
-        let manifest_report = self.manifest.check_marking(pages, &mut used)?;
+        let manifest_report = self.manifest.check_marking(pages, used)?;
         report.pages += pages_of(&manifest_report);
         let merge_target = manifest.merge.as_ref().map(|merge| merge.target);
         for component in manifest
             .components_newest_first()
             .chain(merge_target.iter())
         {
-            let found = component.tree.check_marking(pages, &mut used)?;
+            let found = component.tree.check_marking(pages, used)?;
             report.components += 1;
             report.stored_entries += found.entries;
             report.pages += pages_of(&found);

@@ -1415,6 +1415,7 @@ pub(crate) struct CreateTable {
     pub(crate) sqlite_text: Option<String>,
     pub(crate) system_versioning: Option<SystemVersioning>,
     pub(crate) rowversion_column: Option<String>,
+    pub(crate) lsm_storage: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

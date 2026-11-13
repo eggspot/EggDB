@@ -33,6 +33,7 @@ impl Parser<'_> {
         Ok(Statement::CreateTable(CreateTable {
             system_versioning: None,
             rowversion_column: None,
+            lsm_storage: false,
             name,
             temporary,
             if_not_exists,

@@ -270,6 +270,7 @@ fn empty_table(create: &CreateTableAs) -> CreateTable {
     CreateTable {
         system_versioning: None,
         rowversion_column: None,
+        lsm_storage: false,
         name: create.name.clone(),
         temporary: create
             .temporary

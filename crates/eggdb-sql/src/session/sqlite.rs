@@ -580,6 +580,7 @@ impl<'s> Session<'s> {
         let create = CreateTable {
             system_versioning: None,
             rowversion_column: None,
+            lsm_storage: false,
             comment: None,
             partition_by: None,
             partition_of: None,

@@ -1099,6 +1099,7 @@ impl Parser<'_> {
             sqlite_text: Some(text),
             system_versioning: None,
             rowversion_column: None,
+            lsm_storage: false,
         }))
     }
 }

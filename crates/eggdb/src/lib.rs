@@ -73,6 +73,7 @@ mod consensus_store;
 mod database;
 mod error;
 mod expiry;
+mod lsm_tables;
 pub mod inbox;
 pub mod keyspace;
 mod options;

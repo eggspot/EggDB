@@ -432,6 +432,10 @@ impl KeyValueWrite for SqlWriter<'_> {
         self.0.delete(key).map_err(store_error)
     }
 
+    fn store_prefix_in_lsm_tree(&mut self, prefix: &[u8]) -> SqlResult<bool> {
+        self.0.store_prefix_in_lsm_tree(prefix).map_err(store_error)
+    }
+
     fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
         self.0.put_with_expiry(key, value, ttl).map_err(store_error)
     }
@@ -935,6 +939,14 @@ impl KeyValueWrite for SharedWriter<'_, '_> {
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
         self.writing(|transaction| transaction.delete(key).map_err(store_error))
+    }
+
+    fn store_prefix_in_lsm_tree(&mut self, prefix: &[u8]) -> SqlResult<bool> {
+        self.writing(|transaction| {
+            transaction
+                .store_prefix_in_lsm_tree(prefix)
+                .map_err(store_error)
+        })
     }
 
     fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {

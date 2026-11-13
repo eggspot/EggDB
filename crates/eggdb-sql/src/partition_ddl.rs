@@ -106,6 +106,7 @@ pub(crate) fn copy_of(parent: &TableDefinition, name: Name) -> SqlResult<CreateT
     Ok(CreateTable {
         system_versioning: None,
         rowversion_column: None,
+        lsm_storage: false,
         name,
         temporary: None,
         if_not_exists: false,

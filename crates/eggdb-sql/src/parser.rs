@@ -2140,6 +2140,7 @@ impl<'t> Parser<'t> {
             let declared = CreateTable {
                 system_versioning: None,
                 rowversion_column: None,
+                lsm_storage: false,
                 name: name.clone(),
                 temporary,
                 if_not_exists,
@@ -2188,9 +2189,10 @@ impl<'t> Parser<'t> {
                 scheme: Some(scheme),
             })
         };
+        let mut lsm_storage = false;
         if self.postgresql() {
             self.table_access_method()?;
-            self.storage_parameters()?;
+            lsm_storage = self.storage_parameters()?;
             if let Some(action) = self.on_commit_clause(temporary.is_some())? {
                 temporary = Some(action);
             }
@@ -2202,6 +2204,7 @@ impl<'t> Parser<'t> {
         Ok(Statement::CreateTable(CreateTable {
             system_versioning: self.take_system_versioning()?,
             rowversion_column: self.rowversion_column.take(),
+            lsm_storage,
             name,
             temporary,
             if_not_exists,
