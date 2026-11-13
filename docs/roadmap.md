@@ -2055,8 +2055,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `https://` object storage endpoints, multipart copies of large archives, and uploads without a
   staging file (D226). Check: a simulator test of restoring under failures. `https://` endpoints, through the
   shared HTTP client's TLS: **code written, unbuilt** (code-only mode, 2026-11-12, D920); multipart uploads of large
-  archives: **code written, unbuilt** (code-only mode, 2026-11-12, D921). Left: uploads without a staging file, and
-  the simulator test.
+  archives: **code written, unbuilt** (code-only mode, 2026-11-12, D921). Uploads without a staging file and the
+  simulator test of restoring under failures: **code written, unbuilt** (code-only mode, 2026-11-13, D1100).
 - Stateless compute nodes over shared storage, scaling apart from storage (D18).
 - Serverless: `eggdb serve` archives and exits when idle, and starts again through
   `--restore-from` (D226); research decides what wakes it (D18). Check: a timed cold start.

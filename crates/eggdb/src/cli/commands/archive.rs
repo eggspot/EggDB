@@ -62,15 +62,36 @@ const LOCKED_MANIFEST: &str = "manifest.d/";
 
 /// The archived copies a bucket's manifest lists, each line stored under Object Lock in
 /// `manifest.d/` taking the place of its line in `manifest.jsonl`, which stays writable (D1022).
-fn bucket_entries(location: &eggdb_s3::client::Location, url: &str) -> Result<Vec<Archived>, String> {
-    let manifest_text = location.bucket.get(&location.key(MANIFEST))?;
-    let locked_keys = location.bucket.list(&location.key(LOCKED_MANIFEST))?;
+/// Where archived copies are read from: a bucket, or a test's objects (D1100).
+trait ArchiveObjects {
+    fn object(&self, name: &str) -> Result<Option<Vec<u8>>, String>;
+    fn object_at(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
+    fn keys_under(&self, name: &str) -> Result<Vec<String>, String>;
+}
+
+impl ArchiveObjects for eggdb_s3::client::Location {
+    fn object(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        self.bucket.get(&self.key(name))
+    }
+
+    fn object_at(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.bucket.get(key)
+    }
+
+    fn keys_under(&self, name: &str) -> Result<Vec<String>, String> {
+        self.bucket.list(&self.key(name))
+    }
+}
+
+fn bucket_entries(location: &impl ArchiveObjects, url: &str) -> Result<Vec<Archived>, String> {
+    let manifest_text = location.object(MANIFEST)?;
+    let locked_keys = location.keys_under(LOCKED_MANIFEST)?;
     if manifest_text.is_none() && locked_keys.is_empty() {
         return Err(format!("{url} has no {MANIFEST}: archive into it with eggdb backup <file> {url}"));
     }
     let mut entries = parse_manifest(&String::from_utf8_lossy(&manifest_text.unwrap_or_default()));
     for key in locked_keys {
-        let Some(line) = location.bucket.get(&key)? else {
+        let Some(line) = location.object_at(&key)? else {
             continue;
         };
         for locked in parse_manifest(&String::from_utf8_lossy(&line)) {
@@ -129,11 +150,18 @@ pub(super) fn restore_from_bucket_into(
     at: Option<&str>,
     target: &Path,
 ) -> Result<(String, i64), String> {
-    let location = bucket(url)?;
-    let chosen = choose(&bucket_entries(&location, url)?, at, url)?;
+    restore_from_objects(&bucket(url)?, url, at, target)
+}
+
+fn restore_from_objects(
+    location: &impl ArchiveObjects,
+    url: &str,
+    at: Option<&str>,
+    target: &Path,
+) -> Result<(String, i64), String> {
+    let chosen = choose(&bucket_entries(location, url)?, at, url)?;
     let bytes = location
-        .bucket
-        .get(&location.key(&chosen.file))?
+        .object(&chosen.file)?
         .ok_or_else(|| format!("{} is in the manifest but not in the bucket", chosen.file))?;
     let actual: String = eggdb_crypto::sha256(&bytes)
         .iter()
@@ -391,32 +419,67 @@ pub(super) fn archived_copy(directory: &Path, at: Option<&str>) -> Result<PathBu
     Ok(source)
 }
 
+/// A verified copy to upload: a file staged on disk, or its bytes in memory (D1100).
+enum UploadedCopy<'a> {
+    Staged(&'a Path),
+    InMemory(Vec<u8>),
+}
+
+/// Copies up to this size are built in memory and uploaded with no staging file (D1100).
+const IN_MEMORY_UPLOAD_BYTES: u64 = 1 << 30;
+
+fn hex_of(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn upload_copy(
     location: &eggdb_s3::client::Location,
-    staging: &Path,
+    copy: UploadedCopy<'_>,
     name: &str,
     taken_at_ms: i64,
     shown: &str,
     locked_until_ms: Option<i64>,
 ) -> Result<(String, u64), String> {
-    let verified = eggdb::Database::open_with(staging, eggdb::Options::default().read_only(true))
-        .and_then(|copy| copy.check())
-        .map_err(|error| format!("the copy of {shown} does not verify: {error}"))?;
-    let size = std::fs::metadata(staging)
-        .map_err(|error| format!("cannot read back the copy: {error}"))?
-        .len();
-    let sha256 = file_sha256(staging).map_err(|error| format!("cannot read back the copy: {error}"))?;
+    let not_verified = |error: eggdb::Error| format!("the copy of {shown} does not verify: {error}");
+    let read_back = |error: std::io::Error| format!("cannot read back the copy: {error}");
     let retain_until = locked_until_ms.map(rfc3339);
-    if size > eggdb_s3::client::PART_BYTES as u64 {
-        let mut file = std::fs::File::open(staging).map_err(|error| format!("cannot read back the copy: {error}"))?;
-        location.bucket.put_from(&location.key(name), &mut file, retain_until.as_deref())?;
-    } else {
-        let bytes = std::fs::read(staging).map_err(|error| format!("cannot read back the copy: {error}"))?;
-        match &retain_until {
-            Some(until) => location.bucket.put_locked(&location.key(name), &bytes, until)?,
-            None => location.bucket.put(&location.key(name), &bytes)?,
+    let (verified, size, sha256) = match copy {
+        UploadedCopy::Staged(staging) => {
+            let verified = eggdb::Database::open_with(staging, eggdb::Options::default().read_only(true))
+                .and_then(|copy| copy.check())
+                .map_err(not_verified)?;
+            let size = std::fs::metadata(staging).map_err(read_back)?.len();
+            let sha256 = file_sha256(staging).map_err(read_back)?;
+            if size > eggdb_s3::client::PART_BYTES as u64 {
+                let mut file = std::fs::File::open(staging).map_err(read_back)?;
+                location.bucket.put_from(&location.key(name), &mut file, retain_until.as_deref())?;
+            } else {
+                let bytes = std::fs::read(staging).map_err(read_back)?;
+                match &retain_until {
+                    Some(until) => location.bucket.put_locked(&location.key(name), &bytes, until)?,
+                    None => location.bucket.put(&location.key(name), &bytes)?,
+                }
+            }
+            (verified, size, sha256)
         }
-    }
+        UploadedCopy::InMemory(bytes) => {
+            let verified = eggdb::Database::from_image(bytes.clone(), eggdb::Options::default())
+                .and_then(|copy| copy.check())
+                .map_err(not_verified)?;
+            let size = bytes.len() as u64;
+            let sha256 = hex_of(&eggdb_crypto::sha256(&bytes));
+            if bytes.len() > eggdb_s3::client::PART_BYTES {
+                let mut reader = std::io::Cursor::new(bytes);
+                location.bucket.put_from(&location.key(name), &mut reader, retain_until.as_deref())?;
+            } else {
+                match &retain_until {
+                    Some(until) => location.bucket.put_locked(&location.key(name), &bytes, until)?,
+                    None => location.bucket.put(&location.key(name), &bytes)?,
+                }
+            }
+            (verified, size, sha256)
+        }
+    };
     let mut line = JsonObject::new()
         .string("file", name)
         .string("taken_at", &rfc3339(taken_at_ms))
@@ -560,16 +623,25 @@ impl Session<'_> {
         let mut staging = self.request.file.clone().into_os_string();
         staging.push(format!(".{stamp}{UPLOAD_SUFFIX}"));
         let staging = PathBuf::from(staging);
-        let db = self.open(Access::ReadOnly, None)?;
-        let copied = db.backup_to(&staging);
-        drop(db);
-        copied.map_err(|error| failed(format!("cannot copy {} for {url}: {error}", self.file)))?;
         let locked_until_ms = self
             .request
             .lock_days
             .map(|days| taken_at_ms.saturating_add(i64::from(days) * MS_PER_DAY));
-        let outcome = upload_copy(&location, &staging, &name, taken_at_ms, &self.file, locked_until_ms);
-        let _ = std::fs::remove_file(&staging);
+        let db = self.open(Access::ReadOnly, None)?;
+        let in_memory = db.stats().is_ok_and(|stats| stats.file_bytes <= IN_MEMORY_UPLOAD_BYTES);
+        let outcome = if in_memory {
+            let copied = db.backup_to_bytes();
+            drop(db);
+            let (bytes, _) = copied.map_err(|error| failed(format!("cannot copy {} for {url}: {error}", self.file)))?;
+            upload_copy(&location, UploadedCopy::InMemory(bytes), &name, taken_at_ms, &self.file, locked_until_ms)
+        } else {
+            let copied = db.backup_to(&staging);
+            drop(db);
+            copied.map_err(|error| failed(format!("cannot copy {} for {url}: {error}", self.file)))?;
+            let outcome = upload_copy(&location, UploadedCopy::Staged(&staging), &name, taken_at_ms, &self.file, locked_until_ms);
+            let _ = std::fs::remove_file(&staging);
+            outcome
+        };
         let (line, entries) = outcome.map_err(failed)?;
         match self.format {
             Format::Json => self.out.text(&line),
@@ -972,6 +1044,109 @@ fn prune_change_segments(changes: &Path, oldest_kept: u64) -> std::io::Result<Ve
         }
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+mod restore_under_failures {
+    use super::{ArchiveObjects, MANIFEST, restore_from_objects};
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
+
+    struct FaultyObjects {
+        objects: BTreeMap<String, Vec<u8>>,
+        state: Cell<u64>,
+    }
+
+    impl FaultyObjects {
+        fn next(&self) -> u64 {
+            let mut state = self.state.get();
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            self.state.set(state);
+            state
+        }
+
+        fn served(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            let found = self.objects.get(key).cloned();
+            match self.next() % 10 {
+                0 => Err("connection reset by peer".to_owned()),
+                1 => Ok(found.map(|bytes| bytes[..bytes.len() / 2].to_vec())),
+                2 => Ok(found.map(|mut bytes| {
+                    let at = (self.next() as usize) % bytes.len().max(1);
+                    if let Some(byte) = bytes.get_mut(at) {
+                        *byte ^= 0x5a;
+                    }
+                    bytes
+                })),
+                3 => Ok(None),
+                _ => Ok(found),
+            }
+        }
+    }
+
+    impl ArchiveObjects for FaultyObjects {
+        fn object(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+            self.served(name)
+        }
+
+        fn object_at(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            self.served(key)
+        }
+
+        fn keys_under(&self, _: &str) -> Result<Vec<String>, String> {
+            match self.next() % 10 {
+                0 => Err("the listing timed out".to_owned()),
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+
+    fn archived_copy() -> (Vec<u8>, String) {
+        let db = eggdb::Database::in_memory().unwrap();
+        db.write(|tx| {
+            for index in 0..300u32 {
+                tx.put(index.to_be_bytes(), vec![index as u8; 64])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let (bytes, _) = db.backup_to_bytes().unwrap();
+        let sha256: String = eggdb_crypto::sha256(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+        (bytes, sha256)
+    }
+
+    #[test]
+    fn a_restore_under_failures_gives_the_whole_copy_or_no_file() {
+        let (bytes, sha256) = archived_copy();
+        let manifest = format!("{{\"file\":\"db-1.eggdb\",\"taken_at_ms\":1000,\"sha256\":\"{sha256}\"}}\n");
+        let objects = BTreeMap::from([
+            (MANIFEST.to_owned(), manifest.into_bytes()),
+            ("db-1.eggdb".to_owned(), bytes.clone()),
+        ]);
+        let directory = std::env::temp_dir().join(format!("eggdb-restore-faults-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut restored = 0;
+        for seed in 1..=200u64 {
+            let faulty = FaultyObjects { objects: objects.clone(), state: Cell::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1) };
+            let target = directory.join(format!("restored-{seed}.eggdb"));
+            match restore_from_objects(&faulty, "s3://test/archive", None, &target) {
+                Ok((file, taken_at_ms)) => {
+                    assert_eq!((file.as_str(), taken_at_ms), ("db-1.eggdb", 1000));
+                    assert_eq!(std::fs::read(&target).unwrap(), bytes, "seed {seed}");
+                    let copy = eggdb::Database::open_with(&target, eggdb::Options::new().read_only(true)).unwrap();
+                    assert_eq!(copy.check().unwrap().entries, 300, "seed {seed}");
+                    restored += 1;
+                }
+                Err(message) => {
+                    assert!(!target.exists(), "seed {seed} failed with {message} but left {}", target.display());
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(restored > 20, "only {restored} of 200 restores got through");
+        assert!(restored < 200, "no failure was ever injected");
+    }
 }
 
 #[cfg(test)]

@@ -924,6 +924,42 @@ impl Database {
         self.backup_to_reporting(path, &mut |_| {})
     }
 
+    /// Builds a copy as [`Database::backup_to`] does, from one snapshot while readers and the
+    /// writer keep working, but in memory, and returns its bytes with its report: what an
+    /// upload to object storage sends without a staging file on disk (D1100). The copy holds as
+    /// many bytes as the database's entries, not its free pages, and memory for them is taken
+    /// while it runs.
+    pub fn backup_to_bytes(&self) -> Result<(Vec<u8>, BackupReport)> {
+        let fs = eggdb_platform::SimFileSystem::new();
+        let copy = Path::new("/backup.eggdb");
+        let staging = Path::new("/backup.eggdb.backing-up");
+        let snapshot = self.store.begin_read().map_err(Error::storage)?;
+        let destination = CopyDestination {
+            path: copy,
+            staging,
+            replaces: false,
+        };
+        let report = snapshot
+            .copy_to_reporting(&fs, &OsMemory::new(), Arc::clone(&self.clock.0), destination, &mut |_| {})
+            .map_err(|failure| self.backup_failure(failure, destination))?;
+        drop(snapshot);
+        let file = fs.open(copy, OpenMode::Read).map_err(|error| Error::storage(error.into()))?;
+        let size = file.size().map_err(|error| Error::storage(error.into()))?;
+        let mut bytes = vec![0u8; usize::try_from(size).map_err(|_| Error::new(ErrorKind::TooLarge, "the copy is larger than memory can address"))?];
+        file.read_exact_at(&mut bytes, 0).map_err(|error| Error::storage(error.into()))?;
+        Ok((
+            bytes,
+            BackupReport {
+                stamp: report.stamp,
+                entries: report.entries,
+                key_bytes: report.key_bytes,
+                value_bytes: report.value_bytes,
+                page_count: report.page_count,
+                file_bytes: self.bytes_of(report.page_count),
+            },
+        ))
+    }
+
     /// Writes a copy as [`Database::backup_to`] does, calling `progress` with the entries
     /// copied so far and the entries the copy will hold after each batch (D1023).
     pub fn backup_to_reporting(&self, path: impl AsRef<Path>, progress: &mut dyn FnMut(u64, u64)) -> Result<BackupReport> {
