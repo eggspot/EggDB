@@ -38,7 +38,12 @@ const CAPTURE_INSTANCES_QUERY: &str = "SELECT CAST(s.name AS nvarchar(max)), CAS
      CONVERT(nvarchar(max), sys.fn_cdc_get_min_lsn(c.capture_instance), 1), CAST(cc.column_name AS nvarchar(max)) \
      FROM cdc.change_tables c JOIN sys.tables t ON t.object_id = c.source_object_id \
      JOIN sys.schemas s ON s.schema_id = t.schema_id JOIN cdc.captured_columns cc ON cc.object_id = c.object_id \
-     ORDER BY c.create_date DESC, c.object_id DESC, cc.column_ordinal";
+     ORDER BY c.create_date DESC, c.object_id DESC, cc.column_ordinal; \
+     SELECT CAST(c.capture_instance AS nvarchar(max)), CAST(ic.column_name AS nvarchar(max)), \
+     CAST(CASE WHEN c.supports_net_changes = 1 AND NOT EXISTS (SELECT 1 FROM sys.indexes i \
+     WHERE i.object_id = c.source_object_id AND i.is_primary_key = 1 AND i.name = c.index_name) THEN 1 ELSE 0 END AS nvarchar(max)) \
+     FROM cdc.index_columns ic JOIN cdc.change_tables c ON c.object_id = ic.object_id \
+     ORDER BY c.capture_instance, ic.index_ordinal";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Lsn(u128);
@@ -154,6 +159,8 @@ struct CaptureInstance {
     net_changes: bool,
     minimum: Option<Lsn>,
     columns: Vec<String>,
+    index_columns: Vec<String>,
+    net_by_unique_index: bool,
 }
 
 impl CaptureInstance {
@@ -164,6 +171,26 @@ impl CaptureInstance {
     fn captures(&self, columns: &[String]) -> bool {
         columns.iter().all(|column| self.columns.contains(column))
     }
+
+    fn unique_index_key(&self) -> Option<&[String]> {
+        (self.net_by_unique_index
+            && !self.index_columns.is_empty()
+            && self.captures(&self.index_columns))
+        .then_some(self.index_columns.as_slice())
+    }
+}
+
+fn read_capture_instances(results: Vec<TextRows>) -> Vec<CaptureInstance> {
+    let mut results = results.into_iter();
+    let mut instances = capture_instances(&results.next().unwrap_or_default());
+    let index_rows = results.next().unwrap_or_default();
+    for instance in &mut instances {
+        for row in index_rows.iter().filter(|row| cell(row, 0) == instance.name) {
+            instance.index_columns.push(cell(row, 1));
+            instance.net_by_unique_index = cell(row, 2) == "1";
+        }
+    }
+    instances
 }
 
 fn capture_instances(rows: &TextRows) -> Vec<CaptureInstance> {
@@ -182,6 +209,8 @@ fn capture_instances(rows: &TextRows) -> Vec<CaptureInstance> {
                 net_changes: cell(row, 3) == "1",
                 minimum: row.get(4).and_then(parse_lsn).filter(|lsn| lsn.is_valid()),
                 columns: vec![column],
+                index_columns: Vec::new(),
+                net_by_unique_index: false,
             }),
         }
     }
@@ -308,6 +337,8 @@ struct SourceTable {
     key: Vec<String>,
     changes: ChangeSource,
     left_out: Vec<String>,
+    unique_key: bool,
+    object_id: Option<i64>,
 }
 
 impl SourceTable {
@@ -342,6 +373,87 @@ impl SourceTable {
 
     fn follows(&self, name: &str) -> bool {
         self.columns.iter().any(|column| column.name == name)
+    }
+
+    fn create_statement(&self) -> String {
+        let mut definitions: Vec<String> =
+            self.columns.iter().map(SourceColumn::definition).collect();
+        if !self.key.is_empty() {
+            let key: Vec<String> = self.key.iter().map(|name| quote_name(name)).collect();
+            definitions.push(format!(
+                "{} ({})",
+                if self.unique_key {
+                    "UNIQUE"
+                } else {
+                    "PRIMARY KEY"
+                },
+                key.join(", ")
+            ));
+        }
+        format!("CREATE TABLE {} ({})", self.qualified(), definitions.join(", "))
+    }
+
+    fn select_all_query(&self) -> String {
+        let selected: Vec<String> = self
+            .columns
+            .iter()
+            .map(|column| text_expression(&quote_name(&column.name), &column.data_type))
+            .collect();
+        format!("SELECT {} FROM {}", selected.join(", "), self.qualified())
+    }
+
+    fn insert_statements(&self, rows: &[Vec<Option<String>>]) -> Vec<String> {
+        let names = self.column_names();
+        rows.chunks(ROWS_PER_INSERT)
+            .map(|chunk| {
+                let values: Vec<String> = chunk
+                    .iter()
+                    .map(|row| {
+                        let literals: Vec<String> = row
+                            .iter()
+                            .zip(&self.columns)
+                            .map(|(value, column)| literal(value, &column.data_type))
+                            .collect();
+                        format!("({})", literals.join(", "))
+                    })
+                    .collect();
+                format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    self.qualified(),
+                    names.join(", "),
+                    values.join(", ")
+                )
+            })
+            .collect()
+    }
+}
+
+fn keyed_by_unique_index(
+    key: Vec<String>,
+    changes: &mut ChangeSource,
+    instances: &[&CaptureInstance],
+) -> (Vec<String>, bool) {
+    if !key.is_empty() {
+        return (key, false);
+    }
+    let ChangeSource::Capture {
+        instance,
+        net_changes,
+        ..
+    } = changes
+    else {
+        return (key, false);
+    };
+    match instances
+        .iter()
+        .find(|candidate| candidate.name == *instance)
+        .and_then(|candidate| candidate.unique_index_key())
+    {
+        Some(index_key) => {
+            *net_changes = true;
+            (index_key.to_vec(), true)
+        }
+        None => (key, false),
     }
 }
 
@@ -623,12 +735,13 @@ fn key_condition(table: &SourceTable, key_values: &[Option<String>]) -> String {
         .key
         .iter()
         .zip(key_values)
-        .map(|(key, value)| {
-            format!(
+        .map(|(key, value)| match value {
+            None => format!("{} IS NULL", quote_name(key)),
+            Some(_) => format!(
                 "{} = {}",
                 quote_name(key),
                 literal(value, table.column_type(key))
-            )
+            ),
         })
         .collect();
     condition.join(" AND ")
@@ -685,6 +798,14 @@ fn drop_column_statement(table: &SourceTable, column: &str) -> String {
         "ALTER TABLE {} DROP COLUMN {}",
         table.qualified(),
         quote_name(column)
+    )
+}
+
+fn retype_column_statement(table: &SourceTable, column: &SourceColumn) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {}",
+        table.qualified(),
+        column.definition()
     )
 }
 
@@ -1079,17 +1200,180 @@ fn columns_query(tables: &[SourceTable]) -> String {
         })
         .collect();
     format!(
-        "SELECT CAST(TABLE_SCHEMA AS nvarchar(max)), CAST(TABLE_NAME AS nvarchar(max)), CAST(COLUMN_NAME AS nvarchar(max)) \
+        "SELECT CAST(TABLE_SCHEMA AS nvarchar(max)), CAST(TABLE_NAME AS nvarchar(max)), CAST(COLUMN_NAME AS nvarchar(max)), \
+         CAST(OBJECT_ID(QUOTENAME(TABLE_SCHEMA) + N'.' + QUOTENAME(TABLE_NAME)) AS nvarchar(max)), \
+         CAST(DATA_TYPE AS nvarchar(max)), CAST(CHARACTER_MAXIMUM_LENGTH AS nvarchar(max)), \
+         CAST(NUMERIC_PRECISION AS nvarchar(max)), CAST(NUMERIC_SCALE AS nvarchar(max)), \
+         CAST(DATETIME_PRECISION AS nvarchar(max)), CAST(IS_NULLABLE AS nvarchar(max)) \
          FROM INFORMATION_SCHEMA.COLUMNS WHERE {} ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION",
         filters.join(" OR ")
     )
 }
 
-fn columns_of(rows: &[Vec<Option<String>>], table: &SourceTable) -> Vec<String> {
+fn rows_of_table<'a>(
+    rows: &'a [Vec<Option<String>>],
+    table: &'a SourceTable,
+) -> impl Iterator<Item = &'a Vec<Option<String>>> {
     rows.iter()
         .filter(|row| cell(row, 0) == table.schema && cell(row, 1) == table.name)
-        .map(|row| cell(row, 2))
-        .collect()
+}
+
+fn columns_of(rows: &[Vec<Option<String>>], table: &SourceTable) -> Vec<String> {
+    rows_of_table(rows, table).map(|row| cell(row, 2)).collect()
+}
+
+fn object_of(rows: &[Vec<Option<String>>], table: &SourceTable) -> Option<i64> {
+    rows_of_table(rows, table)
+        .next()
+        .and_then(|row| row.get(3).and_then(whole_number))
+}
+
+fn source_columns_of(rows: &[Vec<Option<String>>], table: &SourceTable) -> Vec<SourceColumn> {
+    let described: TextRows = rows_of_table(rows, table)
+        .map(|row| {
+            let mut described = vec![row.get(2).cloned().flatten()];
+            described.extend(row.iter().skip(4).cloned());
+            described
+        })
+        .collect();
+    source_columns(&described)
+}
+
+fn follow_type_changes(table: &mut SourceTable, now: &[SourceColumn], work: &mut PollWork) {
+    let mut retyped = Vec::new();
+    for column in &mut table.columns {
+        let Some(current) = now.iter().find(|current| current.name == column.name) else {
+            continue;
+        };
+        if current.declared != column.declared || current.data_type != column.data_type {
+            *column = current.clone();
+            retyped.push(column.clone());
+        }
+    }
+    if retyped.is_empty() {
+        return;
+    }
+    for column in &retyped {
+        work.statements.push(retype_column_statement(table, column));
+    }
+    work.counts.schema_changes += retyped.len() as u64;
+    work.notices.push(Notice::Retyped {
+        table: table.shown(),
+        columns: retyped
+            .iter()
+            .map(|column| format!("{} {}", column.name, column.declared))
+            .collect(),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_table(
+    source: &mut TdsClient,
+    context: &PollContext,
+    table: &mut SourceTable,
+    instances: &[CaptureInstance],
+    current_lsn: Option<Lsn>,
+    object: Option<i64>,
+    work: &mut PollWork,
+) -> Result<bool, PollError> {
+    let target = context.target;
+    let (ChangeSource::Capture { .. }, Some(current)) = (&table.changes, current_lsn) else {
+        return Err(PollError::Failed(source_failed(table_recreated(
+            target,
+            &table.shown(),
+        ))));
+    };
+    let columns = source_columns(&ask(
+        source,
+        target,
+        &table_columns_query(&table.schema, &table.name),
+    )?);
+    let key: Vec<String> = ask(source, target, &key_query(&table.schema, &table.name))?
+        .iter()
+        .map(|row| cell(row, 0))
+        .collect();
+    let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
+    let theirs = instances_of(instances, &table.schema, &table.name);
+    let mut changes = choose_changes(
+        Some(SqlServerChanges::ChangeDataCapture),
+        false,
+        &theirs,
+        &names,
+        &key,
+    )
+    .map_err(|_| {
+        PollError::Failed(precondition_failed(
+            format!(
+                "cannot follow {target}: {} was dropped and created again on the source, and the new table has no CDC capture instance that includes its key yet. Turn CDC on for it; the next poll copies it again",
+                table.shown()
+            ),
+            enable_capture_command(&table.schema, &table.name, None),
+        ))
+    })?;
+    let ChangeSource::Capture { instance, .. } = &changes else {
+        return Err(PollError::Failed(malformed_change(target, &table.shown())));
+    };
+    let Some(chosen) = theirs.iter().find(|candidate| candidate.name == *instance) else {
+        return Err(PollError::Failed(malformed_change(target, &table.shown())));
+    };
+    let Some(minimum) = chosen.minimum else {
+        return Ok(false);
+    };
+    let captured = chosen.columns.clone();
+    let (key, unique_key) = keyed_by_unique_index(key, &mut changes, &theirs);
+    if key.is_empty() {
+        return Err(PollError::Failed(source_failed(format!(
+            "cannot follow {target}: {} was dropped and created again on the source without a primary key, so its changes could not be applied by key. Add a primary key, then follow again",
+            table.shown()
+        ))));
+    }
+    if let ChangeSource::Capture {
+        next, net_changes, ..
+    } = &mut changes
+    {
+        *next = current.max(minimum);
+        *net_changes = false;
+    }
+    let (followed, left_out) = split_captured(columns, &captured);
+    let replacement = SourceTable {
+        schema: table.schema.clone(),
+        name: table.name.clone(),
+        columns: followed,
+        key,
+        changes,
+        left_out,
+        unique_key,
+        object_id: object,
+    };
+    if replacement.columns == table.columns
+        && replacement.key == table.key
+        && replacement.unique_key == table.unique_key
+    {
+        work.statements
+            .push(format!("DELETE FROM {}", table.qualified()));
+    } else {
+        work.statements
+            .push(format!("DROP TABLE {}", table.qualified()));
+        work.statements.push(replacement.create_statement());
+    }
+    let rows = ask(source, target, &replacement.select_all_query())?;
+    work.statements.extend(replacement.insert_statements(&rows));
+    work.counts.rows_copied += rows.len() as u64;
+    work.counts.schema_changes += 1;
+    work.notices.push(Notice::Replaced {
+        table: replacement.shown(),
+        instance: instance_name(&replacement.changes),
+        rows: rows.len() as u64,
+    });
+    *table = replacement;
+    Ok(true)
+}
+
+fn instance_name(changes: &ChangeSource) -> String {
+    match changes {
+        ChangeSource::Capture { instance, .. } => instance.clone(),
+        ChangeSource::Tracking => String::new(),
+    }
 }
 
 fn schema_changed(target: &str, table: &str, change: &str, file: &str) -> Failure {
@@ -1136,10 +1420,43 @@ enum Notice {
         added: Vec<String>,
         dropped: Vec<String>,
     },
+    Retyped {
+        table: String,
+        columns: Vec<String>,
+    },
+    Replaced {
+        table: String,
+        instance: String,
+        rows: u64,
+    },
 }
 
 fn notice_event(notice: &Notice) -> (JsonObject, String) {
     match notice {
+        Notice::Retyped { table, columns } => (
+            JsonObject::new()
+                .string("event", "columns_retyped")
+                .string("table", table)
+                .string("columns", &columns.join(", ")),
+            format!(
+                "  retyped column  {table}: {} (changed on the source)\n",
+                columns.join(", ")
+            ),
+        ),
+        Notice::Replaced {
+            table,
+            instance,
+            rows,
+        } => (
+            JsonObject::new()
+                .string("event", "table_replaced")
+                .string("table", table)
+                .string("instance", instance)
+                .number("rows", *rows),
+            format!(
+                "  replaced        {table}: dropped and created again on the source; copied again, {rows} rows, now read through CDC capture instance {instance}\n"
+            ),
+        ),
         Notice::LeftOut {
             table,
             instance,
@@ -1403,11 +1720,24 @@ fn poll(
     let mut position = before.clone();
     let mut work = PollWork::default();
     let mut names_now: Vec<Vec<String>> = Vec::new();
+    let mut replaced: Vec<Option<Option<i64>>> = vec![None; position.tables.len()];
     if !position.tables.is_empty() {
         let columns_now = ask(source, target, &columns_query(&position.tables))?;
-        for table in &mut position.tables {
+        for (index, table) in position.tables.iter_mut().enumerate() {
             let now = columns_of(&columns_now, table);
+            let object = object_of(&columns_now, table);
+            if let (Some(known), Some(current)) = (table.object_id, object)
+                && known != current
+            {
+                replaced[index] = Some(object);
+                names_now.push(now);
+                continue;
+            }
+            if object.is_some() {
+                table.object_id = object;
+            }
             follow_column_changes(context, table, &now, &mut work)?;
+            follow_type_changes(table, &source_columns_of(&columns_now, table), &mut work);
             names_now.push(now);
         }
     }
@@ -1459,13 +1789,28 @@ fn poll(
         .iter()
         .any(|table| table.changes != ChangeSource::Tracking);
     let instances = if reads_capture && current_lsn.is_some() {
-        capture_instances(&ask(source, target, CAPTURE_INSTANCES_QUERY)?)
+        source
+            .batch(CAPTURE_INSTANCES_QUERY)
+            .map(read_capture_instances)
+            .map_err(|error| poll_error(target, &error))?
     } else {
         Vec::new()
     };
     let version = position.version;
     let exact_from = position.exact_from;
     for (index, table) in position.tables.iter_mut().enumerate() {
+        if let Some(object) = replaced[index] {
+            replace_table(
+                source,
+                context,
+                table,
+                &instances,
+                current_lsn,
+                object,
+                &mut work,
+            )?;
+            continue;
+        }
         match table.changes.clone() {
             ChangeSource::Tracking => {
                 let (Some(from), Some(current)) = (version, current_version) else {
@@ -1643,6 +1988,7 @@ impl Session<'_> {
     fn copy_sql_server(
         &mut self,
         source: &mut TdsClient,
+        options: &TdsConnectOptions,
         target: &str,
         tables: &[SourceTable],
         identity: &str,
@@ -1651,11 +1997,6 @@ impl Session<'_> {
         counts: &mut FollowCounts,
         created: &mut Vec<String>,
     ) -> Result<(), Failure> {
-        let query = |source: &mut TdsClient, sql: &str| {
-            source
-                .batch(sql)
-                .map_err(|error| tds_failure(target, &error))
-        };
         let db = self.open(
             Access::Write {
                 create: self.request.create,
@@ -1680,13 +2021,7 @@ impl Session<'_> {
             created.push(format!("DROP SCHEMA {}", quote_name(schema)));
         }
         for table in tables {
-            let mut definitions: Vec<String> =
-                table.columns.iter().map(SourceColumn::definition).collect();
-            if !table.key.is_empty() {
-                let key: Vec<String> = table.key.iter().map(|name| quote_name(name)).collect();
-                definitions.push(format!("PRIMARY KEY ({})", key.join(", ")));
-            }
-            run(&format!("CREATE TABLE {} ({})", table.qualified(), definitions.join(", "))).map_err(|failure| match failure {
+            run(&table.create_statement()).map_err(|failure| match failure {
                 Failure::Database { message, .. } if message.contains("already") => Failure::Database {
                     message: format!(
                         "cannot follow into {}: it already has the source's table {}. Follow into a new file with --create, or drop it first",
@@ -1706,38 +2041,29 @@ impl Session<'_> {
                 return Err(copy_stopped(&self.file_display));
             }
             let copied_at = Instant::now();
-            let selected: Vec<String> = table
-                .columns
-                .iter()
-                .map(|column| text_expression(&quote_name(&column.name), &column.data_type))
-                .collect();
-            let rows = first_rows(query(
-                source,
-                &format!("SELECT {} FROM {}", selected.join(", "), table.qualified()),
-            )?);
-            let names = table.column_names();
+            let rows = loop {
+                match source.batch(&table.select_all_query()) {
+                    Ok(results) => break first_rows(results),
+                    Err(TdsClientError::Io(error)) => {
+                        match self.reconnect_tds(options, error.to_string(), "the first copy") {
+                            Some(client) => *source = client,
+                            None => {
+                                return Err(source_failed(format!(
+                                    "cannot follow {target}: the connection was lost while copying {} and could not be made again: {error}",
+                                    table.shown()
+                                )));
+                            }
+                        }
+                    }
+                    Err(error) => return Err(tds_failure(target, &error)),
+                }
+            };
             run("BEGIN TRANSACTION")?;
-            for chunk in rows.chunks(ROWS_PER_INSERT) {
+            for statement in table.insert_statements(&rows) {
                 if stop_signals::requested() {
                     return Err(copy_stopped(&self.file_display));
                 }
-                let values: Vec<String> = chunk
-                    .iter()
-                    .map(|row| {
-                        let literals: Vec<String> = row
-                            .iter()
-                            .zip(&table.columns)
-                            .map(|(value, column)| literal(value, &column.data_type))
-                            .collect();
-                        format!("({})", literals.join(", "))
-                    })
-                    .collect();
-                run(&format!(
-                    "INSERT INTO {} ({}) VALUES {}",
-                    table.qualified(),
-                    names.join(", "),
-                    values.join(", ")
-                ))?;
+                run(&statement)?;
             }
             run("COMMIT TRANSACTION")?;
             counts.tables += 1;
@@ -1912,7 +2238,7 @@ impl Session<'_> {
             _ => {}
         }
         let instances = if capture_on {
-            capture_instances(&first_rows(query(&mut source, CAPTURE_INSTANCES_QUERY)?))
+            read_capture_instances(query(&mut source, CAPTURE_INSTANCES_QUERY)?)
         } else {
             Vec::new()
         };
@@ -1955,14 +2281,19 @@ impl Session<'_> {
             let names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
             let theirs = instances_of(&instances, &schema, &name);
             match choose_changes(forced, tracked, &theirs, &names, &key) {
-                Ok(changes) => tables.push(SourceTable {
-                    schema,
-                    name,
-                    columns,
-                    key,
-                    changes,
-                    left_out: Vec::new(),
-                }),
+                Ok(mut changes) => {
+                    let (key, unique_key) = keyed_by_unique_index(key, &mut changes, &theirs);
+                    tables.push(SourceTable {
+                        schema,
+                        name,
+                        columns,
+                        key,
+                        changes,
+                        left_out: Vec::new(),
+                        unique_key,
+                        object_id: None,
+                    });
+                }
                 Err(key_left_out) => unfollowable.push(Unfollowable {
                     schema,
                     name,
@@ -2270,6 +2601,7 @@ impl Session<'_> {
             let mut created = Vec::new();
             let copied = self.copy_sql_server(
                 &mut source,
+                &options,
                 &target,
                 &tables,
                 &identity,
@@ -2505,6 +2837,12 @@ fn capture_gap(target: &str, table: &str, old: &str, new: &str, starts: Lsn, nex
     )
 }
 
+fn table_recreated(target: &str, table: &str) -> String {
+    format!(
+        "cannot follow {target}: {table} was dropped and created again on the source, and its change tracking starts again with the new table, so the changes in between are lost. Follow again into a new file"
+    )
+}
+
 fn key_dropped(target: &str, table: &str, column: &str) -> String {
     format!(
         "cannot follow {target}: primary key column {column} of {table} was dropped on the source, so its CDC changes can no longer be applied by key. Follow again into a new file"
@@ -2626,6 +2964,8 @@ mod tests {
                 net_changes: false,
             },
             left_out: Vec::new(),
+            unique_key: false,
+            object_id: None,
         }
     }
 
@@ -2641,6 +2981,8 @@ mod tests {
             net_changes: false,
             minimum: minimum.map(Lsn),
             columns: names(columns),
+            index_columns: Vec::new(),
+            net_by_unique_index: false,
         }
     }
 
@@ -3605,6 +3947,122 @@ mod tests {
                 Lsn(5)
             ),
             "cannot follow db:1433/app: the CDC capture instance dbo_orders of dbo.orders was dropped before the follow reached the start of dbo_orders_2 (0x00000000000000000009), so the changes from 0x00000000000000000005 up to it are lost. Follow again into a new file, and drop an old capture instance only after the follow's capture_switched event"
+        );
+    }
+
+    fn described_column(
+        table: &str,
+        name: &str,
+        object: &str,
+        data_type: &str,
+        length: Option<&str>,
+    ) -> Vec<Option<String>> {
+        vec![
+            Some("dbo".to_owned()),
+            Some(table.to_owned()),
+            Some(name.to_owned()),
+            Some(object.to_owned()),
+            Some(data_type.to_owned()),
+            length.map(str::to_owned),
+            None,
+            None,
+            None,
+            Some("YES".to_owned()),
+        ]
+    }
+
+    #[test]
+    fn a_column_whose_type_changed_on_the_source_is_altered_in_the_file() {
+        let mut table = orders();
+        let rows = vec![
+            described_column("orders", "id", "901", "int", None),
+            described_column("orders", "note", "901", "nvarchar", Some("400")),
+        ];
+        assert_eq!(object_of(&rows, &table), Some(901));
+        let now = source_columns_of(&rows, &table);
+        let mut work = PollWork::default();
+        follow_type_changes(&mut table, &now, &mut work);
+        assert_eq!(
+            work.statements,
+            vec!["ALTER TABLE [dbo].[orders] ALTER COLUMN [note] nvarchar(400)".to_owned()]
+        );
+        assert_eq!(work.counts.schema_changes, 1);
+        let mut again = PollWork::default();
+        follow_type_changes(&mut table, &now, &mut again);
+        assert!(again.statements.is_empty());
+    }
+
+    #[test]
+    fn an_instance_keyed_by_a_unique_index_keys_a_table_without_a_primary_key() {
+        let mut keyed = instance("dbo_orders", &["code", "note"], Some(1));
+        keyed.index_columns = names(&["code"]);
+        keyed.net_by_unique_index = true;
+        let mut changes = capture_source(&keyed);
+        let (key, unique) = keyed_by_unique_index(Vec::new(), &mut changes, &[&keyed]);
+        assert_eq!(key, names(&["code"]));
+        assert!(unique);
+        assert!(changes.net_changes());
+        let mut by_primary_key = capture_source(&keyed);
+        assert_eq!(
+            keyed_by_unique_index(names(&["id"]), &mut by_primary_key, &[&keyed]),
+            (names(&["id"]), false)
+        );
+        let mut table = orders();
+        table.key = names(&["note"]);
+        table.unique_key = true;
+        assert!(table.create_statement().ends_with("UNIQUE ([note]))"));
+        assert_eq!(
+            key_condition(&table, &[None]),
+            "[note] IS NULL"
+        );
+    }
+
+    #[test]
+    fn index_columns_attach_to_their_capture_instance() {
+        let instance_row = |name: &str, column: &str| -> Vec<Option<String>> {
+            vec![
+                Some("dbo".to_owned()),
+                Some("orders".to_owned()),
+                Some(name.to_owned()),
+                Some("0".to_owned()),
+                None,
+                Some(column.to_owned()),
+            ]
+        };
+        let index_row = |name: &str, column: &str| -> Vec<Option<String>> {
+            vec![
+                Some(name.to_owned()),
+                Some(column.to_owned()),
+                Some("1".to_owned()),
+            ]
+        };
+        let instances = read_capture_instances(vec![
+            vec![instance_row("dbo_orders", "code"), instance_row("dbo_orders", "note")],
+            vec![index_row("dbo_orders", "code"), index_row("other", "x")],
+        ]);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].index_columns, names(&["code"]));
+        assert_eq!(instances[0].unique_index_key(), Some(&names(&["code"])[..]));
+        assert!(CAPTURE_INSTANCES_QUERY.contains("cdc.index_columns"));
+    }
+
+    #[test]
+    fn a_replaced_table_is_copied_again_with_insert_statements_in_chunks() {
+        let table = orders();
+        let rows: Vec<Vec<Option<String>>> = (0..ROWS_PER_INSERT + 1)
+            .map(|id| vec![None, Some(id.to_string()), None])
+            .collect();
+        let statements = table.insert_statements(&rows);
+        assert_eq!(statements.len(), 2);
+        assert_eq!(
+            statements[1],
+            format!(
+                "INSERT INTO [dbo].[orders] ([note], [id], [tag]) VALUES (NULL, N'{ROWS_PER_INSERT}', NULL)"
+            )
+        );
+        assert!(table.select_all_query().starts_with("SELECT "));
+        assert!(
+            table_recreated("db:1433/app", "dbo.orders").contains("dropped and created again")
         );
     }
 }

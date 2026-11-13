@@ -399,7 +399,14 @@ EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'orders',
  If CDC's cleanup job (or the change retention) removes changes the
 follow has not applied yet, it stops with exit 3 and says so; follow again into a new file to
 copy the database afresh, and keep the retention longer than any pause in the follow. A CDC table needs a
-primary key, and its capture instance must capture it.
+primary key, and its capture instance must capture it; a table without one can follow through a capture
+instance created with `@index_name` on a unique index and `@supports_net_changes = 1`, which then keys its
+changes (as a `UNIQUE` constraint in the file) and gives net changes.
+
+A column whose type changes on the source is altered in the file (`retyped column`), for change tracking and
+CDC tables alike. A CDC table dropped and created again between two polls is copied again once its new capture
+instance has started (`replaced`), and a lost connection during the first copy is retried for
+`--reconnect-for` seconds, starting that table's copy again.
 
 ## Oracle
 

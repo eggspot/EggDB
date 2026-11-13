@@ -1730,7 +1730,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   and replaced tables.
 - `eggdb follow` of SQL Server CDC: column type changes, capture instances keyed by a unique index
   with net changes, a table dropped and re-added between polls, and a lost connection during the
-  first copy (D282).
+  first copy (D282). **Code written, unbuilt** (code-only mode, 2026-11-13, D1035): `ALTER COLUMN` per poll,
+  `cdc.index_columns` keys, object IDs compared per poll with a fresh copy, and the copy's reconnect.
 
 ### M15 Sharding and distributed SQL
 - Raft's term, vote and log persisted in the file's consensus area, snapshots and log compaction
