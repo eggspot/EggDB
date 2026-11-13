@@ -759,7 +759,7 @@ fn serve_databases<'a, 'd, D: DatabaseDirectory>(
             && let Some(wire) = wire.take()
         {
             shared.register(connection_id, session.cancel_signal());
-            let attention = AttentionWatch::new(wire.socket(), session.cancel_signal());
+            let attention = AttentionWatch::new(wire.watched(), session.cancel_signal());
             let peer = wire.peer();
             let cancel = session.cancel_signal();
             let activity =

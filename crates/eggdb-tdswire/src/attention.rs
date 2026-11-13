@@ -1,9 +1,26 @@
+use eggdb_platform::local_socket::{LocalStream, bytes_waiting};
 use eggdb_sql::CancelSignal;
 use std::io::ErrorKind;
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 const WATCHER_STACK_BYTES: usize = 64 * 1024;
+const LOCAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+pub(crate) enum Watched {
+    Tcp(TcpStream),
+    Local(LocalStream),
+}
+
+impl Watched {
+    fn try_clone(&self) -> Option<Self> {
+        match self {
+            Self::Tcp(socket) => socket.try_clone().ok().map(Self::Tcp),
+            Self::Local(stream) => stream.try_clone().ok().map(Self::Local),
+        }
+    }
+}
 
 #[derive(Default)]
 struct WatchState {
@@ -37,7 +54,7 @@ impl Shared {
 
 pub(crate) struct AttentionWatch {
     shared: Arc<Shared>,
-    socket: Option<TcpStream>,
+    socket: Option<Watched>,
     started: bool,
     signal: CancelSignal,
 }
@@ -59,23 +76,48 @@ fn bytes_arrived_during(shared: &Shared, batch: u64, signal: &CancelSignal) -> b
     !guard.closed
 }
 
-fn watch(shared: &Shared, socket: &TcpStream, signal: &CancelSignal) {
+fn arrived_on_socket(socket: &TcpStream) -> bool {
     let mut probe = [0u8; 1];
+    match socket.peek(&mut probe) {
+        Ok(_) => true,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+            ) =>
+        {
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+fn still_running(shared: &Shared, batch: u64) -> bool {
+    let guard = shared.lock();
+    guard.running && guard.batch == batch && !guard.closed
+}
+
+fn arrived_on_local(shared: &Shared, batch: u64, stream: &LocalStream) -> bool {
+    loop {
+        match bytes_waiting(stream) {
+            Ok(0) => {}
+            Ok(_) | Err(_) => return true,
+        }
+        if !still_running(shared, batch) {
+            return false;
+        }
+        std::thread::sleep(LOCAL_POLL_INTERVAL);
+    }
+}
+
+fn watch(shared: &Shared, watched: &Watched, signal: &CancelSignal) {
     loop {
         let Some(batch) = batch_to_watch(shared) else {
             return;
         };
-        let arrived = match socket.peek(&mut probe) {
-            Ok(_) => true,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
-                ) =>
-            {
-                false
-            }
-            Err(_) => true,
+        let arrived = match watched {
+            Watched::Tcp(socket) => arrived_on_socket(socket),
+            Watched::Local(stream) => arrived_on_local(shared, batch, stream),
         };
         if arrived && !bytes_arrived_during(shared, batch, signal) {
             return;
@@ -84,7 +126,7 @@ fn watch(shared: &Shared, socket: &TcpStream, signal: &CancelSignal) {
 }
 
 impl AttentionWatch {
-    pub(crate) fn new(socket: Option<TcpStream>, signal: CancelSignal) -> Self {
+    pub(crate) fn new(socket: Option<Watched>, signal: CancelSignal) -> Self {
         Self {
             shared: Arc::new(Shared::default()),
             socket,
@@ -98,7 +140,7 @@ impl AttentionWatch {
         let Some(socket) = self
             .socket
             .as_ref()
-            .and_then(|socket| socket.try_clone().ok())
+            .and_then(Watched::try_clone)
         else {
             return;
         };
@@ -148,7 +190,7 @@ impl Drop for AttentionWatch {
         self.shared.changed.notify_all();
         drop(state);
         if self.started
-            && let Some(socket) = &self.socket
+            && let Some(Watched::Tcp(socket)) = &self.socket
         {
             let _ = socket.shutdown(Shutdown::Both);
         }

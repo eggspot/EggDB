@@ -444,6 +444,13 @@ impl<'a> Wire<'a> {
         self.stream.tcp().and_then(|stream| stream.try_clone().ok())
     }
 
+    pub(crate) fn watched(&self) -> Option<crate::attention::Watched> {
+        match &self.stream {
+            TdsStream::Local(stream) => stream.try_clone().ok().map(crate::attention::Watched::Local),
+            _ => self.socket().map(crate::attention::Watched::Tcp),
+        }
+    }
+
     pub(crate) fn peer_ip(&self) -> Option<std::net::IpAddr> {
         self.stream
             .tcp()

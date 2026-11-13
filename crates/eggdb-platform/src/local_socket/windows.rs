@@ -322,6 +322,21 @@ impl LocalStream {
     }
 }
 
+const FIONREAD: i32 = 0x4004_667F_u32 as i32;
+
+pub(super) fn bytes_waiting(stream: &LocalStream) -> io::Result<usize> {
+    match &stream.0 {
+        Connection::Pipe(pipe) => pipe.bytes_waiting(),
+        Connection::Socket(socket) => {
+            let mut waiting = 0u32;
+            // SAFETY: `socket` is an open socket and `waiting` a writable u32 for FIONREAD.
+            let done = unsafe { sys::ioctlsocket(raw(socket), FIONREAD, &raw mut waiting) };
+            check(done)?;
+            Ok(usize::try_from(waiting).unwrap_or(usize::MAX))
+        }
+    }
+}
+
 impl io::Read for LocalStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.receive(buffer)

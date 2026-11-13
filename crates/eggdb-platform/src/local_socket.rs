@@ -188,6 +188,50 @@ mod imp {
             Err(error) => Err(LocalBindError::Io(error)),
         }
     }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const MSG_DONTWAIT: std::ffi::c_int = 0x40;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const MSG_DONTWAIT: std::ffi::c_int = 0x80;
+    const MSG_PEEK: std::ffi::c_int = 0x2;
+
+    unsafe extern "C" {
+        fn recv(
+            socket: std::ffi::c_int,
+            buffer: *mut std::ffi::c_void,
+            length: usize,
+            flags: std::ffi::c_int,
+        ) -> isize;
+    }
+
+    pub(super) fn bytes_waiting(stream: &LocalStream) -> io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        let mut probe = [0u8; 1];
+        loop {
+            // SAFETY: `probe` is writable for its one byte for the whole call, and MSG_PEEK
+            // leaves the byte in the socket.
+            let got = unsafe {
+                recv(
+                    stream.as_raw_fd(),
+                    probe.as_mut_ptr().cast(),
+                    probe.len(),
+                    MSG_PEEK | MSG_DONTWAIT,
+                )
+            };
+            if got > 0 {
+                return Ok(1);
+            }
+            if got == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            let error = io::Error::last_os_error();
+            match error.kind() {
+                io::ErrorKind::Interrupted => {}
+                io::ErrorKind::WouldBlock => return Ok(0),
+                _ => return Err(error),
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -279,6 +323,10 @@ mod imp {
     pub(super) fn bind(_: &Path) -> Result<LocalListener, LocalBindError> {
         Err(LocalBindError::Unsupported)
     }
+
+    pub(super) fn bytes_waiting(stream: &LocalStream) -> io::Result<usize> {
+        match stream.0 {}
+    }
 }
 
 pub use imp::{LocalListener, LocalStream};
@@ -312,6 +360,16 @@ pub fn bind_named_pipe(name: &str) -> Result<LocalListener, LocalBindError> {
         let _ = name;
         Err(LocalBindError::Unsupported)
     }
+}
+
+/// How many bytes wait to be read on `stream`, without reading them or waiting: a server's
+/// watcher calls it while a request runs to see a client's cancel arrive, as TDS's attention
+/// does on a named pipe. Unix systems say only whether at least one byte waits (1 or 0);
+/// Windows says how many. A peer that closed its end answers
+/// [`io::ErrorKind::UnexpectedEof`], and an OS without local sockets
+/// [`io::ErrorKind::Unsupported`].
+pub fn bytes_waiting(stream: &LocalStream) -> io::Result<usize> {
+    imp::bytes_waiting(stream)
 }
 
 /// The socket file a PostgreSQL client looks for in `directory` for `port`.

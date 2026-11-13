@@ -101,6 +101,14 @@ mod sys {
         ) -> i32;
         pub(super) fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
         pub(super) fn CancelIoEx(file: RawHandle, overlapped: *mut Overlapped) -> i32;
+        pub(super) fn PeekNamedPipe(
+            pipe: RawHandle,
+            buffer: *mut c_void,
+            len: u32,
+            read: *mut u32,
+            available: *mut u32,
+            left_in_message: *mut u32,
+        ) -> i32;
     }
 
     #[link(name = "advapi32")]
@@ -411,6 +419,32 @@ impl PipeStream {
             write_timeout: AtomicU32::new(self.write_timeout.load(Ordering::Acquire)),
             nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Acquire)),
         })
+    }
+
+    pub(super) fn bytes_waiting(&self) -> io::Result<usize> {
+        let mut available = 0u32;
+        // SAFETY: `pipe` is an open pipe handle; a null buffer with length 0 asks only for the
+        // count, written to `available`, and the other outputs may be null.
+        let done = unsafe {
+            sys::PeekNamedPipe(
+                self.pipe.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if done == 0 {
+            let error = io::Error::last_os_error();
+            return Err(match error.raw_os_error() {
+                Some(ERROR_BROKEN_PIPE) | Some(ERROR_PIPE_NOT_CONNECTED) => {
+                    io::ErrorKind::UnexpectedEof.into()
+                }
+                _ => error,
+            });
+        }
+        Ok(usize::try_from(available).unwrap_or(usize::MAX))
     }
 
     fn wait_milliseconds(&self, timeout: &AtomicU32) -> u32 {
