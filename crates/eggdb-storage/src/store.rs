@@ -9,9 +9,13 @@ use crate::overflow::{ChainReader, ChainWriter};
 use crate::page_cache::{CacheSize, CacheStats, PageCache, PageSource, Snapshot};
 use crate::page_set::PageSet;
 use crate::tree_page::StoredValue;
-use eggdb_platform::{Clock, File};
-use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use eggdb_platform_core::{Clock, File};
+use core::fmt;
+use crate::sync::{Mutex, MutexGuard};
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 /// A database file's pages with transactions over them (D86): one write transaction at a time,
 /// any number of read transactions, each reading a snapshot of the last commit before it
@@ -348,8 +352,8 @@ impl<'s, F: File> ReadTransaction<'s, F> {
     pub fn lsm_scan(
         &self,
         tree: &LsmTree,
-        start: std::ops::Bound<&[u8]>,
-        end: std::ops::Bound<&[u8]>,
+        start: core::ops::Bound<&[u8]>,
+        end: core::ops::Bound<&[u8]>,
         order: crate::cursor::ScanOrder,
     ) -> Result<LsmCursor, StorageError> {
         let state = self.store.lock()?;
@@ -577,8 +581,8 @@ impl<'s, F: File> WriteTransaction<'s, F> {
     pub fn lsm_scan(
         &self,
         tree: &LsmTree,
-        start: std::ops::Bound<&[u8]>,
-        end: std::ops::Bound<&[u8]>,
+        start: core::ops::Bound<&[u8]>,
+        end: core::ops::Bound<&[u8]>,
         order: crate::cursor::ScanOrder,
     ) -> Result<LsmCursor, StorageError> {
         self.check_open()?;
@@ -624,6 +628,7 @@ impl<'s, F: File> WriteTransaction<'s, F> {
     /// store is taken for each page only. The limits are those of [`BTree::check_fits_len`],
     /// checked before anything is read. A source that ends early or fails, or gives more than
     /// `value_bytes`, rolls the transaction back.
+    #[cfg(feature = "std")]
     pub fn put_from_reader(
         &mut self,
         tree: &BTree,
@@ -658,7 +663,7 @@ impl<'s, F: File> WriteTransaction<'s, F> {
         if let Err(error) = source_ended(source) {
             return self.change(|_| Err(error));
         }
-        let mut hint = std::mem::take(&mut self.append_hint);
+        let mut hint = core::mem::take(&mut self.append_hint);
         let stored = self.change(|cache| {
             let reference = writer.finish(cache)?;
             tree.put_written_hinted(cache, key, reference, &mut hint)
@@ -745,7 +750,7 @@ impl<'s, F: File> WriteTransaction<'s, F> {
     /// Stores `value` under `key` in `tree` (see [`BTree::put`]). A key or value over the
     /// limits is refused with nothing changed; any other error rolls the transaction back.
     pub fn put(&mut self, tree: &BTree, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        let mut hint = std::mem::take(&mut self.append_hint);
+        let mut hint = core::mem::take(&mut self.append_hint);
         let stored = self.change(|cache| tree.put_hinted(cache, key, value, &mut hint));
         self.append_hint = hint;
         stored
@@ -760,7 +765,7 @@ impl<'s, F: File> WriteTransaction<'s, F> {
         key: &[u8],
         value: &[u8],
     ) -> Result<bool, StorageError> {
-        let mut hint = std::mem::take(&mut self.append_hint);
+        let mut hint = core::mem::take(&mut self.append_hint);
         let stored = self.change(|cache| tree.put_if_absent_hinted(cache, key, value, &mut hint));
         self.append_hint = hint;
         stored
@@ -887,20 +892,22 @@ impl<F: File> Store<F> {
     }
 }
 
+#[cfg(feature = "std")]
 fn read_exactly(source: &mut dyn std::io::Read, into: &mut [u8]) -> Result<(), StorageError> {
     source
         .read_exact(into)
         .map_err(|error| StorageError::Io(error.into()))
 }
 
+#[cfg(feature = "std")]
 fn source_ended(source: &mut dyn std::io::Read) -> Result<(), StorageError> {
     let mut extra = [0u8; 1];
     loop {
         match source.read(&mut extra) {
             Ok(0) => return Ok(()),
             Ok(_) => {
-                return Err(StorageError::Io(eggdb_platform::Error::new(
-                    eggdb_platform::ErrorKind::InvalidInput,
+                return Err(StorageError::Io(eggdb_platform_core::Error::new(
+                    eggdb_platform_core::ErrorKind::InvalidInput,
                 )));
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -1000,6 +1007,7 @@ impl<'t, 's, F: File> ValueReader<'t, 's, F> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<F: File> std::io::Read for ValueReader<'_, '_, F> {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         self.read_into(out).map_err(std::io::Error::other)

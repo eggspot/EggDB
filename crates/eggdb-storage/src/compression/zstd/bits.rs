@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
+
 pub(super) type Problem = &'static str;
 
 pub(super) struct BackwardBits<'a> {

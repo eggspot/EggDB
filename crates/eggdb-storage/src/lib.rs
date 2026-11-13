@@ -28,6 +28,19 @@
 //!   [`CommitStamp`] for every commit, and [`Store::check`], which checks the last commit and
 //!   accounts for every page of the file in a [`FileReport`].
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+mod prelude {
+    pub(crate) use alloc::borrow::ToOwned;
+    pub(crate) use alloc::boxed::Box;
+    pub(crate) use alloc::string::{String, ToString};
+    pub(crate) use alloc::vec::Vec;
+    pub(crate) use alloc::{format, vec};
+}
+
 mod before_images;
 mod btree;
 #[cfg(test)]
@@ -59,14 +72,20 @@ mod overflow_mutation_tests;
 #[cfg(test)]
 mod overflow_tests;
 mod page_cache;
+#[cfg(feature = "std")]
+mod page_cipher;
+#[cfg(not(feature = "std"))]
+#[path = "page_cipher_absent.rs"]
 mod page_cipher;
 mod page_file;
 mod page_set;
 mod page_table;
+#[cfg(feature = "std")]
 mod snapshot_copy;
 #[cfg(test)]
 mod snapshot_copy_tests;
 mod store;
+mod sync;
 #[cfg(test)]
 mod store_tests;
 #[cfg(test)]
@@ -96,5 +115,6 @@ pub use page_cache::{
 };
 pub use page_cipher::{PAGE_KEY_BYTES, PageCipher};
 pub use page_file::{CreateOptions, PageFile};
+#[cfg(feature = "std")]
 pub use snapshot_copy::{CopyDestination, CopyFailure, CopyProgress, CopyReport};
 pub use store::{FileReport, ReadTransaction, SnapshotToken, Store, ValueReader, WriteTransaction};

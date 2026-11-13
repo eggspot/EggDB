@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
+
 pub(super) const LITERAL_LENGTH_ACCURACY: u32 = 6;
 pub(super) const MATCH_LENGTH_ACCURACY: u32 = 6;
 pub(super) const OFFSET_ACCURACY: u32 = 5;

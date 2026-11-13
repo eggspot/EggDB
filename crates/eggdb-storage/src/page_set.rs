@@ -1,5 +1,8 @@
 use crate::error::StorageError;
-use eggdb_platform::{Error, ErrorKind};
+use eggdb_platform_core::{Error, ErrorKind};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const BITS_PER_WORD: u64 = 64;
 

@@ -1098,6 +1098,7 @@ jobs:
           rustup target add thumbv7em-none-eabihf
           cargo clippy -p eggdb-format --no-default-features --target thumbv7em-none-eabihf -- -D warnings
           cargo clippy -p eggdb-platform-core --no-default-features --target thumbv7em-none-eabihf -- -D warnings
+          cargo clippy -p eggdb-storage --no-default-features --target thumbv7em-none-eabihf -- -D warnings
 
   bench:
     needs: changes

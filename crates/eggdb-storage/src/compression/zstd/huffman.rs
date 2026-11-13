@@ -1,5 +1,8 @@
 use super::bits::{BackwardBits, Problem, highest_bit};
 use super::fse::{DecodeState, decode_table, read_distribution};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const MOST_BITS: u32 = 11;
 const MOST_WEIGHT_ACCURACY: u32 = 6;

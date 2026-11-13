@@ -1996,8 +1996,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (stage 3 of EggOS's CI plan, in that repo).
 - The B-tree, page cache, log and transactions without `std`, on an embedded platform backend
   with a fixed-frame cache (D223). The platform's error type and the `File` and `Clock` traits without `std`
-  (`eggdb-platform-core`): **code written, unbuilt** (code-only mode, 2026-11-13, D1081). Left: the storage engine on
-  that core with a fixed-frame cache over a caller's buffer.
+  (`eggdb-platform-core`): **code written, unbuilt** (code-only mode, 2026-11-13, D1081); the storage engine without
+  `std`, with a fixed-frame cache over a caller's buffer: **code written, unbuilt** (code-only mode, 2026-11-13,
+  D1082). Left: page encryption without `std` (`eggdb-crypto` without the standard library).
 - Wear levelling, the header slots on flash, and power-loss tests on raw flash (D41, D223).
 - A QEMU Cortex-M run in CI (D223).
 - A published memory floor and size budgets per microcontroller profile (D41, D230).

@@ -1,7 +1,10 @@
 use super::bits::BitWriter;
 use super::fse::EncodeTable;
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use core::cmp::Reverse;
+use alloc::collections::BinaryHeap;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const MOST_BITS: u8 = 11;
 const DIRECT_WEIGHTS_MOST: usize = 128;

@@ -7,10 +7,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["std"]
+std = ["dep:eggdb-crypto", "dep:eggdb-platform", "eggdb-format/std", "eggdb-platform-core/std"]
+
 [dependencies]
-eggdb-crypto = { path = "../eggdb-crypto" }
-eggdb-format = { path = "../eggdb-format" }
-eggdb-platform = { path = "../eggdb-platform" }
+eggdb-crypto = { path = "../eggdb-crypto", optional = true }
+eggdb-format = { path = "../eggdb-format", default-features = false }
+eggdb-platform = { path = "../eggdb-platform", optional = true }
+eggdb-platform-core = { path = "../eggdb-platform-core", default-features = false }
 
 [lints]
 workspace = true

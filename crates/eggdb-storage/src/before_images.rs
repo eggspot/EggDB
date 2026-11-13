@@ -1,8 +1,11 @@
 use crate::error::StorageError;
 use crate::format::PageHeader;
-use eggdb_platform::{Error, ErrorKind};
-use std::cell::Cell;
-use std::collections::BTreeMap;
+use eggdb_platform_core::{Error, ErrorKind};
+use core::cell::Cell;
+use alloc::collections::BTreeMap;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 #[derive(Debug)]
 pub(crate) struct PageImage {

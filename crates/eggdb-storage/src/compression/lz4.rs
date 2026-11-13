@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
+
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
 const MATCH_FIND_LIMIT: usize = 12;

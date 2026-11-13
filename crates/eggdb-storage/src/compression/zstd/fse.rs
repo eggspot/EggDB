@@ -1,4 +1,7 @@
 use super::bits::{BackwardBits, ForwardBits, Problem, highest_bit};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Entry {

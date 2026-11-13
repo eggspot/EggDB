@@ -9,10 +9,16 @@ use crate::log::{
     LogGeometry, LogStats, LogWriter, RecycledSegments, SEQUENCE_RESERVATION, Segment, WriterStart,
 };
 use crate::page_set::PageSet;
-use eggdb_platform::{ErrorKind, File, FileLock, FileSystem, OpenMode};
-use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Range;
+use eggdb_platform_core::{ErrorKind, File, FileLock};
+#[cfg(feature = "std")]
+use eggdb_platform::{FileSystem, OpenMode};
+use alloc::collections::{BTreeMap, BTreeSet};
+use core::ops::Range;
+#[cfg(feature = "std")]
 use std::path::Path;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const FREE_LIST_LAYOUT: u8 = 1;
 const FREE_LIST_NEXT_AT: usize = PAGE_HEADER_SIZE;
@@ -92,13 +98,14 @@ pub struct PageFile<F: File> {
     scratch: Vec<u8>,
     page_count_before_commit: Option<u64>,
     damaged_header_slot: Option<usize>,
-    older_slot_log_reaches: Option<std::ops::Range<u64>>,
+    older_slot_log_reaches: Option<core::ops::Range<u64>>,
     failed: bool,
 }
 
 impl<F: File> PageFile<F> {
     /// Creates a new database file at `path`, refusing a path that already exists, and makes
     /// the file and its directory entry durable. The log is created by the first change.
+    #[cfg(feature = "std")]
     pub fn create<S: FileSystem<File = F>>(
         fs: &S,
         path: &Path,
@@ -158,6 +165,7 @@ impl<F: File> PageFile<F> {
     /// to the other header slot, under the next generation, unless that slot already holds a
     /// copy, so later damage to either slot opens the same state (`docs/format.md`, "Damage to
     /// the newest header slot").
+    #[cfg(feature = "std")]
     pub fn open<S: FileSystem<File = F>>(
         fs: &S,
         path: &Path,
@@ -469,7 +477,7 @@ impl<F: File> PageFile<F> {
         }
         let segment_pages = u64::from(plan.superblock.log_segment_pages);
         let head = plan.superblock.log_head_page;
-        self.log_pages = std::iter::once(head)
+        self.log_pages = core::iter::once(head)
             .chain(plan.superblock.recycled_segments)
             .filter(|&first| first != NO_PAGE)
             .map(|first| (first, first + segment_pages))
@@ -713,7 +721,7 @@ impl<F: File> PageFile<F> {
     /// refuses every later change with [`StorageError::NeedsReopen`].
     pub fn commit(&mut self, update: impl FnOnce(&mut Superblock)) -> Result<(), StorageError> {
         let prepared = self.prepare_commit(NO_STAMP, self.staged.len(), update)?;
-        let mut staged = std::mem::take(&mut self.staged);
+        let mut staged = core::mem::take(&mut self.staged);
         for (&page_id, (header, page)) in staged.iter_mut() {
             if let Err(error) = self.log_page(page_id, page, header) {
                 self.abort_commit();
@@ -957,7 +965,7 @@ impl<F: File> PageFile<F> {
         if self.unwritten.is_empty() {
             return Ok(());
         }
-        let mut page = std::mem::take(&mut self.scratch);
+        let mut page = core::mem::take(&mut self.scratch);
         page.resize(self.page_size().bytes(), 0);
         for (&page_id, &offset) in &self.unwritten {
             self.file.read_exact_at(&mut page, offset)?;
@@ -1007,7 +1015,7 @@ impl<F: File> PageFile<F> {
     ) -> Result<(), StorageError> {
         let capacity = self.free_list_capacity();
         let mut remaining = entries.iter().copied();
-        let mut page = std::mem::take(&mut self.scratch);
+        let mut page = core::mem::take(&mut self.scratch);
         page.resize(self.page_size().bytes(), 0);
         let mut logged = Ok(());
         for (index, &page_id) in list_pages.iter().enumerate() {
@@ -1030,7 +1038,7 @@ impl<F: File> PageFile<F> {
     ) -> Result<(), StorageError> {
         let capacity = self.free_list_capacity();
         let mut remaining = entries.iter().copied();
-        let mut page = std::mem::take(&mut self.scratch);
+        let mut page = core::mem::take(&mut self.scratch);
         page.resize(self.page_size().bytes(), 0);
         let mut written = Ok(());
         for (index, &page_id) in list_pages.iter().enumerate() {
@@ -1613,6 +1621,7 @@ fn read_up_to(file: &impl File, buf: &mut [u8]) -> Result<usize, StorageError> {
     Ok(filled)
 }
 
+#[cfg(feature = "std")]
 pub(crate) fn parent_directory(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())

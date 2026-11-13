@@ -2,7 +2,10 @@ use crate::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64
 use crate::error::FormatError;
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageType};
 use crate::overflow::{OverflowReference, REFERENCE_BYTES};
-use std::cmp::Ordering;
+use core::cmp::Ordering;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 pub(crate) const LAYOUT: u8 = 1;
 pub(crate) const MAX_HEIGHT: u8 = 48;
@@ -903,7 +906,7 @@ impl Node {
         } else {
             (self.keys[at].clone(), at + 1..self.keys.len())
         };
-        let values = |range: std::ops::Range<usize>| {
+        let values = |range: core::ops::Range<usize>| {
             if self.level == 0 {
                 &self.values[range]
             } else {

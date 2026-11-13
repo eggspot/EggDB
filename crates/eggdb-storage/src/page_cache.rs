@@ -7,11 +7,16 @@ use crate::log::{Durability, LogStats};
 use crate::page_file::{NO_STAMP, PageFile, PageUses};
 use crate::page_set::PageSet;
 use crate::page_table::PageTable;
-use eggdb_platform::{ErrorKind, File, Memory};
-use std::cell::{Cell, Ref, RefCell};
-use std::collections::BTreeMap;
-use std::fmt;
-use std::ops::{Deref, DerefMut};
+use eggdb_platform_core::{ErrorKind, File};
+#[cfg(feature = "std")]
+use eggdb_platform::Memory;
+use core::cell::{Cell, Ref, RefCell};
+use alloc::collections::BTreeMap;
+use core::fmt;
+use core::ops::{Deref, DerefMut};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 pub(crate) const MAX_FRAMES: u32 = u32::MAX;
 
@@ -67,11 +72,13 @@ impl PageLookups {
     }
 }
 
+#[cfg(feature = "std")]
 struct ThreadLookups {
     hits: Cell<u64>,
     reads: Cell<u64>,
 }
 
+#[cfg(feature = "std")]
 thread_local! {
     static THREAD_LOOKUPS: ThreadLookups = const {
         ThreadLookups {
@@ -81,12 +88,39 @@ thread_local! {
     };
 }
 
-/// The page lookups this thread has made so far.
+#[cfg(not(feature = "std"))]
+static LOOKUP_HITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "std"))]
+static LOOKUP_READS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The page lookups this thread has made so far; without `std`, which has one thread, those of
+/// the whole program.
 pub fn thread_page_lookups() -> PageLookups {
-    THREAD_LOOKUPS.with(|lookups| PageLookups {
+    #[cfg(feature = "std")]
+    let lookups = THREAD_LOOKUPS.with(|lookups| PageLookups {
         hits: lookups.hits.get(),
         reads: lookups.reads.get(),
-    })
+    });
+    #[cfg(not(feature = "std"))]
+    let lookups = PageLookups {
+        hits: LOOKUP_HITS.load(core::sync::atomic::Ordering::Relaxed),
+        reads: LOOKUP_READS.load(core::sync::atomic::Ordering::Relaxed),
+    };
+    lookups
+}
+
+fn count_hit() {
+    #[cfg(feature = "std")]
+    THREAD_LOOKUPS.with(|lookups| lookups.hits.set(lookups.hits.get() + 1));
+    #[cfg(not(feature = "std"))]
+    LOOKUP_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn count_read() {
+    #[cfg(feature = "std")]
+    THREAD_LOOKUPS.with(|lookups| lookups.reads.set(lookups.reads.get() + 1));
+    #[cfg(not(feature = "std"))]
+    LOOKUP_READS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// What a [`PageCache`] holds and has done since it was created.
@@ -175,6 +209,7 @@ impl<F: File> PageCache<F> {
 
     /// Keeps the cache's memory in RAM, never swapped out, for as long as the cache lives.
     /// Fails with the platform's error when the process may not lock that much memory.
+    #[cfg(feature = "std")]
     pub fn lock_in_memory(&mut self) -> Result<(), StorageError> {
         self.frames.lock_in_memory().map_err(StorageError::from)
     }
@@ -183,6 +218,7 @@ impl<F: File> PageCache<F> {
     /// that node's CPUs reads local memory. Fails with the platform's error for a node the
     /// machine does not have, or where memory cannot be placed (everywhere but Linux and
     /// Android).
+    #[cfg(feature = "std")]
     pub fn place_on_numa_node(
         &mut self,
         node: eggdb_platform::NumaNodeId,
@@ -196,6 +232,7 @@ impl<F: File> PageCache<F> {
     /// again. A size of no pages, or of more pages than [`u32::MAX`], is refused with
     /// [`StorageError::InvalidCacheSize`], and memory that can't be had fails with the
     /// platform's error.
+    #[cfg(feature = "std")]
     pub fn new(
         file: PageFile<F>,
         memory: &impl Memory,
@@ -207,6 +244,24 @@ impl<F: File> PageCache<F> {
             return Err(StorageError::InvalidCacheSize { pages: frames });
         }
         let frame_memory = Frames::new(memory, frames, page_size.bytes())?;
+        Self::with_frames(file, frame_memory, frames)
+    }
+
+    /// Puts `file` behind a cache whose frames are `buffer`, as many whole pages as it holds:
+    /// the fixed-frame cache of a device without an operating system allocator (D223, D1082),
+    /// which never allocates frames again. A buffer too small for one page is refused with
+    /// [`StorageError::InvalidCacheSize`].
+    pub fn with_frame_buffer(file: PageFile<F>, buffer: &'static mut [u8]) -> Result<Self, StorageError> {
+        let page_bytes = file.page_size().bytes();
+        let frames = buffer.len() / page_bytes;
+        if frames == 0 || u32::try_from(frames).is_err() {
+            return Err(StorageError::InvalidCacheSize { pages: frames });
+        }
+        let frame_memory = Frames::over_buffer(buffer, frames, page_bytes)?;
+        Self::with_frames(file, frame_memory, frames)
+    }
+
+    fn with_frames(file: PageFile<F>, frame_memory: Frames, frames: usize) -> Result<Self, StorageError> {
         Ok(Self {
             frames: frame_memory,
             table: PageTable::for_frames(frames)?,
@@ -416,7 +471,7 @@ impl<F: File> PageCache<F> {
         stamp: u64,
         update: impl FnOnce(&mut Superblock),
     ) -> Result<(), StorageError> {
-        let mut order = std::mem::take(&mut self.commit_order);
+        let mut order = core::mem::take(&mut self.commit_order);
         order.clear();
         let states = &self.states;
         order.extend(
@@ -509,7 +564,7 @@ impl<F: File> PageCache<F> {
 
     pub(crate) fn begin_snapshot(&mut self) -> Result<u64, StorageError> {
         let version = self.images.get_mut().register_reader()?;
-        let mut images = std::mem::replace(self.images.get_mut(), BeforeImages::new(0));
+        let mut images = core::mem::replace(self.images.get_mut(), BeforeImages::new(0));
         let kept = self.keep_uncaptured_changes(&mut images);
         if kept.is_err() {
             images.release_reader(version);
@@ -612,7 +667,7 @@ impl<F: File> PageCache<F> {
         let page_bytes = self.page_size().bytes();
         let mut page = Vec::new();
         page.try_reserve_exact(page_bytes)
-            .map_err(|_| StorageError::Io(eggdb_platform::Error::new(ErrorKind::OutOfMemory)))?;
+            .map_err(|_| StorageError::Io(eggdb_platform_core::Error::new(ErrorKind::OutOfMemory)))?;
         page.resize(page_bytes, 0);
         let header = self.file.borrow().read_page(page_id, &mut page)?;
         images.keep_pending(page_id, header, false, &page)
@@ -630,7 +685,7 @@ impl<F: File> PageCache<F> {
     }
 
     fn drop_changes(&mut self) {
-        let dirty_frames = std::mem::take(self.dirty_frames.get_mut());
+        let dirty_frames = core::mem::take(self.dirty_frames.get_mut());
         for &frame in &dirty_frames {
             if self.is_dirty(frame) {
                 self.discard(frame);
@@ -699,7 +754,7 @@ impl<F: File> PageCache<F> {
     #[inline(always)]
     fn hit(&self, frame: usize) {
         self.hits.set(self.hits.get() + 1);
-        THREAD_LOOKUPS.with(|lookups| lookups.hits.set(lookups.hits.get() + 1));
+        count_hit();
         self.states[frame].set(self.states[frame].get() | REFERENCED);
     }
 
@@ -712,7 +767,7 @@ impl<F: File> PageCache<F> {
         drop(file);
         let (frame, mut bytes) = self.claim_frame()?;
         self.misses.set(self.misses.get() + 1);
-        THREAD_LOOKUPS.with(|lookups| lookups.reads.set(lookups.reads.get() + 1));
+        count_read();
         let header = self.file.borrow().read_page(page_id, &mut bytes)?;
         drop(bytes);
         self.install(frame, page_id, header, REFERENCED);

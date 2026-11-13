@@ -6,8 +6,11 @@ use crate::format::{
     Features, FileId, NO_PAGE, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK, PageChecksum, PageSize,
     PageType, RECYCLED_SEGMENTS, Superblock,
 };
-use eggdb_platform::{ErrorKind, File};
-use std::collections::{BTreeMap, BTreeSet};
+use eggdb_platform_core::{ErrorKind, File};
+use alloc::collections::{BTreeMap, BTreeSet};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 pub(crate) const LOG_BLOCK: usize = 4096;
 pub(crate) const RECORD_HEADER: usize = 10;
@@ -577,7 +580,7 @@ impl LogWriter {
             .position(|&first| first != NO_PAGE)
             .filter(|_| self.rest_of_the_flush_fits_in_the_recycled_segments());
         let (first_page, linked_page_count) = match recycled {
-            Some(index) => (std::mem::replace(&mut self.recycled[index], NO_PAGE), 0),
+            Some(index) => (core::mem::replace(&mut self.recycled[index], NO_PAGE), 0),
             None => {
                 let first_page = *page_count;
                 let end = first_page
@@ -906,7 +909,7 @@ pub(crate) fn scan<F: File>(
                 log_pages.take(next_page);
                 segments.push(expected);
                 linked_page_count = linked_page_count.max(page_count);
-                std::mem::swap(&mut buffer, &mut next_buffer);
+                core::mem::swap(&mut buffer, &mut next_buffer);
                 segment = expected;
                 offset = LOG_BLOCK;
                 if at_commit_boundary {

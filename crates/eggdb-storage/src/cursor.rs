@@ -3,8 +3,11 @@ use crate::error::StorageError;
 use crate::overflow;
 use crate::page_cache::{PageCache, PageSource};
 use crate::tree_page::{CellRef, Shape};
-use eggdb_platform::File;
-use std::ops::Bound;
+use eggdb_platform_core::File;
+use core::ops::Bound;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 /// The order a [`Cursor`] returns entries in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

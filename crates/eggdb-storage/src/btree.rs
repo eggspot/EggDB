@@ -7,8 +7,11 @@ use crate::page_set::PageSet;
 use crate::tree_page::{
     self, CellRef, LeafValue, MAX_HEIGHT, Node, Shape, StoredValue, shortest_separator,
 };
-use eggdb_platform::File;
-use std::ops::Bound;
+use eggdb_platform_core::File;
+use core::ops::Bound;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 /// A B+tree of byte-string keys and values in the pages of a [`PageCache`] (D77, format.md
 /// "B+tree pages").

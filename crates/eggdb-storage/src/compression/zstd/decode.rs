@@ -7,6 +7,9 @@ use super::tables::{
     OFFSET_ACCURACY, OFFSET_COUNTS,
 };
 use super::{BLOCK_MAXIMUM, MAGIC};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const SKIPPABLE_MAGIC_LOW: u32 = 0x184D_2A50;
 const SKIPPABLE_MAGIC_MASK: u32 = 0xFFFF_FFF0;

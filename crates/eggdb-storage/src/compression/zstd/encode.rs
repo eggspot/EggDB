@@ -6,6 +6,9 @@ use super::tables::{
     OFFSET_ACCURACY, OFFSET_COUNTS, literal_length_code, match_length_code,
 };
 use super::{BLOCK_MAXIMUM, MAGIC};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const MIN_MATCH: usize = 4;
 const HASH_BITS: u32 = 17;

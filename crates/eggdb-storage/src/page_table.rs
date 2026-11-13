@@ -1,7 +1,10 @@
 use crate::cells;
 use crate::error::StorageError;
 use crate::format::NO_PAGE;
-use std::cell::Cell;
+use core::cell::Cell;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const FIBONACCI_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
 

@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
+
 pub(crate) mod lz4;
 pub(crate) mod zstd;
 

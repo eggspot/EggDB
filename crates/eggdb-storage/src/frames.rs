@@ -1,34 +1,77 @@
 use crate::cells;
 use crate::error::StorageError;
+#[cfg(feature = "std")]
 use eggdb_platform::{Memory, MemoryRegion, PageMode};
-use std::cell::Cell;
-use std::fmt;
-use std::ops::{Deref, DerefMut};
-use std::ptr::NonNull;
+use core::cell::Cell;
+use core::fmt;
+use core::ops::{Deref, DerefMut};
+use core::ptr::NonNull;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const UNLATCHED: u32 = 0;
 const WRITER: u32 = u32::MAX;
 const MAX_READERS: u32 = WRITER - 1;
 
+enum Backing {
+    #[cfg(feature = "std")]
+    Region(MemoryRegion),
+    Buffer,
+}
+
+impl fmt::Debug for Backing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(feature = "std")]
+            Backing::Region(region) => fmt::Debug::fmt(region, f),
+            Backing::Buffer => f.write_str("a caller's buffer"),
+        }
+    }
+}
+
 pub(crate) struct Frames {
     base: NonNull<u8>,
     frame_bytes: usize,
     latches: Box<[Cell<u32>]>,
-    region: MemoryRegion,
+    backing: Backing,
 }
 
 impl Frames {
+    #[cfg(feature = "std")]
     pub(crate) fn lock_in_memory(&mut self) -> eggdb_platform::Result<()> {
-        self.region.lock()
+        match &mut self.backing {
+            Backing::Region(region) => region.lock(),
+            Backing::Buffer => Ok(()),
+        }
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn place_on_numa_node(
         &mut self,
         node: eggdb_platform::NumaNodeId,
     ) -> eggdb_platform::Result<()> {
-        self.region.place_on_numa_node(node)
+        match &mut self.backing {
+            Backing::Region(region) => region.place_on_numa_node(node),
+            Backing::Buffer => Err(eggdb_platform::Error::new(eggdb_platform::ErrorKind::Unsupported)),
+        }
     }
 
+    /// Frames laid over `buffer`, `count` of `frame_bytes` each, for a cache that takes no
+    /// memory from the platform (D1082).
+    pub(crate) fn over_buffer(buffer: &'static mut [u8], count: usize, frame_bytes: usize) -> Result<Self, StorageError> {
+        if count.checked_mul(frame_bytes).is_none_or(|needed| needed > buffer.len()) {
+            return Err(StorageError::InvalidCacheSize { pages: count });
+        }
+        Ok(Self {
+            base: NonNull::from(buffer).cast::<u8>(),
+            frame_bytes,
+            latches: cells::filled(count, UNLATCHED)?,
+            backing: Backing::Buffer,
+        })
+    }
+
+    #[cfg(feature = "std")]
     pub(crate) fn new(
         memory: &impl Memory,
         count: usize,
@@ -44,7 +87,7 @@ impl Frames {
             base,
             frame_bytes,
             latches: cells::filled(count, UNLATCHED)?,
-            region,
+            backing: Backing::Region(region),
         })
     }
 
@@ -93,13 +136,14 @@ impl fmt::Debug for Frames {
         f.debug_struct("Frames")
             .field("count", &self.count())
             .field("frame_bytes", &self.frame_bytes)
-            .field("region", &self.region)
+            .field("backing", &self.backing)
             .finish_non_exhaustive()
     }
 }
 
-// SAFETY: `Frames` owns its region, and `base` points into it, so moving the frames to another
-// thread moves the memory's only owner with them. The `Cell` latches keep `Frames` `!Sync`, so
+// SAFETY: `Frames` owns its region, or holds the only reference to the `'static` buffer it was
+// given, and `base` points into it, so moving the frames to another thread moves the memory's
+// only owner with them. The `Cell` latches keep `Frames` `!Sync`, so
 // two threads never use the same frames at once.
 unsafe impl Send for Frames {}
 
@@ -118,7 +162,7 @@ impl Deref for FrameRef<'_> {
         // which lives as long as `self.frames`. This handle counts as a reader in the frame's
         // latch, and a `FrameMut` is only made for an unlatched frame, so nothing writes the
         // bytes while this shared borrow lives.
-        unsafe { std::slice::from_raw_parts(start, self.frames.frame_bytes) }
+        unsafe { core::slice::from_raw_parts(start, self.frames.frame_bytes) }
     }
 }
 
@@ -143,7 +187,7 @@ impl Deref for FrameMut<'_> {
         // SAFETY: `start` is the first of the `frame_bytes` bytes of a frame inside the region,
         // which lives as long as `self.frames`. The frame's latch marks this handle as its only
         // user, and the shared borrow of the handle rules out a mutable one meanwhile.
-        unsafe { std::slice::from_raw_parts(start, self.frames.frame_bytes) }
+        unsafe { core::slice::from_raw_parts(start, self.frames.frame_bytes) }
     }
 }
 
@@ -154,7 +198,7 @@ impl DerefMut for FrameMut<'_> {
         // which lives as long as `self.frames`, and frames never overlap. The frame's latch
         // marks this handle as its only user, and the exclusive borrow of the handle makes
         // this the only access to the bytes while it lives.
-        unsafe { std::slice::from_raw_parts_mut(start, self.frames.frame_bytes) }
+        unsafe { core::slice::from_raw_parts_mut(start, self.frames.frame_bytes) }
     }
 }
 

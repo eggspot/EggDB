@@ -1,12 +1,15 @@
 pub use eggdb_format::FormatError;
-use std::fmt;
+use core::fmt;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 /// Why a storage operation failed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StorageError {
     /// The file system failed.
-    Io(eggdb_platform::Error),
+    Io(eggdb_platform_core::Error),
     /// Bytes read from the file were refused.
     Format(FormatError),
     /// Another handle, in this process or another, has the file open in a way that excludes
@@ -133,9 +136,9 @@ pub enum StorageError {
     },
 }
 
-impl From<eggdb_platform::Error> for StorageError {
-    fn from(error: eggdb_platform::Error) -> Self {
-        if error.kind() == eggdb_platform::ErrorKind::Locked {
+impl From<eggdb_platform_core::Error> for StorageError {
+    fn from(error: eggdb_platform_core::Error) -> Self {
+        if error.kind() == eggdb_platform_core::ErrorKind::Locked {
             Self::Locked
         } else {
             Self::Io(error)
@@ -247,6 +250,7 @@ impl fmt::Display for StorageError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for StorageError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

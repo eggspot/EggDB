@@ -1,7 +1,10 @@
 use crate::error::StorageError;
-use eggdb_platform::Clock;
-use std::fmt;
-use std::sync::Arc;
+use eggdb_platform_core::Clock;
+use core::fmt;
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 const LOGICAL_BITS: u32 = 12;
 const LOGICAL_MASK: u64 = (1 << LOGICAL_BITS) - 1;

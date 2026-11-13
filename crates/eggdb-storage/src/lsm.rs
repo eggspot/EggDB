@@ -3,9 +3,12 @@ use crate::cursor::{Cursor, ScanOrder};
 use crate::error::{FormatError, StorageError};
 use crate::page_cache::{PageCache, PageSource};
 use crate::page_set::PageSet;
-use eggdb_platform::File;
-use std::cmp::Ordering;
-use std::ops::Bound;
+use eggdb_platform_core::File;
+use core::cmp::Ordering;
+use core::ops::Bound;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 pub(crate) type OwnedEntry = (Vec<u8>, Vec<u8>);
 pub(crate) type EntryRef<'a> = (&'a [u8], &'a [u8]);
@@ -197,7 +200,7 @@ impl Manifest {
     }
 
     fn components_newest_first(&self) -> impl Iterator<Item = &Component> {
-        std::iter::once(&self.delta).chain(self.runs.iter().map(|run| &run.component))
+        core::iter::once(&self.delta).chain(self.runs.iter().map(|run| &run.component))
     }
 }
 
@@ -654,8 +657,8 @@ pub struct LsmCursor {
     entry: (Vec<u8>, Vec<u8>),
 }
 
-impl std::fmt::Debug for LsmCursor {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for LsmCursor {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("LsmCursor")
             .field("components", &self.merged.cursors.len())

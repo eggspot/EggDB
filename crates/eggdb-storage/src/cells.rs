@@ -1,6 +1,9 @@
 use crate::error::StorageError;
-use eggdb_platform::{Error, ErrorKind};
-use std::cell::Cell;
+use eggdb_platform_core::{Error, ErrorKind};
+use core::cell::Cell;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 pub(crate) fn filled<T: Copy>(len: usize, value: T) -> Result<Box<[Cell<T>]>, StorageError> {
     let mut cells = reserved(len)?;

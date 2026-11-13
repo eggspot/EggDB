@@ -3,7 +3,10 @@ use crate::error::{FormatError, StorageError};
 use crate::format::{NO_PAGE, PAGE_HEADER_SIZE, PageHeader, PageSize, PageType};
 use crate::page_cache::{PageCache, PageSource, TreePage};
 use crate::page_set::PageSet;
-use eggdb_platform::{Error, ErrorKind, File};
+use eggdb_platform_core::{Error, ErrorKind, File};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 pub(crate) const LAYOUT: u8 = 1;
 pub(crate) const COMPRESSED_LAYOUT: u8 = 2;

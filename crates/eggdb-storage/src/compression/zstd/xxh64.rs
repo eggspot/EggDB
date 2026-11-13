@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use crate::prelude::*;
+
 const PRIME_1: u64 = 11_400_714_785_074_694_791;
 const PRIME_2: u64 = 14_029_467_366_897_019_727;
 const PRIME_3: u64 = 1_609_587_929_392_839_161;
