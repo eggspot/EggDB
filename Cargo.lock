@@ -514,6 +514,7 @@ dependencies = [
  "eggdb-ai",
  "eggdb-arrow",
  "eggdb-auth",
+ "eggdb-cluster",
  "eggdb-columnar",
  "eggdb-content",
  "eggdb-crypto",

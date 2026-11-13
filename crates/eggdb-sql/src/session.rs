@@ -31,6 +31,7 @@ mod incremental;
 mod invisible;
 mod logical_slots;
 pub(crate) mod freshness;
+pub(crate) mod distributed;
 pub(crate) mod shard_move;
 pub(crate) mod switchover;
 mod property_graphs;
@@ -2010,6 +2011,7 @@ impl<'s> Session<'s> {
             || self.prepare_shard_move(text, on_result)?
             || self.prepare_freshness(text, on_result)?
             || self.prepare_incremental_views(text, on_result)?
+            || self.prepare_distributed(text, on_result)?
         {
             return Ok(());
         }

@@ -47,6 +47,7 @@ mod deferred_checks;
 mod destructive;
 mod calendar_cards;
 mod dicom;
+mod distributed;
 mod geotiff;
 mod dml_row_limit;
 mod dialect;

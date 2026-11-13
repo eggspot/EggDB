@@ -1065,3 +1065,4 @@ its full title with its status.
 - [D1038](decisions/D1038.md) Code-only batch 686 (M15): the cluster transport and eggdb serve --cluster
 - [D1039](decisions/D1039.md) Code-only batch 687 (M15): the shard map and the decision log replicated on Raft
 - [D1040](decisions/D1040.md) Code-only batch 688 (M15): online shard moves copy their data over the replication protocol
+- [D1041](decisions/D1041.md) Code-only batch 689 (M15): a distributed planner for sharded tables

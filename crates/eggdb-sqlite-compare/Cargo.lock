@@ -29,7 +29,9 @@ dependencies = [
  "eggdb-bolt",
  "eggdb-bson",
  "eggdb-clickhouse",
+ "eggdb-cluster",
  "eggdb-commands",
+ "eggdb-consensus",
  "eggdb-content",
  "eggdb-cql",
  "eggdb-crypto",
@@ -140,11 +142,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "eggdb-cluster"
+version = "0.5.0"
+
+[[package]]
 name = "eggdb-columnar"
 version = "0.5.0"
 
 [[package]]
 name = "eggdb-commands"
+version = "0.5.0"
+
+[[package]]
+name = "eggdb-consensus"
 version = "0.5.0"
 
 [[package]]
@@ -443,6 +453,7 @@ dependencies = [
  "eggdb-ai",
  "eggdb-arrow",
  "eggdb-auth",
+ "eggdb-cluster",
  "eggdb-columnar",
  "eggdb-content",
  "eggdb-crypto",
