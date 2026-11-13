@@ -463,3 +463,75 @@ mod merkle_tests {
         assert_eq!(left.differing_leaves(&right), vec![MerkleTree::leaf_of(&keys[42], 8)]);
     }
 }
+
+#[test]
+fn a_shard_map_reads_back_from_its_stored_form_for_every_strategy() {
+    let nodes = placement(&[(1, "eu"), (2, "us"), (3, "eu")]);
+    let strategies = [
+        Strategy::Hash { shards: 6 },
+        Strategy::Range {
+            bounds: vec![b"g".to_vec(), b"p".to_vec()],
+        },
+        Strategy::Time { bucket_ms: 3_600_000 },
+        Strategy::Region {
+            regions: vec!["eu".to_owned(), "us".to_owned()],
+        },
+    ];
+    for strategy in strategies {
+        let mut map = ShardMap::new(strategy, &nodes);
+        map.epoch = 42;
+        let bytes = map.encode();
+        assert_eq!(ShardMap::decode(&bytes), Some(map.clone()));
+        for cut in 0..bytes.len() {
+            assert_eq!(ShardMap::decode(&bytes[..cut]), None);
+        }
+        let mut newer = bytes.clone();
+        newer[0] = 2;
+        assert_eq!(ShardMap::decode(&newer), None);
+        let mut longer = bytes;
+        longer.push(0);
+        assert_eq!(ShardMap::decode(&longer), None);
+    }
+    let mut huge = vec![1u8];
+    huge.extend_from_slice(&1u64.to_be_bytes());
+    huge.push(1);
+    huge.extend_from_slice(&u32::MAX.to_be_bytes());
+    assert_eq!(ShardMap::decode(&huge), None);
+}
+
+#[test]
+fn any_decision_log_settles_in_doubt_transactions() {
+    use crate::transaction::{DecisionLog, decision_from, recover_from};
+    let mut log = Coordinator::default();
+    let first = DecisionLog::begin(&mut log).unwrap();
+    let second = DecisionLog::begin(&mut log).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(decision_from(&[]), Decision::Abort);
+    assert_eq!(decision_from(&[Vote::Yes, Vote::No]), Decision::Abort);
+    assert_eq!(
+        DecisionLog::decide(&mut log, first, &[Vote::Yes, Vote::Yes]).unwrap(),
+        Decision::Commit
+    );
+    let mut participants: BTreeMap<u32, Participant> = BTreeMap::new();
+    for shard in 0..2u32 {
+        let participant = participants.entry(shard).or_default();
+        assert_eq!(
+            participant.prepare(first, vec![(vec![shard as u8], Some(b"one".to_vec()))]),
+            Vote::Yes
+        );
+        assert_eq!(
+            participant.prepare(second, vec![(vec![10 + shard as u8], Some(b"two".to_vec()))]),
+            Vote::Yes
+        );
+    }
+    recover_from(&mut log, &mut participants).unwrap();
+    for (shard, participant) in &participants {
+        assert!(participant.in_doubt().is_empty());
+        assert_eq!(participant.committed(&[*shard as u8]), Some(&b"one".to_vec()));
+        assert_eq!(participant.committed(&[10 + *shard as u8]), None);
+    }
+    assert_eq!(
+        DecisionLog::decide(&mut log, second, &[Vote::Yes]).unwrap(),
+        Decision::Abort
+    );
+}

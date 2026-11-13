@@ -13,6 +13,7 @@ dependencies = [
  "eggdb-bolt",
  "eggdb-bson",
  "eggdb-clickhouse",
+ "eggdb-cluster",
  "eggdb-commands",
  "eggdb-consensus",
  "eggdb-content",

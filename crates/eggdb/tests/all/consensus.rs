@@ -101,3 +101,51 @@ fn a_snapshot_drops_the_entries_it_covers() {
     assert_eq!(node.membership(), &Membership::new(&[1, 2, 3]));
     assert_eq!(node.commit_index(), 4);
 }
+
+#[test]
+fn the_shard_map_is_published_only_over_the_epoch_it_was_based_on() {
+    use eggdb::cluster::{Placement, ShardMap, Strategy};
+    let file = TempPath::new("cluster-map");
+    let db = Database::open(file.path()).unwrap();
+    assert_eq!(db.shard_map().unwrap(), None);
+    let placement = Placement {
+        nodes: [(1, "eu".to_owned()), (2, "eu".to_owned())].into_iter().collect(),
+    };
+    let first = ShardMap::new(Strategy::Hash { shards: 4 }, &placement);
+    assert!(!db.publish_shard_map(&first, Some(1)).unwrap());
+    assert!(db.publish_shard_map(&first, None).unwrap());
+    let mut moved = first.clone();
+    moved.shards.get_mut(&0).unwrap().owner = 2;
+    moved.epoch = first.epoch + 1;
+    assert!(!db.publish_shard_map(&moved, None).unwrap());
+    assert!(db.publish_shard_map(&moved, Some(first.epoch)).unwrap());
+    assert!(!db.publish_shard_map(&moved, Some(first.epoch)).unwrap());
+    drop(db);
+    let db = Database::open(file.path()).unwrap();
+    assert_eq!(db.shard_map().unwrap(), Some(moved));
+    db.fence("a follower");
+    assert!(db.publish_shard_map(&first, Some(2)).is_err());
+}
+
+#[test]
+fn decisions_are_recorded_once_and_outlive_the_coordinator() {
+    use eggdb::cluster::transaction::{Decision, DecisionLog, Vote};
+    let file = TempPath::new("cluster-decisions");
+    let db = Database::open(file.path()).unwrap();
+    let mut log = db.decision_log();
+    let first = log.begin().unwrap();
+    let second = log.begin().unwrap();
+    assert_eq!(second, first + 1);
+    assert_eq!(log.decide(first, &[Vote::Yes, Vote::Yes]).unwrap(), Decision::Commit);
+    assert_eq!(log.decide(first, &[Vote::No]).unwrap(), Decision::Commit);
+    assert_eq!(log.outcome(second).unwrap(), Decision::Abort);
+    assert_eq!(log.decide(second, &[Vote::Yes]).unwrap(), Decision::Abort);
+    drop(db);
+    let db = Database::open(file.path()).unwrap();
+    let log = db.decision_log();
+    assert_eq!(log.recorded(first).unwrap(), Some(Decision::Commit));
+    log.forget(first).unwrap();
+    assert_eq!(log.recorded(first).unwrap(), None);
+    let mut log = db.decision_log();
+    assert_eq!(log.begin().unwrap(), second + 1);
+}

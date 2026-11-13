@@ -143,12 +143,10 @@ impl Coordinator {
     /// votes and every participant voted yes. A decision already recorded, including an abort
     /// presumed for a participant in doubt, stands and is returned instead.
     pub fn decide(&mut self, transaction: TransactionId, votes: &[Vote]) -> Decision {
-        let decision = if !votes.is_empty() && votes.iter().all(|vote| *vote == Vote::Yes) {
-            Decision::Commit
-        } else {
-            Decision::Abort
-        };
-        *self.decisions.entry(transaction).or_insert(decision)
+        *self
+            .decisions
+            .entry(transaction)
+            .or_insert(decision_from(votes))
     }
 
     /// The outcome of `transaction` for a participant in doubt: the recorded decision, or an
@@ -156,6 +154,58 @@ impl Coordinator {
     pub fn outcome(&mut self, transaction: TransactionId) -> Decision {
         *self.decisions.entry(transaction).or_insert(Decision::Abort)
     }
+}
+
+/// Where a coordinator records its decisions before telling anyone: in memory for tests
+/// ([`Coordinator`]), or durably in the cluster's replicated database.
+pub trait DecisionLog {
+    /// A new transaction id, never handed out before.
+    fn begin(&mut self) -> Result<TransactionId, String>;
+
+    /// Records and returns the decision from the votes, as [`Coordinator::decide`] does: a
+    /// decision already recorded stands.
+    fn decide(&mut self, transaction: TransactionId, votes: &[Vote]) -> Result<Decision, String>;
+
+    /// The recorded decision, or an abort recorded now, as [`Coordinator::outcome`] does.
+    fn outcome(&mut self, transaction: TransactionId) -> Result<Decision, String>;
+}
+
+impl DecisionLog for Coordinator {
+    fn begin(&mut self) -> Result<TransactionId, String> {
+        Ok(Coordinator::begin(self))
+    }
+
+    fn decide(&mut self, transaction: TransactionId, votes: &[Vote]) -> Result<Decision, String> {
+        Ok(Coordinator::decide(self, transaction, votes))
+    }
+
+    fn outcome(&mut self, transaction: TransactionId) -> Result<Decision, String> {
+        Ok(Coordinator::outcome(self, transaction))
+    }
+}
+
+/// The decision a fresh vote count gives: commit only when there are votes and all are yes.
+pub fn decision_from(votes: &[Vote]) -> Decision {
+    if !votes.is_empty() && votes.iter().all(|vote| *vote == Vote::Yes) {
+        Decision::Commit
+    } else {
+        Decision::Abort
+    }
+}
+
+/// Settles every in-doubt transaction of `participants` from `log`, as [`recover`] does with
+/// an in-memory coordinator.
+pub fn recover_from(
+    log: &mut impl DecisionLog,
+    participants: &mut BTreeMap<ShardId, Participant>,
+) -> Result<(), String> {
+    for participant in participants.values_mut() {
+        let doubts: BTreeSet<TransactionId> = participant.in_doubt().into_iter().collect();
+        for transaction in doubts {
+            participant.decide(transaction, log.outcome(transaction)?);
+        }
+    }
+    Ok(())
 }
 
 /// Settles every in-doubt transaction of `participants` from the coordinator's record, as a

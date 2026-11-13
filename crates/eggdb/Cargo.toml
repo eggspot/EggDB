@@ -23,6 +23,7 @@ eggdb-amqp = { path = "../eggdb-amqp" }
 eggdb-auth = { path = "../eggdb-auth" }
 eggdb-bolt = { path = "../eggdb-bolt" }
 eggdb-gremlin = { path = "../eggdb-gremlin" }
+eggdb-cluster = { path = "../eggdb-cluster" }
 eggdb-commands = { path = "../eggdb-commands" }
 eggdb-consensus = { path = "../eggdb-consensus" }
 eggdb-crypto = { path = "../eggdb-crypto" }

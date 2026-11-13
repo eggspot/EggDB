@@ -65,6 +65,7 @@
 //!   [`Database::sql_store`].
 
 mod change_archive;
+mod cluster_meta;
 mod collection;
 mod collection_counts;
 mod concurrent;
@@ -93,6 +94,8 @@ pub use replication::{DatabaseApply, ReplicationPrimary};
 pub use eggdb_replication::{Batch as ReplicationBatch, Mode as ReplicationMode, Refusal as ReplicationRefusal, Replica, ReplicaId, decode_batch, encode_batch};
 pub use eggdb_storage::ValueCompression;
 pub use eggdb_consensus as consensus;
+pub use eggdb_cluster as cluster;
+pub use cluster_meta::DatabaseDecisions;
 pub use error::{Error, ErrorKind, Result};
 pub use options::{Durability, Options};
 pub use scan::{KeyRange, Scan};

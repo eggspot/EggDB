@@ -86,12 +86,14 @@ impl Database {
     /// Stores what a Raft node reported ([`eggdb_consensus::Node::take_changes`]) in one
     /// durable write transaction: the newest snapshot's position with the entries it covers
     /// dropped, the rewritten entries, then the term and vote. The node sends the messages it
-    /// returned only after this succeeds.
+    /// returned only after this succeeds. The write is this file's own: it is never captured
+    /// as a replication batch, archived or sent to change data capture.
     pub fn save_consensus(&self, changes: &Changes) -> Result<()> {
         if changes.is_empty() {
             return Ok(());
         }
         let mut transaction = self.begin_write_unfenced(self.write_timeout())?;
+        transaction.keep_local();
         let newest = [&changes.installed, &changes.compacted]
             .into_iter()
             .flatten()
@@ -121,6 +123,7 @@ impl Database {
     /// the other node's Raft keys, which are not this node's.
     pub fn reset_consensus(&self, snapshot: &Snapshot) -> Result<()> {
         let mut transaction = self.begin_write_unfenced(self.write_timeout())?;
+        transaction.keep_local();
         delete_log_range(&mut transaction, LOG_PREFIX.to_vec()..log_end())?;
         transaction.delete_raw(HARD_STATE_KEY)?;
         transaction.put_raw(SNAPSHOT_KEY, &encode_snapshot_meta(snapshot))?;

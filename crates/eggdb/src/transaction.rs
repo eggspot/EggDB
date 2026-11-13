@@ -477,6 +477,11 @@ impl<'db> WriteTransaction<'db> {
         self.put_live(key, value.as_ref())
     }
 
+    pub(crate) fn keep_local(&mut self) {
+        self.archived_keys = None;
+        self.captured = None;
+    }
+
     pub(crate) fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.note_captured(key)?;
         let previous = self.previous_for_journal(key)?;

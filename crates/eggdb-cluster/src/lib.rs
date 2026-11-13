@@ -4,9 +4,12 @@
 //! writes to a shard's old home after a move. [`rebalance`] plans the fewest moves that even out
 //! the shards per node (keeping region-pinned shards in their region), and [`ShardMove`] moves
 //! one shard online: copy, catch up, then cut over in one epoch step. [`transaction`] commits
-//! changes that span shards with two-phase commit. [`quorum`] replicates keys without a leader:
-//! any node takes writes, quorums decide success, and replicas converge.
+//! changes that span shards with two-phase commit, recording each decision in a
+//! [`transaction::DecisionLog`]. [`ShardMap::encode`] gives the map's stored form, so the map and
+//! the decisions live in the cluster's Raft-replicated database (D1039). [`quorum`] replicates
+//! keys without a leader: any node takes writes, quorums decide success, and replicas converge.
 
+mod codec;
 pub mod crdt;
 pub mod merkle;
 pub mod quorum;
