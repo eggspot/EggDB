@@ -99,7 +99,7 @@ impl Session<'_> {
         eggdb_platform::set_process_limit(limit);
         if !cfg!(feature = "egg-allocator") {
             self.messages.text(&format!(
-                "eggdb: --memory-limit {limit}: the page cache, snapshots and connections share it; a build with the egg-allocator feature also refuses any allocation past it\n"
+                "eggdb: --memory-limit {limit}: the page cache, snapshots and connections share it; the default build's allocator also refuses any allocation past it\n"
             ));
         }
         Ok(())

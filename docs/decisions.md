@@ -190,7 +190,7 @@ its full title with its status.
 - [D163](decisions/D163.md) The compatibility list (`docs/compatibility.md`): supported means a CI job runs or replays the tool; expected to work means every known catalog query is answered; pgAdmin's statistics views and administration functions (refined by D259)
 - [D164](decisions/D164.md) Unix domain sockets in the platform layer (`local_socket`), a `Local` server connection beside TCP and TLS, no TLS on local sockets; `eggdb serve --socket-dir` and `--mysql-socket` (refined by D267: local sockets on Windows too)
 - [D165](decisions/D165.md) Sockets on io_uring and I/O completion ports, on request: `NetBackend::IoUring` (batched submission, kernel cancel, Linux 5.11) and `NetBackend::Iocp` (AcceptEx, ConnectEx, one port per socket), a `net.round_trip` benchmark
-- [D166](decisions/D166.md) EggDB's own memory allocator (`EggAllocator`): 40 size classes, per-thread caches, a budget, the system allocator underneath; opt-in (`--features egg-allocator`) until `allocator.small_blocks` says otherwise
+- [D166](decisions/D166.md) EggDB's own memory allocator (`EggAllocator`): 40 size classes, per-thread caches, a budget, the system allocator underneath; opt-in (`--features egg-allocator`) until `allocator.small_blocks` says otherwise (the default since D1117)
 - [D167](decisions/D167.md) Large values streamed a page at a time (`get_reader`, `put_reader`, `eggdb get -F raw`, `eggdb put @file`); errors roll back; the cache limit stays until M3 spills dirty pages
 - [D168](decisions/D168.md) A checkpoint that cuts segments off writes one header slot; the copy to the other slot waits until a data or free-list page is about to use the cut space (three syncs per long `Normal` commit instead of four)
 - [D169](decisions/D169.md) Declarative partitioning: partitions are tables linked by a catalog record (`0x0E`), routed writes, reads expanded into a pruned `UNION ALL`, MySQL's and Oracle's named partitions
@@ -1141,3 +1141,4 @@ its full title with its status.
 - [D1114](decisions/D1114.md) Code-only batch 762 (M1): datagrams in a completion queue of their own with batched receives for QUIC
 - [D1115](decisions/D1115.md) Code-only batch 763 (M1): TDS attention on named pipes and local sockets
 - [D1116](decisions/D1116.md) Code-only batch 764 (M1): io_uring and completion ports as the automatic backends
+- [D1117](decisions/D1117.md) Code-only batch 765 (M1): EggDB's own allocator in the default build

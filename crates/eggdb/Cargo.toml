@@ -16,6 +16,7 @@ name = "eggdb"
 path = "src/main.rs"
 
 [features]
+default = ["egg-allocator"]
 egg-allocator = []
 
 [dependencies]

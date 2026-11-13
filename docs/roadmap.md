@@ -365,7 +365,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Thread pinning and CPU topology on the BSDs (Where we are). **Code written, unbuilt** (code-only mode, 2026-11-10). FreeBSD, DragonFly and NetBSD; OpenBSD has
   no affinity call.
 - EggDB's own allocator as the default build, once the benchmarks show it (D166).
-  Check: the benchmark lines with and without it.
+  Check: the benchmark lines with and without it. **Code written, unbuilt** (code-only mode, 2026-11-13, D1117).
 - The M1 review's IOCP follow-ups: a guard against packets after an immediate success, and tests
   that cancel a pending connect and mix port and worker operations (Where we are). The guard: **Code written, unbuilt** (code-only mode, 2026-11-10). The tests: **code written, unbuilt** (code-only mode, 2026-11-13, D944).
 - `NotConnected` after a reset checked against Windows' sockets in the contract test (D314). **Code written,

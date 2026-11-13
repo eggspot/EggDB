@@ -1038,7 +1038,7 @@ jobs:
           $starting.Stop()
           "| Step | Seconds |`n|------|--------:|`n| download and install | $([math]::Round($installing.Elapsed.TotalSeconds, 2)) |`n| first start | $([math]::Round($starting.Elapsed.TotalSeconds, 2)) |" >> $env:GITHUB_STEP_SUMMARY
 
-  egg-allocator:
+  system-allocator:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -1055,12 +1055,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-v2-egg-allocator-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-v2-egg-allocator-${{ runner.os }}-
-      - name: Test the eggdb binary and its library with EggDB's own allocator installed
+          key: cargo-v2-system-allocator-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-system-allocator-${{ runner.os }}-
+      - name: Test the eggdb binary and its library built with the system allocator
         run: |
-          cargo test -p eggdb --features egg-allocator
-          cargo build -p eggdb --features egg-allocator
+          cargo test -p eggdb --no-default-features
+          cargo build -p eggdb --no-default-features
           scripts/smoke-test.sh target/debug/eggdb
 
   cross:
@@ -2182,7 +2182,7 @@ jobs:
           PY
 
   check:
-    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, cortex-m, opensearch-compare, mongo-compare, ldbc-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, android, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
+    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, cortex-m, opensearch-compare, mongo-compare, ldbc-compare, installers, system-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, android, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

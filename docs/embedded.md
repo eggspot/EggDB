@@ -574,8 +574,9 @@ static ALLOCATOR: eggdb_platform::EggAllocator = eggdb_platform::EggAllocator::w
 
 With a budget, an allocation that would hold more than that many bytes from the system fails
 the way an out-of-memory allocation does. `EggAllocator::new()` has no budget. The `eggdb`
-binary uses it when built with `--features egg-allocator`; the default build keeps the system
-allocator until the benchmark line `allocator.small_blocks` shows ours ahead on every system.
+binary uses it by default (D1117): `allocator.small_blocks` puts ours at 0.880 of the
+system allocator's time on Linux and 0.523 on macOS. `cargo build -p eggdb --no-default-features`
+builds the binary on the system allocator instead.
 
 A fixed-memory mode puts one limit on the whole process (D1086). `Options::memory_limit(bytes)`
 splits it across what the database holds: half for the page cache, an eighth for snapshots; the
