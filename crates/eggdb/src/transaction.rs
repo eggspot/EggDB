@@ -268,6 +268,7 @@ pub struct WriteTransaction<'db> {
     journal: Option<Vec<StoredChange>>,
     counts: KeptCounts,
     archived_keys: Option<Vec<Vec<u8>>>,
+    captured: Option<std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
     turn: WriterTurn<'db>,
 }
 
@@ -290,6 +291,7 @@ impl<'db> WriteTransaction<'db> {
             journal: None,
             counts: KeptCounts::default(),
             archived_keys: (database.change_archive().is_some() || database.primary().is_some()).then(Vec::new),
+            captured: database.row_capture().map(|_| std::collections::BTreeMap::new()),
             turn,
         })
     }
@@ -372,6 +374,7 @@ impl<'db> WriteTransaction<'db> {
                 "a collection's entry count is written whole by EggDB, never streamed",
             ));
         }
+        self.note_captured(key)?;
         let previous = self.previous_for_journal(key)?;
         let kept = self.kept_entry(key)?;
         let before = self.value_len_if(kept, key)?;
@@ -475,6 +478,7 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub(crate) fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.note_captured(key)?;
         let previous = self.previous_for_journal(key)?;
         let kept = self.kept_entry(key)?;
         let before = self.value_len_if(kept, key)?;
@@ -493,6 +497,50 @@ impl<'db> WriteTransaction<'db> {
                 .change(number, key_bytes, before, Some(value.len() as u64));
         }
         self.note_count_record(key, Some(value))
+    }
+
+    fn note_captured(&mut self, key: &[u8]) -> Result<()> {
+        let Some(filter) = self.database.row_capture() else {
+            return Ok(());
+        };
+        if !filter(key) || self.captured.as_ref().is_some_and(|captured| captured.contains_key(key)) {
+            return Ok(());
+        }
+        let before = self.get_raw(key)?;
+        if let Some(captured) = self.captured.as_mut() {
+            captured.insert(key.to_vec(), before);
+        }
+        Ok(())
+    }
+
+    fn write_capture_record(&mut self) -> Result<()> {
+        let Some(captured) = self.captured.take() else {
+            return Ok(());
+        };
+        let mut keys = Vec::with_capacity(captured.len());
+        for (key, before) in captured {
+            let after = self.get_raw(&key)?;
+            if before != after {
+                keys.push((key, before, after));
+            }
+        }
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let sequence = self.next_capture_sequence()?;
+        let mut record_key = eggdb_sql::cdc::CAPTURE_PREFIX.to_vec();
+        record_key.extend_from_slice(&sequence.to_be_bytes());
+        self.put_raw(&record_key, &eggdb_sql::cdc::encode_capture(&keys))
+    }
+
+    fn next_capture_sequence(&self) -> Result<u64> {
+        let mut end = eggdb_sql::cdc::CAPTURE_PREFIX.to_vec();
+        end.push(0xFF);
+        let last = Scan::within_between(self.reader(), self.tree(), b"", &(eggdb_sql::cdc::CAPTURE_PREFIX.to_vec()..end))
+            .next_back()
+            .transpose()?
+            .and_then(|(key, _)| key.get(eggdb_sql::cdc::CAPTURE_PREFIX.len()..).and_then(|bytes| bytes.try_into().ok()).map(u64::from_be_bytes));
+        Ok(last.map_or(1, |last| last + 1))
     }
 
     fn note_archived(&mut self, key: &[u8]) {
@@ -627,6 +675,7 @@ impl<'db> WriteTransaction<'db> {
     }
 
     pub(crate) fn put_if_absent_raw(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        self.note_captured(key)?;
         let tree = match self.tree {
             Some(tree) => tree,
             None => {
@@ -665,6 +714,7 @@ impl<'db> WriteTransaction<'db> {
         let Some(tree) = self.tree else {
             return Ok(false);
         };
+        self.note_captured(key)?;
         let previous = self.previous_for_journal(key)?;
         let kept = self.kept_entry(key)?;
         let before = self.value_len_if(kept, key)?;
@@ -710,6 +760,7 @@ impl<'db> WriteTransaction<'db> {
                 ..Features::default()
             });
         }
+        self.write_capture_record()?;
         if let Some(primary) = self.database.primary()
             && self.archived_keys.as_ref().is_some_and(|keys| !keys.is_empty())
         {

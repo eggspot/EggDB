@@ -577,3 +577,179 @@ mod tests {
         assert_eq!(dead, 1);
     }
 }
+
+/// Where the engine keeps each commit's captured row changes when capture without triggers is
+/// on (D1030): this prefix and the capture's sequence, big-endian.
+pub const CAPTURE_PREFIX: &[u8] = b"\xffCOL\x00\x7fcapture\x00";
+
+/// One captured key: its stored bytes before the commit and after it, `None` when absent.
+pub type CapturedKey = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// Whether `key` holds a row of a SQL table, the keys capture without triggers records.
+pub fn is_row_key(key: &[u8]) -> bool {
+    key.len() > crate::encoding::NAMESPACE.len() + 4 && key.starts_with(&crate::encoding::rows_prefix(0)[..crate::encoding::NAMESPACE.len() + 1])
+}
+
+/// The capture record of one commit's row changes.
+pub fn encode_capture(keys: &[CapturedKey]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(keys.len() as u64).to_le_bytes());
+    let put = |bytes: Option<&Vec<u8>>, out: &mut Vec<u8>| match bytes {
+        Some(bytes) => {
+            out.push(1);
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+        None => out.push(0),
+    };
+    for (key, before, after) in keys {
+        put(Some(key), &mut out);
+        put(before.as_ref(), &mut out);
+        put(after.as_ref(), &mut out);
+    }
+    out
+}
+
+fn decode_capture(bytes: &[u8]) -> Option<Vec<CapturedKey>> {
+    let mut at = 0usize;
+    let number = |at: &mut usize| -> Option<u64> {
+        let value = u64::from_le_bytes(bytes.get(*at..*at + 8)?.try_into().ok()?);
+        *at += 8;
+        Some(value)
+    };
+    let count = number(&mut at)?;
+    let part = |at: &mut usize| -> Option<Option<Vec<u8>>> {
+        let present = *bytes.get(*at)?;
+        *at += 1;
+        if present == 0 {
+            return Some(None);
+        }
+        let length = usize::try_from(u64::from_le_bytes(bytes.get(*at..*at + 8)?.try_into().ok()?)).ok()?;
+        *at += 8;
+        let value = bytes.get(*at..at.checked_add(length)?)?.to_vec();
+        *at += length;
+        Some(Some(value))
+    };
+    let mut keys = Vec::with_capacity(usize::try_from(count.min(1 << 16)).ok()?);
+    for _ in 0..count {
+        let key = part(&mut at)??;
+        let before = part(&mut at)?;
+        let after = part(&mut at)?;
+        keys.push((key, before, after));
+    }
+    (at == bytes.len()).then_some(keys)
+}
+
+fn row_json(definition: &crate::encoding::TableDefinition, stored: &[u8]) -> SqlResult<String> {
+    let values = crate::encoding::decode_row(stored, &definition.columns)?;
+    let mut out = String::from("{");
+    for (index, (column, value)) in definition.columns.iter().zip(values.iter()).enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(&column.name));
+        out.push(':');
+        out.push_str(&crate::json_functions::to_json_text(value)?);
+    }
+    out.push('}');
+    Ok(out)
+}
+
+fn tables_by_id(reader: &dyn crate::store::KeyValueRead) -> SqlResult<std::collections::HashMap<u32, crate::encoding::TableDefinition>> {
+    let prefix = crate::encoding::table_key("");
+    let end = crate::encoding::prefix_end(&prefix);
+    let mut tables = std::collections::HashMap::new();
+    reader.scan(&prefix, &end, crate::store::ScanDirection::Forward, &mut |key, value| {
+        if crate::encoding::is_view_record(value) {
+            return Ok(true);
+        }
+        let name = String::from_utf8_lossy(&key[prefix.len()..]).into_owned();
+        if let Ok(definition) = crate::encoding::TableDefinition::decode(&name, value) {
+            tables.insert(definition.id, definition);
+        }
+        Ok(true)
+    })?;
+    Ok(tables)
+}
+
+fn captured_events(
+    tables: &std::collections::HashMap<u32, crate::encoding::TableDefinition>,
+    database: &str,
+    keys: &[CapturedKey],
+    now_ms: i64,
+) -> SqlResult<Vec<String>> {
+    let id_at = crate::encoding::NAMESPACE.len() + 1;
+    let mut events = Vec::new();
+    for (key, before, after) in keys {
+        let Some(id) = key.get(id_at..id_at + 4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_be_bytes) else {
+            continue;
+        };
+        let Some(definition) = tables.get(&id) else {
+            continue;
+        };
+        let schema = crate::schemas::schema_of(&definition.name);
+        let schema = if schema.is_empty() { crate::schemas::DEFAULT_SCHEMA } else { schema };
+        if schema == "eggdb_cdc" {
+            continue;
+        }
+        let table = crate::schemas::base_name(&definition.name);
+        let op = match (before, after) {
+            (None, Some(_)) => "c",
+            (Some(_), Some(_)) => "u",
+            (Some(_), None) => "d",
+            (None, None) => continue,
+        };
+        let before = before.as_deref().map(|stored| row_json(definition, stored)).transpose()?;
+        let after = after.as_deref().map(|stored| row_json(definition, stored)).transpose()?;
+        events.push(debezium_event(database, schema, table, op, before.as_deref(), after.as_deref(), now_ms));
+    }
+    Ok(events)
+}
+
+/// Hands the row changes the engine captured without triggers (D1030), commit by commit and
+/// in commit order, to `deliver` as Debezium-style JSON events with full `before` and `after`
+/// rows, and removes each commit's record once every event of it was accepted; stops at the
+/// first refusal, so delivery is at least once and in order. Returns how many commits were
+/// delivered.
+pub fn deliver_captured_changes<S: KeyValueStore>(
+    store: &S,
+    database: &str,
+    limit: u64,
+    now_ms: i64,
+    deliver: &mut dyn FnMut(&str) -> bool,
+) -> SqlResult<u64> {
+    let read = store.begin_read()?;
+    let tables = tables_by_id(&read)?;
+    let end = crate::encoding::prefix_end(CAPTURE_PREFIX);
+    let mut records: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    read.scan(CAPTURE_PREFIX, &end, crate::store::ScanDirection::Forward, &mut |key, value| {
+        records.push((key.to_vec(), value.to_vec()));
+        Ok((records.len() as u64) < limit)
+    })?;
+    drop(read);
+    let mut delivered = 0;
+    for (key, value) in records {
+        let keys = decode_capture(&value).ok_or_else(|| crate::encoding::corrupt("captured changes"))?;
+        let events = captured_events(&tables, database, &keys, now_ms)?;
+        if !events.iter().all(|event| deliver(event)) {
+            break;
+        }
+        let mut write = store.begin_write()?;
+        crate::store::KeyValueWrite::delete(&mut write, &key)?;
+        crate::store::KeyValueWrite::commit(write)?;
+        delivered += 1;
+    }
+    Ok(delivered)
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn capture_records_read_back() {
+        let keys = vec![(b"k1".to_vec(), None, Some(b"v".to_vec())), (b"k2".to_vec(), Some(b"old".to_vec()), None)];
+        assert_eq!(decode_capture(&encode_capture(&keys)), Some(keys));
+        assert!(decode_capture(b"\x01").is_none());
+    }
+}

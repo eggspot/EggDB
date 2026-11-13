@@ -1706,7 +1706,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Retries with backoff and the dead-letter table: **code written, unbuilt** (code-only mode,
   2026-11-11, D528); Debezium's `schema` section: **code written, unbuilt** (code-only mode, 2026-11-12,
   D610). Left: transaction metadata (needs a transaction id per transaction).
-- Change capture without triggers (D210).
+- Change capture without triggers (D210). **Code written, unbuilt** (code-only mode, 2026-11-13, D1030): `--cdc-capture
+  engine` with before and after images. Left: decoding with the table definition at commit time, and retries for
+  captured records.
 - System-versioned temporal tables (SQL:2011) with `AS OF` over kept history, and SQL Server's
   temporal tables (D28). `FOR SYSTEM_TIME AS OF | FROM ... TO | BETWEEN ... AND | CONTAINED IN | ALL` over the tables
   `eggdb_temporal` keeps (D755): **code written, unbuilt** (code-only mode, 2026-11-12, D794); SQL Server's and

@@ -297,6 +297,7 @@ impl CommandName {
             | OptionName::FailoverAfter
             | OptionName::StandbyOf
             | OptionName::ApplyDelay
+            | OptionName::CdcCapture
             | OptionName::CdcWebhook
             | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
@@ -525,6 +526,7 @@ enum OptionName {
     FailoverAfter,
     StandbyOf,
     ApplyDelay,
+    CdcCapture,
     CdcWebhook,
     OtlpEndpoint,
     CdcQueue,
@@ -691,6 +693,7 @@ impl OptionName {
             b"failover-after" => Self::FailoverAfter,
             b"standby-of" => Self::StandbyOf,
             b"apply-delay" => Self::ApplyDelay,
+            b"cdc-capture" => Self::CdcCapture,
             b"cdc-webhook" => Self::CdcWebhook,
             b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
@@ -1062,6 +1065,7 @@ pub(crate) struct ServeOptions {
     pub(crate) failover_after_seconds: Option<u64>,
     pub(crate) standby_of: Option<PathBuf>,
     pub(crate) apply_delay_seconds: Option<u64>,
+    pub(crate) cdc_capture_engine: bool,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1807,6 +1811,13 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.replication_advertise = Some(address.to_owned());
             }
             OptionName::StandbyOf => request.serve.standby_of = Some(PathBuf::from(value)),
+            OptionName::CdcCapture => {
+                request.serve.cdc_capture_engine = match value.to_str() {
+                    Some("engine") => true,
+                    Some("triggers") => false,
+                    _ => return Err(usage(format!("{} takes triggers (the eggdb_cdc extension's, the default) or engine (every table, no triggers)", option.spelled))),
+                };
+            }
             OptionName::ApplyDelay => {
                 request.serve.apply_delay_seconds = Some(
                     parse_whole_number(value.as_encoded_bytes())

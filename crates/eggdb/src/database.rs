@@ -84,6 +84,7 @@ pub struct Database {
     encrypted: bool,
     primary: OnceLock<Arc<crate::replication::ReplicationPrimary>>,
     fence: std::sync::Mutex<Option<String>>,
+    row_capture: OnceLock<fn(&[u8]) -> bool>,
 }
 
 struct ClockHandle(Arc<dyn Clock>);
@@ -379,7 +380,22 @@ impl Database {
             encrypted: options.encryption_key.is_some(),
             primary: OnceLock::new(),
             fence: std::sync::Mutex::new(None),
+            row_capture: OnceLock::new(),
         })
+    }
+
+    /// Captures every commit's changes to the keys `filter` accepts, with their stored bytes
+    /// before and after the commit, as one capture record written in the same commit (D1030),
+    /// for change data capture without triggers; `eggdb_sql::cdc` passes SQL table rows and
+    /// delivers the records.
+    pub fn capture_rows(&self, filter: fn(&[u8]) -> bool) -> Result<()> {
+        self.row_capture
+            .set(filter)
+            .map_err(|_| Error::new(ErrorKind::InvalidOption, "the database already captures changes"))
+    }
+
+    pub(crate) fn row_capture(&self) -> Option<fn(&[u8]) -> bool> {
+        self.row_capture.get().copied()
     }
 
     /// Refuses every write transaction from now on with `reason` (D1026), as a replica, an old

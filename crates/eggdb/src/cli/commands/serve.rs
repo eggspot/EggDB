@@ -1128,6 +1128,14 @@ impl Session<'_> {
         if replication_listener.is_some() {
             eggdb_sql::set_switchover_hook(super::serve_failover::request_switchover);
         }
+        if options.cdc_capture_engine && options.cdc_webhook.is_none() && options.cdc_topic.is_none() && options.cdc_queue.is_none() {
+            return Err(usage("--cdc-capture engine captures every change for a sink: give --cdc-webhook, --cdc-topic or --cdc-queue too".to_owned()));
+        }
+        if options.cdc_capture_engine {
+            db.capture_rows(eggdb_sql::cdc::is_row_key).map_err(|error| {
+                Failure::database(format!("cannot capture changes in {}: {error}", self.file), Exit::DatabaseError)
+            })?;
+        }
         if replicates {
             replication_node.publish_role();
             eggdb_sql::set_replication_hooks(super::serve_failover::freshness_hook, super::serve_failover::token_hook);
@@ -1388,6 +1396,7 @@ impl Session<'_> {
                         &store,
                         &config.database,
                         url,
+                        options.cdc_capture_engine,
                         &stop_signals::requested,
                     )
                 }
@@ -1484,6 +1493,7 @@ impl Session<'_> {
                         &config.database,
                         &kafka_database,
                         topic,
+                        options.cdc_capture_engine,
                         &stop_signals::requested,
                     );
                 }
@@ -1495,6 +1505,7 @@ impl Session<'_> {
                         &config.database,
                         &queue_database,
                         queue,
+                        options.cdc_capture_engine,
                         &stop_signals::requested,
                     );
                 }

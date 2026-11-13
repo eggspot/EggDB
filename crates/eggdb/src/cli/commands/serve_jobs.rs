@@ -49,6 +49,7 @@ pub(super) fn deliver_changes(
     store: &impl eggdb_sql::KeyValueStore,
     database: &str,
     url: &str,
+    engine_capture: bool,
     stop: &(dyn Fn() -> bool + Sync),
 ) {
     let Some(target) = super::report_delivery::WebTarget::parse(url) else {
@@ -56,11 +57,15 @@ pub(super) fn deliver_changes(
     };
     while !stop() {
         std::thread::sleep(DELIVER_EVERY);
-        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "webhook", EVENTS_PER_ROUND, now_ms(), &mut |event| {
+        let mut send = |event: &str| {
             target
                 .post("application/json", event.as_bytes(), WEBHOOK_TIMEOUT, WEBHOOK_CERTIFICATE_VARIABLE)
                 .is_ok_and(|status| (200..300).contains(&status))
-        });
+        };
+        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "webhook", EVENTS_PER_ROUND, now_ms(), &mut send);
+        if engine_capture {
+            let _ = eggdb_sql::cdc::deliver_captured_changes(store, database, EVENTS_PER_ROUND, now_ms(), &mut send);
+        }
     }
 }
 
@@ -69,6 +74,7 @@ pub(super) fn deliver_changes_to_queue(
     database: &str,
     keyspace: &(dyn eggdb_keyspace::Keyspace + Sync),
     queue: &str,
+    engine_capture: bool,
     stop: &(dyn Fn() -> bool + Sync),
 ) {
     let queues = eggdb_queues::Queues::new(keyspace);
@@ -82,9 +88,11 @@ pub(super) fn deliver_changes_to_queue(
             .map_or(0, |since| {
                 u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
             });
-        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "queue", EVENTS_PER_ROUND, now_ms(), &mut |event| {
-            queues.send(queue, event.as_bytes(), 0, now).is_ok()
-        });
+        let mut send = |event: &str| queues.send(queue, event.as_bytes(), 0, now).is_ok();
+        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "queue", EVENTS_PER_ROUND, now_ms(), &mut send);
+        if engine_capture {
+            let _ = eggdb_sql::cdc::deliver_captured_changes(store, database, EVENTS_PER_ROUND, now_ms(), &mut send);
+        }
     }
 }
 
@@ -93,13 +101,16 @@ pub(super) fn deliver_changes_to_topic(
     database: &str,
     keyspace: &(dyn eggdb_keyspace::Keyspace + Sync),
     topic: &str,
+    engine_capture: bool,
     stop: &(dyn Fn() -> bool + Sync),
 ) {
     while !stop() {
         std::thread::sleep(DELIVER_EVERY);
-        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "topic", EVENTS_PER_ROUND, now_ms(), &mut |event| {
-            eggdb_kafka::publish(keyspace, topic, event.as_bytes()).is_ok()
-        });
+        let mut send = |event: &str| eggdb_kafka::publish(keyspace, topic, event.as_bytes()).is_ok();
+        let _ = eggdb_sql::cdc::deliver_changes_with_retries(store, database, "topic", EVENTS_PER_ROUND, now_ms(), &mut send);
+        if engine_capture {
+            let _ = eggdb_sql::cdc::deliver_captured_changes(store, database, EVENTS_PER_ROUND, now_ms(), &mut send);
+        }
     }
 }
 
