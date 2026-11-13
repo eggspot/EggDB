@@ -492,6 +492,14 @@ name = "eggdb-search"
 version = "0.5.0"
 
 [[package]]
+name = "eggdb-sparql-suite"
+version = "0.5.0"
+dependencies = [
+ "eggdb-keyspace",
+ "eggdb-rdf",
+]
+
+[[package]]
 name = "eggdb-sql"
 version = "0.5.0"
 dependencies = [

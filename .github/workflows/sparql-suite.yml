@@ -1,0 +1,69 @@
+name: sparql-suite
+
+on:
+  schedule:
+    - cron: "17 5 * * 6"
+  workflow_dispatch:
+    inputs:
+      minimum:
+        description: "The pass rate below which the run fails, in percent"
+        required: false
+        default: "0"
+
+concurrency:
+  group: sparql-suite
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  SPARQL_SUITE_MINIMUM: ${{ inputs.minimum || vars.SPARQL_SUITE_MINIMUM || '0' }}
+
+jobs:
+  sparql-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-sparql-suite-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-sparql-suite-${{ runner.os }}-
+      - name: Fetch the W3C RDF and SPARQL test suites (W3C test suite licence, test data only, never shipped)
+        run: git clone --depth 1 https://github.com/w3c/rdf-tests "$RUNNER_TEMP/rdf-tests"
+      - name: Run the SPARQL 1.0 and 1.1 suites and publish the pass rate (D38, D1013)
+        run: |
+          cargo build --release -p eggdb-sparql-suite
+          set -o pipefail
+          target/release/eggdb-sparql-suite "$RUNNER_TEMP/rdf-tests/sparql/sparql10" "$RUNNER_TEMP/rdf-tests/sparql/sparql11" --minimum "$SPARQL_SUITE_MINIMUM" 2> "$RUNNER_TEMP/sparql-suite-failures.txt" | tee "$RUNNER_TEMP/sparql-suite-rates.txt"
+      - name: Summarise the rate
+        if: always()
+        run: |
+          {
+            echo "## W3C SPARQL suite"
+            echo
+            echo "Minimum: ${SPARQL_SUITE_MINIMUM}%"
+            echo
+            echo '```'
+            tail -n 1 "$RUNNER_TEMP/sparql-suite-rates.txt" 2>/dev/null || echo "no results"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the per-manifest rates and the failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sparql-suite-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/sparql-suite-rates.txt
+            ${{ runner.temp }}/sparql-suite-failures.txt
+          retention-days: 90

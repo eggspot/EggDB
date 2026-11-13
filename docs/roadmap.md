@@ -1640,8 +1640,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   1.1 query and update reader: **code written, unbuilt** (code-only mode, 2026-11-12, D887); queries evaluated with
   the four result formats: **code written, unbuilt** (code-only mode, 2026-11-12, D888); updates, the SPARQL protocol
   and Graph Store protocol, and `eggdb serve --sparql-listen`: **code written, unbuilt** (code-only mode, 2026-11-12,
-  D889). SPARQL in the CLI (`eggdb sql --sparql`): **code written, unbuilt** (code-only mode, 2026-11-12, D922). Left: the W3C
-  SPARQL suite in CI, and RDF in the MCP tools. `LOAD` from allowed URLs: **code written, unbuilt**
+  D889). SPARQL in the CLI (`eggdb sql --sparql`): **code written, unbuilt** (code-only mode, 2026-11-12, D922). The W3C SPARQL suite run weekly in
+  CI: **code written, unbuilt** (code-only mode, 2026-11-13, D1013). Left: RDF in the MCP tools. `LOAD` from allowed URLs: **code written, unbuilt**
   (code-only mode, 2026-11-12, D923); `SERVICE` to allowed endpoints: **code written, unbuilt** (code-only mode,
   2026-11-12, D924).
 - The LDBC benchmark against Neo4j (D7, D206).

@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-sparql-suite"
+description = "Runs the W3C SPARQL 1.1 test suite's syntax and query evaluation tests against EggDB's RDF store and reports the pass rate, failing below a stated minimum."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+eggdb-rdf = { path = "../eggdb-rdf" }
+
+[lints]
+workspace = true
