@@ -526,6 +526,16 @@ impl KeyValueStore for Store<'_> {
     fn page_lookups(&self) -> Option<eggdb_sql::PageLookups> {
         Some(this_threads_page_lookups())
     }
+
+    fn backup_to(&self, path: &std::path::Path, clone: bool) -> SqlResult<Option<eggdb_sql::StoreBackup>> {
+        let failed = |error: crate::Error| SqlError::new(SqlState::IO_ERROR, format!("BACKUP: {error}"));
+        if clone {
+            let report = self.0.clone_to(path).map_err(failed)?;
+            return Ok(Some(eggdb_sql::StoreBackup { stamp: report.stamp.bits(), entries: 0, instant: report.instant }));
+        }
+        let report = self.0.backup_to(path).map_err(failed)?;
+        Ok(Some(eggdb_sql::StoreBackup { stamp: report.stamp.bits(), entries: report.entries, instant: false }))
+    }
 }
 
 /// A [`Database`] owned as the store SQL sessions run on, for a program that opens the

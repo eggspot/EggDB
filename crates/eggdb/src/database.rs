@@ -705,6 +705,12 @@ impl Database {
     /// # Ok(()) }
     /// ```
     pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<BackupReport> {
+        self.backup_to_reporting(path, &mut |_| {})
+    }
+
+    /// Writes a copy as [`Database::backup_to`] does, calling `progress` with the entries
+    /// copied so far and the entries the copy will hold after each batch (D1023).
+    pub fn backup_to_reporting(&self, path: impl AsRef<Path>, progress: &mut dyn FnMut(u64, u64)) -> Result<BackupReport> {
         let copy = path.as_ref();
         let staging = staging_path(copy, BACKUP_STAGING_SUFFIX);
         let snapshot = self.store.begin_read().map_err(Error::storage)?;
@@ -714,11 +720,12 @@ impl Database {
             replaces: false,
         };
         let report = snapshot
-            .copy_to(
+            .copy_to_reporting(
                 &OsFileSystem::new(),
                 &OsMemory::new(),
                 Arc::clone(&self.clock.0),
                 destination,
+                &mut |step| progress(step.entries, step.total_entries),
             )
             .map_err(|failure| self.backup_failure(failure, destination))?;
         Ok(BackupReport {

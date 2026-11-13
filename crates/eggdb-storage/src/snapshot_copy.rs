@@ -32,6 +32,15 @@ pub struct CopyDestination<'p> {
     pub replaces: bool,
 }
 
+/// How far a copy has come, as [`ReadTransaction::copy_to_reporting`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CopyProgress {
+    /// The entries copied and committed so far.
+    pub entries: u64,
+    /// The entries the snapshot holds.
+    pub total_entries: u64,
+}
+
 /// What [`ReadTransaction::copy_to`] wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
@@ -141,8 +150,21 @@ impl<F: File> ReadTransaction<'_, F> {
         clock: Arc<dyn Clock>,
         destination: CopyDestination<'_>,
     ) -> Result<CopyReport, CopyFailure> {
+        self.copy_to_reporting(fs, memory, clock, destination, &mut |_| {})
+    }
+
+    /// Copies the snapshot as [`ReadTransaction::copy_to`] does, calling `progress` after each
+    /// batch of entries is committed to the copy (D1023).
+    pub fn copy_to_reporting<S: FileSystem>(
+        &self,
+        fs: &S,
+        memory: &impl Memory,
+        clock: Arc<dyn Clock>,
+        destination: CopyDestination<'_>,
+        progress: &mut dyn FnMut(CopyProgress),
+    ) -> Result<CopyReport, CopyFailure> {
         let report = self
-            .build_copy(fs, memory, clock, destination)
+            .build_copy(fs, memory, clock, destination, progress)
             .map_err(CopyFailure::NotCopied)?;
         refuse_existing(fs, destination).map_err(|error| {
             let _ = fs.remove_file(destination.staging);
@@ -161,6 +183,7 @@ impl<F: File> ReadTransaction<'_, F> {
         memory: &impl Memory,
         clock: Arc<dyn Clock>,
         destination: CopyDestination<'_>,
+        progress: &mut dyn FnMut(CopyProgress),
     ) -> Result<CopyReport, StorageError> {
         self.features().check(Access::ReadWrite)?;
         refuse_existing(fs, destination)?;
@@ -186,7 +209,7 @@ impl<F: File> ReadTransaction<'_, F> {
                 let _ = fs.remove_file(destination.staging);
             })?;
         }
-        self.fill(file, memory, clock, source, survey)
+        self.fill(file, memory, clock, source, survey, progress)
             .inspect_err(|_| {
                 let _ = fs.remove_file(destination.staging);
             })
@@ -209,6 +232,7 @@ impl<F: File> ReadTransaction<'_, F> {
         clock: Arc<dyn Clock>,
         source: Option<BTree>,
         survey: Survey,
+        progress: &mut dyn FnMut(CopyProgress),
     ) -> Result<CopyReport, StorageError> {
         let page_size = file.page_size();
         let frames = copy_cache_frames(page_size, survey.largest_value_bytes);
@@ -234,7 +258,7 @@ impl<F: File> ReadTransaction<'_, F> {
         if let (Some(source), Some(target)) = (source, target) {
             let batch_bytes =
                 (frames as u64).saturating_mul(page_size.bytes() as u64) / BATCH_SHARE_OF_CACHE;
-            self.copy_entries(&source, &store, &target, batch_bytes, &mut report)?;
+            self.copy_entries(&source, &store, &target, batch_bytes, &mut report, survey.entries, progress)?;
         }
         store.checkpoint()?;
         store.sync()?;
@@ -259,6 +283,8 @@ impl<F: File> ReadTransaction<'_, F> {
         target: &BTree,
         batch_bytes: u64,
         report: &mut CopyReport,
+        total: u64,
+        progress: &mut dyn FnMut(CopyProgress),
     ) -> Result<(), StorageError> {
         let mut cursor = source.scan(Bound::Unbounded, Bound::Unbounded, ScanOrder::Ascending);
         let mut transaction = store.begin_write()?;
@@ -267,6 +293,7 @@ impl<F: File> ReadTransaction<'_, F> {
             let entry_bytes = (key.len() + value.len()) as u64 + ENTRY_OVERHEAD_BYTES;
             if batch > 0 && batch.saturating_add(entry_bytes) > batch_bytes {
                 transaction.commit()?;
+                progress(CopyProgress { entries: report.entries, total_entries: total });
                 transaction = store.begin_write()?;
                 batch = 0;
             }
@@ -277,6 +304,7 @@ impl<F: File> ReadTransaction<'_, F> {
             report.value_bytes += value.len() as u64;
         }
         transaction.commit()?;
+        progress(CopyProgress { entries: report.entries, total_entries: total });
         Ok(())
     }
 }

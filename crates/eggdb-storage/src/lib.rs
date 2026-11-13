@@ -96,5 +96,5 @@ pub use page_cache::{
 };
 pub use page_cipher::{PAGE_KEY_BYTES, PageCipher};
 pub use page_file::{CreateOptions, PageFile};
-pub use snapshot_copy::{CopyDestination, CopyFailure, CopyReport};
+pub use snapshot_copy::{CopyDestination, CopyFailure, CopyProgress, CopyReport};
 pub use store::{FileReport, ReadTransaction, SnapshotToken, Store, ValueReader, WriteTransaction};

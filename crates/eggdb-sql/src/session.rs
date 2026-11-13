@@ -26,6 +26,7 @@ mod sqlserver_security;
 mod sqlserver_ddl_triggers;
 mod sqlserver_partitions;
 mod oracle_system_triggers;
+mod backup;
 mod property_graphs;
 mod transaction_settings;
 mod triggers;
@@ -1998,6 +1999,9 @@ impl<'s> Session<'s> {
     ) -> SqlResult<()> {
         self.prepare_writer_snapshot(text)?;
         self.prepare_database_links(text)?;
+        if self.prepare_backup(text, on_result)? {
+            return Ok(());
+        }
         let rewritten = match self.prepare_property_graphs(text, on_result)? {
             property_graphs::GraphText::Done => return Ok(()),
             property_graphs::GraphText::Rewritten(rewritten) => Some(rewritten),

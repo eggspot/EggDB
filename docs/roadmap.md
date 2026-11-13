@@ -1673,7 +1673,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Lock (`eggdb backup --lock-days`): **code written, unbuilt** (code-only mode, 2026-11-12, D919). A locked
   manifest, and WORM for local archives: **code written, unbuilt** (code-only mode, 2026-11-13, D1022).
 - Backups through `eggdb serve`'s clients, compaction of a file `serve` holds, and progress
-  reports (D141).
+  reports (D141). `BACKUP TO` and T-SQL's `BACKUP DATABASE ... TO DISK`, and progress on the terminal: **code written,
+  unbuilt** (code-only mode, 2026-11-13, D1023). Left: compaction of a file `serve` holds.
 - Compaction's lock window closed: the platform layer tells whether a file it locked is still
   linked at its path (D141). **Code written, unbuilt** (code-only mode, 2026-11-13, D974).
 - Tenant-aware backup and restore (D234). Logical, per tenant (`eggdb_tenancy.backup_tenant`, `restore_tenant`):

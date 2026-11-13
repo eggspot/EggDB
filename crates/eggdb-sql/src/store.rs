@@ -325,6 +325,25 @@ pub trait KeyValueStore {
     fn page_lookups(&self) -> Option<PageLookups> {
         None
     }
+
+    /// Writes a copy of the store's last commit to the new file `path` for SQL's `BACKUP`
+    /// (D1023): a copy-on-write clone where the file system can when `clone`. `None` when the
+    /// store keeps no file to copy, the default.
+    fn backup_to(&self, path: &std::path::Path, clone: bool) -> SqlResult<Option<StoreBackup>> {
+        let _ = (path, clone);
+        Ok(None)
+    }
+}
+
+/// What [`KeyValueStore::backup_to`] wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StoreBackup {
+    /// The commit stamp the copy holds.
+    pub stamp: u64,
+    /// The entries copied; 0 for a clone, which copies no entries.
+    pub entries: u64,
+    /// Whether the copy is a copy-on-write clone.
+    pub instant: bool,
 }
 
 /// Page lookups a store's page cache answered from memory and from its file.
@@ -379,6 +398,10 @@ impl<S: KeyValueStore> KeyValueStore for &S {
     fn page_lookups(&self) -> Option<PageLookups> {
         (**self).page_lookups()
     }
+
+    fn backup_to(&self, path: &std::path::Path, clone: bool) -> SqlResult<Option<StoreBackup>> {
+        (**self).backup_to(path, clone)
+    }
 }
 
 impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
@@ -413,6 +436,10 @@ impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
 
     fn page_lookups(&self) -> Option<PageLookups> {
         (**self).page_lookups()
+    }
+
+    fn backup_to(&self, path: &std::path::Path, clone: bool) -> SqlResult<Option<StoreBackup>> {
+        (**self).backup_to(path, clone)
     }
 }
 
@@ -589,9 +616,15 @@ pub(crate) trait ErasedStore {
     ) -> SqlResult<Option<Box<dyn KeyValueRead + '_>>>;
 
     fn erased_store_id(&self) -> usize;
+
+    fn erased_backup_to(&self, path: &std::path::Path, clone: bool) -> SqlResult<Option<StoreBackup>>;
 }
 
 impl<S: KeyValueStore> ErasedStore for S {
+    fn erased_backup_to(&self, path: &std::path::Path, clone: bool) -> SqlResult<Option<StoreBackup>> {
+        self.backup_to(path, clone)
+    }
+
     fn begin_boxed_read(&self) -> SqlResult<Box<dyn KeyValueRead + '_>> {
         Ok(Box::new(self.begin_read()?))
     }

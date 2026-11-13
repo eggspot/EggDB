@@ -6,7 +6,9 @@ use crate::cli::reports::{self, Copied};
 use eggdb::{Error, ErrorKind};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 const BACKUP_STAGING_SUFFIX: &str = ".backing-up";
 const WRITER_HOLDS_THE_FILE: &str = "  to copy a file while a program writes to it, use backup <copy> inside eggdb shell, or Database::backup_to in the program.";
@@ -59,9 +61,21 @@ impl Session<'_> {
             }
             Err(error) => return Err(self.open_failure(&error, Access::ReadOnly)),
         };
+        let show_progress = self.format != Format::Json && std::io::IsTerminal::is_terminal(&std::io::stderr());
+        let mut last_shown = Instant::now();
         let report = db
-            .backup_to(&copy)
-            .map_err(|error| engine_failure(&error))?;
+            .backup_to_reporting(&copy, &mut |done, total| {
+                if show_progress && (last_shown.elapsed() >= PROGRESS_EVERY || done == total) {
+                    last_shown = Instant::now();
+                    let percent = (done * 100).checked_div(total).unwrap_or(100);
+                    eprint!("\rcopying {percent}% ({} of {} entries)", render::count(done), render::count(total));
+                }
+            })
+            .map_err(|error| engine_failure(&error));
+        if show_progress {
+            eprint!("\r{:70}\r", "");
+        }
+        let report = report?;
         let page_size = db.page_size();
         drop(db);
         let elapsed = started.elapsed();

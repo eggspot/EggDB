@@ -467,7 +467,7 @@ pub use sqlserver_catalog::is_catalog_procedure;
 pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
-    SnapshotHandle, StoreFailure,
+    SnapshotHandle, StoreBackup, StoreFailure,
 };
 pub use time_zones::TimeZone;
 pub use type_affinity::TypeAffinity;
