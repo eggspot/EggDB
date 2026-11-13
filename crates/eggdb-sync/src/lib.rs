@@ -5,9 +5,12 @@
 //! both ways between a client and a server. Every change carries a hybrid-clock [`Stamp`]; for
 //! each key the change with the highest stamp wins on every replica, a delete included, so
 //! replicas that have exchanged all their changes hold the same rows whatever order they synced
-//! in. Changes travel as bytes ([`encode`], [`decode`]) for any transport.
+//! in. Changes travel as bytes ([`encode`], [`decode`]) for any transport, and [`http`] carries
+//! them over HTTP with a space per signed-in user.
 
 use eggdb_keyspace::{Entries as Rows, KeysRead, KeysWrite, Keyspace};
+
+pub mod http;
 
 const ROW: u8 = b'r';
 const LOG: u8 = b'l';

@@ -68,6 +68,7 @@ eggdb-format = { path = "../eggdb-format" }
 eggdb-platform = { path = "../eggdb-platform" }
 eggdb-replication = { path = "../eggdb-replication" }
 eggdb-sql = { path = "../eggdb-sql" }
+eggdb-sync = { path = "../eggdb-sync" }
 eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }
 eggdb-storage = { path = "../eggdb-storage" }
 eggdb-tdswire = { path = "../eggdb-tdswire" }

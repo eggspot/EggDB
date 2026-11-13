@@ -41,6 +41,26 @@ pub(super) fn run_scheduled_jobs(
     }
 }
 
+/// The application user a session token from `eggdb_app_auth` signs in (D37, D1106): its
+/// signature, issuer, audience and expiry checked against the database's own signing keys, and
+/// its session neither signed out nor expired; `None` for any other token, or without
+/// `eggdb_app_auth`.
+pub(super) fn app_user_of(store: &impl eggdb_sql::KeyValueStore, token: &str) -> Option<u32> {
+    if token.is_empty() || token.len() > 8_192 || !token.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')) {
+        return None;
+    }
+    let mut session = eggdb_sql::Session::with_dialect(store, eggdb_sql::Dialect::PostgreSql);
+    let mut user = None;
+    let statement = format!(
+        "SELECT s.user_id FROM eggdb_app_auth.sessions s, (SELECT eggdb_jwt_verify('{token}', eggdb_app_auth.jwks()::text, eggdb_app_auth.setting('issuer'), eggdb_app_auth.setting('audience')) AS claims) c WHERE s.session_id = c.claims ->> 'sid' AND s.user_id::text = c.claims ->> 'user_id' AND s.revoked_at IS NULL AND s.expires_at > now()"
+    );
+    let _ = session.execute(&statement, &mut |result| {
+        user = result.rows.first().and_then(|row| row.first()).and_then(|value| value.to_text());
+    });
+    let _ = session.close();
+    user.and_then(|text| text.parse::<u32>().ok())
+}
+
 const PREWARM_EVERY: Duration = Duration::from_secs(60);
 
 pub(super) fn keep_placement(

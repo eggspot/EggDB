@@ -619,6 +619,19 @@ impl Session<'_> {
             None => None,
         };
         let dynamodb_secret = dynamodb_listener.as_ref().map(|_| password.clone());
+        let sync_listener = match options.sync_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() && tls.is_none() {
+                    return Err(usage(format!(
+                        "--sync-listen {address}: devices outside this machine sync over HTTPS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for syncing devices on {address}: {error}"), Exit::DatabaseError)
+                })?)
+            }
+            None => None,
+        };
         let observability_listener = match options.observability_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -1613,6 +1626,22 @@ impl Session<'_> {
                     jmap_endpoint.run_push(&stop_signals::requested);
                 }
             });
+            let sync_server = scope.spawn(|| match &sync_listener {
+                Some(listener) => {
+                    let keyspace = eggdb::keyspace::DatabaseKeyspace { db: &db, prefix: eggdb::keyspace::SYNC_COLLECTIONS };
+                    let authenticate = |token: &str| super::serve_jobs::app_user_of(&store, token);
+                    let endpoint = eggdb_sync::http::SyncEndpoint { keyspace: &keyspace, server_id: 0, authenticate: &authenticate };
+                    eggdb_http::serve_with_limits(
+                        listener,
+                        &|request| endpoint.answer(request),
+                        &stop_signals::requested,
+                        &eggdb_http::Limits::new(64 << 20, &memory_budget)
+                            .with_rate_limit(rate_limiter.as_ref())
+                            .with_tls(tls.as_ref().map(|setup| &*setup.postgresql)),
+                    )
+                }
+                None => Ok(()),
+            });
             let jmap_server = scope.spawn(|| match &jmap_listener {
                 Some(listener) => eggdb_http::serve_replies_with_limits(
                     listener,
@@ -2196,6 +2225,7 @@ impl Session<'_> {
             let _ = page_store_follower.join();
             let _ = idle_stopper.join();
             let _ = edge_follower.join();
+            let _ = sync_server.join();
             let _ = placement_keeper.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();

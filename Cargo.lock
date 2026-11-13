@@ -55,6 +55,7 @@ dependencies = [
  "eggdb-sqs",
  "eggdb-stomp",
  "eggdb-storage",
+ "eggdb-sync",
  "eggdb-tdswire",
  "eggdb-tls",
  "eggdb-trino",
@@ -573,6 +574,7 @@ dependencies = [
  "eggdb-geo",
  "eggdb-graph",
  "eggdb-parquet",
+ "eggdb-platform-core",
  "eggdb-search",
  "eggdb-sqlite-format",
  "eggdb-storage",
@@ -636,6 +638,7 @@ dependencies = [
 name = "eggdb-sync"
 version = "0.5.0"
 dependencies = [
+ "eggdb-http",
  "eggdb-keyspace",
 ]
 

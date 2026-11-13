@@ -2075,7 +2075,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Data pinned to regions, and residency policies per row (D18, D53). **Code written, unbuilt** (code-only mode, 2026-11-13, D1105): `eggdb_placement.residency`, the
   row trigger, `eggdb serve --region`, refused transfers logged in `eggdb_placement.transfers`.
 - Offline-first sync over HTTP with authentication per user, as the client sync API apps use (D37,
-  D228).
+  D228). **Code written, unbuilt** (code-only mode, 2026-11-13, D1106): `eggdb_sync::http`
+  (`SyncEndpoint`, `sync_over_http`), `eggdb serve --sync-listen` signing devices in with `eggdb_app_auth` sessions.
 - Sync of SQL tables through change capture (D210, D228).
 - Sync log compaction, partial sync, per-field merges and CRDTs, and end-to-end encryption (D228).
 - CouchDB's replication protocol (D48).

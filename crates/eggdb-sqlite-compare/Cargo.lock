@@ -45,6 +45,7 @@ dependencies = [
  "eggdb-format",
  "eggdb-gremlin",
  "eggdb-http",
+ "eggdb-iot",
  "eggdb-kafka",
  "eggdb-keyspace",
  "eggdb-kql",
@@ -56,6 +57,7 @@ dependencies = [
  "eggdb-mysqlwire",
  "eggdb-nats",
  "eggdb-observability",
+ "eggdb-opcua",
  "eggdb-parquet",
  "eggdb-pgwire",
  "eggdb-platform",
@@ -69,6 +71,7 @@ dependencies = [
  "eggdb-sqs",
  "eggdb-stomp",
  "eggdb-storage",
+ "eggdb-sync",
  "eggdb-tdswire",
  "eggdb-tls",
  "eggdb-trino",
@@ -289,6 +292,13 @@ name = "eggdb-http2"
 version = "0.5.0"
 
 [[package]]
+name = "eggdb-iot"
+version = "0.5.0"
+dependencies = [
+ "eggdb-sql",
+]
+
+[[package]]
 name = "eggdb-kafka"
 version = "0.5.0"
 dependencies = [
@@ -320,6 +330,7 @@ dependencies = [
  "eggdb-http",
  "eggdb-keyspace",
  "eggdb-platform",
+ "eggdb-tls",
 ]
 
 [[package]]
@@ -399,6 +410,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "eggdb-opcua"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-sql",
+]
+
+[[package]]
 name = "eggdb-parquet"
 version = "0.5.0"
 dependencies = [
@@ -420,6 +439,13 @@ dependencies = [
 
 [[package]]
 name = "eggdb-platform"
+version = "0.5.0"
+dependencies = [
+ "eggdb-platform-core",
+]
+
+[[package]]
+name = "eggdb-platform-core"
 version = "0.5.0"
 
 [[package]]
@@ -480,6 +506,7 @@ dependencies = [
  "eggdb-geo",
  "eggdb-graph",
  "eggdb-parquet",
+ "eggdb-platform-core",
  "eggdb-search",
  "eggdb-sqlite-format",
  "eggdb-storage",
@@ -531,6 +558,15 @@ dependencies = [
  "eggdb-crypto",
  "eggdb-format",
  "eggdb-platform",
+ "eggdb-platform-core",
+]
+
+[[package]]
+name = "eggdb-sync"
+version = "0.5.0"
+dependencies = [
+ "eggdb-http",
+ "eggdb-keyspace",
 ]
 
 [[package]]

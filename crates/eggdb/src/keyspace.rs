@@ -45,6 +45,8 @@ pub const CONNECT_COLLECTIONS: &str = "connect";
 pub const OBJECT_COLLECTIONS: &str = "objects";
 /// The DynamoDB-compatible tables.
 pub const DYNAMODB_COLLECTIONS: &str = "dynamodb";
+/// The offline-first sync spaces, one per signed-in application user (D1106).
+pub const SYNC_COLLECTIONS: &str = "sync";
 
 fn failed(error: &crate::Error) -> String {
     format!("ERR {error}")
