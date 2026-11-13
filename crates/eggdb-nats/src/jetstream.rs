@@ -11,6 +11,8 @@ const CONSUMER: u8 = b'C';
 const CONSUMER_STATE: u8 = b'P';
 const DEDUPLICATION: u8 = b'D';
 const SUBJECT_INDEX: u8 = b'L';
+const EXTERNAL_POSITION: u8 = b'X';
+const EXTERNAL_PULL_BATCH: usize = 256;
 
 const API_PREFIX: &str = "$JS.API.";
 const ACK_PREFIX: &str = "$JS.ACK.";
@@ -87,6 +89,7 @@ struct Origin {
     name: String,
     filter: Option<String>,
     start_seq: u64,
+    external_api: Option<String>,
 }
 
 impl Origin {
@@ -96,10 +99,15 @@ impl Origin {
         if filter.as_deref().is_some_and(|filter| !valid_subject(filter, true)) {
             return Err(BAD_REQUEST);
         }
+        let external_api = member_node(node, "external").and_then(|external| text(external, "api")).map(str::to_owned);
+        if external_api.as_deref().is_some_and(|api| !valid_subject(api, false)) {
+            return Err(BAD_REQUEST);
+        }
         Ok(Self {
             name: name.to_owned(),
             filter,
             start_seq: integer(node, "opt_start_seq", 0).max(0) as u64,
+            external_api,
         })
     }
 
@@ -110,6 +118,9 @@ impl Origin {
         }
         if self.start_seq > 0 {
             out.push_str(&format!(",\"opt_start_seq\":{}", self.start_seq));
+        }
+        if let Some(api) = &self.external_api {
+            out.push_str(&format!(",\"external\":{{\"api\":{}}}", quote(api)));
         }
         out.push('}');
         out
@@ -361,6 +372,13 @@ fn last_per_subject(keys: &dyn KeysRead, stream: &str, filter: Option<&str>) -> 
     Ok(seqs)
 }
 
+fn external_position_key(stream: &str, origin: &Origin) -> Vec<u8> {
+    key(
+        EXTERNAL_POSITION,
+        &[stream.as_bytes(), origin.external_api.as_deref().unwrap_or_default().as_bytes(), origin.name.as_bytes()],
+    )
+}
+
 fn message_prefix(stream: &str) -> Vec<u8> {
     let mut key = key(MESSAGE, &[stream.as_bytes()]);
     key.push(0);
@@ -492,8 +510,8 @@ impl StreamConfig {
         };
         if sources.len() > MOST_SOURCES
             || (mirror.is_some() && !sources.is_empty())
-            || mirror.as_ref().is_some_and(|mirror| mirror.name == name)
-            || sources.iter().any(|source| source.name == name)
+            || mirror.as_ref().is_some_and(|mirror| mirror.name == name && mirror.external_api.is_none())
+            || sources.iter().any(|source| source.name == name && source.external_api.is_none())
         {
             return Err(BAD_REQUEST);
         }
@@ -1113,6 +1131,7 @@ impl<'k> JetStream<'k> {
                 key(CONSUMER_STATE, &[name.as_bytes(), b""]),
                 key(DEDUPLICATION, &[name.as_bytes(), b""]),
                 key(SUBJECT_INDEX, &[name.as_bytes(), b""]),
+                key(EXTERNAL_POSITION, &[name.as_bytes(), b""]),
             ] {
                 doomed.extend(keys.scan(&prefix)?.into_iter().map(|(found, _)| found));
             }
@@ -1576,6 +1595,83 @@ impl<'k> JetStream<'k> {
     /// What JetStream sends as time passes, called about once a second: a `408` to each pull
     /// whose wait ran out, push deliveries whose acknowledgement wait ran out, and idle
     /// heartbeats to push consumers that asked for them and got nothing in that time.
+    /// Pulls into every stream whose mirror or sources are on another server what those
+    /// origins hold past the position kept for them (D1060). `remotes` maps the API prefix an
+    /// origin's `external.api` names to the address of the server that holds it; that server is
+    /// asked directly, through its own `$JS.API.STREAM.MSG.GET.<stream>`, for each next
+    /// sequence, a sequence it no longer holds is passed over, and each message taken is stored
+    /// through the same path as a publish, with `Nats-Stream-Source` for sources.
+    pub(crate) fn pull_external(&self, remotes: &[(String, String)]) -> Vec<Outgoing> {
+        let Ok(streams) = read(self.keyspace, |keys| {
+            let mut found = Vec::new();
+            for name in stream_names(keys)? {
+                if let Some(config) = stream_config(keys, &name)? {
+                    let mirrored = config.mirror.is_some();
+                    for taken in config.origins().filter(|taken| taken.external_api.is_some()) {
+                        found.push((name.clone(), taken.clone(), mirrored));
+                    }
+                }
+            }
+            Ok(found)
+        }) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (stream, origin, mirrored) in streams {
+            let Some(api) = origin.external_api.as_deref() else {
+                continue;
+            };
+            let Some((_, address)) = remotes.iter().find(|(prefix, _)| prefix == api) else {
+                continue;
+            };
+            let Ok(mut remote) = crate::remote::RemoteClient::connect(address) else {
+                continue;
+            };
+            let position_key = external_position_key(&stream, &origin);
+            let mut next = read(self.keyspace, |keys| {
+                Ok(keys.get(&position_key)?.and_then(|bytes| bytes.as_slice().try_into().ok()).map(u64::from_be_bytes))
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(origin.start_seq.max(1));
+            let last = remote
+                .request(&format!("{API_PREFIX}STREAM.INFO.{}", origin.name), b"")
+                .ok()
+                .and_then(|(_, payload)| parse_document(std::str::from_utf8(&payload).ok()?).ok())
+                .and_then(|node| member_node(&node, "state").map(|state| integer(state, "last_seq", 0)))
+                .unwrap_or(0)
+                .max(0) as u64;
+            let mut pulled = 0;
+            while next <= last && pulled < EXTERNAL_PULL_BATCH {
+                let request = format!("{{\"seq\":{next}}}");
+                let Ok((_, payload)) = remote.request(&format!("{API_PREFIX}STREAM.MSG.GET.{}", origin.name), request.as_bytes()) else {
+                    break;
+                };
+                let message = std::str::from_utf8(&payload)
+                    .ok()
+                    .and_then(|text| parse_document(text).ok())
+                    .and_then(|node| member_node(&node, "message").cloned());
+                if let Some(message) = message {
+                    let subject = text(&message, "subject").unwrap_or_default().to_owned();
+                    let headers = text(&message, "hdrs").and_then(|encoded| eggdb_crypto::base64_decode(encoded.as_bytes()).ok()).unwrap_or_default();
+                    let data = text(&message, "data").and_then(|encoded| eggdb_crypto::base64_decode(encoded.as_bytes()).ok()).unwrap_or_default();
+                    if origin.takes(next, &subject) {
+                        let headers = if mirrored {
+                            headers
+                        } else {
+                            with_header(&headers, "Nats-Stream-Source", &format!("{} {next}", origin.name))
+                        };
+                        out.extend(self.store_in(stream.clone(), &subject, None, &headers, &data, 1));
+                    }
+                }
+                next += 1;
+                pulled += 1;
+                let _ = write(self.keyspace, |keys| keys.put(&position_key, &next.to_be_bytes()));
+            }
+        }
+        out
+    }
+
     pub(crate) fn tick(&self) -> Vec<Outgoing> {
         let now = Instant::now();
         let mut out: Vec<Outgoing> = Vec::new();
@@ -1690,7 +1786,7 @@ impl<'k> JetStream<'k> {
             for name in stream_names(keys)? {
                 if let Some(config) = stream_config(keys, &name)? {
                     let mirrored = config.mirror.is_some();
-                    for taken in config.origins().filter(|taken| taken.name == origin) {
+                    for taken in config.origins().filter(|taken| taken.name == origin && taken.external_api.is_none()) {
                         found.push((name.clone(), taken.clone(), mirrored));
                     }
                 }
@@ -1725,7 +1821,7 @@ impl<'k> JetStream<'k> {
         };
         let mirrored = config.mirror.is_some();
         let mut out = Vec::new();
-        for taken in config.origins() {
+        for taken in config.origins().filter(|taken| taken.external_api.is_none()) {
             let messages = read(self.keyspace, |keys| {
                 Ok(keys
                     .scan(&message_prefix(&taken.name))?
@@ -2031,6 +2127,62 @@ mod tests {
         assert!(refused.contains("\"error\""), "{refused}");
         let looped = answer(&jetstream, "$JS.API.STREAM.CREATE.SELF", r#"{"name":"SELF","sources":[{"name":"SELF"}]}"#);
         assert!(looped.contains("\"error\""), "{looped}");
+    }
+
+    #[test]
+    fn sources_on_another_server_are_pulled_through_its_jetstream_api() {
+        let remote_keyspace = MemoryKeyspace::default();
+        let remote = JetStream::new(&remote_keyspace);
+        answer(&remote, "$JS.API.STREAM.CREATE.ORDERS", r#"{"name":"ORDERS","subjects":["orders.>"]}"#);
+        remote.store("orders.eu.1", None, b"", b"first");
+        remote.store("orders.us.1", None, b"NATS/1.0\r\nRegion: us\r\n\r\n", b"second");
+        remote.store("orders.eu.2", None, b"", b"third");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let config = crate::ServerConfig {
+            user: "hub".to_owned(),
+            password_sha256: eggdb_crypto::sha256(b"secret"),
+            max_connections: 4,
+            memory_budget: std::sync::Arc::default(),
+            nkeys: Vec::new(),
+            remotes: Vec::new(),
+        };
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                crate::serve_with_jetstream(&remote_keyspace, &listener, &config, &|| stop.load(std::sync::atomic::Ordering::Relaxed))
+            });
+            let keyspace = MemoryKeyspace::default();
+            let jetstream = JetStream::new(&keyspace);
+            let created = answer(
+                &jetstream,
+                "$JS.API.STREAM.CREATE.ORDERS",
+                r#"{"name":"ORDERS","sources":[{"name":"ORDERS","external":{"api":"$JS.hub.API"}}]}"#,
+            );
+            assert!(created.contains("\"external\":{\"api\":\"$JS.hub.API\"}"), "{created}");
+            let europe = answer(
+                &jetstream,
+                "$JS.API.STREAM.CREATE.EU",
+                r#"{"name":"EU","mirror":{"name":"ORDERS","filter_subject":"orders.eu.>","external":{"api":"$JS.hub.API"}}}"#,
+            );
+            assert!(!europe.contains("\"error\""), "{europe}");
+            let remotes = vec![("$JS.hub.API".to_owned(), format!("hub:secret@{address}"))];
+            jetstream.pull_external(&remotes);
+            let copied = answer(&jetstream, "$JS.API.STREAM.INFO.ORDERS", "");
+            assert!(copied.contains("\"messages\":3"), "{copied}");
+            let second = jetstream.request("$JS.API.STREAM.MSG.GET.ORDERS", Some("_INBOX.9"), br#"{"seq":2}"#);
+            let second = String::from_utf8_lossy(&second[0].payload).into_owned();
+            let headers = eggdb_crypto::base64_encode(b"NATS/1.0\r\nRegion: us\r\nNats-Stream-Source: ORDERS 2\r\n\r\n");
+            assert!(second.contains(&headers), "{second}");
+            let mirrored = answer(&jetstream, "$JS.API.STREAM.INFO.EU", "");
+            assert!(mirrored.contains("\"messages\":2"), "{mirrored}");
+            remote.store("orders.eu.3", None, b"", b"fourth");
+            jetstream.pull_external(&remotes);
+            let again = answer(&jetstream, "$JS.API.STREAM.INFO.ORDERS", "");
+            assert!(again.contains("\"messages\":4"), "{again}");
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            server.join().unwrap().unwrap();
+        });
     }
 
     #[test]

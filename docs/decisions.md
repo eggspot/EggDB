@@ -1084,3 +1084,4 @@ its full title with its status.
 - [D1057](decisions/D1057.md) Code-only batch 705 (M16): quorum-style replicated AMQP queues
 - [D1058](decisions/D1058.md) Code-only batch 706 (M16): a benchmark against RabbitMQ
 - [D1059](decisions/D1059.md) Code-only batch 707 (M16): a benchmark against Mosquitto and EMQX
+- [D1060](decisions/D1060.md) Code-only batch 708 (M16): JetStream mirrors and sources from other servers

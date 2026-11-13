@@ -334,6 +334,7 @@ impl CommandName {
             | OptionName::RespMaxMemory
             | OptionName::MemcachedMaxMemory
             | OptionName::NatsNkey
+            | OptionName::NatsRemote
             | OptionName::RespEviction
             | OptionName::McpTokenFile
             | OptionName::McpTables
@@ -571,6 +572,7 @@ enum OptionName {
     RespMaxMemory,
     MemcachedMaxMemory,
     NatsNkey,
+    NatsRemote,
     RespEviction,
     McpTokenFile,
     McpTables,
@@ -746,6 +748,7 @@ impl OptionName {
             b"resp-max-memory" => Self::RespMaxMemory,
             b"memcached-max-memory" => Self::MemcachedMaxMemory,
             b"nats-nkey" => Self::NatsNkey,
+            b"nats-remote" => Self::NatsRemote,
             b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
             b"mcp-tables" => Self::McpTables,
@@ -1128,6 +1131,7 @@ pub(crate) struct ServeOptions {
     pub(crate) resp_max_memory: Option<u64>,
     pub(crate) memcached_max_memory: Option<u64>,
     pub(crate) nats_nkeys: Vec<String>,
+    pub(crate) nats_remotes: Vec<(String, String)>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
     pub(crate) resp_cluster: bool,
@@ -1659,6 +1663,18 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     )));
                 }
                 request.serve.nats_nkeys.push(key.to_owned());
+            }
+            OptionName::NatsRemote => {
+                let text = value.to_str().unwrap_or_default();
+                let Some((prefix, address)) = text.split_once('=').filter(|(prefix, address)| {
+                    !prefix.is_empty() && !prefix.contains([' ', '*', '>']) && !address.is_empty()
+                }) else {
+                    return Err(usage(format!(
+                        "{} {text}: expected <JetStream API prefix>=<[user:password@]host:port>",
+                        option.spelled
+                    )));
+                };
+                request.serve.nats_remotes.push((prefix.to_owned(), address.to_owned()));
             }
             OptionName::RespEviction => {
                 let name = value.to_str().unwrap_or_default();

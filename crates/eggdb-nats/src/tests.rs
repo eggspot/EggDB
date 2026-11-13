@@ -14,6 +14,7 @@ fn config() -> ServerConfig {
         max_connections: 8,
         memory_budget: Arc::default(),
         nkeys: Vec::new(),
+        remotes: Vec::new(),
     }
 }
 

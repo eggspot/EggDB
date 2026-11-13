@@ -37,6 +37,10 @@ pub struct ServerConfig {
     /// The user NKeys (public keys beginning with `U`) that may sign in by signing the
     /// server's nonce instead of giving the password.
     pub nkeys: Vec<String>,
+    /// Other NATS servers whose streams this server's streams mirror or source, by the
+    /// JetStream API prefix their `external.api` names: `(prefix, address)`, the address
+    /// `host:port` or `user:password@host:port` (D1060).
+    pub remotes: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -566,6 +570,9 @@ fn serve_broker(
                     while !stop() {
                         std::thread::sleep(JETSTREAM_TICK);
                         broker.send_all(jetstream.tick(), &config.memory_budget);
+                        if !config.remotes.is_empty() {
+                            broker.send_all(jetstream.pull_external(&config.remotes), &config.memory_budget);
+                        }
                     }
                 });
         }

@@ -1836,7 +1836,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-12, D724); object stores (stream names and lists by subject, checked
   through an object store's chunk, metadata-rollup and purge flow): **code written, unbuilt** (code-only mode,
   2026-11-12, D810); mirrors and sources within one server: **code written, unbuilt** (code-only mode, 2026-11-12,
-  D811). Left: sources from other domains and servers.
+  D811); mirrors and sources from other domains and servers (`external.api` and `--nats-remote`): **code written,
+  unbuilt** (code-only mode, 2026-11-13, D1060).
 - NATS no-responders, token and NKey authentication, clusters and leaf nodes (D216). No-responders and
   token authentication: **code written, unbuilt** (code-only mode, 2026-11-11, D476); NKeys: **code written,
   unbuilt** (code-only mode, 2026-11-12, D617).

@@ -9,6 +9,7 @@
 mod jetstream;
 mod nkeys;
 mod protocol;
+mod remote;
 mod server;
 
 pub use server::{ServerConfig, serve, serve_with_jetstream};

@@ -754,6 +754,7 @@ impl Session<'_> {
             max_connections,
             memory_budget: Arc::clone(&memory_budget),
             nkeys: options.nats_nkeys.clone(),
+            remotes: options.nats_remotes.clone(),
         };
         let mqtt_config = eggdb_mqtt::ServerConfig {
             user: user.clone(),
