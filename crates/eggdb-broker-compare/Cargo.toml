@@ -1,0 +1,27 @@
+[package]
+name = "eggdb-broker-compare"
+description = "EggDB's message broker protocols measured against the brokers they are compatible with, over the same wire and the same client (D7). Never published and never shipped."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/eggspot/EggDB"
+publish = false
+
+[workspace]
+
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

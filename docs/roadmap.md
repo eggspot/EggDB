@@ -1803,7 +1803,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Kafka Connect's REST and worker protocol (D46). **Code written, unbuilt** (code-only mode, 2026-11-13, D1055):
   `eggdb-connect`, `--connect-listen`, Rust file source and sink and topic copy, the worker protocol's codec and round
   robin. Left: workers of several servers joining one group, and more connectors (SQL tables, object storage).
-- A benchmark against Kafka (D33, D213).
+- A benchmark against Kafka (D33, D213). **Code written, unbuilt** (code-only mode, 2026-11-13, D1056):
+  `eggdb-broker-compare kafka`, CI's `broker-compare` job against Apache Kafka.
 - AMQP 0-9-1: durable exchanges and bindings, headers exchanges, exclusive and auto-delete queues
   (D33, D214). Headers exchanges and exclusive and auto-delete queues: **code written, unbuilt**
   (code-only mode, 2026-11-11, D482).

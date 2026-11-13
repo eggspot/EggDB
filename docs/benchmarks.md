@@ -274,3 +274,14 @@ operation, and tpmC (New-Order transactions per minute) for TPC-C. The cardinali
 audited TPC-C number. `cluster-bench.yml` runs all four workloads weekly, in the Saturday
 performance pass, and keeps the results as an artifact.
 
+## Brokers compared (D1056)
+
+`eggdb-broker-compare` (a workspace of its own, never shipped) measures EggDB's broker protocols
+against the brokers they are compatible with, on one machine, through one client of its own, so
+both sides receive the same bytes over the same wire and the ratio compares servers, not client
+libraries. `kafka` produces 2,000 batches of 100 records of 100 bytes with `acks=1` to EggDB's
+`--kafka-listen` and to Apache Kafka, then fetches them all back from offset 0, and reports
+messages per second, p50 and p99 round trips and EggDB's ratio. CI's `broker-compare` job runs it
+on every change against the `apache/kafka` image and keeps the results; like the other
+comparisons the ratio is reported, not gated.
+
