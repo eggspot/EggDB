@@ -1136,7 +1136,10 @@ impl Session<'_> {
         self.print_listening(bound, &config, read_only, tls.as_ref(), &sockets);
         self.out.finish()?;
         let _ = stop_signals::watch();
-        let follow_options = self.database_options(Access::ReadOnly, None);
+        let follow_options = match options.page_store_disk {
+            Some(bytes) => self.database_options(Access::ReadOnly, None).page_store_disk_bytes(bytes),
+            None => self.database_options(Access::ReadOnly, None),
+        };
         let store = DatabaseStore(&db);
         let served_databases = ServedDirectory::new(ServedDirectorySetup {
             default_name: &config.database,

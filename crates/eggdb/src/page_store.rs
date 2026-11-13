@@ -149,28 +149,55 @@ struct State {
     size: u64,
     present: BTreeMap<u64, u64>,
     dirty: BTreeSet<u64>,
+    files: BTreeMap<u64, eggdb_platform::OsFile>,
+    last_used: BTreeMap<u64, u64>,
+    tick: u64,
 }
 
-/// A database file over an [`ObjectStore`], with a local cache file of the chunks read or
-/// written so far.
+/// A database file over an [`ObjectStore`], with a local cache directory holding one file per
+/// chunk read or written so far: the warm tier between the page cache in memory and the cold
+/// chunks only object storage holds (D1103).
 pub struct PageStoreFile<O: ObjectStore> {
     objects: O,
-    cache: eggdb_platform::OsFile,
-    present_path: PathBuf,
+    directory: PathBuf,
+    lock: eggdb_platform::OsFile,
+    disk_budget: Option<u64>,
     state: Mutex<State>,
 }
 
 impl<O: ObjectStore> std::fmt::Debug for PageStoreFile<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PageStoreFile").field("present_path", &self.present_path).finish_non_exhaustive()
+        f.debug_struct("PageStoreFile").field("directory", &self.directory).finish_non_exhaustive()
     }
+}
+
+fn local_name(index: u64, version: u64) -> String {
+    format!("{index:016x}-{version:016x}")
+}
+
+fn parse_local_name(name: &str) -> Option<(u64, u64)> {
+    let (index, version) = name.split_once('-')?;
+    Some((u64::from_str_radix(index, 16).ok()?, u64::from_str_radix(version, 16).ok()?))
+}
+
+fn whole(length: u64) -> Result<usize> {
+    usize::try_from(length).map_err(|_| Error::new(ErrorKind::InvalidInput))
 }
 
 impl<O: ObjectStore> PageStoreFile<O> {
     /// Opens the file kept in `objects`, an empty one when it has no manifest yet, caching its
-    /// chunks in the file at `cache` (created when missing). Chunks the cache already holds at
-    /// the manifest's versions, as `cache` plus `.chunks` records, are not fetched again.
+    /// chunks as files in the directory `cache` (created when missing), with no limit on the
+    /// disk they take. Chunk files already there at the manifest's versions are used again;
+    /// others are removed.
     pub fn open(objects: O, cache: &Path) -> Result<Self> {
+        Self::open_with_budget(objects, cache, None)
+    }
+
+    /// Opens as [`PageStoreFile::open`] does, keeping at most `disk_budget` bytes of chunks on
+    /// disk when given: past it, the chunks read longest ago leave the disk and are fetched
+    /// from object storage again when next read. Chunks changed since the last sync stay until
+    /// they are uploaded.
+    pub fn open_with_budget(objects: O, cache: &Path, disk_budget: Option<u64>) -> Result<Self> {
         let manifest = match objects.get(MANIFEST).map_err(failed)? {
             Some(bytes) => std::str::from_utf8(&bytes)
                 .ok()
@@ -179,35 +206,39 @@ impl<O: ObjectStore> PageStoreFile<O> {
             None => Manifest::default(),
         };
         let fs = OsFileSystem::new();
-        let file = match fs.open(cache, OpenMode::ReadWrite) {
+        fs.create_dir_all(cache)?;
+        let lock_path = cache.join("lock");
+        let lock = match fs.open(&lock_path, OpenMode::ReadWrite) {
             Ok(file) => file,
-            Err(error) if error.kind() == ErrorKind::NotFound => fs.open(cache, OpenMode::CreateNew)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => fs.open(&lock_path, OpenMode::CreateNew)?,
             Err(error) => return Err(error),
         };
-        let mut present_path = cache.as_os_str().to_owned();
-        present_path.push(".chunks");
-        let present_path = PathBuf::from(present_path);
-        let recorded = std::fs::read_to_string(&present_path).unwrap_or_default();
-        let present: BTreeMap<u64, u64> = recorded
-            .lines()
-            .filter_map(|line| {
-                let (index, version) = line.split_once(' ')?;
-                Some((index.parse().ok()?, version.parse().ok()?))
-            })
-            .filter(|(index, version)| manifest.chunks.get(index) == Some(version))
-            .collect();
-        let size = manifest.size;
-        Ok(Self {
-            objects,
-            cache: file,
-            present_path,
-            state: Mutex::new(State { manifest, size, present, dirty: BTreeSet::new() }),
-        })
+        let mut state = State { size: manifest.size, ..State::default() };
+        if let Ok(entries) = std::fs::read_dir(cache) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some((index, version)) = parse_local_name(&name) else {
+                    continue;
+                };
+                if manifest.chunks.get(&index) == Some(&version) {
+                    state.present.insert(index, version);
+                } else {
+                    let _ = fs.remove_file(&entry.path());
+                }
+            }
+        }
+        state.manifest = manifest;
+        Ok(Self { objects, directory: cache.to_path_buf(), lock, disk_budget, state: Mutex::new(state) })
     }
 
     /// The manifest as of the last sync.
     pub fn manifest(&self) -> Manifest {
         self.lock().map(|state| state.manifest.clone()).unwrap_or_default()
+    }
+
+    /// The chunks held on disk now.
+    pub fn chunks_on_disk(&self) -> usize {
+        self.lock().map(|state| state.present.len()).unwrap_or(0)
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, State>> {
@@ -218,33 +249,82 @@ impl<O: ObjectStore> PageStoreFile<O> {
         size.saturating_sub(index * CHUNK_BYTES).min(CHUNK_BYTES)
     }
 
+    fn local_path(&self, index: u64, version: u64) -> PathBuf {
+        self.directory.join(local_name(index, version))
+    }
+
+    fn chunk_file<'s>(&self, state: &'s mut State, index: u64) -> Result<&'s eggdb_platform::OsFile> {
+        if !state.files.contains_key(&index) {
+            let version = state.present.get(&index).copied().unwrap_or(0);
+            let path = self.local_path(index, version);
+            let fs = OsFileSystem::new();
+            let file = match fs.open(&path, OpenMode::ReadWrite) {
+                Ok(file) => file,
+                Err(error) if error.kind() == ErrorKind::NotFound => fs.open(&path, OpenMode::CreateNew)?,
+                Err(error) => return Err(error),
+            };
+            state.files.insert(index, file);
+        }
+        state.files.get(&index).ok_or_else(|| Error::new(ErrorKind::NotFound))
+    }
+
+    fn touch(state: &mut State, index: u64) {
+        state.tick += 1;
+        let tick = state.tick;
+        state.last_used.insert(index, tick);
+    }
+
     fn ensure(&self, state: &mut State, index: u64) -> Result<()> {
+        Self::touch(state, index);
         if state.present.contains_key(&index) || state.dirty.contains(&index) {
             return Ok(());
         }
         let length = Self::chunk_length(state.size.max(state.manifest.size), index);
-        let mut bytes = match state.manifest.chunks.get(&index) {
+        let version = state.manifest.chunks.get(&index).copied();
+        let mut bytes = match version {
             Some(version) => self
                 .objects
-                .get(&chunk_name(index, *version))
+                .get(&chunk_name(index, version))
                 .map_err(failed)?
                 .ok_or_else(|| failed(format!("chunk {index} at version {version} is missing")))?,
             None => Vec::new(),
         };
-        bytes.resize(usize::try_from(length).map_err(|_| Error::new(ErrorKind::InvalidInput))?, 0);
-        self.cache.write_all_at(&bytes, index * CHUNK_BYTES)?;
-        let version = state.manifest.chunks.get(&index).copied().unwrap_or(0);
-        state.present.insert(index, version);
+        bytes.resize(whole(length)?, 0);
+        state.present.insert(index, version.unwrap_or(0));
+        state.files.remove(&index);
+        let file = self.chunk_file(state, index)?;
+        file.set_size(0)?;
+        file.write_all_at(&bytes, 0)?;
+        self.evict(state)
+    }
+
+    fn evict(&self, state: &mut State) -> Result<()> {
+        let Some(budget) = self.disk_budget else {
+            return Ok(());
+        };
+        let mut held: u64 = state.present.len() as u64 * CHUNK_BYTES;
+        while held > budget {
+            let coldest = state
+                .present
+                .keys()
+                .filter(|index| !state.dirty.contains(index))
+                .min_by_key(|index| state.last_used.get(index).copied().unwrap_or(0))
+                .copied();
+            let Some(coldest) = coldest else {
+                return Ok(());
+            };
+            let version = state.present.remove(&coldest).unwrap_or(0);
+            state.files.remove(&coldest);
+            state.last_used.remove(&coldest);
+            let _ = OsFileSystem::new().remove_file(&self.local_path(coldest, version));
+            held = held.saturating_sub(CHUNK_BYTES);
+        }
         Ok(())
     }
 
-    fn record_present(&self, state: &State) -> Result<()> {
-        let text: String = state
-            .present
-            .iter()
-            .map(|(index, version)| format!("{index} {version}\n"))
-            .collect();
-        std::fs::write(&self.present_path, text).map_err(Error::from)
+    fn rename_local(&self, state: &mut State, index: u64, from: u64, to: u64) {
+        state.files.remove(&index);
+        let _ = std::fs::rename(self.local_path(index, from), self.local_path(index, to));
     }
 }
 
@@ -255,12 +335,20 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
         if offset >= end {
             return Ok(0);
         }
-        for index in offset / CHUNK_BYTES..=(end - 1) / CHUNK_BYTES {
+        let mut at = offset;
+        while at < end {
+            let index = at / CHUNK_BYTES;
             self.ensure(&mut state, index)?;
+            let within = at - index * CHUNK_BYTES;
+            let take = (CHUNK_BYTES - within).min(end - at);
+            let from = whole(at - offset)?;
+            let to = from + whole(take)?;
+            let file = self.chunk_file(&mut state, index)?;
+            let read = file.read_at(&mut buf[from..to], within)?;
+            buf[from + read..to].fill(0);
+            at += take;
         }
-        let wanted = usize::try_from(end - offset).map_err(|_| Error::new(ErrorKind::InvalidInput))?;
-        self.cache.read_exact_at(&mut buf[..wanted], offset)?;
-        Ok(wanted)
+        whole(end - offset)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
@@ -269,15 +357,25 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
         }
         let mut state = self.lock()?;
         let end = offset.checked_add(buf.len() as u64).ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
-        for index in offset / CHUNK_BYTES..=(end - 1) / CHUNK_BYTES {
+        let mut at = offset;
+        while at < end {
+            let index = at / CHUNK_BYTES;
             let start = index * CHUNK_BYTES;
-            let covers_whole = offset <= start && end >= start + CHUNK_BYTES;
-            if !covers_whole && index * CHUNK_BYTES < state.size {
+            let covers_whole = at == start && end >= start + CHUNK_BYTES;
+            if !covers_whole && start < state.size {
                 self.ensure(&mut state, index)?;
+            } else {
+                Self::touch(&mut state, index);
+                state.present.entry(index).or_insert(0);
             }
             state.dirty.insert(index);
+            let within = at - start;
+            let take = (CHUNK_BYTES - within).min(end - at);
+            let from = whole(at - offset)?;
+            let file = self.chunk_file(&mut state, index)?;
+            file.write_all_at(&buf[from..from + whole(take)?], within)?;
+            at += take;
         }
-        self.cache.write_all_at(buf, offset)?;
         state.size = state.size.max(end);
         Ok(buf.len())
     }
@@ -292,15 +390,26 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
             let last = size / CHUNK_BYTES;
             self.ensure(&mut state, last)?;
             state.dirty.insert(last);
+            self.chunk_file(&mut state, last)?.set_size(size % CHUNK_BYTES)?;
         }
         if size > state.size {
             for index in state.size / CHUNK_BYTES..size.div_ceil(CHUNK_BYTES) {
                 state.dirty.insert(index);
+                state.present.entry(index).or_insert(0);
             }
         }
+        let dropped: Vec<(u64, u64)> = state
+            .present
+            .iter()
+            .filter(|(index, _)| **index * CHUNK_BYTES >= size)
+            .map(|(index, version)| (*index, *version))
+            .collect();
+        for (index, version) in dropped {
+            state.present.remove(&index);
+            state.files.remove(&index);
+            let _ = OsFileSystem::new().remove_file(&self.local_path(index, version));
+        }
         state.dirty.retain(|index| index * CHUNK_BYTES < size);
-        state.present.retain(|index, _| index * CHUNK_BYTES < size);
-        self.cache.set_size(size)?;
         state.size = size;
         Ok(())
     }
@@ -310,11 +419,11 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
     }
 
     fn try_lock(&self, lock: FileLock) -> Result<()> {
-        self.cache.try_lock(lock)
+        self.lock.try_lock(lock)
     }
 
     fn unlock(&self) -> Result<()> {
-        self.cache.unlock()
+        self.lock.unlock()
     }
 
     fn sync_data(&self) -> Result<()> {
@@ -337,8 +446,11 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
         let dirty: Vec<u64> = state.dirty.iter().copied().collect();
         for index in &dirty {
             let length = Self::chunk_length(state.size, *index);
-            let mut bytes = vec![0u8; usize::try_from(length).map_err(|_| Error::new(ErrorKind::InvalidInput))?];
-            self.cache.read_exact_at(&mut bytes, index * CHUNK_BYTES)?;
+            let mut bytes = vec![0u8; whole(length)?];
+            let file = self.chunk_file(&mut state, *index)?;
+            let read = file.read_at(&mut bytes, 0)?;
+            bytes[read..].fill(0);
+            file.sync_data()?;
             self.objects.put(&chunk_name(*index, generation), &bytes).map_err(failed)?;
             next.chunks.insert(*index, generation);
         }
@@ -357,14 +469,17 @@ impl<O: ObjectStore> File for PageStoreFile<O> {
             .map(|(name, _)| name.clone())
             .collect();
         next.retired.retain(|(_, at)| now.saturating_sub(*at) < RETIRED_KEPT_MS);
-        self.cache.sync_data()?;
         self.objects.put(MANIFEST, next.encode().as_bytes()).map_err(failed)?;
         for index in &dirty {
+            let old = state.present.get(index).copied().unwrap_or(0);
+            if old != generation {
+                self.rename_local(&mut state, *index, old, generation);
+            }
             state.present.insert(*index, generation);
         }
         state.dirty.clear();
         state.manifest = next;
-        self.record_present(&state)?;
+        self.evict(&mut state)?;
         drop(state);
         for name in expired {
             let _ = self.objects.delete(&name);
@@ -382,16 +497,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn scratch(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("eggdb-page-store-{name}-{}", std::process::id()))
-    }
-
     fn fresh(name: &str) -> PathBuf {
-        let path = scratch(name);
-        let _ = std::fs::remove_file(&path);
-        let mut present = path.as_os_str().to_owned();
-        present.push(".chunks");
-        let _ = std::fs::remove_file(PathBuf::from(present));
+        let path = std::env::temp_dir().join(format!("eggdb-page-store-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
         path
     }
 
@@ -411,8 +519,7 @@ mod tests {
     #[test]
     fn a_sync_uploads_only_changed_chunks_and_a_new_node_reads_them_on_demand() {
         let objects = Arc::new(MemoryObjects::default());
-        let first_cache = fresh("first");
-        let file = PageStoreFile::open(Arc::clone(&objects), &first_cache).unwrap();
+        let file = PageStoreFile::open(Arc::clone(&objects), &fresh("first")).unwrap();
         file.write_all_at(&vec![7u8; 3 * CHUNK_BYTES as usize], 0).unwrap();
         file.sync_data().unwrap();
         assert_eq!(file.manifest().chunks.len(), 3);
@@ -424,16 +531,37 @@ mod tests {
         assert_eq!(objects.names().iter().filter(|name| name.starts_with("chunks/")).count(), 4);
         assert_eq!(manifest.retired.len(), 1);
         drop(file);
-        let second_cache = fresh("second");
-        let reader = PageStoreFile::open(Arc::clone(&objects), &second_cache).unwrap();
+        let reader = PageStoreFile::open(Arc::clone(&objects), &fresh("second")).unwrap();
         assert_eq!(reader.size().unwrap(), 3 * CHUNK_BYTES);
         let mut read = [0u8; 7];
         reader.read_exact_at(&mut read, CHUNK_BYTES + 10).unwrap();
         assert_eq!(&read, b"changed");
-        assert_eq!(reader.lock().unwrap().present.len(), 1);
+        assert_eq!(reader.chunks_on_disk(), 1);
         reader.set_size(CHUNK_BYTES / 2).unwrap();
         reader.sync_data().unwrap();
         assert_eq!(reader.manifest().chunks.keys().copied().collect::<Vec<_>>(), vec![0]);
         assert_eq!(reader.manifest().retired.len(), 4);
+    }
+
+    #[test]
+    fn a_disk_budget_sends_the_coldest_chunks_back_to_object_storage() {
+        let objects = Arc::new(MemoryObjects::default());
+        let writer = PageStoreFile::open(Arc::clone(&objects), &fresh("tier-writer")).unwrap();
+        for index in 0..6u64 {
+            writer.write_all_at(&vec![index as u8; CHUNK_BYTES as usize], index * CHUNK_BYTES).unwrap();
+        }
+        writer.sync_data().unwrap();
+        drop(writer);
+        let tiered = PageStoreFile::open_with_budget(Arc::clone(&objects), &fresh("tier-reader"), Some(2 * CHUNK_BYTES)).unwrap();
+        let mut byte = [0u8; 1];
+        for index in [0u64, 1, 2, 0, 3] {
+            tiered.read_exact_at(&mut byte, index * CHUNK_BYTES).unwrap();
+            assert_eq!(byte[0], index as u8);
+            assert!(tiered.chunks_on_disk() <= 2);
+        }
+        let held = tiered.lock().unwrap().present.keys().copied().collect::<Vec<_>>();
+        assert_eq!(held, vec![0, 3]);
+        tiered.read_exact_at(&mut byte, 1 + CHUNK_BYTES).unwrap();
+        assert_eq!(byte[0], 1);
     }
 }

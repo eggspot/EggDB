@@ -328,8 +328,9 @@ impl Database {
         Self::with_page_file(file, path, options)
     }
 
-    /// Opens the database whose pages live in `objects` (an S3 bucket's prefix, say), with
-    /// `cache` as the local file that holds the pages read so far (D1099): a database not
+    /// Opens the database whose pages live in `objects` (an S3 bucket's prefix, say), with the
+    /// directory `cache` plus `.pages` holding the pages read so far (D1099, D1103), within
+    /// [`Options::page_store_disk_bytes`] when set: a database not
     /// stored there yet starts empty. Pages are fetched the first time they are read, and every
     /// sync, at each durable commit and checkpoint, uploads the 1 MiB chunks changed since the
     /// last one and then a new manifest. One server writes a page store at a time.
@@ -339,8 +340,8 @@ impl Database {
         options: Options,
     ) -> Result<Self> {
         let cache = cache.as_ref();
-        let local = if options.read_only { follower_cache(cache, 0) } else { cache.to_path_buf() };
-        let file = crate::page_store::PageStoreFile::open(objects, &local)
+        let local = if options.read_only { follower_cache(cache, 0) } else { writer_cache(cache) };
+        let file = crate::page_store::PageStoreFile::open_with_budget(objects, &local, options.page_store_disk_bytes)
             .map_err(|error| Error::storage(error.into()))?;
         let generation = file.manifest().generation;
         let empty = file.size().map_err(|error| Error::storage(error.into()))? == 0;
@@ -396,7 +397,7 @@ impl Database {
             return Ok(false);
         }
         let side = 1 - self.page_store_side.load(Ordering::Acquire);
-        let file = crate::page_store::PageStoreFile::open(objects, &follower_cache(&self.path, side))
+        let file = crate::page_store::PageStoreFile::open_with_budget(objects, &follower_cache(&self.path, side), options.page_store_disk_bytes)
             .map_err(|error| Error::storage(error.into()))?;
         let generation = file.manifest().generation;
         let opened = PageFile::open_in(DatabaseFile::custom(Box::new(file)), Access::ReadOnly)
@@ -1387,6 +1388,12 @@ fn explain_open_error(error: StorageError, options: &Options) -> Error {
     } else {
         "the file does not exist; open it with `Options::create_if_missing(true)` to create it"
     })
+}
+
+fn writer_cache(path: &Path) -> PathBuf {
+    let mut named = path.as_os_str().to_owned();
+    named.push(".pages");
+    PathBuf::from(named)
 }
 
 fn follower_cache(path: &Path, side: u8) -> PathBuf {

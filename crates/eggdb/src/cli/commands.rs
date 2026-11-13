@@ -794,6 +794,10 @@ impl<'a> Session<'a> {
         if let Some(url) = &self.request.serve.page_store {
             let objects = archive::page_store_objects(url)
                 .map_err(|message| Error::new(eggdb::ErrorKind::InvalidOption, format!("--page-store {url}: {message}")))?;
+            let options = match self.request.serve.page_store_disk {
+                Some(bytes) => options.page_store_disk_bytes(bytes),
+                None => options,
+            };
             return Database::open_page_store(objects, &self.request.file, options);
         }
         if self.request.file.as_os_str() == IN_MEMORY_FILE {

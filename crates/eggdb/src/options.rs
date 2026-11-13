@@ -69,6 +69,7 @@ pub struct Options {
     pub(crate) cache_bytes: usize,
     pub(crate) snapshot_memory_bytes: Option<usize>,
     pub(crate) auto_checkpoint_log_bytes: Option<u64>,
+    pub(crate) page_store_disk_bytes: Option<u64>,
     pub(crate) page_size_bytes: usize,
     pub(crate) write_timeout: Duration,
     pub(crate) busy_timeout: Duration,
@@ -133,6 +134,7 @@ impl Options {
             cache_bytes: DEFAULT_CACHE_BYTES,
             snapshot_memory_bytes: None,
             auto_checkpoint_log_bytes: Some(DEFAULT_AUTO_CHECKPOINT_LOG_BYTES),
+            page_store_disk_bytes: None,
             page_size_bytes: PageSize::DEFAULT.bytes(),
             write_timeout: DEFAULT_WRITE_TIMEOUT,
             busy_timeout: Duration::ZERO,
@@ -243,6 +245,16 @@ impl Options {
     /// replay crosses. A read-only open keeps nothing.
     pub fn archive_changes_to(mut self, directory: impl Into<std::path::PathBuf>) -> Self {
         self.change_archive = Some(directory.into());
+        self
+    }
+
+    /// How many bytes of a page store's chunks may stay on the local disk (D1103): past it, the
+    /// chunks read longest ago leave the disk and are read from object storage again when
+    /// needed, so memory holds the hot pages, the disk the warm ones and object storage all
+    /// of them. No limit by default. Only [`Database::open_page_store`](crate::Database::open_page_store)
+    /// reads it.
+    pub fn page_store_disk_bytes(mut self, bytes: u64) -> Self {
+        self.page_store_disk_bytes = Some(bytes);
         self
     }
 

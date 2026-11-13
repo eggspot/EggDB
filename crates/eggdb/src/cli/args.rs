@@ -307,6 +307,7 @@ impl CommandName {
             | OptionName::Quorum
             | OptionName::IdleExit
             | OptionName::PageStore
+            | OptionName::PageStoreDisk
             | OptionName::MultiPrimary
             | OptionName::MultiPrimaryNode
             | OptionName::QuorumNode
@@ -559,6 +560,7 @@ enum OptionName {
     Quorum,
     IdleExit,
     PageStore,
+    PageStoreDisk,
     MultiPrimary,
     MultiPrimaryNode,
     QuorumNode,
@@ -749,6 +751,7 @@ impl OptionName {
             b"quorum" => Self::Quorum,
             b"idle-exit" => Self::IdleExit,
             b"page-store" => Self::PageStore,
+            b"page-store-disk" => Self::PageStoreDisk,
             b"multi-primary" => Self::MultiPrimary,
             b"multi-primary-node" => Self::MultiPrimaryNode,
             b"quorum-node" => Self::QuorumNode,
@@ -1145,6 +1148,7 @@ pub(crate) struct ServeOptions {
     pub(crate) quorum: Option<String>,
     pub(crate) idle_exit_seconds: Option<u64>,
     pub(crate) page_store: Option<String>,
+    pub(crate) page_store_disk: Option<u64>,
     pub(crate) multi_primary: Option<String>,
     pub(crate) multi_primary_node: Option<String>,
     pub(crate) quorum_node: Option<u64>,
@@ -1986,6 +1990,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     .filter(|seconds| *seconds > 0)
                     .ok_or_else(|| usage(format!("{} needs a whole number of seconds above 0, not '{}'", option.spelled, shown(value))))?;
                 request.serve.idle_exit_seconds = Some(seconds);
+            }
+            OptionName::PageStoreDisk => {
+                let bytes = parse_size(&option.spelled, value).map_err(usage)?;
+                request.serve.page_store_disk = Some(bytes as u64);
             }
             OptionName::PageStore => {
                 let text = value.to_str().filter(|text| text.starts_with("s3://")).ok_or_else(|| usage(format!("{} takes s3://bucket/prefix, where the database's pages are kept", option.spelled)))?;
