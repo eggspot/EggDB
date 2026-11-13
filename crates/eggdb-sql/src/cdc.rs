@@ -610,7 +610,7 @@ pub fn encode_capture(keys: &[CapturedKey]) -> Vec<u8> {
     out
 }
 
-fn decode_capture(bytes: &[u8]) -> Option<Vec<CapturedKey>> {
+pub(crate) fn decode_capture_record(bytes: &[u8]) -> Option<Vec<CapturedKey>> {
     let mut at = 0usize;
     let number = |at: &mut usize| -> Option<u64> {
         let value = u64::from_le_bytes(bytes.get(*at..*at + 8)?.try_into().ok()?);
@@ -655,7 +655,7 @@ fn row_json(definition: &crate::encoding::TableDefinition, stored: &[u8]) -> Sql
     Ok(out)
 }
 
-fn tables_by_id(reader: &dyn crate::store::KeyValueRead) -> SqlResult<std::collections::HashMap<u32, crate::encoding::TableDefinition>> {
+pub(crate) fn table_definitions(reader: &dyn crate::store::KeyValueRead) -> SqlResult<std::collections::HashMap<u32, crate::encoding::TableDefinition>> {
     let prefix = crate::encoding::table_key("");
     let end = crate::encoding::prefix_end(&prefix);
     let mut tables = std::collections::HashMap::new();
@@ -723,7 +723,8 @@ fn captured_events(
 
 /// Hands the row changes the engine captured without triggers (D1030), commit by commit and
 /// in commit order, to `deliver` as Debezium-style JSON events with full `before` and `after`
-/// rows, and removes each commit's record once every event of it was accepted; stops at the
+/// rows, and moves its position past each commit once every event of it was accepted, removing
+/// the records every consumer (it and the replication slots, D1031) has passed; stops at the
 /// first refusal, so delivery is at least once and in order. Returns how many commits were
 /// delivered.
 pub fn deliver_captured_changes<S: KeyValueStore>(
@@ -734,17 +735,20 @@ pub fn deliver_captured_changes<S: KeyValueStore>(
     deliver: &mut dyn FnMut(&str) -> bool,
 ) -> SqlResult<u64> {
     let read = store.begin_read()?;
-    let tables = tables_by_id(&read)?;
+    let tables = table_definitions(&read)?;
+    let position = crate::logical_decoding::cdc_position(&read)?;
+    let mut start = CAPTURE_PREFIX.to_vec();
+    start.extend_from_slice(&position.saturating_add(1).to_be_bytes());
     let end = crate::encoding::prefix_end(CAPTURE_PREFIX);
     let mut records: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    read.scan(CAPTURE_PREFIX, &end, crate::store::ScanDirection::Forward, &mut |key, value| {
+    read.scan(&start, &end, crate::store::ScanDirection::Forward, &mut |key, value| {
         records.push((key.to_vec(), value.to_vec()));
         Ok((records.len() as u64) < limit)
     })?;
     drop(read);
     let mut delivered = 0;
     for (key, value) in records {
-        let keys = decode_capture(&value).ok_or_else(|| crate::encoding::corrupt("captured changes"))?;
+        let keys = decode_capture_record(&value).ok_or_else(|| crate::encoding::corrupt("captured changes"))?;
         let transaction = key
             .get(CAPTURE_PREFIX.len()..)
             .and_then(|bytes| bytes.try_into().ok())
@@ -755,9 +759,11 @@ pub fn deliver_captured_changes<S: KeyValueStore>(
         if !events.iter().all(|event| deliver(event)) {
             break;
         }
-        let mut write = store.begin_write()?;
-        crate::store::KeyValueWrite::delete(&mut write, &key)?;
-        crate::store::KeyValueWrite::commit(write)?;
+        let sequence = key.get(CAPTURE_PREFIX.len()..).and_then(|bytes| bytes.try_into().ok()).map(u64::from_be_bytes).unwrap_or(0);
+        let mut write: Box<dyn crate::store::BoxedWrite + '_> = Box::new(store.begin_write()?);
+        crate::logical_decoding::set_cdc_position(write.as_mut(), sequence)?;
+        crate::logical_decoding::prune(write.as_mut(), 1_000)?;
+        write.commit_boxed()?;
         delivered += 1;
     }
     Ok(delivered)
@@ -770,7 +776,7 @@ mod capture_tests {
     #[test]
     fn capture_records_read_back() {
         let keys = vec![(b"k1".to_vec(), None, Some(b"v".to_vec())), (b"k2".to_vec(), Some(b"old".to_vec()), None)];
-        assert_eq!(decode_capture(&encode_capture(&keys)), Some(keys));
-        assert!(decode_capture(b"\x01").is_none());
+        assert_eq!(decode_capture_record(&encode_capture(&keys)), Some(keys));
+        assert!(decode_capture_record(b"\x01").is_none());
     }
 }

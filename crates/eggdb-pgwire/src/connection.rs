@@ -25,7 +25,10 @@ use std::time::{Duration, Instant};
 pub const MAX_AUTHENTICATION_MESSAGE_BYTES: usize = 16 * 1024;
 /// The largest message accepted from an authenticated client: 1 GiB, the largest value a
 /// database stores, plus room for the rest of the message.
-pub const MAX_MESSAGE_BYTES: usize = (1 << 30) + (1 << 20);
+pub const REPLICATION_BATCH: usize = 64;
+const REPLICATION_POLL: Duration = Duration::from_millis(200);
+const KEEPALIVE_EVERY: Duration = Duration::from_secs(10);
+const MAX_MESSAGE_BYTES: usize = (1 << 30) + (1 << 20);
 /// The most prepared statements one connection keeps; one more is refused with `54000`.
 pub const MAX_PREPARED_STATEMENTS: usize = 4096;
 /// The most portals one connection keeps open; one more is refused with `54000`.
@@ -1028,6 +1031,8 @@ pub(crate) struct Connection<'a, 's> {
     process_id: i32,
     listening: bool,
     activity: eggdb_sql::session_activity::ActivityHandle,
+    replication: bool,
+    exported_snapshot: bool,
 }
 
 pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
@@ -1137,16 +1142,19 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
     }
     let mut unrecognized_options = Vec::new();
     let mut settings = Vec::new();
+    let mut replication = false;
     for (name, value) in &startup.parameters {
         match name.as_str() {
             "user" | "database" => {}
             "options" => settings.extend(options_parameters(value)),
             "replication" => {
-                if !matches!(value.as_str(), "false" | "0" | "off" | "no") {
+                if matches!(value.as_str(), "database") && shared.config.logical_replication {
+                    replication = true;
+                } else if !matches!(value.as_str(), "false" | "0" | "off" | "no") {
                     fatal(
                         &mut wire,
                         SqlState::FEATURE_NOT_SUPPORTED,
-                        "replication connections are not supported yet",
+                        "only logical replication connections (replication=database) are served, and only by a server started with --pg-replication",
                     );
                     return;
                 }
@@ -1220,6 +1228,8 @@ pub(crate) fn serve_connection<'a, D: DatabaseDirectory>(
         idle: true,
         process_id,
         listening: false,
+        replication,
+        exported_snapshot: false,
     };
     connection.ready_for_query();
     if connection.wire.flush().is_ok() {
@@ -1707,6 +1717,14 @@ impl<'a, 's> Connection<'a, 's> {
     }
 
     fn simple_query(&mut self, text: &str) -> bool {
+        if self.replication
+            && let Some(command) = crate::walsender::replication_command(text)
+        {
+            return self.replication_command(command, text);
+        }
+        if self.exported_snapshot {
+            self.release_exported_snapshot();
+        }
         let started = Instant::now();
         self.activity.started(text);
         let keep_going = self.simple_query_timed(text);
@@ -1801,6 +1819,143 @@ impl<'a, 's> Connection<'a, 's> {
         self.report_changed_parameters();
         self.ready_for_query();
         self.wire.flush().is_ok()
+    }
+
+    fn release_exported_snapshot(&mut self) {
+        if self.exported_snapshot {
+            self.exported_snapshot = false;
+            let _ = self.session.execute("COMMIT", &mut |_| {});
+        }
+    }
+
+    fn text_rows(&mut self, columns: &[&str], rows: Vec<Vec<Option<String>>>, tag: &str) {
+        let description: Vec<ColumnDescription> = columns
+            .iter()
+            .map(|name| ColumnDescription {
+                name: (*name).to_owned(),
+                type_oid: crate::types::oid_of(eggdb_sql::SqlType::Text),
+                type_size: -1,
+                type_modifier: -1,
+                format: Format::Text,
+            })
+            .collect();
+        if self.wire.outbox.row_description(&description).is_err() {
+            return;
+        }
+        for row in rows {
+            let values: Vec<Option<Vec<u8>>> = row.into_iter().map(|value| value.map(String::into_bytes)).collect();
+            if self.wire.outbox.data_row(&values).is_err() {
+                return;
+            }
+        }
+        self.wire.outbox.command_complete(tag);
+    }
+
+    fn export_slot_snapshot(&mut self) -> Result<Option<String>, SqlError> {
+        self.session.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", &mut |_| {})?;
+        self.exported_snapshot = true;
+        let mut name = None;
+        self.session.execute("SELECT pg_export_snapshot()", &mut |result| {
+            name = result.rows.first().and_then(|row| row.first()).and_then(eggdb_sql::Value::to_text);
+        })?;
+        Ok(name)
+    }
+
+    fn replication_command(&mut self, command: crate::walsender::ReplicationCommand, text: &str) -> bool {
+        use crate::walsender::ReplicationCommand;
+        self.release_exported_snapshot();
+        let outcome: Result<(), SqlError> = match command {
+            ReplicationCommand::IdentifySystem => {
+                let row = crate::walsender::identify_row(&mut self.session, &self.shared.config.database);
+                self.text_rows(&["systemid", "timeline", "xlogpos", "dbname"], vec![row], "IDENTIFY_SYSTEM");
+                Ok(())
+            }
+            ReplicationCommand::CreateSlot { name, export_snapshot } => (|| {
+                let snapshot = if export_snapshot { self.export_slot_snapshot()? } else { None };
+                let lsn = self.session.create_logical_slot(&name)?;
+                let row = crate::walsender::slot_row(&name, lsn, snapshot);
+                self.text_rows(&["slot_name", "consistent_point", "snapshot_name", "output_plugin"], vec![row], "CREATE_REPLICATION_SLOT");
+                Ok(())
+            })(),
+            ReplicationCommand::DropSlot { name } => self.session.drop_logical_slot(&name).map(|()| {
+                self.wire.outbox.command_complete("DROP_REPLICATION_SLOT");
+            }),
+            ReplicationCommand::StartReplication { slot, lsn } => return self.stream_changes(&slot, lsn),
+        };
+        if let Err(error) = outcome {
+            if self.exported_snapshot {
+                self.release_exported_snapshot();
+            }
+            report_error(&mut self.wire, Severity::Error, &error, Some(text));
+        }
+        self.ready_for_query();
+        self.wire.flush().is_ok()
+    }
+
+    fn stream_changes(&mut self, slot: &str, start: u64) -> bool {
+        use crate::walsender::{flushed_lsn, keepalive, sequence_of, transaction_messages, xlog_data};
+        let confirmed = match self.session.logical_slot_position(slot) {
+            Ok(confirmed) => confirmed,
+            Err(error) => {
+                report_error(&mut self.wire, Severity::Error, &error, None);
+                self.ready_for_query();
+                return self.wire.flush().is_ok();
+            }
+        };
+        let mut sent = sequence_of(start).max(confirmed);
+        self.wire.outbox.copy_both_response();
+        if self.wire.flush().is_err() {
+            return false;
+        }
+        let mut described = std::collections::HashSet::new();
+        let mut last_keepalive = Instant::now();
+        loop {
+            match self.session.logical_changes_after(sent, REPLICATION_BATCH) {
+                Ok(transactions) => {
+                    for transaction in &transactions {
+                        for (lsn, message) in transaction_messages(transaction, &mut described) {
+                            if self.wire.outbox.copy_data(&xlog_data(lsn, &message)).is_err() {
+                                return false;
+                            }
+                        }
+                        sent = transaction.lsn;
+                    }
+                    if !transactions.is_empty() && self.wire.flush().is_err() {
+                        return false;
+                    }
+                }
+                Err(error) => {
+                    report_error(&mut self.wire, Severity::Error, &error, None);
+                    self.ready_for_query();
+                    return self.wire.flush().is_ok();
+                }
+            }
+            if last_keepalive.elapsed() >= KEEPALIVE_EVERY {
+                last_keepalive = Instant::now();
+                if self.wire.outbox.copy_data(&keepalive(sent.saturating_mul(16), false)).is_err() || self.wire.flush().is_err() {
+                    return false;
+                }
+            }
+            self.wire.deadline = Some(Instant::now() + REPLICATION_POLL);
+            let read = self.wire.read_message(MAX_MESSAGE_BYTES);
+            self.wire.deadline = None;
+            match read {
+                Ok((b'd', body)) => {
+                    if let Some(flushed) = flushed_lsn(&body) {
+                        let _ = self.session.confirm_logical_slot(slot, sequence_of(flushed));
+                    }
+                }
+                Ok((b'c', _)) => {
+                    self.wire.outbox.copy_done();
+                    self.wire.outbox.command_complete("COPY 0");
+                    self.ready_for_query();
+                    return self.wire.flush().is_ok();
+                }
+                Ok((b'X', _)) => return false,
+                Ok(_) | Err(WireError::TimedOut) => {}
+                Err(_) => return false,
+            }
+        }
     }
 
     fn refuse_in_failed_block(&self, text: &str) -> Result<(), (SqlError, Option<String>)> {

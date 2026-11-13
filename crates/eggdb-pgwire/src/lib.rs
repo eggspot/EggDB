@@ -42,6 +42,7 @@ mod notifications;
 pub mod replication;
 mod server;
 pub mod types;
+mod walsender;
 mod wire;
 
 pub use connection::{

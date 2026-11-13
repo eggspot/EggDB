@@ -1055,3 +1055,4 @@ its full title with its status.
 - [D1028](decisions/D1028.md) Code-only batch 676 (M14): replica freshness chosen per request
 - [D1029](decisions/D1029.md) Code-only batch 677 (M14): Jepsen-style checks against real processes
 - [D1030](decisions/D1030.md) Code-only batch 678 (M14): change capture without triggers
+- [D1031](decisions/D1031.md) Code-only batch 679 (M14): PostgreSQL's logical replication protocol served

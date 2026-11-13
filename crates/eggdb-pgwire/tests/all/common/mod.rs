@@ -194,6 +194,7 @@ impl TestServer {
             memory_budget: limits.memory_budget,
             auth_rules: None,
             tls,
+            logical_replication: false,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);
@@ -234,6 +235,7 @@ impl TestServer {
             memory_budget: Arc::default(),
             auth_rules,
             tls: None,
+            logical_replication: false,
         };
         let thread_stop = Arc::clone(&stop);
         let thread_logged = Arc::clone(&logged);

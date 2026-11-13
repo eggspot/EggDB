@@ -27,6 +27,7 @@ mod sqlserver_ddl_triggers;
 mod sqlserver_partitions;
 mod oracle_system_triggers;
 mod backup;
+mod logical_slots;
 pub(crate) mod freshness;
 pub(crate) mod switchover;
 mod property_graphs;

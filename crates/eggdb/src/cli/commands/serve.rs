@@ -864,6 +864,7 @@ impl Session<'_> {
             memory_budget: Arc::clone(&memory_budget),
             auth_rules: self.auth_rules()?,
             tls: tls.as_ref().map(|setup| Arc::clone(&setup.postgresql)),
+            logical_replication: options.pg_replication,
         };
         cql_config.database = config.database.clone();
         let mysql_config = mysql_credentials.map(|credentials| eggdb_mysqlwire::ServerConfig {
@@ -1128,10 +1129,10 @@ impl Session<'_> {
         if replication_listener.is_some() {
             eggdb_sql::set_switchover_hook(super::serve_failover::request_switchover);
         }
-        if options.cdc_capture_engine && options.cdc_webhook.is_none() && options.cdc_topic.is_none() && options.cdc_queue.is_none() {
+        if options.cdc_capture_engine && !options.pg_replication && options.cdc_webhook.is_none() && options.cdc_topic.is_none() && options.cdc_queue.is_none() {
             return Err(usage("--cdc-capture engine captures every change for a sink: give --cdc-webhook, --cdc-topic or --cdc-queue too".to_owned()));
         }
-        if options.cdc_capture_engine {
+        if options.cdc_capture_engine || options.pg_replication {
             db.capture_rows(eggdb_sql::cdc::is_row_key).map_err(|error| {
                 Failure::database(format!("cannot capture changes in {}: {error}", self.file), Exit::DatabaseError)
             })?;

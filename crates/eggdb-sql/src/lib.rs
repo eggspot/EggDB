@@ -72,6 +72,7 @@ mod grouping_sets;
 mod hash_index;
 mod hierarchy;
 mod hstore;
+pub mod logical_decoding;
 mod vector_type;
 mod sqlserver_hierarchy;
 mod sqlserver_spatial;

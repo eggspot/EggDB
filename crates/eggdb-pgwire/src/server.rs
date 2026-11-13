@@ -64,6 +64,9 @@ pub struct ServerConfig {
     /// The TLS setup, when the server offers TLS (D161): `SSLRequest` is then answered `S`,
     /// PostgreSQL 17's direct TLS is accepted, and connections from other machines must use it.
     pub tls: Option<std::sync::Arc<eggdb_tls::ServerConfig>>,
+    /// Whether `replication=database` connections may stream logical replication from the
+    /// changes the engine captures (D1031); otherwise they are refused.
+    pub logical_replication: bool,
 }
 
 impl ServerConfig {

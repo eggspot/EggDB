@@ -857,6 +857,14 @@ impl Outbox {
         self.copy_response(b'G', columns, format)
     }
 
+    /// `CopyBothResponse`, which starts a replication stream (D1031).
+    pub fn copy_both_response(&mut self) {
+        self.message(b'W', |body| {
+            body.push(0);
+            body.extend_from_slice(&0i16.to_be_bytes());
+        });
+    }
+
     /// `CopyOutResponse` for data in `format` (text for the text and CSV formats, binary for
     /// the binary one) with `columns` columns; refused for more than 32,767 columns.
     pub fn copy_out_response(&mut self, columns: usize, format: Format) -> Result<(), TooLarge> {

@@ -298,6 +298,7 @@ impl CommandName {
             | OptionName::StandbyOf
             | OptionName::ApplyDelay
             | OptionName::CdcCapture
+            | OptionName::PgReplication
             | OptionName::CdcWebhook
             | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
@@ -527,6 +528,7 @@ enum OptionName {
     StandbyOf,
     ApplyDelay,
     CdcCapture,
+    PgReplication,
     CdcWebhook,
     OtlpEndpoint,
     CdcQueue,
@@ -694,6 +696,7 @@ impl OptionName {
             b"standby-of" => Self::StandbyOf,
             b"apply-delay" => Self::ApplyDelay,
             b"cdc-capture" => Self::CdcCapture,
+            b"pg-replication" => Self::PgReplication,
             b"cdc-webhook" => Self::CdcWebhook,
             b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
@@ -844,6 +847,7 @@ impl OptionName {
                 | Self::Delete
                 | Self::Differential
                 | Self::Clone
+                | Self::PgReplication
         )
     }
 }
@@ -1066,6 +1070,7 @@ pub(crate) struct ServeOptions {
     pub(crate) standby_of: Option<PathBuf>,
     pub(crate) apply_delay_seconds: Option<u64>,
     pub(crate) cdc_capture_engine: bool,
+    pub(crate) pg_replication: bool,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1811,6 +1816,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.replication_advertise = Some(address.to_owned());
             }
             OptionName::StandbyOf => request.serve.standby_of = Some(PathBuf::from(value)),
+            OptionName::PgReplication => request.serve.pg_replication = true,
             OptionName::CdcCapture => {
                 request.serve.cdc_capture_engine = match value.to_str() {
                     Some("engine") => true,
