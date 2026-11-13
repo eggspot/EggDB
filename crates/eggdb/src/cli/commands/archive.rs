@@ -36,19 +36,32 @@ fn choose(entries: &[Archived], at: Option<&str>, shown: &str) -> Result<Archive
 /// A read-only edge copy of what the bucket at `url` archived at or before `at`: the copy kept in
 /// the local cache (`EGGDB_EDGE_CACHE`, or `eggdb-edge` in the temporary directory) under its
 /// SHA-256, downloaded and checked first when the cache lacks it.
+const LOCKED_MANIFEST: &str = "manifest.d/";
+
+/// The archived copies a bucket's manifest lists, each line stored under Object Lock in
+/// `manifest.d/` taking the place of its line in `manifest.jsonl`, which stays writable (D1022).
+fn bucket_entries(location: &eggdb_s3::client::Location, url: &str) -> Result<Vec<Archived>, String> {
+    let manifest_text = location.bucket.get(&location.key(MANIFEST))?;
+    let locked_keys = location.bucket.list(&location.key(LOCKED_MANIFEST))?;
+    if manifest_text.is_none() && locked_keys.is_empty() {
+        return Err(format!("{url} has no {MANIFEST}: archive into it with eggdb backup <file> {url}"));
+    }
+    let mut entries = parse_manifest(&String::from_utf8_lossy(&manifest_text.unwrap_or_default()));
+    for key in locked_keys {
+        let Some(line) = location.bucket.get(&key)? else {
+            continue;
+        };
+        for locked in parse_manifest(&String::from_utf8_lossy(&line)) {
+            entries.retain(|entry| entry.file != locked.file);
+            entries.push(locked);
+        }
+    }
+    Ok(entries)
+}
+
 pub(super) fn edge_copy(url: &str, at: Option<&str>) -> Result<PathBuf, String> {
     let location = bucket(url)?;
-    let manifest_text = location
-        .bucket
-        .get(&location.key(MANIFEST))?
-        .ok_or_else(|| {
-            format!("{url} has no {MANIFEST}: archive into it with eggdb backup <file> {url}")
-        })?;
-    let chosen = choose(
-        &parse_manifest(&String::from_utf8_lossy(&manifest_text)),
-        at,
-        url,
-    )?;
+    let chosen = choose(&bucket_entries(&location, url)?, at, url)?;
     if chosen.sha256.len() != 64 || !chosen.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!(
             "the manifest of {url} gives {} no valid SHA-256",
@@ -95,17 +108,7 @@ pub(super) fn restore_from_bucket_into(
     target: &Path,
 ) -> Result<(String, i64), String> {
     let location = bucket(url)?;
-    let manifest_text = location
-        .bucket
-        .get(&location.key(MANIFEST))?
-        .ok_or_else(|| {
-            format!("{url} has no {MANIFEST}: archive into it with eggdb backup <file> {url}")
-        })?;
-    let chosen = choose(
-        &parse_manifest(&String::from_utf8_lossy(&manifest_text)),
-        at,
-        url,
-    )?;
+    let chosen = choose(&bucket_entries(&location, url)?, at, url)?;
     let bytes = location
         .bucket
         .get(&location.key(&chosen.file))?
@@ -265,6 +268,7 @@ struct Archived {
     differential: bool,
     base: Option<String>,
     encrypted: bool,
+    locked_until_ms: Option<i64>,
 }
 
 fn json_field<'l>(line: &'l str, name: &str) -> Option<&'l str> {
@@ -301,6 +305,7 @@ fn parse_manifest(text: &str) -> Vec<Archived> {
                 differential: json_field(line, "kind") == Some("differential"),
                 base: json_field(line, "base").map(str::to_owned),
                 encrypted: json_field(line, "encrypted") == Some("true"),
+                locked_until_ms: json_field(line, "locked_until").and_then(parse_time),
             })
         })
         .collect()
@@ -402,6 +407,9 @@ fn upload_copy(
         line = line.string("locked_until", &rfc3339(until));
     }
     let line = line.line();
+    if let Some(until) = &retain_until {
+        location.bucket.put_locked(&location.key(&format!("{LOCKED_MANIFEST}{name}.json")), line.as_bytes(), until)?;
+    }
     let mut manifest_text = location
         .bucket
         .get(&location.key(MANIFEST))?
@@ -426,6 +434,7 @@ impl Session<'_> {
         ArchiveSettings {
             differential: self.request.differential,
             clone: self.request.clone_copy,
+            lock_days: self.request.lock_days,
             key: self.request.backup_key.as_ref().map(|key| key.0),
             keep: self.request.keep_copies,
             options: self.database_options(Access::ReadOnly, None),
@@ -665,6 +674,7 @@ const MOST_PARALLEL_BACKUPS: usize = 8;
 struct ArchiveSettings {
     differential: bool,
     clone: bool,
+    lock_days: Option<u32>,
     key: Option<[u8; 32]>,
     keep: Option<u32>,
     options: eggdb::Options,
@@ -738,6 +748,10 @@ fn archive_database(source: &Path, directory: &Path, settings: &ArchiveSettings)
     };
     let sha256 = file_sha256(&stored).map_err(|error| format!("cannot read back {name}: {error}"))?;
     let bytes = std::fs::metadata(&stored).map(|metadata| metadata.len()).unwrap_or(0);
+    let locked = match settings.lock_days {
+        Some(days) => Some((taken_at_ms + i64::from(days) * MS_PER_DAY, lock_local(&stored)?)),
+        None => None,
+    };
     let mut line = JsonObject::new()
         .string("file", &name)
         .string("taken_at", &rfc3339(taken_at_ms))
@@ -750,6 +764,9 @@ fn archive_database(source: &Path, directory: &Path, settings: &ArchiveSettings)
         .boolean("encrypted", settings.key.is_some());
     if let Some(base) = &base {
         line = line.string("kind", "differential").string("base", base);
+    }
+    if let Some((until, immutable)) = locked {
+        line = line.string("locked_until", &rfc3339(until)).boolean("immutable", immutable);
     }
     let line = line.line();
     append_manifest(directory, &line).map_err(|error| format!("cannot record {name} in {shown}/{MANIFEST}: {error}"))?;
@@ -797,6 +814,34 @@ fn apply_differential(staging: &Path, directory: &Path, delta: &Archived, base_s
     closed
 }
 
+/// Makes an archived file read-only and, where the file system and privileges allow, immutable
+/// (D1022); returns whether it is immutable.
+fn lock_local(path: &Path) -> Result<bool, String> {
+    let mut permissions = std::fs::metadata(path).map_err(|error| format!("cannot lock {}: {error}", path.display()))?.permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(path, permissions).map_err(|error| format!("cannot lock {}: {error}", path.display()))?;
+    eggdb_platform::set_immutable(path, true).map_err(|error| format!("cannot lock {}: {error}", path.display()))
+}
+
+fn unlock_local(path: &Path) -> std::io::Result<()> {
+    eggdb_platform::set_immutable(path, false)?;
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    owner_writable(&mut permissions);
+    std::fs::set_permissions(path, permissions)
+}
+
+#[cfg(unix)]
+fn owner_writable(permissions: &mut std::fs::Permissions) {
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn owner_writable(permissions: &mut std::fs::Permissions) {
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+}
+
 fn append_manifest(directory: &Path, line: &str) -> std::io::Result<()> {
     let mut manifest = std::fs::OpenOptions::new().create(true).append(true).open(directory.join(MANIFEST))?;
     manifest.write_all(line.as_bytes())?;
@@ -812,7 +857,11 @@ fn prune(directory: &Path, keep: u32) -> std::io::Result<Vec<String>> {
     fulls.sort_by_key(|entry| std::cmp::Reverse(entry.taken_at_ms));
     let kept: Vec<&str> = fulls.iter().take(keep as usize).map(|entry| entry.file.as_str()).collect();
     let mut pruned = Vec::new();
+    let now = now_ms();
     for entry in &entries {
+        if entry.locked_until_ms.is_some_and(|until| until > now) {
+            continue;
+        }
         let keeps = if entry.differential {
             entry.base.as_deref().is_some_and(|base| kept.contains(&base))
         } else {
@@ -820,6 +869,13 @@ fn prune(directory: &Path, keep: u32) -> std::io::Result<Vec<String>> {
         };
         if keeps {
             continue;
+        }
+        if entry.locked_until_ms.is_some() {
+            match unlock_local(&directory.join(&entry.file)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
         match std::fs::remove_file(directory.join(&entry.file)) {
             Ok(()) => {}

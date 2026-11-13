@@ -22,9 +22,9 @@ impl Session<'_> {
         {
             return self.backup_into_bucket(url);
         }
-        if self.request.lock_days.is_some() {
+        if self.request.lock_days.is_some() && !copy.is_dir() && !self.request.file.is_dir() {
             return Err(Failure::usage(
-                "--lock-days locks copies in an S3 bucket with Object Lock; give an s3:// archive",
+                "--lock-days locks archived copies: give an archive directory or an s3:// archive",
                 Some(crate::cli::args::CommandName::Backup),
             ));
         }
