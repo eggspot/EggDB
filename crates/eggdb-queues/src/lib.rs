@@ -7,6 +7,8 @@
 
 use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 
+pub mod selector;
+
 const QUEUE: u8 = 1;
 const MESSAGE: u8 = 2;
 const MAX_QUEUE_NAME: usize = 255;

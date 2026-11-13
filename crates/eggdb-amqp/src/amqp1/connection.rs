@@ -1,5 +1,8 @@
+use super::message::{DestinationKind, inbound, names_topic, routable_address, selector_field, transfer_payload};
 use super::value::{Value, decode_all, decode_first, encode};
-use crate::server::{Broker, ServerConfig};
+use crate::field_table::BasicProperties;
+use crate::server::{Broker, ServerConfig, StoredMessage, encode_message};
+use eggdb_queues::selector::Selector;
 use eggdb_platform::connection_limits::{Reservation, UNCOUNTED_BUFFER_BYTES};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -41,10 +44,24 @@ const ACCEPTED: u64 = 0x24;
 const REJECTED: u64 = 0x25;
 const RELEASED: u64 = 0x26;
 const MODIFIED: u64 = 0x27;
-const HEADER_SECTION: u64 = 0x70;
-const PROPERTIES_SECTION: u64 = 0x73;
-const DATA_SECTION: u64 = 0x75;
 const VALUE_SECTION: u64 = 0x77;
+const SOURCE: u64 = 0x28;
+const COORDINATOR: u64 = 0x30;
+const DECLARE: u64 = 0x31;
+const DISCHARGE: u64 = 0x32;
+const DECLARED: u64 = 0x33;
+const TRANSACTIONAL_STATE: u64 = 0x34;
+const SELECTOR_FILTER: u64 = 0x0000_468c_0000_0004;
+const SELECTOR_FILTER_NAME: &str = "apache.org:selector-filter:string";
+const TOPIC_EXCHANGE: &str = "amq.topic";
+const SELECTOR_SCAN: usize = 1_000;
+const MAX_TRANSACTIONS: usize = 64;
+const MAX_TRANSACTION_ITEMS: usize = 100_000;
+const MAX_TRANSACTION_BYTES: usize = 64 << 20;
+const SOURCE_FILTER_FIELD: usize = 7;
+const TRANSFER_STATE_FIELD: usize = 7;
+const SOURCE_CAPABILITIES_FIELD: usize = 10;
+const TARGET_CAPABILITIES_FIELD: usize = 6;
 
 /// What a receiver's disposition does to a message (AMQP 1.0 section 3.4): `accepted` removes
 /// it; `rejected`, and `modified` with `undeliverable-here`, send it to the queue's dead letters;
@@ -113,6 +130,7 @@ struct Incoming {
     delivery_id: u32,
     settled: bool,
     bytes: Vec<u8>,
+    transaction: Option<u64>,
 }
 
 enum Direction {
@@ -120,12 +138,47 @@ enum Direction {
     ToClient { presettled: bool, drain: bool },
 }
 
+/// Where the messages a client sends on a link go: its queue, a topic (the `amq.topic`
+/// exchange with the topic's name as routing key), the queue or topic each message's `to`
+/// names (the anonymous relay), or the transaction coordinator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Route {
+    Queue,
+    Topic(String),
+    Anonymous,
+    Coordinator,
+}
+
+/// A topic subscription's queue, which only its link reads: durable ones outlive the link
+/// until the client unsubscribes by detaching with `closed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Subscription {
+    durable: bool,
+}
+
 struct Link {
     queue: String,
+    route: Route,
     direction: Direction,
     credit: u32,
     delivery_count: u32,
     incoming: Option<Incoming>,
+    selector: Option<Selector>,
+    subscription: Option<Subscription>,
+}
+
+#[derive(Default)]
+struct Transaction {
+    publishes: Vec<(Vec<String>, Vec<u8>)>,
+    settles: Vec<(String, u64, Outcome)>,
+    bytes: usize,
+}
+
+impl Transaction {
+    fn full(&self, more_bytes: usize) -> bool {
+        self.publishes.len() + self.settles.len() >= MAX_TRANSACTION_ITEMS
+            || self.bytes.saturating_add(more_bytes) > MAX_TRANSACTION_BYTES
+    }
 }
 
 struct Unsettled {
@@ -162,6 +215,9 @@ struct Connection<'b, 's> {
     outgoing_held: Reservation<'b>,
     next_link: usize,
     dynamic_queues: Vec<String>,
+    container_id: String,
+    transactions: BTreeMap<u64, Transaction>,
+    next_transaction: u64,
 }
 
 const DYNAMIC_FIELD: usize = 4;
@@ -194,54 +250,48 @@ fn delivery_bytes(body_bytes: usize, max_frame: u32) -> usize {
     )
 }
 
-fn message_body(payload: &[u8]) -> Result<Vec<u8>, String> {
-    let mut body = Vec::new();
-    for section in decode_all(payload)? {
-        match (section.descriptor(), &section) {
-            (Some(DATA_SECTION), Value::Described(_, inner)) => {
-                if let Value::Binary(bytes) = inner.as_ref() {
-                    body.extend_from_slice(bytes);
-                }
-            }
-            (Some(VALUE_SECTION), Value::Described(_, inner)) => match inner.as_ref() {
-                Value::String(text) => body.extend_from_slice(text.as_bytes()),
-                Value::Binary(bytes) => body.extend_from_slice(bytes),
-                other => encode(other, &mut body),
-            },
-            _ => {}
-        }
+fn transaction_id(value: &Value) -> Option<u64> {
+    match value {
+        Value::Binary(bytes) => bytes.as_slice().try_into().ok().map(u64::from_be_bytes),
+        _ => None,
     }
-    Ok(body)
 }
 
-fn outgoing_payload(queue: &str, message: &eggdb_queues::Message) -> Vec<u8> {
-    let mut out = Vec::with_capacity(message.body.len() + 64);
-    let header = Value::described(
-        HEADER_SECTION,
-        vec![
-            Value::Bool(true),
-            Value::Null,
-            Value::Null,
-            Value::Bool(message.receive_count <= 1),
-            Value::Uint(message.receive_count.saturating_sub(1)),
-        ],
-    );
-    encode(&header, &mut out);
-    encode(
-        &Value::described(
-            PROPERTIES_SECTION,
-            vec![Value::String(format!("{queue}-{}", message.id))],
-        ),
-        &mut out,
-    );
-    encode(
-        &Value::Described(
-            Box::new(Value::Ulong(DATA_SECTION)),
-            Box::new(Value::Binary(message.body.clone())),
-        ),
-        &mut out,
-    );
-    out
+fn transaction_of(state: &Value) -> Option<(u64, &Value)> {
+    (state.descriptor() == Some(TRANSACTIONAL_STATE)).then(|| state.field(0)).and_then(transaction_id).map(|id| (id, state.field(1)))
+}
+
+fn symbols(value: &Value) -> Vec<&str> {
+    match value {
+        Value::Array(items) | Value::List(items) => items.iter().filter_map(Value::text).collect(),
+        Value::Symbol(single) => vec![single.as_str()],
+        _ => Vec::new(),
+    }
+}
+
+fn selector_of(filter: &Value) -> Result<Option<Selector>, String> {
+    let Value::Map(entries) = filter else {
+        return Ok(None);
+    };
+    for (_, entry) in entries {
+        let Value::Described(descriptor, inner) = entry else {
+            continue;
+        };
+        let named = descriptor.unsigned() == Some(SELECTOR_FILTER) || descriptor.text() == Some(SELECTOR_FILTER_NAME);
+        if let (true, Some(text)) = (named, inner.text()) {
+            return Selector::parse(text).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn subscription_queue(container_id: &str, link_name: &str, shared: bool) -> String {
+    let name = link_name.split('|').next().unwrap_or_default();
+    if shared {
+        format!("subscription.shared.{name}")
+    } else {
+        format!("subscription.{container_id}.{name}")
+    }
 }
 
 impl Connection<'_, '_> {
@@ -336,6 +386,7 @@ impl Connection<'_, '_> {
             .unsigned()
             .filter(|ms| *ms > 0)
             .map(Duration::from_millis);
+        self.container_id = body.field(0).text().unwrap_or_default().chars().take(128).collect();
         self.send(
             FRAME_AMQP,
             0,
@@ -347,6 +398,12 @@ impl Connection<'_, '_> {
                     Value::Uint(MAX_FRAME),
                     Value::Ushort(CHANNEL_MAX),
                     Value::Uint(u32::try_from(LOCAL_IDLE_TIMEOUT.as_millis()).unwrap_or(u32::MAX)),
+                    Value::Null,
+                    Value::Null,
+                    Value::Array(vec![
+                        Value::Symbol("ANONYMOUS-RELAY".to_owned()),
+                        Value::Symbol("SHARED-SUBS".to_owned()),
+                    ]),
                 ],
             ),
         );
@@ -362,7 +419,8 @@ impl Connection<'_, '_> {
             Some(DISPOSITION) => self.disposition(channel, body),
             Some(DETACH) => {
                 let handle = self.handle_of(body)?;
-                self.detach(channel, handle);
+                let closed = body.field(1).flag().unwrap_or(false);
+                self.detach(channel, handle, closed);
                 self.send(
                     FRAME_AMQP,
                     channel,
@@ -467,14 +525,33 @@ impl Connection<'_, '_> {
         } else {
             body.field(6)
         };
+        let link_name = body.field(0).text().unwrap_or_default().to_owned();
+        if !client_receives && terminus.descriptor() == Some(COORDINATOR) {
+            return self.attach_coordinator(channel, handle, body);
+        }
         let dynamic = terminus.field(DYNAMIC_FIELD).flag() == Some(true);
-        let mut address = terminus
-            .field(0)
-            .text()
-            .unwrap_or_default()
-            .trim_start_matches("/queues/")
-            .trim_start_matches("/queue/")
-            .to_owned();
+        let written = terminus.field(0).text().unwrap_or_default();
+        let capabilities = symbols(terminus.field(if client_receives {
+            SOURCE_CAPABILITIES_FIELD
+        } else {
+            TARGET_CAPABILITIES_FIELD
+        }));
+        let topic = names_topic(written)
+            || capabilities
+                .iter()
+                .any(|capability| matches!(*capability, "topic" | "temporary-topic"));
+        let shared = capabilities.contains(&"shared");
+        let durable = terminus.field(1).unsigned().unwrap_or(0) > 0
+            || terminus.field(2).text() == Some("never");
+        let mut address = routable_address(written);
+        let mut route = Route::Queue;
+        let mut subscription = None;
+        let mut reply_source = None;
+        let selector = if client_receives {
+            selector_of(terminus.field(SOURCE_FILTER_FIELD))
+        } else {
+            Ok(None)
+        };
         if dynamic {
             if self.dynamic_queues.len() >= MAX_DYNAMIC_QUEUES {
                 return Err("this connection holds too many dynamic queues".to_owned());
@@ -483,16 +560,67 @@ impl Connection<'_, '_> {
                 "amq.dynamic-{}",
                 self.broker.next_name.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             );
-            self.dynamic_queues.push(address.clone());
+            if !topic {
+                self.dynamic_queues.push(address.clone());
+            }
         }
-        let declared = if address.is_empty() {
-            Err("the link has no queue address".to_owned())
-        } else {
-            self.broker
+        let declared = match (&selector, client_receives) {
+            (Err(description), _) => Err(format!("the selector cannot be read: {description}")),
+            (Ok(_), false) if topic => {
+                route = Route::Topic(address.clone());
+                Ok(())
+            }
+            (Ok(_), false) if address.is_empty() && !dynamic => {
+                route = Route::Anonymous;
+                Ok(())
+            }
+            (Ok(_), true) if topic => {
+                let queue = if durable || shared {
+                    subscription_queue(&self.container_id, &link_name, shared)
+                } else {
+                    if self.dynamic_queues.len() >= MAX_DYNAMIC_QUEUES {
+                        return Err("this connection holds too many dynamic queues".to_owned());
+                    }
+                    let queue = format!(
+                        "amq.subscription-{}",
+                        self.broker.next_name.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    );
+                    self.dynamic_queues.push(queue.clone());
+                    queue
+                };
+                subscription = Some(Subscription { durable: durable || shared });
+                let topic_name = std::mem::replace(&mut address, queue);
+                self.broker
+                    .queues
+                    .declare(&address)
+                    .map_err(|error| error.to_string())
+                    .and_then(|_| {
+                        self.broker
+                            .bind(TOPIC_EXCHANGE, &address, &topic_name)
+                            .then_some(())
+                            .ok_or_else(|| "the topic exchange is missing".to_owned())
+                    })
+            }
+            (Ok(_), true) if address.is_empty() && !dynamic && !link_name.is_empty() => {
+                let queue = subscription_queue(&self.container_id, &link_name, shared);
+                if self.broker.queues.exists(&queue).unwrap_or(false) {
+                    subscription = Some(Subscription { durable: true });
+                    reply_source = Some(Value::described(SOURCE, vec![Value::String(queue.clone())]));
+                    address = queue;
+                    Ok(())
+                } else {
+                    Err(format!("there is no subscription named {link_name}"))
+                }
+            }
+            _ if address.is_empty() => Err("the link has no queue address".to_owned()),
+            _ => self
+                .broker
                 .queues
                 .declare(&address)
                 .map_err(|error| error.to_string())
+                .map(|_| ()),
         };
+        let selector = selector.unwrap_or(None);
         let snd_settle_mode = body.field(3).unsigned().unwrap_or(2);
         let reply = vec![
             body.field(0).clone(),
@@ -501,6 +629,7 @@ impl Connection<'_, '_> {
             Value::Ubyte(u8::try_from(snd_settle_mode).unwrap_or(2)),
             Value::Ubyte(0),
             match (declared.is_ok(), client_receives) {
+                (true, true) if reply_source.is_some() => reply_source.clone().unwrap_or(Value::Null),
                 (true, true) if dynamic => with_address(body.field(5), &address),
                 (true, _) | (false, true) => body.field(5).clone(),
                 (false, false) => Value::Null,
@@ -537,6 +666,7 @@ impl Connection<'_, '_> {
         let link = if client_receives {
             Link {
                 queue: address,
+                route: Route::Queue,
                 direction: Direction::ToClient {
                     presettled: snd_settle_mode == 1,
                     drain: false,
@@ -544,6 +674,8 @@ impl Connection<'_, '_> {
                 credit: 0,
                 delivery_count: 0,
                 incoming: None,
+                selector,
+                subscription,
             }
         } else {
             let delivery_count = body
@@ -553,10 +685,13 @@ impl Connection<'_, '_> {
                 .unwrap_or(0);
             Link {
                 queue: address,
+                route,
                 direction: Direction::FromClient,
                 credit: LINK_CREDIT,
                 delivery_count,
                 incoming: None,
+                selector: None,
+                subscription: None,
             }
         };
         let session = self.session(channel)?;
@@ -640,11 +775,15 @@ impl Connection<'_, '_> {
                     delivery_id,
                     settled: false,
                     bytes: Vec::new(),
+                    transaction: None,
                 }
             }
         };
         let mut incoming = incoming;
         incoming.settled |= body.field(4).flag().unwrap_or(false);
+        incoming.transaction = incoming
+            .transaction
+            .or_else(|| transaction_of(body.field(TRANSFER_STATE_FIELD)).map(|(id, _)| id));
         if body.field(9).flag().unwrap_or(false) {
             return Ok(());
         }
@@ -657,23 +796,31 @@ impl Connection<'_, '_> {
             return Ok(());
         }
         let queue = link.queue.clone();
+        let route = link.route.clone();
         let top_up = link.credit < LINK_CREDIT / 2;
         if top_up {
             link.credit = LINK_CREDIT;
         }
-        let stored = message_body(&incoming.bytes).and_then(|body| {
-            self.broker
-                .queues
-                .send(&queue, &body, 0, now_ms())
-                .map_err(|error| error.to_string())
-        });
-        if !incoming.settled {
-            let state = match &stored {
-                Ok(_) => Value::described(ACCEPTED, Vec::new()),
-                Err(description) => {
-                    Value::described(REJECTED, vec![error("amqp:internal-error", description)])
+        let state = if route == Route::Coordinator {
+            self.coordinate(&incoming.bytes)
+        } else {
+            match self.store(&route, &queue, &incoming.bytes, incoming.transaction) {
+                Ok(()) => {
+                    let accepted = Value::described(ACCEPTED, Vec::new());
+                    match incoming.transaction {
+                        Some(id) => Value::described(
+                            TRANSACTIONAL_STATE,
+                            vec![Value::Binary(id.to_be_bytes().to_vec()), accepted],
+                        ),
+                        None => accepted,
+                    }
                 }
-            };
+                Err((condition, description)) => {
+                    Value::described(REJECTED, vec![error(condition, &description)])
+                }
+            }
+        };
+        if !incoming.settled {
             let disposition = performative(
                 DISPOSITION,
                 vec![
@@ -692,6 +839,162 @@ impl Connection<'_, '_> {
             self.send(FRAME_AMQP, channel, &flow);
         }
         Ok(())
+    }
+
+    fn attach_coordinator(&mut self, channel: u16, handle: u32, body: &Value) -> Result<(), String> {
+        let reply = vec![
+            body.field(0).clone(),
+            Value::Uint(handle),
+            Value::Bool(true),
+            Value::Ubyte(u8::try_from(body.field(3).unsigned().unwrap_or(2)).unwrap_or(2)),
+            Value::Ubyte(0),
+            body.field(5).clone(),
+            body.field(6).clone(),
+        ];
+        self.send(FRAME_AMQP, channel, &performative(ATTACH, reply));
+        let delivery_count = body
+            .field(9)
+            .unsigned()
+            .and_then(|count| u32::try_from(count).ok())
+            .unwrap_or(0);
+        let session = self.session(channel)?;
+        session.links.insert(
+            handle,
+            Link {
+                queue: String::new(),
+                route: Route::Coordinator,
+                direction: Direction::FromClient,
+                credit: LINK_CREDIT,
+                delivery_count,
+                incoming: None,
+                selector: None,
+                subscription: None,
+            },
+        );
+        let session = &self.sessions[&channel];
+        let flow = self.link_flow(session, handle, &session.links[&handle], false);
+        self.send(FRAME_AMQP, channel, &flow);
+        Ok(())
+    }
+
+    fn store(
+        &mut self,
+        route: &Route,
+        link_queue: &str,
+        payload: &[u8],
+        transaction: Option<u64>,
+    ) -> Result<(), (&'static str, String)> {
+        let internal = |description: String| ("amqp:internal-error", description);
+        let message = inbound(payload).map_err(|description| ("amqp:decode-error", description))?;
+        let (exchange, routing_key) = match route {
+            Route::Queue => (String::new(), link_queue.to_owned()),
+            Route::Topic(topic) => (TOPIC_EXCHANGE.to_owned(), topic.clone()),
+            Route::Anonymous => {
+                let to = message
+                    .to
+                    .clone()
+                    .filter(|to| !to.is_empty())
+                    .ok_or_else(|| ("amqp:not-found", "a message on the anonymous relay names no to address".to_owned()))?;
+                if message.destination_kind == Some(DestinationKind::Topic) {
+                    (TOPIC_EXCHANGE.to_owned(), to)
+                } else {
+                    self.broker.queues.declare(&to).map_err(|error| internal(error.to_string()))?;
+                    (String::new(), to)
+                }
+            }
+            Route::Coordinator => return Err(internal("the coordinator takes no messages".to_owned())),
+        };
+        let queues = self
+            .broker
+            .route(&exchange, &routing_key, &[])
+            .ok_or_else(|| ("amqp:not-found", format!("there is no exchange {exchange}")))?;
+        let stored = encode_message(&exchange, &routing_key, &message.properties, &message.body);
+        if let Some(id) = transaction {
+            let transaction = self
+                .transactions
+                .get_mut(&id)
+                .ok_or_else(|| ("amqp:transaction:unknown-id", format!("transaction {id} is not open")))?;
+            if transaction.full(stored.len()) {
+                return Err((RESOURCE_LIMIT_EXCEEDED, "the transaction holds too much".to_owned()));
+            }
+            transaction.bytes = transaction.bytes.saturating_add(stored.len());
+            transaction.publishes.push((queues, stored));
+            return Ok(());
+        }
+        let now = now_ms();
+        for queue in queues {
+            if self.broker.queues.exists(&queue).unwrap_or(false) {
+                self.broker
+                    .queues
+                    .send(&queue, &stored, 0, now)
+                    .map_err(|error| internal(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn coordinate(&mut self, payload: &[u8]) -> Value {
+        let unknown = |description: &str| {
+            Value::described(
+                REJECTED,
+                vec![error("amqp:transaction:unknown-id", description)],
+            )
+        };
+        let request = decode_all(payload).ok().and_then(|sections| {
+            sections.into_iter().find_map(|section| match section {
+                Value::Described(descriptor, inner) if descriptor.unsigned() == Some(VALUE_SECTION) => Some(*inner),
+                _ => None,
+            })
+        });
+        let Some(request) = request else {
+            return unknown("the coordinator expects declare or discharge");
+        };
+        match request.descriptor() {
+            Some(DECLARE) => {
+                if self.transactions.len() >= MAX_TRANSACTIONS {
+                    return Value::described(
+                        REJECTED,
+                        vec![error(RESOURCE_LIMIT_EXCEEDED, "this connection holds too many open transactions")],
+                    );
+                }
+                self.next_transaction = self.next_transaction.wrapping_add(1);
+                let id = self.next_transaction;
+                self.transactions.insert(id, Transaction::default());
+                Value::described(DECLARED, vec![Value::Binary(id.to_be_bytes().to_vec())])
+            }
+            Some(DISCHARGE) => {
+                let Some(transaction) = transaction_id(request.field(0)).and_then(|id| self.transactions.remove(&id)) else {
+                    return unknown("the transaction is not open");
+                };
+                let fail = request.field(1).flag().unwrap_or(false);
+                self.finish(transaction, !fail);
+                Value::described(ACCEPTED, Vec::new())
+            }
+            _ => unknown("the coordinator expects declare or discharge"),
+        }
+    }
+
+    fn finish(&self, transaction: Transaction, commit: bool) {
+        let now = now_ms();
+        let queues = &self.broker.queues;
+        if commit {
+            for (targets, stored) in &transaction.publishes {
+                for queue in targets {
+                    if queues.exists(queue).unwrap_or(false) {
+                        let _ = queues.send(queue, stored, 0, now);
+                    }
+                }
+            }
+        }
+        for (queue, id, outcome) in transaction.settles {
+            let _ = match (commit, outcome) {
+                (false, _) => queues.release(&queue, id, now),
+                (true, Outcome::DeadLetter) => queues.dead_letter(&queue, id, now),
+                (true, Outcome::Accepted) => queues.ack(&queue, id),
+                (true, Outcome::Failed) => queues.release(&queue, id, now),
+                (true, Outcome::Untouched) => queues.unlease(&queue, id, now),
+            };
+        }
     }
 
     fn disposition(&mut self, channel: u16, body: &Value) -> Result<(), String> {
@@ -713,7 +1016,11 @@ impl Connection<'_, '_> {
         }
         let settled = body.field(3).flag().unwrap_or(false);
         let state = body.field(4).clone();
-        let outcome = Outcome::of(&state);
+        let transaction = transaction_of(&state).map(|(id, _)| id);
+        let outcome = match transaction_of(&state) {
+            Some((_, inner)) => Outcome::of(inner),
+            None => Outcome::of(&state),
+        };
         let session = self.session(channel)?;
         let mut done = Vec::new();
         let mut id = first;
@@ -725,6 +1032,18 @@ impl Connection<'_, '_> {
                 break;
             }
             id = id.wrapping_add(1);
+        }
+        if let Some(id) = transaction
+            && let Some(open) = self.transactions.get_mut(&id)
+        {
+            for unsettled in done {
+                if open.full(0) {
+                    let _ = self.broker.queues.release(&unsettled.queue, unsettled.id, now_ms());
+                    continue;
+                }
+                open.settles.push((unsettled.queue, unsettled.id, outcome));
+            }
+            done = Vec::new();
         }
         let now = now_ms();
         for unsettled in done {
@@ -762,11 +1081,11 @@ impl Connection<'_, '_> {
         }
     }
 
-    fn detach(&mut self, channel: u16, handle: u32) {
+    fn detach(&mut self, channel: u16, handle: u32, closed: bool) {
         let Some(session) = self.sessions.get_mut(&channel) else {
             return;
         };
-        session.links.remove(&handle);
+        let removed = session.links.remove(&handle);
         let ids: Vec<u32> = session
             .unsettled
             .iter()
@@ -783,6 +1102,16 @@ impl Connection<'_, '_> {
             })
             .collect();
         self.release_all(released);
+        if let Some(Link {
+            queue,
+            subscription: Some(Subscription { durable }),
+            ..
+        }) = removed
+            && (!durable || closed)
+        {
+            self.dynamic_queues.retain(|dynamic| *dynamic != queue);
+            self.broker.delete_queue(&queue);
+        }
     }
 
     fn send_transfer(
@@ -835,6 +1164,8 @@ impl Connection<'_, '_> {
                         link.credit.min(MAX_PER_PUMP),
                         presettled,
                         drain,
+                        link.selector.clone(),
+                        link.subscription.is_some(),
                     ));
                 }
             }
@@ -845,9 +1176,14 @@ impl Connection<'_, '_> {
         let start = self.next_link % wanted.len();
         wanted.rotate_left(start);
         let mut delivered_this_round = false;
-        for (position, (channel, handle, queue, room, presettled, drain)) in
+        for (position, (channel, handle, queue, room, presettled, drain, selector, owns_queue)) in
             wanted.into_iter().enumerate()
         {
+            let scan = if selector.is_some() {
+                SELECTOR_SCAN
+            } else {
+                room as usize
+            };
             let mut refused = false;
             let messages = if room > 0 {
                 let broker = self.broker;
@@ -858,7 +1194,7 @@ impl Connection<'_, '_> {
                     .queues
                     .receive_fitting(
                         &queue,
-                        room as usize,
+                        scan,
                         LEASE_MS,
                         now_ms(),
                         &mut |body_bytes: usize| {
@@ -882,8 +1218,25 @@ impl Connection<'_, '_> {
                 return;
             }
             let mut sent = Vec::new();
+            let mut passed_over = Vec::new();
             let mut unsent = messages.iter();
             for message in unsent.by_ref() {
+                if sent.len() >= room as usize {
+                    passed_over.push(message.id);
+                    continue;
+                }
+                let stored = StoredMessage::read(&queue, &message.body);
+                if let Some(selector) = &selector {
+                    let properties = BasicProperties::decode(stored.properties);
+                    if !selector.chooses(&|name| selector_field(&properties, name)) {
+                        if owns_queue {
+                            let _ = self.broker.queues.ack(&queue, message.id);
+                        } else {
+                            passed_over.push(message.id);
+                        }
+                        continue;
+                    }
+                }
                 let Some(session) = self.sessions.get_mut(&channel) else {
                     let _ = self.broker.queues.unlease(&queue, message.id, now_ms());
                     break;
@@ -904,7 +1257,13 @@ impl Connection<'_, '_> {
                         },
                     );
                 }
-                let payload = outgoing_payload(&queue, message);
+                let payload = transfer_payload(
+                    &queue,
+                    message.id,
+                    message.receive_count,
+                    stored.properties,
+                    stored.body,
+                );
                 self.send_transfer(
                     channel,
                     handle,
@@ -919,6 +1278,9 @@ impl Connection<'_, '_> {
             for message in unsent {
                 let _ = self.broker.queues.unlease(&queue, message.id, now);
             }
+            for id in passed_over {
+                let _ = self.broker.queues.unlease(&queue, id, now);
+            }
             let delivered_any = !sent.is_empty();
             delivered_this_round |= delivered_any;
             if presettled {
@@ -932,7 +1294,7 @@ impl Connection<'_, '_> {
                     .saturating_add(usize::from(delivered_any));
                 return;
             }
-            if drain && messages.len() < room as usize {
+            if drain && sent.len() < room as usize {
                 let Some(session) = self.sessions.get_mut(&channel) else {
                     continue;
                 };
@@ -1001,6 +1363,9 @@ pub(crate) fn serve_stream(
         outgoing_held: config.memory_budget.empty_reservation(),
         next_link: 0,
         dynamic_queues: Vec::new(),
+        container_id: String::new(),
+        transactions: BTreeMap::new(),
+        next_transaction: 0,
     };
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
@@ -1104,8 +1469,11 @@ pub(crate) fn serve_stream(
     for (_, session) in sessions {
         connection.release_all(session.unsettled);
     }
+    for (_, transaction) in std::mem::take(&mut connection.transactions) {
+        connection.finish(transaction, false);
+    }
     for queue in std::mem::take(&mut connection.dynamic_queues) {
-        let _ = connection.broker.queues.delete(&queue);
+        connection.broker.delete_queue(&queue);
     }
     outcome
 }

@@ -1086,3 +1086,4 @@ its full title with its status.
 - [D1059](decisions/D1059.md) Code-only batch 707 (M16): a benchmark against Mosquitto and EMQX
 - [D1060](decisions/D1060.md) Code-only batch 708 (M16): JetStream mirrors and sources from other servers
 - [D1061](decisions/D1061.md) Code-only batch 709 (M16): benchmarks against nats-server and ElasticMQ
+- [D1062](decisions/D1062.md) Code-only batch 710 (M16): JMS clients over AMQP 1.0

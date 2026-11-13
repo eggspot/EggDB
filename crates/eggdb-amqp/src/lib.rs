@@ -9,7 +9,11 @@
 //! The same listener serves AMQP 1.0 (D217), told apart by the protocol header: SASL PLAIN,
 //! sessions, links to queues in both directions with credit-based flow control, multi-frame
 //! transfers, and settlement with the accepted, rejected, released and modified outcomes, on the
-//! same queues.
+//! same queues. Messages keep their properties, application properties and annotations across
+//! both protocols; topics (the `topic` capability) fan out through `amq.topic` to subscription
+//! queues, durable ones kept until unsubscribed; the anonymous relay routes by each message's
+//! `to`; JMS selectors filter receivers; and local transactions run through the coordinator, so
+//! JMS clients work unchanged (D1062).
 
 mod amqp1;
 mod codec;

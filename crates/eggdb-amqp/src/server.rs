@@ -387,6 +387,31 @@ impl<'s> Broker<'s> {
         }
     }
 
+    /// Deletes `queue` with its messages, and forgets its bindings and settings.
+    pub(crate) fn delete_queue(&self, queue: &str) {
+        let _ = self.queues.delete(queue);
+        self.forget_queue(queue);
+    }
+
+    /// Binds `queue` to `exchange` with `key`; false when there is no such exchange.
+    pub(crate) fn bind(&self, exchange: &str, queue: &str, key: &str) -> bool {
+        let mut exchanges = self
+            .exchanges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(found) = exchanges.get_mut(exchange) else {
+            return false;
+        };
+        if !found.bindings.iter().any(|binding| binding.queue == queue && binding.key == key) {
+            found.bindings.push(Binding {
+                key: key.to_owned(),
+                queue: queue.to_owned(),
+                arguments: Vec::new(),
+            });
+        }
+        true
+    }
+
     fn forget_queue(&self, queue: &str) {
         self.policies
             .lock()
@@ -409,7 +434,7 @@ impl<'s> Broker<'s> {
         }
     }
 
-    fn route(
+    pub(crate) fn route(
         &self,
         exchange: &str,
         routing_key: &str,
@@ -500,11 +525,11 @@ pub(crate) fn encode_message(
     out.bytes
 }
 
-struct StoredMessage<'m> {
-    exchange: String,
-    routing_key: String,
-    properties: &'m [u8],
-    body: &'m [u8],
+pub(crate) struct StoredMessage<'m> {
+    pub(crate) exchange: String,
+    pub(crate) routing_key: String,
+    pub(crate) properties: &'m [u8],
+    pub(crate) body: &'m [u8],
 }
 
 impl<'m> StoredMessage<'m> {
@@ -521,7 +546,7 @@ impl<'m> StoredMessage<'m> {
         })
     }
 
-    fn read(queue: &str, stored: &'m [u8]) -> Self {
+    pub(crate) fn read(queue: &str, stored: &'m [u8]) -> Self {
         Self::framed(stored).unwrap_or_else(|_| Self {
             exchange: String::new(),
             routing_key: queue.to_owned(),

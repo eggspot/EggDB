@@ -549,8 +549,8 @@ fn messages_flow_in_and_out_of_a_queue_with_settlement() {
     assert_eq!(
         sections[2],
         Value::Described(
-            Box::new(Value::Ulong(0x75)),
-            Box::new(Value::Binary(b"hel".to_vec()))
+            Box::new(Value::Ulong(0x77)),
+            Box::new(Value::String("hel".to_owned()))
         )
     );
     let queues = eggdb_queues::Queues::new(&keyspace);
@@ -558,6 +558,227 @@ fn messages_flow_in_and_out_of_a_queue_with_settlement() {
         queues.depth("orders", u64::MAX).unwrap(),
         eggdb_queues::Depth::default()
     );
+}
+
+fn jms_message(priority: u8, region: &str, body: &str) -> (Vec<u8>, Vec<u8>) {
+    let mut kept = Vec::new();
+    encode(
+        &Value::Described(
+            Box::new(Value::Ulong(0x72)),
+            Box::new(Value::Map(vec![(
+                Value::Symbol("x-opt-jms-dest".to_owned()),
+                Value::Signed(1),
+            )])),
+        ),
+        &mut kept,
+    );
+    encode(
+        &Value::described(
+            0x73,
+            vec![
+                Value::String(format!("ID:{region}")),
+                Value::Null,
+                Value::String("prices".to_owned()),
+            ],
+        ),
+        &mut kept,
+    );
+    encode(
+        &Value::Described(
+            Box::new(Value::Ulong(0x74)),
+            Box::new(Value::Map(vec![
+                (Value::String("region".to_owned()), Value::String(region.to_owned())),
+                (Value::String("quantity".to_owned()), Value::Signed(3)),
+            ])),
+        ),
+        &mut kept,
+    );
+    kept.extend(data(body.as_bytes()));
+    let mut whole = Vec::new();
+    encode(
+        &Value::described(0x70, vec![Value::Bool(true), Value::Ubyte(priority)]),
+        &mut whole,
+    );
+    whole.extend_from_slice(&kept);
+    (whole, kept)
+}
+
+fn transfer(handle: u32, delivery_id: u32, state: Value, payload: &[u8]) -> Vec<u8> {
+    frame(
+        0,
+        0,
+        0x14,
+        vec![
+            Value::Uint(handle),
+            Value::Uint(delivery_id),
+            Value::Binary(delivery_id.to_be_bytes().to_vec()),
+            Value::Uint(0),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Null,
+            state,
+        ],
+        payload,
+    )
+}
+
+fn coordinator_request(code: u64, fields: Vec<Value>) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode(
+        &Value::Described(
+            Box::new(Value::Ulong(0x77)),
+            Box::new(Value::described(code, fields)),
+        ),
+        &mut out,
+    );
+    out
+}
+
+#[test]
+fn jms_topics_selectors_and_transactions_keep_every_section_as_sent() {
+    let keyspace = MemoryKeyspace::default();
+    let mut connect = AMQP_HEADER.to_vec();
+    connect.extend(frame(
+        0,
+        0,
+        0x10,
+        vec![Value::String("jms-client".to_owned()), Value::Null, Value::Uint(1 << 16)],
+        &[],
+    ));
+    connect.extend(frame(
+        0,
+        0,
+        0x11,
+        vec![Value::Null, Value::Uint(0), Value::Uint(100), Value::Uint(100)],
+        &[],
+    ));
+    let selector = Value::Map(vec![(
+        Value::Symbol("jms-selector".to_owned()),
+        Value::Described(
+            Box::new(Value::Ulong(0x0000_468c_0000_0004)),
+            Box::new(Value::String("region = 'eu' AND JMSPriority > 4 AND quantity = 3".to_owned())),
+        ),
+    )]);
+    let source = Value::described(
+        0x28,
+        vec![
+            Value::String("prices".to_owned()),
+            Value::Uint(2),
+            Value::Symbol("never".to_owned()),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            selector,
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![Value::Symbol("topic".to_owned())]),
+        ],
+    );
+    connect.extend(frame(
+        0,
+        0,
+        0x12,
+        vec![
+            Value::String("prices-eu".to_owned()),
+            Value::Uint(0),
+            Value::Bool(true),
+            Value::Ubyte(0),
+            Value::Ubyte(0),
+            source,
+            Value::described(0x29, Vec::new()),
+        ],
+        &[],
+    ));
+    connect.extend(frame(
+        0,
+        0,
+        0x13,
+        vec![
+            Value::Uint(0),
+            Value::Uint(100),
+            Value::Uint(0),
+            Value::Uint(100),
+            Value::Uint(0),
+            Value::Uint(0),
+            Value::Uint(10),
+        ],
+        &[],
+    ));
+    for (handle, name, target) in [
+        (1, "relay", Value::described(0x29, Vec::new())),
+        (
+            2,
+            "coordinator",
+            Value::described(
+                0x30,
+                vec![Value::Array(vec![Value::Symbol("amqp:local-transactions".to_owned())])],
+            ),
+        ),
+    ] {
+        connect.extend(frame(
+            0,
+            0,
+            0x12,
+            vec![
+                Value::String(name.to_owned()),
+                Value::Uint(handle),
+                Value::Bool(false),
+                Value::Ubyte(0),
+                Value::Ubyte(0),
+                Value::described(0x28, Vec::new()),
+                target,
+                Value::Null,
+                Value::Null,
+                Value::Uint(0),
+            ],
+            &[],
+        ));
+    }
+    let declare = transfer(2, 0, Value::Null, &coordinator_request(0x31, Vec::new()));
+    let transaction = Value::Binary(1u64.to_be_bytes().to_vec());
+    let (eu, eu_kept) = jms_message(7, "eu", "eu price");
+    let (us, _) = jms_message(9, "us", "us price");
+    let staged = [
+        transfer(
+            1,
+            1,
+            Value::described(0x34, vec![transaction.clone()]),
+            &eu,
+        ),
+        transfer(1, 2, Value::Null, &us),
+    ]
+    .concat();
+    let discharge = transfer(
+        2,
+        3,
+        Value::Null,
+        &coordinator_request(0x32, vec![transaction, Value::Bool(false)]),
+    );
+    let close = frame(0, 0, 0x18, Vec::new(), &[]);
+    let replies = run(&keyspace, vec![sasl("secret"), connect, declare, staged, discharge, close]);
+    let open = replies.iter().find(|(code, _, _)| *code == 0x10).unwrap();
+    assert!(matches!(open.1.field(7), Value::Array(capabilities) if capabilities.contains(&Value::Symbol("ANONYMOUS-RELAY".to_owned()))));
+    let states: Vec<&Value> = replies
+        .iter()
+        .filter(|(code, _, _)| *code == 0x15)
+        .map(|(_, disposition, _)| disposition.field(4))
+        .collect();
+    assert_eq!(states[0].descriptor(), Some(0x33), "{states:?}");
+    assert_eq!(states[1].descriptor(), Some(0x34), "{states:?}");
+    assert_eq!(states[2].descriptor(), Some(0x24), "{states:?}");
+    assert_eq!(states[3].descriptor(), Some(0x24), "{states:?}");
+    let delivered: Vec<&Vec<u8>> = replies
+        .iter()
+        .filter(|(code, transfer, _)| *code == 0x14 && transfer.field(0) == &Value::Uint(0))
+        .map(|(_, _, payload)| payload)
+        .collect();
+    assert_eq!(delivered.len(), 1, "only the committed message the selector chooses arrives");
+    let (header, used) = decode_first(delivered[0]).unwrap();
+    assert_eq!(header.field(1), &Value::Ubyte(7));
+    assert_eq!(&delivered[0][used..], eu_kept.as_slice());
+    let queues = eggdb_queues::Queues::new(&keyspace);
+    assert!(queues.exists("subscription.jms-client.prices-eu").unwrap(), "a durable subscription outlives its connection");
 }
 
 #[test]

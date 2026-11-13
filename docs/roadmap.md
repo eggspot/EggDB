@@ -1847,8 +1847,12 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `amqp:modified`, and the `idle-time-out` enforced and heartbeats sent (D217, D352). Dynamic nodes: **code
   written, unbuilt** (code-only mode, 2026-11-11, D538); the idle time-out enforced: **code
   written, unbuilt** (D539); `amqp:modified` and `released`: **code written, unbuilt** (code-only mode,
-  2026-11-12, D627).
-- JMS clients over AMQP 1.0, and Azure Service Bus-style use after D58's legal check (D33).
+  2026-11-12, D627); annotations and properties end to end, and local transactions: **code written, unbuilt**
+  (code-only mode, 2026-11-13, D1062); heartbeats are sent at half the client's `idle-time-out`. Left: link
+  resumption.
+- JMS clients over AMQP 1.0, and Azure Service Bus-style use after D58's legal check (D33). JMS clients (topics,
+  durable and shared subscriptions, selectors, the anonymous relay, transacted sessions): **code written,
+  unbuilt** (code-only mode, 2026-11-13, D1062); Azure Service Bus-style use waits for D58's legal check.
 - STOMP `/exchange/` destinations and selectors (D217). **Code written, unbuilt** (code-only mode,
   2026-11-11, D477); selectors on `/queue/` subscriptions are not written.
 - A dead-letter queue for rejected messages, and an in-process inbox for embedded consumers

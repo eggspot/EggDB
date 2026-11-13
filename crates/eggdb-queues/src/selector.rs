@@ -1,17 +1,25 @@
+//! JMS message selectors, shared by every messaging protocol that filters by them: STOMP's
+//! `selector` header and AMQP 1.0's `jms-selector` source filter.
+
 const MAX_SELECTOR_BYTES: usize = 4096;
 const MAX_DEPTH: usize = 32;
 
+/// A value a selector reads: a literal, a message property or a message header.
 #[derive(Debug, Clone, PartialEq)]
-enum Literal {
+pub enum SelectorValue {
+    /// Absent, or SQL's `NULL`.
     Null,
+    /// `TRUE` or `FALSE`.
     Boolean(bool),
+    /// A number; exact and approximate numerics are compared by value.
     Number(f64),
+    /// A string.
     Text(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum Operand {
-    Literal(Literal),
+    Literal(SelectorValue),
     Header(String),
 }
 
@@ -55,10 +63,10 @@ enum Condition {
     Value(Operand),
 }
 
-/// A JMS-style message selector (a subset of SQL-92 over message headers), as ActiveMQ and
-/// Artemis take it in a `SUBSCRIBE` frame's `selector` header.
+/// A JMS message selector: the subset of SQL-92 that JMS defines over a message's headers and
+/// properties, as STOMP's `selector` header and AMQP 1.0's `jms-selector` filter carry it.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Selector {
+pub struct Selector {
     condition: Condition,
 }
 
@@ -225,15 +233,15 @@ impl Parser {
         let token = self.peek().cloned().ok_or("the selector ends too soon")?;
         self.at += 1;
         Ok(match token {
-            Token::Text(text) => Operand::Literal(Literal::Text(text)),
-            Token::Number(number) => Operand::Literal(Literal::Number(number)),
+            Token::Text(text) => Operand::Literal(SelectorValue::Text(text)),
+            Token::Number(number) => Operand::Literal(SelectorValue::Number(number)),
             Token::Word(word) if word.eq_ignore_ascii_case("true") => {
-                Operand::Literal(Literal::Boolean(true))
+                Operand::Literal(SelectorValue::Boolean(true))
             }
             Token::Word(word) if word.eq_ignore_ascii_case("false") => {
-                Operand::Literal(Literal::Boolean(false))
+                Operand::Literal(SelectorValue::Boolean(false))
             }
-            Token::Word(word) if word.eq_ignore_ascii_case("null") => Operand::Literal(Literal::Null),
+            Token::Word(word) if word.eq_ignore_ascii_case("null") => Operand::Literal(SelectorValue::Null),
             Token::Word(word) => Operand::Header(word),
             other => return Err(format!("the selector has an unexpected {other:?}")),
         })
@@ -336,44 +344,43 @@ impl Parser {
     }
 }
 
-fn value_of(operand: &Operand, headers: &[(String, String)]) -> Literal {
+type Lookup<'l> = &'l dyn Fn(&str) -> SelectorValue;
+
+fn value_of(operand: &Operand, headers: Lookup<'_>) -> SelectorValue {
     match operand {
         Operand::Literal(literal) => literal.clone(),
-        Operand::Header(name) => headers
-            .iter()
-            .find(|(header, _)| header == name)
-            .map_or(Literal::Null, |(_, value)| Literal::Text(value.clone())),
+        Operand::Header(name) => headers(name),
     }
 }
 
-fn number_of(literal: &Literal) -> Option<f64> {
+fn number_of(literal: &SelectorValue) -> Option<f64> {
     match literal {
-        Literal::Number(number) => Some(*number),
-        Literal::Text(text) => text.trim().parse().ok(),
+        SelectorValue::Number(number) => Some(*number),
+        SelectorValue::Text(text) => text.trim().parse().ok(),
         _ => None,
     }
 }
 
-fn text_of(literal: &Literal) -> Option<String> {
+fn text_of(literal: &SelectorValue) -> Option<String> {
     match literal {
-        Literal::Text(text) => Some(text.clone()),
-        Literal::Boolean(flag) => Some(flag.to_string()),
-        Literal::Number(number) => Some(number.to_string()),
-        Literal::Null => None,
+        SelectorValue::Text(text) => Some(text.clone()),
+        SelectorValue::Boolean(flag) => Some(flag.to_string()),
+        SelectorValue::Number(number) => Some(number.to_string()),
+        SelectorValue::Null => None,
     }
 }
 
-fn compared(left: &Literal, right: &Literal) -> Option<std::cmp::Ordering> {
-    if matches!(left, Literal::Null) || matches!(right, Literal::Null) {
+fn compared(left: &SelectorValue, right: &SelectorValue) -> Option<std::cmp::Ordering> {
+    if matches!(left, SelectorValue::Null) || matches!(right, SelectorValue::Null) {
         return None;
     }
-    let numeric = matches!(left, Literal::Number(_)) || matches!(right, Literal::Number(_));
+    let numeric = matches!(left, SelectorValue::Number(_)) || matches!(right, SelectorValue::Number(_));
     if numeric {
         return number_of(left)?.partial_cmp(&number_of(right)?);
     }
     match (left, right) {
-        (Literal::Boolean(a), Literal::Boolean(b)) => Some(a.cmp(b)),
-        (Literal::Boolean(flag), Literal::Text(text)) | (Literal::Text(text), Literal::Boolean(flag)) => {
+        (SelectorValue::Boolean(a), SelectorValue::Boolean(b)) => Some(a.cmp(b)),
+        (SelectorValue::Boolean(flag), SelectorValue::Text(text)) | (SelectorValue::Text(text), SelectorValue::Boolean(flag)) => {
             text.eq_ignore_ascii_case(&flag.to_string()).then_some(std::cmp::Ordering::Equal)
         }
         _ => Some(text_of(left)?.cmp(&text_of(right)?)),
@@ -399,7 +406,7 @@ fn negate(value: Option<bool>, negated: bool) -> Option<bool> {
     value.map(|value| value != negated)
 }
 
-fn evaluate(condition: &Condition, headers: &[(String, String)]) -> Option<bool> {
+fn evaluate(condition: &Condition, headers: Lookup<'_>) -> Option<bool> {
     match condition {
         Condition::And(left, right) => match (evaluate(left, headers), evaluate(right, headers)) {
             (Some(false), _) | (_, Some(false)) => Some(false),
@@ -417,8 +424,8 @@ fn evaluate(condition: &Condition, headers: &[(String, String)]) -> Option<bool>
             let equal_kind = matches!(comparison, Comparison::Equal | Comparison::NotEqual);
             let ordering = match ordering {
                 None if equal_kind
-                    && !matches!(value_of(left, headers), Literal::Null)
-                    && !matches!(value_of(right, headers), Literal::Null) =>
+                    && !matches!(value_of(left, headers), SelectorValue::Null)
+                    && !matches!(value_of(right, headers), SelectorValue::Null) =>
                 {
                     return Some(*comparison == Comparison::NotEqual);
                 }
@@ -451,7 +458,7 @@ fn evaluate(condition: &Condition, headers: &[(String, String)]) -> Option<bool>
             negate(Some(listed.contains(&text)), *negated)
         }
         Condition::IsNull { operand, negated } => Some(
-            matches!(value_of(operand, headers), Literal::Null) != *negated,
+            matches!(value_of(operand, headers), SelectorValue::Null) != *negated,
         ),
         Condition::Between {
             operand,
@@ -465,9 +472,9 @@ fn evaluate(condition: &Condition, headers: &[(String, String)]) -> Option<bool>
             negate(Some(above && below), *negated)
         }
         Condition::Value(operand) => match value_of(operand, headers) {
-            Literal::Boolean(flag) => Some(flag),
-            Literal::Text(text) if text.eq_ignore_ascii_case("true") => Some(true),
-            Literal::Text(text) if text.eq_ignore_ascii_case("false") => Some(false),
+            SelectorValue::Boolean(flag) => Some(flag),
+            SelectorValue::Text(text) if text.eq_ignore_ascii_case("true") => Some(true),
+            SelectorValue::Text(text) if text.eq_ignore_ascii_case("false") => Some(false),
             _ => None,
         },
     }
@@ -475,7 +482,7 @@ fn evaluate(condition: &Condition, headers: &[(String, String)]) -> Option<bool>
 
 impl Selector {
     /// The selector written as `text`, or why it cannot be read.
-    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+    pub fn parse(text: &str) -> Result<Self, String> {
         if text.len() > MAX_SELECTOR_BYTES {
             return Err(format!("a selector takes at most {MAX_SELECTOR_BYTES} bytes"));
         }
@@ -491,10 +498,21 @@ impl Selector {
         Ok(Self { condition })
     }
 
-    /// Whether a message with `headers` is chosen: only when the condition is true, not false or
+    /// Whether a message is chosen, `value` giving each header or property it names
+    /// ([`SelectorValue::Null`] when it has none): only when the condition is true, not false or
     /// unknown.
-    pub(crate) fn chooses(&self, headers: &[(String, String)]) -> bool {
-        evaluate(&self.condition, headers) == Some(true)
+    pub fn chooses(&self, value: &dyn Fn(&str) -> SelectorValue) -> bool {
+        evaluate(&self.condition, value) == Some(true)
+    }
+
+    /// Whether a message with the text `headers` is chosen, each header's value read as text.
+    pub fn chooses_headers(&self, headers: &[(String, String)]) -> bool {
+        self.chooses(&|name| {
+            headers
+                .iter()
+                .find(|(header, _)| header == name)
+                .map_or(SelectorValue::Null, |(_, value)| SelectorValue::Text(value.clone()))
+        })
     }
 }
 
@@ -512,7 +530,7 @@ mod tests {
     #[test]
     fn selectors_follow_sql92_with_unknown_as_not_chosen() {
         let order = headers(&[("type", "order"), ("amount", "250"), ("region", "eu-west")]);
-        let chosen = |text: &str| Selector::parse(text).unwrap().chooses(&order);
+        let chosen = |text: &str| Selector::parse(text).unwrap().chooses_headers(&order);
         assert!(chosen("type = 'order' AND amount > 100"));
         assert!(!chosen("amount BETWEEN 1 AND 100"));
         assert!(chosen("region LIKE 'eu-%'"));
@@ -522,5 +540,18 @@ mod tests {
         assert!(chosen("missing = 'x' OR amount <> 1"));
         assert!(Selector::parse("amount >").is_err());
         assert!(Selector::parse("type = 'open").is_err());
+    }
+
+    #[test]
+    fn typed_values_compare_as_numbers_and_booleans() {
+        let selector = Selector::parse("JMSPriority > 4 AND urgent AND price BETWEEN 9.5 AND 10").unwrap();
+        let typed = |name: &str| match name {
+            "JMSPriority" => SelectorValue::Number(7.0),
+            "urgent" => SelectorValue::Boolean(true),
+            "price" => SelectorValue::Number(9.75),
+            _ => SelectorValue::Null,
+        };
+        assert!(selector.chooses(&typed));
+        assert!(!selector.chooses(&|_| SelectorValue::Null));
     }
 }

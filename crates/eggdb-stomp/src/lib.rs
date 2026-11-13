@@ -10,7 +10,6 @@
 //! messages on their headers.
 
 mod frame;
-mod selector;
 mod server;
 
 pub use server::{ServerConfig, serve};

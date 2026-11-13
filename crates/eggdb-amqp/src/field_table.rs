@@ -335,6 +335,137 @@ pub(crate) fn with_death(
     headers
 }
 
+/// A content header's basic properties (AMQP 0-9-1's `basic` class), each one present only when
+/// its property flag is set.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct BasicProperties {
+    pub(crate) content_type: Option<String>,
+    pub(crate) content_encoding: Option<String>,
+    pub(crate) headers: Option<Vec<(String, FieldValue)>>,
+    pub(crate) delivery_mode: Option<u8>,
+    pub(crate) priority: Option<u8>,
+    pub(crate) correlation_id: Option<String>,
+    pub(crate) reply_to: Option<String>,
+    pub(crate) expiration: Option<String>,
+    pub(crate) message_id: Option<String>,
+    pub(crate) timestamp: Option<u64>,
+    pub(crate) message_type: Option<String>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) app_id: Option<String>,
+}
+
+impl BasicProperties {
+    /// The properties in `bytes` (the property flags, then each present property in order), or
+    /// as many as could be read before the bytes ran out or went wrong.
+    pub(crate) fn decode(bytes: &[u8]) -> Self {
+        let mut reader = Reader { bytes, at: 0 };
+        let mut properties = Self::default();
+        let Ok(flags) = reader.array::<2>().map(u16::from_be_bytes) else {
+            return properties;
+        };
+        let has = |bit: u16| flags & (1 << bit) != 0;
+        let _ = (|| -> Result<(), String> {
+            if has(15) {
+                properties.content_type = Some(reader.shortstr()?);
+            }
+            if has(14) {
+                properties.content_encoding = Some(reader.shortstr()?);
+            }
+            if has(13) {
+                properties.headers = Some(decode_table(reader.longstr()?)?);
+            }
+            if has(12) {
+                properties.delivery_mode = Some(reader.take(1)?[0]);
+            }
+            if has(11) {
+                properties.priority = Some(reader.take(1)?[0]);
+            }
+            if has(10) {
+                properties.correlation_id = Some(reader.shortstr()?);
+            }
+            if has(9) {
+                properties.reply_to = Some(reader.shortstr()?);
+            }
+            if has(8) {
+                properties.expiration = Some(reader.shortstr()?);
+            }
+            if has(7) {
+                properties.message_id = Some(reader.shortstr()?);
+            }
+            if has(6) {
+                properties.timestamp = Some(u64::from_be_bytes(reader.array::<8>()?));
+            }
+            if has(5) {
+                properties.message_type = Some(reader.shortstr()?);
+            }
+            if has(4) {
+                properties.user_id = Some(reader.shortstr()?);
+            }
+            if has(3) {
+                properties.app_id = Some(reader.shortstr()?);
+            }
+            Ok(())
+        })();
+        properties
+    }
+
+    /// The properties as a content header carries them: the flags, then each present one.
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        fn short(out: &mut Vec<u8>, text: &str) {
+            let mut end = text.len().min(255);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.push(end as u8);
+            out.extend_from_slice(&text.as_bytes()[..end]);
+        }
+        let mut flags = 0u16;
+        let mut out = Vec::new();
+        let mut text = |bit: u16, value: &Option<String>, out: &mut Vec<u8>| {
+            if let Some(value) = value {
+                flags |= 1 << bit;
+                short(out, value);
+            }
+        };
+        text(15, &self.content_type, &mut out);
+        text(14, &self.content_encoding, &mut out);
+        if let Some(headers) = &self.headers {
+            let table = encode_table(headers);
+            out.extend_from_slice(&(table.len() as u32).to_be_bytes());
+            out.extend_from_slice(&table);
+        }
+        if let Some(mode) = self.delivery_mode {
+            out.push(mode);
+        }
+        if let Some(priority) = self.priority {
+            out.push(priority);
+        }
+        text(10, &self.correlation_id, &mut out);
+        text(9, &self.reply_to, &mut out);
+        text(8, &self.expiration, &mut out);
+        text(7, &self.message_id, &mut out);
+        if let Some(timestamp) = self.timestamp {
+            out.extend_from_slice(&timestamp.to_be_bytes());
+        }
+        text(5, &self.message_type, &mut out);
+        text(4, &self.user_id, &mut out);
+        text(3, &self.app_id, &mut out);
+        for (bit, present) in [
+            (13, self.headers.is_some()),
+            (12, self.delivery_mode.is_some()),
+            (11, self.priority.is_some()),
+            (6, self.timestamp.is_some()),
+        ] {
+            if present {
+                flags |= 1 << bit;
+            }
+        }
+        let mut framed = flags.to_be_bytes().to_vec();
+        framed.extend_from_slice(&out);
+        framed
+    }
+}
+
 /// A message's `priority` property, 0 when it has none or it cannot be read.
 pub(crate) fn message_priority(properties: &[u8]) -> u8 {
     let mut reader = Reader {

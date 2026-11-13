@@ -111,7 +111,7 @@ struct TopicSubscriber {
     subscription: String,
     writer: SharedWriter,
     binding: Option<String>,
-    selector: Option<crate::selector::Selector>,
+    selector: Option<eggdb_queues::selector::Selector>,
 }
 
 const SERVER_HEADERS: [&str; 7] = [
@@ -241,7 +241,7 @@ impl<'k> Broker<'k> {
                 subscriber
                     .selector
                     .as_ref()
-                    .is_none_or(|selector| selector.chooses(headers))
+                    .is_none_or(|selector| selector.chooses_headers(headers))
             })
             .map(|subscriber| {
                 (
@@ -526,7 +526,7 @@ impl Session<'_, '_> {
         let selector = frame
             .header("selector")
             .filter(|text| !text.trim().is_empty())
-            .map(crate::selector::Selector::parse)
+            .map(eggdb_queues::selector::Selector::parse)
             .transpose()
             .map_err(|why| format!("the selector cannot be read: {why}"))?;
         let queue = match destination(destination_text)? {
