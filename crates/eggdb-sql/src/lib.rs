@@ -485,7 +485,7 @@ pub use session::freshness::{Freshness, set_replication_hooks};
 pub use session::switchover::set_switchover_hook;
 pub use session::shard_move::{set_database_move_hook, set_shard_move_hook, set_tenant_move_hook};
 pub use store::{
-    EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
+    ConcurrentIsolation, ConcurrentWrite, EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
     SnapshotHandle, StoreBackup, StoreFailure,
 };
 pub use time_zones::TimeZone;

@@ -179,6 +179,8 @@ impl SqlState {
     pub const OBJECT_IN_USE: Self = Self(*b"55006");
     /// `25001` active_sql_transaction.
     pub const ACTIVE_SQL_TRANSACTION: Self = Self(*b"25001");
+    /// `40001`: a serializable or snapshot transaction failed its check at commit; retry it.
+    pub const SERIALIZATION_FAILURE: Self = Self(*b"40001");
     /// `25006` read_only_sql_transaction.
     pub const READ_ONLY_SQL_TRANSACTION: Self = Self(*b"25006");
     /// `25P01` no_active_sql_transaction.

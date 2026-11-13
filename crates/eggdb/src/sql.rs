@@ -113,6 +113,15 @@ fn store_error(error: Error) -> SqlError {
     if error.kind() == ErrorKind::NotAnInteger {
         return SqlError::new(SqlState::DATA_EXCEPTION, error.to_string());
     }
+    if error.kind() == ErrorKind::Conflict {
+        return SqlError::new(
+            SqlState::SERIALIZATION_FAILURE,
+            format!("could not serialize access due to a concurrent commit: {error}"),
+        )
+        .with_hint("The transaction might succeed if retried.")
+        .with_vendor_code(1213)
+        .with_oracle_code(8177);
+    }
     let failure = match error.kind() {
         ErrorKind::Locked | ErrorKind::WriterActive => StoreFailure::Busy,
         ErrorKind::ReadOnly => StoreFailure::ReadOnly,
@@ -520,6 +529,13 @@ impl KeyValueStore for Store<'_> {
         self.0.begin_write().map(SqlWriter).map_err(store_error)
     }
 
+    fn begin_concurrent_write(
+        &self,
+        isolation: eggdb_sql::ConcurrentIsolation,
+    ) -> SqlResult<Option<Box<dyn eggdb_sql::ConcurrentWrite + '_>>> {
+        concurrent_writer(&self.0, isolation)
+    }
+
     fn begin_write_waiting(&self, limit: Duration) -> SqlResult<SqlWriter<'_>> {
         self.0
             .begin_write_within(limit)
@@ -539,6 +555,92 @@ impl KeyValueStore for Store<'_> {
         }
         let report = self.0.backup_to(path).map_err(failed)?;
         Ok(Some(eggdb_sql::StoreBackup { stamp: report.stamp.bits(), entries: report.entries, instant: false }))
+    }
+}
+
+fn concurrent_writer(
+    database: &Database,
+    isolation: eggdb_sql::ConcurrentIsolation,
+) -> SqlResult<Option<Box<dyn eggdb_sql::ConcurrentWrite + '_>>> {
+    let isolation = match isolation {
+        eggdb_sql::ConcurrentIsolation::Snapshot => crate::Isolation::Snapshot,
+        eggdb_sql::ConcurrentIsolation::Serializable => crate::Isolation::Serializable,
+    };
+    let transaction = database.begin_concurrent(isolation).map_err(store_error)?;
+    Ok(Some(Box::new(SqlConcurrentWriter(std::cell::RefCell::new(transaction)))))
+}
+
+/// A write transaction that SQL runs beside other writers for an explicit `REPEATABLE READ` or
+/// `SERIALIZABLE` block (D1123): a [`crate::ConcurrentTransaction`], checked when it commits.
+/// Collections, keys with a time to live and counters are refused inside it for now.
+#[derive(Debug)]
+pub struct SqlConcurrentWriter<'db>(std::cell::RefCell<crate::ConcurrentTransaction<'db>>);
+
+impl KeyValueRead for SqlConcurrentWriter<'_> {
+    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.0.borrow_mut().get(key).map_err(store_error)
+    }
+
+    fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        let entries = self
+            .0
+            .borrow_mut()
+            .scan((Bound::Included(start), Bound::Excluded(end)))
+            .map_err(store_error)?;
+        let ordered: Box<dyn Iterator<Item = &(Vec<u8>, Vec<u8>)>> = match direction {
+            ScanDirection::Forward => Box::new(entries.iter()),
+            ScanDirection::Backward => Box::new(entries.iter().rev()),
+        };
+        for (key, value) in ordered {
+            if !visit(key, value)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl KeyValueWrite for SqlConcurrentWriter<'_> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        self.0.get_mut().put(key, value).map_err(store_error)
+    }
+
+    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        let transaction = self.0.get_mut();
+        if transaction.get(key).map_err(store_error)?.is_some() {
+            return Ok(false);
+        }
+        transaction.put(key, value).map_err(store_error)?;
+        Ok(true)
+    }
+
+    fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.0.get_mut().delete(key).map_err(store_error)
+    }
+
+    fn commit(self) -> SqlResult<()> {
+        self.0.into_inner().commit().map(|_| ()).map_err(store_error)
+    }
+
+    fn rollback(self) -> SqlResult<()> {
+        self.0.into_inner().rollback();
+        Ok(())
+    }
+}
+
+impl eggdb_sql::ConcurrentWrite for SqlConcurrentWriter<'_> {
+    fn commit_concurrent(self: Box<Self>) -> SqlResult<()> {
+        (*self).commit()
+    }
+
+    fn rollback_concurrent(self: Box<Self>) -> SqlResult<()> {
+        (*self).rollback()
     }
 }
 
@@ -578,6 +680,13 @@ impl KeyValueStore for OwnedStore {
 
     fn begin_write(&self) -> SqlResult<SqlWriter<'_>> {
         self.0.begin_write().map(SqlWriter).map_err(store_error)
+    }
+
+    fn begin_concurrent_write(
+        &self,
+        isolation: eggdb_sql::ConcurrentIsolation,
+    ) -> SqlResult<Option<Box<dyn eggdb_sql::ConcurrentWrite + '_>>> {
+        concurrent_writer(&self.0, isolation)
     }
 
     fn begin_write_waiting(&self, limit: Duration) -> SqlResult<SqlWriter<'_>> {

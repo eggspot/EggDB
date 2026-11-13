@@ -4281,6 +4281,31 @@ impl<'s> Session<'s> {
         Ok(result)
     }
 
+    fn concurrent_isolation(&self) -> Option<crate::store::ConcurrentIsolation> {
+        let requested = self.transaction_mode.isolation.as_deref()?.to_ascii_lowercase();
+        match requested.split_whitespace().collect::<Vec<_>>().join(" ").as_str() {
+            "serializable" => Some(crate::store::ConcurrentIsolation::Serializable),
+            "repeatable read" | "snapshot" => Some(crate::store::ConcurrentIsolation::Snapshot),
+            _ => None,
+        }
+    }
+
+    fn begin_statement_writer(
+        &self,
+        keep_open: bool,
+        implicit: bool,
+    ) -> SqlResult<Box<dyn crate::store::BoxedWrite + 's>> {
+        let store = self.store;
+        if keep_open
+            && !implicit
+            && let Some(isolation) = self.concurrent_isolation()
+            && let Some(writer) = store.begin_boxed_concurrent_write(isolation)?
+        {
+            return Ok(writer);
+        }
+        store.begin_boxed_write()
+    }
+
     fn build_index_online(&mut self, mut build: crate::indexes::OnlineBuild) -> SqlResult<()> {
         loop {
             let mut done = false;
@@ -4461,8 +4486,7 @@ impl<'s> Session<'s> {
             }
             Block::None | Block::Failed if keeps_procedure_statements => {
                 let mut writer = self
-                    .store
-                    .begin_boxed_write()
+                    .begin_statement_writer(keep_open, implicit)
                     .map_err(|error| read_only_refusal(error, command))?;
                 let mut log = savepoints::Undo::new();
                 let outcome = body(
@@ -4502,8 +4526,7 @@ impl<'s> Session<'s> {
             }
             Block::None | Block::Failed => {
                 let mut writer = self
-                    .store
-                    .begin_boxed_write()
+                    .begin_statement_writer(keep_open, implicit)
                     .map_err(|error| read_only_refusal(error, command))?;
                 let outcome = body(
                     &mut crate::temporary::TemporaryWrite {

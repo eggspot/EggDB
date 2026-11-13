@@ -620,3 +620,80 @@ fn a_read_only_database_moves_to_a_newer_copy_when_no_reader_holds_the_old_one()
         Some(ErrorKind::InvalidOption)
     );
 }
+
+#[test]
+fn serializable_sql_blocks_write_side_by_side_and_the_second_conflicting_commit_fails_40001() {
+    use eggdb::sql::Dialect;
+    let file = TempPath::new("sql-concurrent");
+    let db = Database::open(file.path()).unwrap();
+    let store = db.sql_store();
+    let mut setup = store.session(Dialect::PostgreSql);
+    setup
+        .execute("CREATE TABLE accounts (id integer PRIMARY KEY, balance integer)", &mut |_| {})
+        .unwrap();
+    setup
+        .execute("INSERT INTO accounts VALUES (1, 100), (2, 100)", &mut |_| {})
+        .unwrap();
+    let mut first = store.session(Dialect::PostgreSql);
+    let mut second = store.session(Dialect::PostgreSql);
+    first
+        .execute("BEGIN ISOLATION LEVEL SERIALIZABLE", &mut |_| {})
+        .unwrap();
+    second
+        .execute("BEGIN ISOLATION LEVEL SERIALIZABLE", &mut |_| {})
+        .unwrap();
+    first
+        .execute("UPDATE accounts SET balance = balance - 30 WHERE id = 1", &mut |_| {})
+        .unwrap();
+    second
+        .execute("UPDATE accounts SET balance = balance - 50 WHERE id = 1", &mut |_| {})
+        .unwrap();
+    first.execute("COMMIT", &mut |_| {}).unwrap();
+    let error = second.execute("COMMIT", &mut |_| {}).unwrap_err();
+    assert_eq!(error.state().code(), "40001");
+    let mut balances = Vec::new();
+    setup
+        .execute("SELECT balance FROM accounts ORDER BY id", &mut |result| {
+            balances.extend(result.rows)
+        })
+        .unwrap();
+    assert_eq!(
+        balances,
+        vec![
+            vec![eggdb::sql::Value::Integer(70)],
+            vec![eggdb::sql::Value::Integer(100)]
+        ]
+    );
+}
+
+#[test]
+fn snapshot_sql_blocks_on_different_rows_both_commit() {
+    use eggdb::sql::Dialect;
+    let file = TempPath::new("sql-snapshot");
+    let db = Database::open(file.path()).unwrap();
+    let store = db.sql_store();
+    let mut setup = store.session(Dialect::PostgreSql);
+    setup
+        .execute("CREATE TABLE seats (id integer PRIMARY KEY, taken boolean)", &mut |_| {})
+        .unwrap();
+    setup
+        .execute("INSERT INTO seats VALUES (1, false), (2, false)", &mut |_| {})
+        .unwrap();
+    let mut first = store.session(Dialect::PostgreSql);
+    let mut second = store.session(Dialect::PostgreSql);
+    for (session, seat) in [(&mut first, 1), (&mut second, 2)] {
+        session
+            .execute("BEGIN ISOLATION LEVEL REPEATABLE READ", &mut |_| {})
+            .unwrap();
+        session
+            .execute(&format!("UPDATE seats SET taken = true WHERE id = {seat}"), &mut |_| {})
+            .unwrap();
+    }
+    first.execute("COMMIT", &mut |_| {}).unwrap();
+    second.execute("COMMIT", &mut |_| {}).unwrap();
+    let mut taken = Vec::new();
+    setup
+        .execute("SELECT count(*) FROM seats WHERE taken", &mut |result| taken.extend(result.rows))
+        .unwrap();
+    assert_eq!(taken, vec![vec![eggdb::sql::Value::BigInt(2)]]);
+}

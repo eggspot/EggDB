@@ -437,7 +437,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M3 Transactions
 - Users can run SQL sessions on concurrent transactions, with each dialect's isolation levels and
-  errors (D172, D173). Check: Flyway's default two-connection lock (D138).
+  errors (D172, D173). Check: Flyway's default two-connection lock (D138). **Code written, unbuilt** (code-only mode, 2026-11-13,
+  D1123): explicit `REPEATABLE READ` and `SERIALIZABLE` blocks run on concurrent transactions; `40001` on conflict.
 - Users can choose the isolation level per database, table or request, from strict serializable
   to read committed with per-statement snapshots (D18, D173).
 - Row versions in the storage engine (MVCC), so changes larger than memory spill (D172).

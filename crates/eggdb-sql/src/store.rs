@@ -287,6 +287,28 @@ impl std::fmt::Debug for SnapshotHandle {
     }
 }
 
+/// How a transaction from [`KeyValueStore::begin_concurrent_write`] is checked when it commits
+/// (D1123).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConcurrentIsolation {
+    /// The commit fails when a key it writes changed since it began: first committer wins.
+    Snapshot,
+    /// The commit fails when anything it read changed since it began.
+    Serializable,
+}
+
+/// A write transaction that runs beside other writers and is checked when it commits, from
+/// [`KeyValueStore::begin_concurrent_write`] (D1123).
+pub trait ConcurrentWrite: KeyValueWrite {
+    /// Checks the transaction against the commits made since it began and commits it; a failed
+    /// check answers [`SqlState::SERIALIZATION_FAILURE`](crate::SqlState::SERIALIZATION_FAILURE)
+    /// and commits nothing.
+    fn commit_concurrent(self: Box<Self>) -> SqlResult<()>;
+
+    /// Discards every change.
+    fn rollback_concurrent(self: Box<Self>) -> SqlResult<()>;
+}
+
 /// An ordered byte-string key-value store that SQL keeps its catalog and tables in: one writer
 /// and snapshot readers.
 pub trait KeyValueStore {
@@ -304,6 +326,17 @@ pub trait KeyValueStore {
 
     /// Begins the write transaction, waiting for another writer as the store does.
     fn begin_write(&self) -> SqlResult<Self::Write<'_>>;
+
+    /// Begins a write transaction that runs beside the store's other writers and is checked
+    /// when it commits, for an explicit transaction block at `REPEATABLE READ` or `SERIALIZABLE`
+    /// (D1123). `None`, the default, when the store has only its one writer.
+    fn begin_concurrent_write(
+        &self,
+        isolation: ConcurrentIsolation,
+    ) -> SqlResult<Option<Box<dyn ConcurrentWrite + '_>>> {
+        let _ = isolation;
+        Ok(None)
+    }
 
     /// Begins the write transaction, waiting at most `limit` for another writer, for
     /// PostgreSQL's `lock_timeout`. By default it waits as [`KeyValueStore::begin_write`] does.
@@ -390,6 +423,13 @@ impl<S: KeyValueStore> KeyValueStore for &S {
         (**self).begin_write()
     }
 
+    fn begin_concurrent_write(
+        &self,
+        isolation: ConcurrentIsolation,
+    ) -> SqlResult<Option<Box<dyn ConcurrentWrite + '_>>> {
+        (**self).begin_concurrent_write(isolation)
+    }
+
     fn begin_write_waiting(&self, limit: std::time::Duration) -> SqlResult<S::Write<'_>> {
         (**self).begin_write_waiting(limit)
     }
@@ -427,6 +467,13 @@ impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
 
     fn begin_write(&self) -> SqlResult<S::Write<'_>> {
         (**self).begin_write()
+    }
+
+    fn begin_concurrent_write(
+        &self,
+        isolation: ConcurrentIsolation,
+    ) -> SqlResult<Option<Box<dyn ConcurrentWrite + '_>>> {
+        (**self).begin_concurrent_write(isolation)
     }
 
     fn begin_write_waiting(&self, limit: std::time::Duration) -> SqlResult<S::Write<'_>> {
@@ -610,8 +657,57 @@ fn lock_timeout() -> Option<std::time::Duration> {
     (millis > 0).then(|| std::time::Duration::from_millis(millis.unsigned_abs()))
 }
 
+pub(crate) struct ConcurrentBoxed<'s>(Box<dyn ConcurrentWrite + 's>);
+
+impl KeyValueRead for ConcurrentBoxed<'_> {
+    fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.0.get(key)
+    }
+
+    fn get_with(&self, key: &[u8], read: &mut dyn FnMut(&[u8]) -> SqlResult<()>) -> SqlResult<bool> {
+        self.0.get_with(key, read)
+    }
+
+    fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        self.0.scan(start, end, direction, visit)
+    }
+}
+
+impl KeyValueWrite for ConcurrentBoxed<'_> {
+    fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
+        self.0.put(key, value)
+    }
+
+    fn put_if_absent(&mut self, key: &[u8], value: &[u8]) -> SqlResult<bool> {
+        self.0.put_if_absent(key, value)
+    }
+
+    fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.0.delete(key)
+    }
+
+    fn commit(self) -> SqlResult<()> {
+        self.0.commit_concurrent()
+    }
+
+    fn rollback(self) -> SqlResult<()> {
+        self.0.rollback_concurrent()
+    }
+}
+
 pub(crate) trait ErasedStore {
     fn begin_boxed_read(&self) -> SqlResult<Box<dyn KeyValueRead + '_>>;
+
+    fn begin_boxed_concurrent_write(
+        &self,
+        isolation: ConcurrentIsolation,
+    ) -> SqlResult<Option<Box<dyn BoxedWrite + '_>>>;
 
     fn begin_boxed_write(&self) -> SqlResult<Box<dyn BoxedWrite + '_>>;
 
@@ -628,6 +724,15 @@ pub(crate) trait ErasedStore {
 }
 
 impl<S: KeyValueStore> ErasedStore for S {
+    fn begin_boxed_concurrent_write(
+        &self,
+        isolation: ConcurrentIsolation,
+    ) -> SqlResult<Option<Box<dyn BoxedWrite + '_>>> {
+        Ok(self
+            .begin_concurrent_write(isolation)?
+            .map(|writer| Box::new(ConcurrentBoxed(writer)) as Box<dyn BoxedWrite + '_>))
+    }
+
     fn erased_backup_to(&self, path: &std::path::Path, clone: bool) -> SqlResult<Option<StoreBackup>> {
         self.backup_to(path, clone)
     }
