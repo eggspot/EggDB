@@ -827,7 +827,52 @@ fn prune(directory: &Path, keep: u32) -> std::io::Result<Vec<String>> {
         append_manifest(directory, &JsonObject::new().string("pruned", &entry.file).line())?;
         pruned.push(entry.file.clone());
     }
+    let oldest_kept = fulls.iter().take(keep as usize).filter_map(|entry| entry.stamp).min();
+    if let Some(oldest_kept) = oldest_kept {
+        pruned.extend(prune_change_segments(&directory.join(CHANGES), oldest_kept)?);
+    }
     Ok(pruned)
+}
+
+fn segment_latest_stamp(path: &Path) -> Option<u64> {
+    eggdb::read_change_file(path)
+        .ok()?
+        .iter()
+        .map(|event| match event {
+            eggdb::ArchivedEvent::Base(stamp) | eggdb::ArchivedEvent::Gap(stamp) | eggdb::ArchivedEvent::Commit(stamp, _) => stamp.bits(),
+        })
+        .max()
+}
+
+/// Removes the change archive's segments that only hold commits the oldest kept copy already
+/// has, keeping the newest of them, which shows where the archive reaches back to.
+fn prune_change_segments(changes: &Path, oldest_kept: u64) -> std::io::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(changes) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut segments: Vec<String> = entries
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("changes-") && name.ends_with(".eggcl"))
+        .collect();
+    segments.sort();
+    let covered: Vec<bool> = segments
+        .iter()
+        .map(|name| segment_latest_stamp(&changes.join(name)).is_some_and(|latest| latest <= oldest_kept))
+        .collect();
+    let Some(last_covered) = covered.iter().rposition(|covered| *covered) else {
+        return Ok(Vec::new());
+    };
+    let mut removed = Vec::new();
+    for (index, name) in segments.iter().enumerate().take(last_covered) {
+        if covered[index] {
+            std::fs::remove_file(changes.join(name))?;
+            removed.push(format!("{CHANGES}/{name}"));
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
