@@ -1101,3 +1101,4 @@ its full title with its status.
 - [D1074](decisions/D1074.md) Code-only batch 722 (M16): JMAP push
 - [D1075](decisions/D1075.md) Code-only batch 723 (M16): STARTTLS for SMTP and IMAP
 - [D1076](decisions/D1076.md) Code-only batch 724 (M16): TLS in the shared HTTP layer, and JMAP over HTTPS
+- [D1077](decisions/D1077.md) Code-only batch 725 (M16): CalDAV scheduling and WebDAV ACLs

@@ -13,7 +13,8 @@ use eggdb_keyspace::{KeysRead, KeysWrite, Keyspace};
 
 const CALENDARSERVER: &str = "http://calendarserver.org/ns/";
 const MAX_LISTED: usize = 10_000;
-const ALLOWED: &str = "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, MKCALENDAR, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK, REPORT";
+const ALLOWED: &str = "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, MKCALENDAR, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK, REPORT, ACL, POST";
+const EGGDB: &str = "https://eggdb.dev/ns/dav";
 /// The largest request body the DAV endpoint accepts.
 pub const MAX_REQUEST_BYTES: usize = 64 << 20;
 
@@ -55,6 +56,11 @@ fn reply(status: u16, content_type: &str, body: Vec<u8>) -> Response {
         body,
         headers: Vec::new(),
     }
+}
+
+fn safe_name(text: &str) -> String {
+    let cleaned: String = text.chars().map(|character| if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') { character } else { '_' }).take(120).collect();
+    if cleaned.is_empty() || cleaned.starts_with('.') { format!("x{cleaned}") } else { cleaned }
 }
 
 fn empty(status: u16) -> Response {
@@ -203,6 +209,22 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
         format!("/calendars/{}", self.user)
     }
 
+    fn inbox(&self) -> String {
+        format!("{}/inbox", self.calendar_home())
+    }
+
+    fn outbox(&self) -> String {
+        format!("{}/outbox", self.calendar_home())
+    }
+
+    fn default_calendar(&self) -> String {
+        format!("{}/calendar", self.calendar_home())
+    }
+
+    fn address(&self) -> String {
+        format!("mailto:{}@localhost", self.user)
+    }
+
     fn addressbook_home(&self) -> String {
         format!("/addressbooks/{}", self.user)
     }
@@ -242,8 +264,8 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
     }
 
     fn ensure_homes(&self) {
-        let principal = self.principal();
-        if self.read_only || self.read(&mut |keys| store::get(keys, &principal)).is_ok_and(|found| found.is_some()) {
+        let inbox = self.inbox();
+        if self.read_only || self.read(&mut |keys| store::get(keys, &inbox)).is_ok_and(|found| found.is_some()) {
             return;
         }
         let homes = [
@@ -252,13 +274,15 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             ("/calendars".to_owned(), Kind::Collection, None),
             (self.calendar_home(), Kind::Collection, None),
             (format!("{}/calendar", self.calendar_home()), Kind::Calendar, Some("Calendar")),
+            (self.inbox(), Kind::Collection, Some("Inbox")),
+            (self.outbox(), Kind::Collection, Some("Outbox")),
             ("/addressbooks".to_owned(), Kind::Collection, None),
             (self.addressbook_home(), Kind::Collection, None),
             (format!("{}/contacts", self.addressbook_home()), Kind::AddressBook, Some("Contacts")),
         ];
         let now = now_seconds();
         let _ = self.write(&mut |keys| {
-            if store::get(&*keys, &self.principal())?.is_some() {
+            if store::get(&*keys, &self.inbox())?.is_some() {
                 return Ok(());
             }
             for (path, kind, display) in &homes {
@@ -304,9 +328,11 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             "LOCK" => self.lock(&path),
             "UNLOCK" => empty(204),
             "REPORT" => self.report(&path, request),
+            "ACL" => self.acl_request(&path, request),
+            "POST" if path == self.outbox() => self.free_busy(request),
             _ => empty(405),
         };
-        response.headers.push(("DAV".to_owned(), "1, 2, 3, calendar-access, addressbook".to_owned()));
+        response.headers.push(("DAV".to_owned(), "1, 2, 3, access-control, calendar-access, calendar-auto-schedule, addressbook".to_owned()));
         if method == "OPTIONS" || response.status == 405 {
             response.headers.push(("Allow".to_owned(), ALLOWED.to_owned()));
         }
@@ -390,6 +416,7 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
         });
         match outcome {
             Ok(Ok((created, etag))) => {
+                self.scheduled_after_put(&parent_path, &body);
                 let mut response = empty(if created { 201 } else { 204 });
                 response.headers.push(("ETag".to_owned(), etag));
                 response
@@ -404,6 +431,7 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             return empty(403);
         }
         let if_match = request.header("if-match").map(str::to_owned);
+        let mut removed_body: Option<Vec<u8>> = None;
         let outcome = self.write(&mut |keys| {
             let Some(existing) = store::get(&*keys, path)? else {
                 return Ok(404);
@@ -414,9 +442,18 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             {
                 return Ok(412);
             }
+            if existing.kind == Kind::File {
+                removed_body = Some(existing.body.clone());
+            }
             store::remove(keys, path)?;
             Ok(204)
         });
+        if outcome == Ok(204)
+            && let Some(body) = removed_body
+            && parent(path).is_some_and(|parent_path| parent_path != self.inbox() && parent_path != self.outbox())
+        {
+            self.queue_outgoing(&body, "CANCEL");
+        }
         empty(outcome.unwrap_or(500))
     }
 
@@ -520,6 +557,8 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             (DAV, "resourcetype") => match resource.kind {
                 Kind::File => String::new(),
                 Kind::Collection if resource.path == self.principal() => "<D:collection/><D:principal/>".to_owned(),
+                Kind::Collection if resource.path == self.inbox() => "<D:collection/><C:schedule-inbox/>".to_owned(),
+                Kind::Collection if resource.path == self.outbox() => "<D:collection/><C:schedule-outbox/>".to_owned(),
                 Kind::Collection => "<D:collection/>".to_owned(),
                 Kind::Calendar => "<D:collection/><C:calendar/>".to_owned(),
                 Kind::AddressBook => "<D:collection/><A:addressbook/>".to_owned(),
@@ -541,7 +580,17 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             (DAV, "sync-token") if resource.kind.is_collection() => format!("data:,{}", resource.version),
             (CALDAV, "calendar-home-set") => href(&self.calendar_home()),
             (CARDDAV, "addressbook-home-set") => href(&self.addressbook_home()),
-            (CALDAV, "calendar-user-address-set") => format!("<D:href>mailto:{}@localhost</D:href>", escaped(&self.user)),
+            (CALDAV, "calendar-user-address-set") => format!("<D:href>{}</D:href>", escaped(&self.address())),
+            (CALDAV, "schedule-inbox-URL") => href(&self.inbox()),
+            (CALDAV, "schedule-outbox-URL") => href(&self.outbox()),
+            (CALDAV, "schedule-default-calendar-URL") => href(&self.default_calendar()),
+            (CALDAV, "calendar-user-type") => "INDIVIDUAL".to_owned(),
+            (DAV, "current-user-privilege-set") => crate::acl::current_user_privileges(self.read_only),
+            (DAV, "acl") => crate::acl::acl(&self.principal()),
+            (DAV, "supported-privilege-set") => crate::acl::supported_privileges(),
+            (DAV, "acl-restrictions") => "<D:grant-only/><D:no-invert/>".to_owned(),
+            (DAV, "inherited-acl-set") | (DAV, "group-membership") => String::new(),
+            (DAV, "principal-collection-set") => href("/principals"),
             (CALDAV, "supported-calendar-component-set") if resource.kind == Kind::Calendar => {
                 "<C:comp name=\"VEVENT\"/><C:comp name=\"VTODO\"/><C:comp name=\"VJOURNAL\"/>".to_owned()
             }
@@ -716,10 +765,161 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
         response
     }
 
+    fn scheduled_after_put(&self, parent_path: &str, body: &[u8]) {
+        if self.read_only || !body.starts_with(b"BEGIN:VCALENDAR") {
+            return;
+        }
+        let text = String::from_utf8_lossy(body).into_owned();
+        if parent_path == self.inbox() {
+            self.apply_incoming(&text);
+        } else if parent_path != self.outbox() && self.read(&mut |keys| store::get(keys, parent_path)).ok().flatten().is_some_and(|parent| parent.kind == Kind::Calendar) {
+            self.queue_outgoing(body, "REQUEST");
+        }
+    }
+
+    fn apply_incoming(&self, message: &str) {
+        let Some(uid) = scheduling::first(&scheduling::lines(message), "UID").map(str::to_owned) else {
+            return;
+        };
+        let calendar = self.default_calendar();
+        let _ = self.write(&mut |keys| {
+            let existing = store::children(&*keys, &calendar)?
+                .into_iter()
+                .find(|resource| resource.kind == Kind::File && scheduling::first(&scheduling::lines(&String::from_utf8_lossy(&resource.body)), "UID") == Some(uid.as_str()));
+            let existing_text = existing.as_ref().map(|resource| String::from_utf8_lossy(&resource.body).into_owned());
+            let scheduling::Applied::Replace(text) = scheduling::apply(message, existing_text.as_deref()) else {
+                return Ok(());
+            };
+            let target = existing.as_ref().map_or_else(|| format!("{calendar}/{}.ics", safe_name(&uid)), |resource| resource.path.clone());
+            let properties = existing.map(|resource| resource.properties).unwrap_or_default();
+            store::put(
+                keys,
+                Resource {
+                    path: target,
+                    kind: Kind::File,
+                    content_type: "text/calendar; charset=utf-8".to_owned(),
+                    modified: 0,
+                    version: 0,
+                    properties,
+                    body: text.into_bytes(),
+                },
+                now_seconds(),
+            )?;
+            Ok(())
+        });
+    }
+
+    fn queue_outgoing(&self, body: &[u8], method: &str) {
+        let text = String::from_utf8_lossy(body).into_owned();
+        let Some((message, recipients)) = scheduling::outgoing(&text, &self.user, method) else {
+            return;
+        };
+        let uid = scheduling::first(&scheduling::lines(&text), "UID").unwrap_or("event").to_owned();
+        let outbox = self.outbox();
+        let now = now_seconds();
+        let _ = self.write(&mut |keys| {
+            let queued = store::children(&*keys, &outbox)?.len();
+            store::put(
+                keys,
+                Resource {
+                    path: format!("{outbox}/{}-{now}-{queued}.ics", safe_name(&uid)),
+                    kind: Kind::File,
+                    content_type: "text/calendar; charset=utf-8".to_owned(),
+                    modified: 0,
+                    version: 0,
+                    properties: vec![(EGGDB.to_owned(), "recipients".to_owned(), recipients.join(" "))],
+                    body: message.clone().into_bytes(),
+                },
+                now,
+            )?;
+            Ok(())
+        });
+    }
+
+    fn free_busy(&self, request: &Request) -> Response {
+        let Some(question) = std::str::from_utf8(&request.body).ok().and_then(scheduling::free_busy_request) else {
+            return precondition(400, "C", "valid-scheduling-message");
+        };
+        let home = self.calendar_home();
+        let (inbox, outbox) = (self.inbox(), self.outbox());
+        let objects = match self.read(&mut |keys| {
+            Ok(store::subtree(keys, &home)?
+                .into_iter()
+                .filter(|resource| resource.kind == Kind::File && !resource.path.starts_with(&format!("{inbox}/")) && !resource.path.starts_with(&format!("{outbox}/")))
+                .filter(|resource| resource.body.starts_with(b"BEGIN:VCALENDAR"))
+                .map(|resource| String::from_utf8_lossy(&resource.body).into_owned())
+                .collect::<Vec<_>>())
+        }) {
+            Ok(objects) => objects,
+            Err(_) => return empty(500),
+        };
+        let periods = scheduling::busy(&objects, TimeRange { start: Some(question.range.0), end: Some(question.range.1) });
+        let now = i64::try_from(now_seconds()).unwrap_or(i64::MAX);
+        let mut responses = String::new();
+        for attendee in &question.attendees {
+            let (status, data) = if scheduling::is_user(attendee, &self.user) {
+                ("2.0;Success", format!("<C:calendar-data>{}</C:calendar-data>", escaped(&scheduling::free_busy_reply(&question, attendee, &periods, now))))
+            } else {
+                ("3.7;Invalid calendar user", String::new())
+            };
+            responses.push_str(&format!(
+                "<C:response><C:recipient><D:href>{}</D:href></C:recipient><C:request-status>{status}</C:request-status>{data}</C:response>",
+                escaped(attendee)
+            ));
+        }
+        reply(
+            200,
+            "application/xml; charset=utf-8",
+            format!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<C:schedule-response xmlns:D=\"DAV:\" xmlns:C=\"{CALDAV}\">{responses}</C:schedule-response>").into_bytes(),
+        )
+    }
+
+    fn acl_request(&self, path: &str, request: &Request) -> Response {
+        if self.read(&mut |keys| store::get(keys, path)).ok().flatten().is_none() {
+            return empty(404);
+        }
+        match crate::acl::refusal(&String::from_utf8_lossy(&request.body), &self.principal()) {
+            None => empty(200),
+            Some(condition) => precondition(403, "D", condition),
+        }
+    }
+
+    fn principal_report(&self, document: &xml::Element) -> Response {
+        if document.is(DAV, "principal-search-property-set") {
+            return reply(
+                200,
+                "application/xml; charset=utf-8",
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:principal-search-property-set xmlns:D=\"DAV:\" xmlns:C=\"{CALDAV}\"><D:principal-search-property><D:prop><D:displayname/></D:prop><D:description xml:lang=\"en\">Name</D:description></D:principal-search-property><D:principal-search-property><D:prop><C:calendar-user-address-set/></D:prop><D:description xml:lang=\"en\">Address</D:description></D:principal-search-property></D:principal-search-property-set>"
+                )
+                .into_bytes(),
+            );
+        }
+        if !crate::acl::search_matches(document, &self.user, &self.address()) {
+            return Self::multistatus("");
+        }
+        let principal = self.principal();
+        let Ok(Some(resource)) = self.read(&mut |keys| store::get(keys, &principal)) else {
+            return Self::multistatus("");
+        };
+        let wanted = Wanted {
+            all: false,
+            names_only: false,
+            properties: document
+                .child(DAV, "prop")
+                .map(|prop| prop.children.iter().map(|child| (child.namespace.clone(), child.name.clone())).collect())
+                .unwrap_or_default(),
+        };
+        Self::multistatus(&self.response_xml(&resource, &wanted, &|_, _, _| None))
+    }
+
     fn report(&self, path: &str, request: &Request) -> Response {
         let Some(document) = std::str::from_utf8(&request.body).ok().and_then(xml::parse) else {
             return empty(400);
         };
+        if document.is(DAV, "principal-property-search") || document.is(DAV, "principal-search-property-set") {
+            return self.principal_report(&document);
+        }
         let properties: Vec<(String, String)> = document
             .child(DAV, "prop")
             .map(|prop| prop.children.iter().map(|child| (child.namespace.clone(), child.name.clone())).collect())
@@ -932,5 +1132,33 @@ mod tests {
         assert!(week.contains("Standup") && !week.contains("Review"), "{week}");
         let later = query("20260110T000000Z", "20260202T000000Z");
         assert!(!later.contains("Standup") && later.contains("Review"), "{later}");
+    }
+
+    #[test]
+    fn scheduling_answers_free_busy_applies_replies_and_queues_invitations() {
+        let keyspace = MemoryKeyspace::default();
+        let endpoint = Endpoint::new(&keyspace, "eggdb", eggdb_crypto::sha256(b"secret"), false);
+        let principal = call(&endpoint, "PROPFIND", "/principals/eggdb/", &[("depth", "0")], "<D:propfind xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\"><D:prop><C:schedule-inbox-URL/><C:schedule-outbox-URL/><D:current-user-privilege-set/><D:acl/></D:prop></D:propfind>");
+        let text = String::from_utf8_lossy(&principal.body).into_owned();
+        assert!(text.contains("/calendars/eggdb/inbox/") && text.contains("/calendars/eggdb/outbox/"), "{text}");
+        assert!(text.contains("<D:write-content/>") && text.contains("<D:all/>"), "{text}");
+        let meeting = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m1\r\nDTSTAMP:20261101T000000Z\r\nDTSTART:20261113T090000Z\r\nDTEND:20261113T100000Z\r\nORGANIZER:mailto:eggdb@localhost\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:ann@example.org\r\nSUMMARY:Plan\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        assert_eq!(call(&endpoint, "PUT", "/calendars/eggdb/calendar/m1.ics", &[], meeting).status, 201);
+        let queued = call(&endpoint, "PROPFIND", "/calendars/eggdb/outbox/", &[("depth", "1")], "");
+        let queued = String::from_utf8_lossy(&queued.body).into_owned();
+        assert!(queued.contains("/calendars/eggdb/outbox/m1-"), "an invitation waits in the outbox: {queued}");
+        let reply = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:m1\r\nDTSTAMP:20261102T000000Z\r\nORGANIZER:mailto:eggdb@localhost\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:ann@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        assert_eq!(call(&endpoint, "PUT", "/calendars/eggdb/inbox/r1.ics", &[], reply).status, 201);
+        let updated = String::from_utf8_lossy(&call(&endpoint, "GET", "/calendars/eggdb/calendar/m1.ics", &[], "").body).into_owned();
+        assert!(updated.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:ann@example.org"), "{updated}");
+        let question = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VFREEBUSY\r\nUID:fb1\r\nDTSTAMP:20261101T000000Z\r\nDTSTART:20261113T000000Z\r\nDTEND:20261114T000000Z\r\nORGANIZER:mailto:ann@example.org\r\nATTENDEE:mailto:eggdb@localhost\r\nATTENDEE:mailto:bob@example.org\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n";
+        let answer = call(&endpoint, "POST", "/calendars/eggdb/outbox/", &[("content-type", "text/calendar")], question);
+        let answer = String::from_utf8_lossy(&answer.body).into_owned();
+        assert!(answer.contains("FREEBUSY;FBTYPE=BUSY:20261113T090000Z/20261113T100000Z"), "{answer}");
+        assert!(answer.contains("3.7;Invalid calendar user"), "{answer}");
+        assert_eq!(call(&endpoint, "ACL", "/calendars/eggdb/calendar/", &[], "<D:acl xmlns:D=\"DAV:\"><D:ace><D:principal><D:href>/principals/stranger/</D:href></D:principal><D:grant><D:privilege><D:read/></D:privilege></D:grant></D:ace></D:acl>").status, 403);
+        assert_eq!(call(&endpoint, "ACL", "/calendars/eggdb/calendar/", &[], "<D:acl xmlns:D=\"DAV:\"><D:ace><D:principal><D:self/></D:principal><D:grant><D:privilege><D:all/></D:privilege></D:grant></D:ace></D:acl>").status, 200);
+        let found = call(&endpoint, "REPORT", "/principals/", &[], "<D:principal-property-search xmlns:D=\"DAV:\"><D:property-search><D:prop><D:displayname/></D:prop><D:match>egg</D:match></D:property-search><D:prop><D:displayname/></D:prop></D:principal-property-search>");
+        assert!(String::from_utf8_lossy(&found.body).contains("/principals/eggdb"), "{}", String::from_utf8_lossy(&found.body));
     }
 }

@@ -1981,7 +1981,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (`eggdb-dav`, `--dav-listen`): **code written, unbuilt** (code-only mode, 2026-11-12, D895); `time-range` filters
   over recurring events: **code written, unbuilt** (code-only mode, 2026-11-12, D901); `expand` in `calendar-data`:
   **code written, unbuilt** (code-only mode, 2026-11-12, D925); times by `TZID` through the object's `VTIMEZONE`: **code
-  written, unbuilt** (code-only mode, 2026-11-12, D926). Left: scheduling and ACLs.
+  written, unbuilt** (code-only mode, 2026-11-12, D926); scheduling (inbox, outbox, free-busy, iTIP) and ACLs: **code
+  written, unbuilt** (code-only mode, 2026-11-13, D1077). Left: sending the outbox's invitations as iMIP mail.
 - Digital asset management: EXIF and XMP metadata, and renditions with our own royalty-free
   codecs (D56). EXIF and XMP (`image_metadata`): **code written, unbuilt** (code-only mode, 2026-11-12, D731). Left:
   renditions.
