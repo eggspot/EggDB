@@ -565,6 +565,7 @@ impl<'t> Parser<'t> {
             "eggdb_shredding",
             "eggdb_iot",
             "eggdb_advisor",
+            "eggdb_multi_primary",
             "pgrouting",
         ]
         .into_iter()

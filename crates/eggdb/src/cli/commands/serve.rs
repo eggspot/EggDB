@@ -428,6 +428,20 @@ impl Session<'_> {
                 None
             }
         };
+        let multi_primary = match (&options.multi_primary, &options.multi_primary_node) {
+            (Some(text), Some(node)) => {
+                let peers = super::serve_multi_primary::parse_peers(text).map_err(usage)?;
+                if peers.contains_key(node) {
+                    return Err(usage(format!("--multi-primary lists the other servers; {node} is this one")));
+                }
+                if options.cluster.is_some() || options.replica_of.is_some() || options.standby_of.is_some() {
+                    return Err(usage("--multi-primary takes writes on every server; it goes without --cluster, --replica-of and --standby-of".to_owned()));
+                }
+                Some((node.clone(), peers))
+            }
+            (None, None) => None,
+            _ => return Err(usage("--multi-primary and --multi-primary-node go together".to_owned())),
+        };
         let quorum = match &options.quorum {
             Some(text) => {
                 let members = super::serve_cluster::parse_members(text).map_err(|message| usage(message.replace("--cluster", "--quorum")))?;
@@ -2003,6 +2017,16 @@ impl Session<'_> {
                 }
                 None => Ok(()),
             });
+            let multi_primary_puller = scope.spawn(|| match &multi_primary {
+                Some((node, peers)) => {
+                    let outcome = super::serve_multi_primary::pull_peers(&store, node, peers, &password, &stop_signals::requested);
+                    if let Err(message) = &outcome {
+                        eprintln!("eggdb serve: multi-primary replication stopped: {message}");
+                    }
+                    outcome
+                }
+                None => Ok(()),
+            });
             let quorum_node = scope.spawn(|| match &quorum {
                 Some((settings, listener)) => {
                     let outcome = super::serve_quorum::run_quorum(
@@ -2116,6 +2140,7 @@ impl Session<'_> {
             let _ = standby_follower.join();
             let _ = cluster_node.join();
             let _ = quorum_node.join();
+            let _ = multi_primary_puller.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();
             let _ = database_arrivals.join();

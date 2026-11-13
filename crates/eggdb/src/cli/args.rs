@@ -305,6 +305,8 @@ impl CommandName {
             | OptionName::PgReplication
             | OptionName::Cluster
             | OptionName::Quorum
+            | OptionName::MultiPrimary
+            | OptionName::MultiPrimaryNode
             | OptionName::QuorumNode
             | OptionName::QuorumReplicas
             | OptionName::QuorumResolution
@@ -553,6 +555,8 @@ enum OptionName {
     PgReplication,
     Cluster,
     Quorum,
+    MultiPrimary,
+    MultiPrimaryNode,
     QuorumNode,
     QuorumReplicas,
     QuorumResolution,
@@ -739,6 +743,8 @@ impl OptionName {
             b"pg-replication" => Self::PgReplication,
             b"cluster" => Self::Cluster,
             b"quorum" => Self::Quorum,
+            b"multi-primary" => Self::MultiPrimary,
+            b"multi-primary-node" => Self::MultiPrimaryNode,
             b"quorum-node" => Self::QuorumNode,
             b"quorum-replicas" => Self::QuorumReplicas,
             b"quorum-resolution" => Self::QuorumResolution,
@@ -1131,6 +1137,8 @@ pub(crate) struct ServeOptions {
     pub(crate) pg_replication: bool,
     pub(crate) cluster: Option<String>,
     pub(crate) quorum: Option<String>,
+    pub(crate) multi_primary: Option<String>,
+    pub(crate) multi_primary_node: Option<String>,
     pub(crate) quorum_node: Option<u64>,
     pub(crate) quorum_replicas: Option<(usize, usize, usize)>,
     pub(crate) quorum_resolution: Option<String>,
@@ -1964,6 +1972,17 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::Quorum => {
                 let text = value.to_str().filter(|text| text.contains('=')).ok_or_else(|| usage(format!("{} takes id=host:port for every node, separated by commas", option.spelled)))?;
                 request.serve.quorum = Some(text.to_owned());
+            }
+            OptionName::MultiPrimary => {
+                let text = value.to_str().filter(|text| text.contains('=')).ok_or_else(|| usage(format!("{} takes name=postgresql://host:port/database for every other server, separated by commas", option.spelled)))?;
+                request.serve.multi_primary = Some(text.to_owned());
+            }
+            OptionName::MultiPrimaryNode => {
+                let text = value
+                    .to_str()
+                    .filter(|text| !text.is_empty() && text.chars().all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_'))
+                    .ok_or_else(|| usage(format!("{} takes this server's name in its group: letters, digits, - and _", option.spelled)))?;
+                request.serve.multi_primary_node = Some(text.to_owned());
             }
             OptionName::QuorumNode => {
                 request.serve.quorum_node = Some(

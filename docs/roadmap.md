@@ -2044,7 +2044,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - CRDT types (counters, sets) as resolution policies (D18, D225). **Code written, unbuilt** (code-only mode,
   2026-11-11, D442).
 - Multi-primary SQL rows with conflict rules per table: last writer wins, application rules or
-  CRDTs (D18, D225).
+  CRDTs (D18, D225). **Code written, unbuilt** (code-only mode, 2026-11-13, D1098): the `eggdb_multi_primary`
+  extension (`eggdb_mp.enable`, `eggdb_mp.apply`, rules `lww`, `crdt` and `function`) and `eggdb serve --multi-primary`.
 - Tombstones collected once every replica has seen them, and membership changes by epoch (D225). **Code
   written, unbuilt** (code-only mode, 2026-11-11, D444).
 - Page-level remote storage: the page cache reads missing pages from object storage, and the log

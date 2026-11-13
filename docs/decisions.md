@@ -1122,3 +1122,4 @@ its full title with its status.
 - [D1095](decisions/D1095.md) Code-only batch 743 (M17): the whole workspace tested on six other CPUs under QEMU, in shards
 - [D1096](decisions/D1096.md) Code-only batch 744 (M17): the container image's download size and pull time measured at every release and budgeted
 - [D1097](decisions/D1097.md) Code-only batch 745 (M18): leaderless quorums between processes under eggdb serve --quorum
+- [D1098](decisions/D1098.md) Code-only batch 746 (M18): multi-primary SQL rows with a conflict rule per table

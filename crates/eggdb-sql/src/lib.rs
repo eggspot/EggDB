@@ -32,6 +32,7 @@ mod bytea;
 mod cancel;
 mod catalog;
 pub mod cdc;
+pub mod multi_primary;
 mod citext;
 mod column_privileges;
 mod comments;
@@ -292,6 +293,8 @@ mod batch_logic_tests;
 mod bulk_load_tests;
 #[cfg(test)]
 mod citext_tests;
+#[cfg(test)]
+mod multi_primary_tests;
 #[cfg(test)]
 mod constraint_tests;
 #[cfg(test)]
