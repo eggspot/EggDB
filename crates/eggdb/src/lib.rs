@@ -82,6 +82,7 @@ mod replay;
 mod replication;
 mod scan;
 mod shard_copy;
+pub mod table_sync;
 mod tenant_space;
 pub mod sql;
 mod transaction;

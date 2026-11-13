@@ -34,6 +34,7 @@ mod catalog;
 pub mod cdc;
 pub mod multi_primary;
 pub mod placement;
+pub mod sync_tables;
 mod citext;
 mod column_privileges;
 mod comments;

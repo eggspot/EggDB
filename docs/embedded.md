@@ -849,6 +849,20 @@ client lacks, and the newest write of each key (by a hybrid-clock stamp) wins ev
 network transport is the next step; until then the two replicas must be reachable from one
 program, or their changes carried as bytes with `encode` and `decode`.
 
+
+SQL tables sync the same way (D1107). Enable them once, write to them as usual, and call
+`sync_tables` whenever the device is online:
+
+```rust,ignore
+db.sql("CREATE EXTENSION eggdb_sync; SELECT eggdb_sync.enable('public', 'notes')")?;
+let report = eggdb::table_sync::sync_tables(&db, device_id, "https://sync.example.com", &session_token)?;
+```
+
+A capture trigger logs every local row change in `eggdb_sync.outbox`, offline included. A call
+stamps them into the device's replica, exchanges changes with the server's `--sync-listen` endpoint
+as the signed-in user (D1106), and writes the rows the user's other devices changed into the
+tables, with capture off so they are not sent back. A table needs a primary key, and the newest
+change of each row wins.
 ## Limits in this release
 - **Size of keys:** at most an eighth of a page, 512 bytes with the default 4 KiB pages and 8,192
   with 64 KiB pages (`db.max_key_bytes()`).

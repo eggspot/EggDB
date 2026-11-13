@@ -92,6 +92,19 @@ pub fn sync_over_http(
     batch: usize,
     timeout: Duration,
 ) -> Result<usize, SyncError> {
+    sync_over_http_changed(client, cursors, url, token, batch, timeout).map(|changed| changed.len())
+}
+
+/// Syncs as [`sync_over_http`] does and returns the server's changes that changed a row on the
+/// client, for a layer above to write through (D1107).
+pub fn sync_over_http_changed(
+    client: &Replica<'_>,
+    cursors: &mut Cursors,
+    url: &str,
+    token: &str,
+    batch: usize,
+    timeout: Duration,
+) -> Result<Vec<crate::Change>, SyncError> {
     let target = eggdb_http::client::parse_http_url(url).map_err(SyncError::Storage)?;
     let (outgoing, sent) = client.changes_after(cursors.sent, batch)?;
     let mut body = Vec::new();
@@ -118,7 +131,7 @@ pub fn sync_over_http(
         .ok_or(SyncError::Malformed("the answer has no received cursor"))?;
     let incoming = decode(&answer.body)?;
     cursors.sent = sent;
-    let changed = client.apply(&incoming)?;
+    let changed = client.apply_changed(&incoming)?;
     cursors.received = next;
     Ok(changed)
 }

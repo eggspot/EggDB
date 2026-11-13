@@ -396,6 +396,23 @@ impl<'k> Replica<'k> {
         })
     }
 
+    /// Takes in another replica's changes in one transaction, as [`Replica::apply`] does, and
+    /// returns the ones that changed a row: what a layer above, such as SQL tables synced
+    /// through this replica (D1107), must now write.
+    pub fn apply_changed(&self, changes: &[Change]) -> Result<Vec<Change>, SyncError> {
+        self.transact(|keys| {
+            let mut meta = Meta::read(&*keys)?;
+            let mut changed = Vec::new();
+            for change in changes {
+                if store_if_newer(keys, &mut meta, change)? {
+                    changed.push(change.clone());
+                }
+            }
+            meta.write(keys)?;
+            Ok(changed)
+        })
+    }
+
     /// Takes in another replica's changes in one transaction; returns how many changed a row.
     pub fn apply(&self, changes: &[Change]) -> Result<usize, SyncError> {
         self.transact(|keys| {
