@@ -1,7 +1,7 @@
 use crate::storage::{self, MemoryStorage};
 use crate::{
-    BrokenLog, Changes, Envelope, HardState, Message, Node, NodeId, Recovered, Role, Snapshot,
-    Timing,
+    BrokenLog, Changes, EntryKind, Envelope, HardState, Membership, MembershipRefused, Message,
+    Node, NodeId, Recovered, Role, Snapshot, Timing,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -269,6 +269,7 @@ fn entry(term: u64, index: u64) -> crate::Entry {
     crate::Entry {
         term,
         index,
+        kind: EntryKind::Command,
         command: vec![index as u8],
     }
 }
@@ -284,6 +285,7 @@ fn a_follower_never_commits_past_what_it_shares_with_the_leader() {
             previous_term: 0,
             entries: vec![entry(1, 1), entry(1, 2), entry(1, 3)],
             commit: 0,
+            round: 0,
         },
     );
     follower.step(
@@ -294,6 +296,7 @@ fn a_follower_never_commits_past_what_it_shares_with_the_leader() {
             previous_term: 1,
             entries: Vec::new(),
             commit: 3,
+            round: 0,
         },
     );
     assert_eq!(follower.commit_index(), 1);
@@ -305,6 +308,7 @@ fn a_follower_never_commits_past_what_it_shares_with_the_leader() {
             previous_term: 1,
             entries: vec![entry(2, 0), entry(2, 7)],
             commit: 3,
+            round: 0,
         },
     );
     assert_eq!(follower.log().len(), 3);
@@ -375,6 +379,7 @@ fn an_installed_snapshot_replaces_the_log_and_is_reported_for_storage() {
             previous_term: 0,
             entries: vec![entry(1, 1), entry(1, 2)],
             commit: 1,
+            round: 0,
         },
     );
     let first = follower.take_changes();
@@ -394,8 +399,10 @@ fn an_installed_snapshot_replaces_the_log_and_is_reported_for_storage() {
             snapshot: Snapshot {
                 index: 10,
                 term: 2,
+                membership: Membership::new(&[1, 2, 3]),
                 data: b"all of it".to_vec(),
             },
+            round: 1,
         },
     );
     assert!(replies.iter().any(|envelope| matches!(
@@ -431,6 +438,7 @@ fn an_installed_snapshot_replaces_the_log_and_is_reported_for_storage() {
             previous_term: 1,
             entries: vec![entry(2, 10), entry(2, 11)],
             commit: 11,
+            round: 0,
         },
     );
     assert_eq!(follower.commit_index(), 11);
@@ -451,10 +459,17 @@ fn stored_state_reads_back_and_a_gap_in_the_log_is_refused() {
     let mut bad = storage::encode_hard_state(&state);
     bad[8] = 2;
     assert_eq!(storage::decode_hard_state(&bad), None);
+    let snapshot = Snapshot {
+        index: 4,
+        term: 2,
+        membership: Membership::joint(&Membership::new(&[1, 2, 3]), &[2, 3, 4]),
+        data: Vec::new(),
+    };
     assert_eq!(
-        storage::decode_snapshot_position(&storage::encode_snapshot_position(4, 2)),
-        Some((4, 2))
+        storage::decode_snapshot_meta(&storage::encode_snapshot_meta(&snapshot)),
+        Some(snapshot)
     );
+    assert_eq!(storage::decode_snapshot_meta(&[0; 15]), None);
     let stored = entry(3, 5);
     assert_eq!(
         storage::decode_entry(5, &storage::encode_entry(&stored)),
@@ -474,4 +489,154 @@ fn stored_state_reads_back_and_a_gap_in_the_log_is_refused() {
         }
     );
     assert!(Changes::default().is_empty());
+}
+
+#[test]
+fn a_membership_change_moves_the_cluster_through_a_joint_configuration() {
+    let mut cluster = Cluster::new(3, 21);
+    let mut rng = Rng(8);
+    let none = BTreeSet::new();
+    for _ in 0..100 {
+        cluster.round(&mut rng, 0, &none);
+    }
+    let leader = cluster.leader().expect("a leader is elected");
+    for id in [4, 5] {
+        cluster
+            .nodes
+            .insert(id, Node::new(id, &[], Timing::default(), id));
+        cluster.storage.insert(id, MemoryStorage::new());
+    }
+    let voters: Vec<NodeId> = (1..=5).filter(|id| *id != leader).collect();
+    let (joint_index, outgoing) = cluster
+        .nodes
+        .get_mut(&leader)
+        .unwrap()
+        .propose_membership(&voters)
+        .unwrap();
+    assert!(cluster.nodes[&leader].membership().is_joint());
+    assert_eq!(
+        cluster
+            .nodes
+            .get_mut(&leader)
+            .unwrap()
+            .propose_membership(&[1])
+            .unwrap_err(),
+        MembershipRefused::ChangeInProgress
+    );
+    cluster.in_flight.extend(outgoing);
+    for _ in 0..300 {
+        cluster.round(&mut rng, 0, &none);
+    }
+    assert_ne!(cluster.nodes[&leader].role(), Role::Leader);
+    let new_leader = cluster
+        .leader()
+        .expect("the new configuration elects a leader");
+    assert!(voters.contains(&new_leader));
+    for id in &voters {
+        assert_eq!(cluster.nodes[id].membership(), &Membership::new(&voters));
+        assert!(cluster.nodes[id].commit_index() > joint_index);
+    }
+    let (proposed, outgoing) = cluster
+        .nodes
+        .get_mut(&new_leader)
+        .unwrap()
+        .propose(b"after the change".to_vec())
+        .unwrap();
+    cluster.in_flight.extend(outgoing);
+    for _ in 0..60 {
+        cluster.round(&mut rng, 0, &none);
+    }
+    for id in &voters {
+        assert!(cluster.nodes[id].commit_index() >= proposed);
+    }
+}
+
+#[test]
+fn a_partitioned_node_does_not_raise_its_term_or_unseat_the_leader() {
+    let mut cluster = Cluster::new(3, 31);
+    let mut rng = Rng(12);
+    let none = BTreeSet::new();
+    for _ in 0..100 {
+        cluster.round(&mut rng, 0, &none);
+    }
+    let leader = cluster.leader().expect("a leader is elected");
+    let term = cluster.nodes[&leader].term();
+    let isolated = cluster
+        .members
+        .iter()
+        .copied()
+        .find(|id| *id != leader)
+        .unwrap();
+    let partition: BTreeSet<NodeId> = [isolated].into_iter().collect();
+    for _ in 0..200 {
+        cluster.round(&mut rng, 0, &partition);
+    }
+    assert_eq!(cluster.nodes[&isolated].term(), term);
+    for _ in 0..60 {
+        cluster.round(&mut rng, 0, &none);
+    }
+    assert_eq!(cluster.leader(), Some(leader));
+    assert_eq!(cluster.nodes[&leader].term(), term);
+    assert_eq!(cluster.nodes[&isolated].leader(), Some(leader));
+}
+
+#[test]
+fn a_leader_reads_on_its_lease_only_while_a_quorum_answers() {
+    let mut cluster = Cluster::new(3, 41);
+    let mut rng = Rng(3);
+    let none = BTreeSet::new();
+    for _ in 0..100 {
+        cluster.round(&mut rng, 0, &none);
+    }
+    let leader = cluster.leader().expect("a leader is elected");
+    assert_eq!(
+        cluster.nodes[&leader].lease_read_index(),
+        Some(cluster.nodes[&leader].commit_index())
+    );
+    let follower = cluster
+        .members
+        .iter()
+        .copied()
+        .find(|id| *id != leader)
+        .unwrap();
+    assert_eq!(cluster.nodes[&follower].lease_read_index(), None);
+    let partition: BTreeSet<NodeId> = [leader].into_iter().collect();
+    for _ in 0..Timing::default().election_ticks {
+        cluster.round(&mut rng, 0, &partition);
+    }
+    assert_eq!(cluster.nodes[&leader].lease_read_index(), None);
+}
+
+#[test]
+fn configurations_encode_and_need_both_majorities_while_joint() {
+    let joint = Membership::joint(&Membership::new(&[3, 1, 2]), &[4, 2, 3, 5]);
+    assert_eq!(joint.voters, vec![2, 3, 4, 5]);
+    assert_eq!(joint.outgoing, vec![1, 2, 3]);
+    assert_eq!(Membership::decode(&joint.encode()), Some(joint.clone()));
+    assert_eq!(Membership::decode(&[0, 0, 0, 9]), None);
+    assert_eq!(Membership::decode(&[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]), None);
+    let only_new: BTreeSet<NodeId> = [3, 4, 5].into_iter().collect();
+    assert!(!joint.has_quorum(&only_new));
+    let both: BTreeSet<NodeId> = [2, 3, 4].into_iter().collect();
+    assert!(joint.has_quorum(&both));
+    assert!(joint.contains(1) && joint.contains(5) && !joint.contains(6));
+    let mut lone = Node::new(1, &[1], Timing::default(), 3);
+    for _ in 0..40 {
+        lone.tick();
+    }
+    assert_eq!(lone.role(), Role::Leader);
+    assert_eq!(
+        lone.propose_membership(&[]).unwrap_err(),
+        MembershipRefused::NoVoters
+    );
+    let (_, outgoing) = lone.propose_membership(&[1]).unwrap();
+    assert!(outgoing.is_empty());
+    assert!(!lone.membership().is_joint());
+    assert!(
+        lone.log()
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Membership)
+            .count()
+            == 2
+    );
 }

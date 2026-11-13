@@ -475,8 +475,10 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
 - **Consensus state** (D1036): a file that is a node of a cluster keeps its Raft state under the
   engine's reserved prefix `FF 43 4F 4C 00 7F` followed by `raft 00`: `state` holds the term
   (8 bytes, big-endian), a vote flag (1) and the vote (8); `snapshot` holds the last snapshot's
-  index and term (8 each; the database itself is the snapshot's state); `log 00` followed by an
-  index (8, big-endian) holds that entry's term (8) and command. They are written in one durable
+  index and term (8 each) and its configuration (the database itself is the snapshot's state);
+  `log 00` followed by an index (8, big-endian) holds that entry's term (8), its kind (0 a
+  command, 1 a configuration) and its command. A configuration is a voter count (4) and the
+  voters (8 each), then the same for the outgoing voters of a joint configuration (D1037). They are written in one durable
   commit per batch of changes, the snapshot first, so the log after a snapshot is always
   contiguous; a reader refuses a gap as damage. A file that never joined a cluster holds none.
 

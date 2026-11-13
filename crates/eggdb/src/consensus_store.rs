@@ -2,10 +2,10 @@ use crate::scan::Scan;
 use crate::transaction::WriteTransaction;
 use crate::{Database, Error, ErrorKind, Result};
 use eggdb_consensus::storage::{
-    decode_entry, decode_hard_state, decode_snapshot_position, encode_entry, encode_hard_state,
-    encode_snapshot_position,
+    decode_entry, decode_hard_state, decode_snapshot_meta, encode_entry, encode_hard_state,
+    encode_snapshot_meta,
 };
-use eggdb_consensus::{Changes, HardState, Recovered, Snapshot};
+use eggdb_consensus::{Changes, HardState, Recovered};
 
 const HARD_STATE_KEY: &[u8] = b"\xffCOL\x00\x7fraft\x00state";
 const SNAPSHOT_KEY: &[u8] = b"\xffCOL\x00\x7fraft\x00snapshot";
@@ -52,8 +52,8 @@ fn delete_log_range(
 
 impl Database {
     /// The Raft state this file keeps for its node of a cluster (D211, D1036): the term and
-    /// vote, the position of the last snapshot (the database itself is the snapshot's state,
-    /// so its data is empty) and the log entries after it, for
+    /// vote, the position and configuration of the last snapshot (the database itself is the
+    /// snapshot's state, so its data is empty) and the log entries after it, for
     /// [`eggdb_consensus::Node::recover`].
     pub fn consensus_state(&self) -> Result<Recovered> {
         let read = self.begin_read()?;
@@ -62,15 +62,7 @@ impl Database {
             None => HardState::default(),
         };
         let snapshot = match read.get_raw(SNAPSHOT_KEY)? {
-            Some(bytes) => {
-                let (index, term) =
-                    decode_snapshot_position(&bytes).ok_or_else(|| broken("snapshot position"))?;
-                Some(Snapshot {
-                    index,
-                    term,
-                    data: Vec::new(),
-                })
-            }
+            Some(bytes) => Some(decode_snapshot_meta(&bytes).ok_or_else(|| broken("snapshot"))?),
             None => None,
         };
         let mut entries = Vec::new();
@@ -105,10 +97,7 @@ impl Database {
             .flatten()
             .max_by_key(|snapshot| snapshot.index);
         if let Some(snapshot) = newest {
-            transaction.put_raw(
-                SNAPSHOT_KEY,
-                &encode_snapshot_position(snapshot.index, snapshot.term),
-            )?;
+            transaction.put_raw(SNAPSHOT_KEY, &encode_snapshot_meta(snapshot))?;
             delete_log_range(
                 &mut transaction,
                 LOG_PREFIX.to_vec()..log_key(snapshot.index.saturating_add(1)),

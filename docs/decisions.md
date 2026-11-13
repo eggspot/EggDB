@@ -1061,3 +1061,4 @@ its full title with its status.
 - [D1034](decisions/D1034.md) Code-only batch 682 (M14): eggdb follow of pgoutput protocols 3 and 4, more binary types, moved and replaced tables
 - [D1035](decisions/D1035.md) Code-only batch 683 (M14): eggdb follow of SQL Server type changes, unique-index capture instances, replaced tables and a reconnecting copy
 - [D1036](decisions/D1036.md) Code-only batch 684 (M15): Raft's durable state in the file, snapshots and log compaction
+- [D1037](decisions/D1037.md) Code-only batch 685 (M15): Raft membership changes by joint consensus, pre-vote and leader leases

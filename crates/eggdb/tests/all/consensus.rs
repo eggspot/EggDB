@@ -3,12 +3,13 @@
 
 use crate::common::TempPath;
 use eggdb::Database;
-use eggdb::consensus::{Changes, Entry, HardState, Node, Snapshot, Timing};
+use eggdb::consensus::{Changes, Entry, EntryKind, HardState, Membership, Node, Snapshot, Timing};
 
 fn entry(term: u64, index: u64) -> Entry {
     Entry {
         term,
         index,
+        kind: EntryKind::Command,
         command: format!("command {index}").into_bytes(),
     }
 }
@@ -72,6 +73,7 @@ fn a_snapshot_drops_the_entries_it_covers() {
         compacted: Some(Snapshot {
             index: 4,
             term: 1,
+            membership: Membership::new(&[1, 2, 3]),
             data: Vec::new(),
         }),
         ..Changes::default()
@@ -90,7 +92,12 @@ fn a_snapshot_drops_the_entries_it_covers() {
             .collect::<Vec<_>>(),
         vec![5, 6]
     );
+    assert_eq!(
+        recovered.snapshot.as_ref().map(|snapshot| snapshot.membership.clone()),
+        Some(Membership::new(&[1, 2, 3]))
+    );
     let node = Node::recover(1, &[1], Timing::default(), 1, recovered).unwrap();
     assert_eq!(node.snapshot_position(), (4, 1));
+    assert_eq!(node.membership(), &Membership::new(&[1, 2, 3]));
     assert_eq!(node.commit_index(), 4);
 }
