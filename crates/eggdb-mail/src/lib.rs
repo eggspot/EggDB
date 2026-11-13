@@ -11,6 +11,7 @@ mod json;
 pub mod message;
 pub mod mime;
 mod smtp;
+mod smtp_client;
 pub mod store;
 
 pub use jmap::{Endpoint as JmapEndpoint, MAX_REQUEST_BYTES as MAX_JMAP_REQUEST_BYTES};
@@ -36,6 +37,12 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// The largest message accepted, in bytes.
     pub max_message_bytes: usize,
+    /// The account's mail domain: its address is `user@domain`, and mail submitted over JMAP to
+    /// this domain (or `localhost`) is delivered to the store.
+    pub domain: String,
+    /// The SMTP server (`host:port`) that JMAP submissions to other domains are relayed through;
+    /// without one they are refused.
+    pub relay: Option<String>,
 }
 
 pub(crate) fn now_seconds() -> u64 {
@@ -126,6 +133,8 @@ mod tests {
             password_sha256: eggdb_crypto::sha256(b"secret"),
             max_connections: 4,
             max_message_bytes: 1 << 20,
+            domain: "localhost".to_owned(),
+            relay: None,
         };
         let stopped = AtomicBool::new(false);
         let stop = || stopped.load(Ordering::Acquire);
@@ -187,6 +196,8 @@ mod tests {
             password_sha256: eggdb_crypto::sha256(b"secret"),
             max_connections: 4,
             max_message_bytes: 1 << 20,
+            domain: "localhost".to_owned(),
+            relay: None,
         };
         let stopped = AtomicBool::new(false);
         let stop = || stopped.load(Ordering::Acquire);

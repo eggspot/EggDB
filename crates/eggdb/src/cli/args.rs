@@ -321,6 +321,8 @@ impl CommandName {
             | OptionName::FlightListen
             | OptionName::SparqlListen
             | OptionName::SmtpListen
+            | OptionName::SmtpRelay
+            | OptionName::MailDomain
             | OptionName::ImapListen
             | OptionName::JmapListen
             | OptionName::DavListen
@@ -562,6 +564,8 @@ enum OptionName {
     FlightListen,
     SparqlListen,
     SmtpListen,
+    SmtpRelay,
+    MailDomain,
     ImapListen,
     JmapListen,
     DavListen,
@@ -741,6 +745,8 @@ impl OptionName {
             b"flight-listen" => Self::FlightListen,
             b"sparql-listen" => Self::SparqlListen,
             b"smtp-listen" => Self::SmtpListen,
+            b"smtp-relay" => Self::SmtpRelay,
+            b"mail-domain" => Self::MailDomain,
             b"imap-listen" => Self::ImapListen,
             b"jmap-listen" => Self::JmapListen,
             b"dav-listen" => Self::DavListen,
@@ -1127,6 +1133,8 @@ pub(crate) struct ServeOptions {
     pub(crate) flight_listen: Option<SocketAddr>,
     pub(crate) sparql_listen: Option<SocketAddr>,
     pub(crate) smtp_listen: Option<SocketAddr>,
+    pub(crate) smtp_relay: Option<String>,
+    pub(crate) mail_domain: Option<String>,
     pub(crate) imap_listen: Option<SocketAddr>,
     pub(crate) jmap_listen: Option<SocketAddr>,
     pub(crate) dav_listen: Option<SocketAddr>,
@@ -1828,6 +1836,21 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::SparqlListen => {
                 request.serve.sparql_listen =
                     Some(parse_listen(&option.spelled, value, 3030).map_err(usage)?);
+            }
+            OptionName::SmtpRelay => {
+                let text = value.to_str().unwrap_or_default();
+                let valid = text.rsplit_once(':').is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok_and(|port| port > 0));
+                if !valid {
+                    return Err(usage(format!("{} {text}: give the relay as host:port, such as smtp.example.org:25", option.spelled)));
+                }
+                request.serve.smtp_relay = Some(text.to_owned());
+            }
+            OptionName::MailDomain => {
+                let text = value.to_str().unwrap_or_default();
+                if text.is_empty() || text.contains(['@', ' ', '/']) {
+                    return Err(usage(format!("{} {text}: give a domain, such as example.org", option.spelled)));
+                }
+                request.serve.mail_domain = Some(text.to_ascii_lowercase());
             }
             OptionName::SmtpListen => {
                 request.serve.smtp_listen =

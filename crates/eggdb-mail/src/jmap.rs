@@ -19,6 +19,8 @@ const PREVIEW_CHARS: usize = 256;
 const UPLOAD_KEPT_SECONDS: u64 = 24 * 3600;
 const CORE: &str = "urn:ietf:params:jmap:core";
 const MAIL: &str = "urn:ietf:params:jmap:mail";
+const SUBMISSION: &str = "urn:ietf:params:jmap:submission";
+const IDENTITY_ID: &str = "i1";
 /// The largest JMAP request body.
 pub const MAX_REQUEST_BYTES: usize = 10 << 20;
 
@@ -351,10 +353,11 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
         json_reply(
             200,
             format!(
-                "{{\"capabilities\":{{{core_name}:{core},{mail_name}:{{}}}},\"accounts\":{{\"{ACCOUNT}\":{{\"name\":{user},\"isPersonal\":true,\"isReadOnly\":false,\"accountCapabilities\":{{{mail_name}:{mail}}}}}}},\"primaryAccounts\":{{{mail_name}:\"{ACCOUNT}\"}},\"username\":{user},\"apiUrl\":\"/jmap/api\",\"downloadUrl\":\"/jmap/download/{{accountId}}/{{blobId}}/{{name}}?accept={{type}}\",\"uploadUrl\":\"/jmap/upload/{{accountId}}/\",\"eventSourceUrl\":\"/jmap/eventsource\",\"state\":{}}}",
+                "{{\"capabilities\":{{{core_name}:{core},{mail_name}:{{}},{submission_name}:{{}}}},\"accounts\":{{\"{ACCOUNT}\":{{\"name\":{user},\"isPersonal\":true,\"isReadOnly\":false,\"accountCapabilities\":{{{mail_name}:{mail},{submission_name}:{{\"maxDelayedSend\":0,\"submissionExtensions\":{{}}}}}}}}}},\"primaryAccounts\":{{{mail_name}:\"{ACCOUNT}\",{submission_name}:\"{ACCOUNT}\"}},\"username\":{user},\"apiUrl\":\"/jmap/api\",\"downloadUrl\":\"/jmap/download/{{accountId}}/{{blobId}}/{{name}}?accept={{type}}\",\"uploadUrl\":\"/jmap/upload/{{accountId}}/\",\"eventSourceUrl\":\"/jmap/eventsource\",\"state\":{}}}",
                 string(&state),
                 core_name = string(CORE),
                 mail_name = string(MAIL),
+                submission_name = string(SUBMISSION),
                 user = string(&self.config.user),
             ),
         )
@@ -523,7 +526,7 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             return problem(400, "urn:ietf:params:jmap:error:notRequest", "the request needs using and methodCalls");
         };
         for capability in using {
-            if !matches!(capability.as_str(), Some(CORE | MAIL)) {
+            if !matches!(capability.as_str(), Some(CORE | MAIL | SUBMISSION)) {
                 return problem(400, "urn:ietf:params:jmap:error:unknownCapability", "a capability in using is not offered");
             }
         }
@@ -538,11 +541,26 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             let (Some(name), Some(call_id)) = (name.as_str(), call_id.as_str()) else {
                 return problem(400, "urn:ietf:params:jmap:error:notRequest", "a method call is [name, arguments, id]");
             };
+            let mut implicit = None;
             let (response_name, response) = match self.resolve_references(arguments, &responses) {
+                Ok(arguments) if name == "EmailSubmission/set" => match self.submission_set(&arguments, &responses) {
+                    Ok((response, follow_up)) => {
+                        implicit = follow_up;
+                        (name.to_owned(), response)
+                    }
+                    Err(kind) => method_error(&kind),
+                },
                 Ok(arguments) => self.method(name, &arguments),
                 Err(()) => method_error("invalidResultReference"),
             };
             responses.push((response_name, response, call_id.to_owned()));
+            if let Some(update) = implicit {
+                let (implicit_name, implicit_response) = match self.email_set(&update) {
+                    Ok(response) => ("Email/set".to_owned(), response),
+                    Err(kind) => method_error(&kind),
+                };
+                responses.push((implicit_name, implicit_response, call_id.to_owned()));
+            }
         }
         let state = self.snapshot().map(|store| Self::state(&store)).unwrap_or_default();
         let listed: Vec<String> = responses
@@ -589,6 +607,9 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
             "Email/set" => self.email_set(arguments),
             "Email/import" => self.email_import(arguments),
             "Thread/get" => self.thread_get(arguments),
+            "Identity/get" => Ok(self.identity_get(arguments)),
+            "EmailSubmission/get" => self.submission_get(arguments),
+            "EmailSubmission/query" => self.submission_query(),
             _ => return method_error("unknownMethod"),
         };
         match outcome {
@@ -953,6 +974,289 @@ impl<'k, K: Keyspace + ?Sized> Endpoint<'k, K> {
         ]))
     }
 
+    fn address(&self) -> String {
+        format!("{}@{}", self.config.user, self.config.domain)
+    }
+
+    fn identity_get(&self, arguments: &Json) -> Json {
+        let identity = Json::Object(vec![
+            ("id".to_owned(), Json::String(IDENTITY_ID.to_owned())),
+            ("name".to_owned(), Json::String(self.config.user.clone())),
+            ("email".to_owned(), Json::String(self.address())),
+            ("replyTo".to_owned(), Json::Null),
+            ("bcc".to_owned(), Json::Null),
+            ("textSignature".to_owned(), Json::String(String::new())),
+            ("htmlSignature".to_owned(), Json::String(String::new())),
+            ("mayDelete".to_owned(), Json::Bool(false)),
+        ]);
+        let (list, not_found) = match Self::wanted_ids(arguments) {
+            None => (vec![identity], Vec::new()),
+            Some(ids) => {
+                let found = ids.iter().any(|id| id == IDENTITY_ID);
+                (
+                    if found { vec![identity] } else { Vec::new() },
+                    ids.into_iter().filter(|id| id != IDENTITY_ID).map(Json::String).collect(),
+                )
+            }
+        };
+        Json::Object(vec![
+            ("accountId".to_owned(), Json::String(ACCOUNT.to_owned())),
+            ("state".to_owned(), Json::String("i0".to_owned())),
+            ("list".to_owned(), Json::Array(list)),
+            ("notFound".to_owned(), Json::Array(not_found)),
+        ])
+    }
+
+    fn stored_submissions(&self) -> Result<Vec<(String, Json)>, String> {
+        let mut found = Vec::new();
+        self.keyspace.read(0, &mut |keys| {
+            found = store::submissions(keys).map_err(|error| error.0)?;
+            Ok(())
+        })?;
+        Ok(found.into_iter().filter_map(|(id, text)| Some((id, parse(&text)?))).collect())
+    }
+
+    fn submission_state(count: usize) -> String {
+        format!("u{count}")
+    }
+
+    fn submission_get(&self, arguments: &Json) -> Result<Json, String> {
+        let stored = self.stored_submissions().map_err(|_| "serverFail".to_owned())?;
+        let state = Self::submission_state(stored.len());
+        let (list, not_found): (Vec<Json>, Vec<Json>) = match Self::wanted_ids(arguments) {
+            None => (stored.into_iter().map(|(_, json)| json).collect(), Vec::new()),
+            Some(ids) => {
+                let mut list = Vec::new();
+                let mut missing = Vec::new();
+                for id in ids {
+                    match stored.iter().find(|(known, _)| *known == id) {
+                        Some((_, json)) => list.push(json.clone()),
+                        None => missing.push(Json::String(id)),
+                    }
+                }
+                (list, missing)
+            }
+        };
+        Ok(Json::Object(vec![
+            ("accountId".to_owned(), Json::String(ACCOUNT.to_owned())),
+            ("state".to_owned(), Json::String(state)),
+            ("list".to_owned(), Json::Array(list)),
+            ("notFound".to_owned(), Json::Array(not_found)),
+        ]))
+    }
+
+    fn submission_query(&self) -> Result<Json, String> {
+        let stored = self.stored_submissions().map_err(|_| "serverFail".to_owned())?;
+        Ok(Json::Object(vec![
+            ("accountId".to_owned(), Json::String(ACCOUNT.to_owned())),
+            ("queryState".to_owned(), Json::String(Self::submission_state(stored.len()))),
+            ("canCalculateChanges".to_owned(), Json::Bool(false)),
+            ("position".to_owned(), Json::Number(0.0)),
+            ("total".to_owned(), Json::Number(stored.len() as f64)),
+            ("ids".to_owned(), Json::Array(stored.into_iter().map(|(id, _)| Json::String(id)).collect())),
+        ]))
+    }
+
+    fn is_local(&self, recipient: &str) -> bool {
+        recipient
+            .rsplit_once('@')
+            .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(&self.config.domain) || domain.eq_ignore_ascii_case("localhost"))
+    }
+
+    fn submit(&self, creation: &Json, earlier: &[(String, Json, String)]) -> Result<(Json, String), Json> {
+        let failure = |kind: &str, description: &str| {
+            Json::Object(vec![
+                ("type".to_owned(), Json::String(kind.to_owned())),
+                ("description".to_owned(), Json::String(description.to_owned())),
+            ])
+        };
+        let email_id = match creation.get("emailId").and_then(Json::as_str) {
+            Some(reference) if reference.starts_with('#') => earlier
+                .iter()
+                .rev()
+                .filter(|(name, _, _)| name == "Email/set" || name == "Email/import")
+                .find_map(|(_, response, _)| response.get("created")?.get(&reference[1..])?.get("id")?.as_str().map(str::to_owned))
+                .ok_or_else(|| failure("invalidProperties", "emailId names no Email created earlier in this request"))?,
+            Some(id) => id.to_owned(),
+            None => return Err(failure("invalidProperties", "emailId is required")),
+        };
+        if creation.get("identityId").and_then(Json::as_str) != Some(IDENTITY_ID) {
+            return Err(failure("invalidProperties", "identityId must be the account's identity, i1"));
+        }
+        let store = self.snapshot().map_err(|_| failure("serverFail", "the store could not be read"))?;
+        let (_, message) = store.find(&email_id).ok_or_else(|| failure("invalidProperties", "emailId names no Email"))?;
+        let header_fields = headers(&message.raw);
+        let mail_from = creation
+            .get("envelope")
+            .and_then(|envelope| envelope.get("mailFrom"))
+            .and_then(|from| from.get("email"))
+            .and_then(Json::as_str)
+            .map_or_else(|| self.address(), str::to_owned);
+        let recipients: Vec<String> = match creation.get("envelope").and_then(|envelope| envelope.get("rcptTo")).and_then(Json::as_array) {
+            Some(listed) => listed.iter().filter_map(|to| to.get("email").and_then(Json::as_str).map(str::to_owned)).collect(),
+            None => header_fields
+                .iter()
+                .filter(|(name, _)| ["to", "cc", "bcc"].contains(&name.to_ascii_lowercase().as_str()))
+                .flat_map(|(_, value)| addresses(value))
+                .map(|address| address.email)
+                .collect(),
+        };
+        if recipients.is_empty() {
+            return Err(failure("noRecipients", "the Email names no recipient and no envelope was given"));
+        }
+        if message.raw.len() > self.config.max_message_bytes {
+            return Err(failure("tooLarge", "the Email is larger than the server sends"));
+        }
+        let (local, remote): (Vec<String>, Vec<String>) = recipients.iter().cloned().partition(|recipient| self.is_local(recipient));
+        if !remote.is_empty() && self.config.relay.is_none() {
+            return Err(failure("forbiddenToSend", "mail to other domains needs eggdb serve --smtp-relay"));
+        }
+        let sent = without_bcc(&message.raw);
+        let mut statuses: Vec<(String, Json)> = Vec::new();
+        let status = |reply: &str, delivered: &str| {
+            Json::Object(vec![
+                ("smtpReply".to_owned(), Json::String(reply.to_owned())),
+                ("delivered".to_owned(), Json::String(delivered.to_owned())),
+                ("displayed".to_owned(), Json::String("unknown".to_owned())),
+            ])
+        };
+        if let (Some(relay), false) = (&self.config.relay, remote.is_empty()) {
+            let outcomes = crate::smtp_client::relay(relay, &self.config.domain, &mail_from, &remote, &sent)
+                .map_err(|error| failure("serverFail", &error))?;
+            if outcomes.iter().all(|(_, outcome)| outcome.is_err()) {
+                let rejected = outcomes.iter().map(|(recipient, _)| Json::String(recipient.clone())).collect();
+                let mut error = failure("invalidRecipients", "the relay refused every recipient");
+                if let Json::Object(members) = &mut error {
+                    members.push(("invalidRecipients".to_owned(), Json::Array(rejected)));
+                }
+                return Err(error);
+            }
+            for (recipient, outcome) in outcomes {
+                statuses.push(match outcome {
+                    Ok(reply) => (recipient, status(&reply, "queued")),
+                    Err(reply) => (recipient, status(&reply, "no")),
+                });
+            }
+        }
+        if !local.is_empty() {
+            let mut delivered = format!("Delivered-To: {}\r\n", local.join(", ")).into_bytes();
+            delivered.extend_from_slice(&sent);
+            self.change(&mut |keys| store::append(keys, INBOX, &[], crate::now_seconds(), &delivered).map(drop))
+                .map_err(|_| failure("serverFail", "the Email could not be delivered to the store"))?;
+            for recipient in local {
+                statuses.push((recipient, status("250 2.0.0 delivered to the store", "yes")));
+            }
+        }
+        let mut number = 0;
+        let send_at = utc_date(crate::now_seconds());
+        let envelope = Json::Object(vec![
+            ("mailFrom".to_owned(), Json::Object(vec![("email".to_owned(), Json::String(mail_from.clone())), ("parameters".to_owned(), Json::Null)])),
+            (
+                "rcptTo".to_owned(),
+                Json::Array(recipients.iter().map(|to| Json::Object(vec![("email".to_owned(), Json::String(to.clone())), ("parameters".to_owned(), Json::Null)])).collect()),
+            ),
+        ]);
+        let mut record = Json::Null;
+        self.change(&mut |keys| {
+            number = store::next_number(keys, "submission")?;
+            let id = format!("S{number}");
+            record = Json::Object(vec![
+                ("id".to_owned(), Json::String(id.clone())),
+                ("identityId".to_owned(), Json::String(IDENTITY_ID.to_owned())),
+                ("emailId".to_owned(), Json::String(email_id.clone())),
+                ("threadId".to_owned(), Json::String(format!("t{}", email_id.get(1..).unwrap_or_default()))),
+                ("envelope".to_owned(), envelope.clone()),
+                ("sendAt".to_owned(), Json::String(send_at.clone())),
+                ("undoStatus".to_owned(), Json::String("final".to_owned())),
+                ("deliveryStatus".to_owned(), Json::Object(statuses.clone())),
+                ("dsnBlobIds".to_owned(), Json::Array(Vec::new())),
+                ("mdnBlobIds".to_owned(), Json::Array(Vec::new())),
+            ]);
+            store::put_submission(keys, &id, &record.to_text())
+        })
+        .map_err(|_| failure("serverFail", "the submission could not be kept"))?;
+        let created = Json::Object(vec![
+            ("id".to_owned(), Json::String(format!("S{number}"))),
+            ("sendAt".to_owned(), Json::String(send_at)),
+            ("undoStatus".to_owned(), Json::String("final".to_owned())),
+        ]);
+        Ok((created, email_id))
+    }
+
+    fn submission_set(&self, arguments: &Json, earlier: &[(String, Json, String)]) -> Result<(Json, Option<Json>), String> {
+        if arguments.get("accountId").and_then(Json::as_str).is_some_and(|account| account != ACCOUNT) {
+            return Err("accountNotFound".to_owned());
+        }
+        let old_state = Self::submission_state(self.stored_submissions().map_err(|_| "serverFail".to_owned())?.len());
+        let mut created = Vec::new();
+        let mut not_created = Vec::new();
+        let mut sent_emails: Vec<(String, String, String)> = Vec::new();
+        if let Some(Json::Object(creations)) = arguments.get("create") {
+            for (creation_id, creation) in creations {
+                match self.submit(creation, earlier) {
+                    Ok((record, email_id)) => {
+                        let submission_id = record.get("id").and_then(Json::as_str).unwrap_or_default().to_owned();
+                        sent_emails.push((creation_id.clone(), submission_id, email_id));
+                        created.push((creation_id.clone(), record));
+                    }
+                    Err(error) => not_created.push((creation_id.clone(), error)),
+                }
+            }
+        }
+        let refusal = |kind: &str| Json::Object(vec![("type".to_owned(), Json::String(kind.to_owned()))]);
+        let not_updated: Vec<(String, Json)> = match arguments.get("update") {
+            Some(Json::Object(updates)) => updates.iter().map(|(id, _)| (id.clone(), refusal("cannotUnsend"))).collect(),
+            _ => Vec::new(),
+        };
+        let not_destroyed: Vec<(String, Json)> = match arguments.get("destroy").and_then(Json::as_array) {
+            Some(ids) => ids.iter().filter_map(Json::as_str).map(|id| (id.to_owned(), refusal("forbidden"))).collect(),
+            None => Vec::new(),
+        };
+        let email_of = |key: &str| -> Option<String> {
+            sent_emails
+                .iter()
+                .find(|(creation_id, submission_id, _)| key.strip_prefix('#') == Some(creation_id.as_str()) || key == submission_id)
+                .map(|(_, _, email_id)| email_id.clone())
+        };
+        let mut updates = Vec::new();
+        if let Some(Json::Object(patches)) = arguments.get("onSuccessUpdateEmail") {
+            for (key, patch) in patches {
+                if let Some(email_id) = email_of(key) {
+                    updates.push((email_id, patch.clone()));
+                }
+            }
+        }
+        let destroys: Vec<Json> = arguments
+            .get("onSuccessDestroyEmail")
+            .and_then(Json::as_array)
+            .map(|keys| keys.iter().filter_map(Json::as_str).filter_map(email_of).map(Json::String).collect())
+            .unwrap_or_default();
+        let follow_up = (!updates.is_empty() || !destroys.is_empty()).then(|| {
+            let mut members = vec![("accountId".to_owned(), Json::String(ACCOUNT.to_owned()))];
+            if !updates.is_empty() {
+                members.push(("update".to_owned(), Json::Object(updates)));
+            }
+            if !destroys.is_empty() {
+                members.push(("destroy".to_owned(), Json::Array(destroys)));
+            }
+            Json::Object(members)
+        });
+        let new_state = Self::submission_state(self.stored_submissions().map_err(|_| "serverFail".to_owned())?.len());
+        let optional = |entries: Vec<(String, Json)>| if entries.is_empty() { Json::Null } else { Json::Object(entries) };
+        Ok((
+            Json::Object(vec![
+                ("accountId".to_owned(), Json::String(ACCOUNT.to_owned())),
+                ("oldState".to_owned(), Json::String(old_state)),
+                ("newState".to_owned(), Json::String(new_state)),
+                ("created".to_owned(), optional(created)),
+                ("notCreated".to_owned(), optional(not_created)),
+                ("notUpdated".to_owned(), optional(not_updated)),
+                ("notDestroyed".to_owned(), optional(not_destroyed)),
+            ]),
+            follow_up,
+        ))
+    }
+
     fn thread_get(&self, arguments: &Json) -> Result<Json, String> {
         let store = self.snapshot().map_err(|_| "serverFail".to_owned())?;
         let ids = Self::wanted_ids(arguments).unwrap_or_default();
@@ -1005,6 +1309,29 @@ fn walk(value: &Json, steps: &[String]) -> Option<Json> {
     }
 }
 
+fn without_bcc(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut skipping = false;
+    let mut at = 0;
+    while at < raw.len() {
+        let end = raw[at..].iter().position(|byte| *byte == b'\n').map_or(raw.len(), |found| at + found + 1);
+        let line = &raw[at..end];
+        if line == b"\r\n" || line == b"\n" {
+            out.extend_from_slice(&raw[at..]);
+            return out;
+        }
+        let continuation = line.first().is_some_and(|byte| *byte == b' ' || *byte == b'\t');
+        if !continuation {
+            skipping = line.len() >= 4 && line[..4].eq_ignore_ascii_case(b"bcc:");
+        }
+        if !skipping {
+            out.extend_from_slice(line);
+        }
+        at = end;
+    }
+    out
+}
+
 fn parse_rfc3339(text: &str) -> Option<u64> {
     let (date, time) = text.split_once('T')?;
     let mut parts = date.splitn(3, '-');
@@ -1048,6 +1375,8 @@ mod tests {
             password_sha256: eggdb_crypto::sha256(b"secret"),
             max_connections: 4,
             max_message_bytes: 1 << 20,
+            domain: "localhost".to_owned(),
+            relay: None,
         };
         let endpoint = Endpoint::new(&keyspace, config);
         let session = call(&endpoint, "GET", "/.well-known/jmap", "");
@@ -1098,6 +1427,8 @@ mod tests {
             password_sha256: eggdb_crypto::sha256(b"secret"),
             max_connections: 4,
             max_message_bytes: 1 << 20,
+            domain: "localhost".to_owned(),
+            relay: None,
         };
         let endpoint = Endpoint::new(&keyspace, config);
         let id = email_id(INBOX, 1);
@@ -1123,6 +1454,8 @@ mod tests {
             password_sha256: eggdb_crypto::sha256(b"secret"),
             max_connections: 4,
             max_message_bytes: 1 << 20,
+            domain: "localhost".to_owned(),
+            relay: None,
         };
         let endpoint = Endpoint::new(&keyspace, config);
         let upload = endpoint.answer(&Request {
@@ -1149,5 +1482,56 @@ mod tests {
         assert!(imported.contains("\"k1\":{\"id\":"), "{imported}");
         assert!(imported.contains("\"k2\":{\"type\":\"blobNotFound\"}"), "{imported}");
         assert!(imported.contains("\"total\":1"), "{imported}");
+    }
+
+    #[test]
+    fn submissions_deliver_locally_update_the_email_and_refuse_other_domains_without_a_relay() {
+        let keyspace = MemoryKeyspace::default();
+        keyspace
+            .write(0, &mut |keys| {
+                store::append(keys, INBOX, &["\\Draft".to_owned()], 100, b"From: eggdb@localhost\r\nTo: eggdb@localhost\r\nBcc: hidden@localhost\r\nSubject: Note\r\n\r\nHi\r\n").map_err(|error| error.0)?;
+                store::append(keys, INBOX, &[], 200, b"From: eggdb@localhost\r\nTo: ann@example.org\r\nSubject: Out\r\n\r\nHello\r\n").map(drop).map_err(|error| error.0)
+            })
+            .unwrap();
+        let config = ServerConfig {
+            user: "eggdb".to_owned(),
+            password_sha256: eggdb_crypto::sha256(b"secret"),
+            max_connections: 4,
+            max_message_bytes: 1 << 20,
+            domain: "localhost".to_owned(),
+            relay: None,
+        };
+        let endpoint = Endpoint::new(&keyspace, config);
+        let session = call(&endpoint, "GET", "/.well-known/jmap", "");
+        assert!(session.contains("urn:ietf:params:jmap:submission"), "{session}");
+        let (local, remote) = (email_id(INBOX, 1), email_id(INBOX, 2));
+        let answered = call(
+            &endpoint,
+            "POST",
+            "/jmap/api",
+            &format!(
+                r##"{{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail","urn:ietf:params:jmap:submission"],"methodCalls":[
+                ["Identity/get",{{}},"i"],
+                ["EmailSubmission/set",{{"create":{{"k1":{{"emailId":"{local}","identityId":"i1"}},"k2":{{"emailId":"{remote}","identityId":"i1"}}}},"onSuccessUpdateEmail":{{"#k1":{{"keywords/$draft":null}}}}}},"s"],
+                ["EmailSubmission/get",{{"ids":null}},"g"]]}}"##
+            ),
+        );
+        assert!(answered.contains("\"email\":\"eggdb@localhost\""), "{answered}");
+        assert!(answered.contains("\"created\":{\"k1\":{\"id\":\"S1\""), "{answered}");
+        assert!(answered.contains("\"k2\":{\"type\":\"forbiddenToSend\""), "{answered}");
+        assert!(answered.contains(&format!("[\"Email/set\",{{\"accountId\":\"a\"")), "the implicit Email/set follows: {answered}");
+        assert!(answered.contains("\"delivered\":\"yes\""), "{answered}");
+        let mut inbox = Vec::new();
+        keyspace
+            .read(0, &mut |keys| {
+                inbox = store::messages(keys, INBOX).map_err(|error| error.0)?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(inbox.len(), 3, "the local copy was delivered");
+        let delivered = String::from_utf8_lossy(&inbox[2].raw).into_owned();
+        assert!(delivered.starts_with("Delivered-To: eggdb@localhost, hidden@localhost\r\n"), "{delivered}");
+        assert!(!delivered.contains("Bcc:"), "{delivered}");
+        assert!(!inbox[0].flags.iter().any(|flag| flag == "\\Draft"), "{:?}", inbox[0].flags);
     }
 }

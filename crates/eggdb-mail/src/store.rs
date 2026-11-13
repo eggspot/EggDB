@@ -7,6 +7,8 @@ const VALIDITY_COUNTER: &[u8] = b"\x00validity";
 const MAILBOX: u8 = b'B';
 const MESSAGE: u8 = b'M';
 const UPLOAD: u8 = b'U';
+const SUBMISSION: u8 = b'S';
+const COUNTER: u8 = b'N';
 const MAX_MAILBOX_NAME_BYTES: usize = 1024;
 
 /// The mailbox every account has and new mail arrives in.
@@ -331,6 +333,37 @@ pub fn upload(keys: &dyn KeysRead, id: &str) -> MailResult<Option<Upload>> {
         })
     };
     Ok(read())
+}
+
+/// The next number of the counter `name`, starting at 1.
+pub fn next_number(keys: &mut dyn KeysWrite, name: &str) -> MailResult<u64> {
+    let mut key = vec![COUNTER];
+    key.extend_from_slice(name.as_bytes());
+    let next = keys
+        .get(&key)
+        .map_err(storage)?
+        .and_then(|value| value.as_slice().try_into().ok())
+        .map_or(0, u64::from_be_bytes)
+        + 1;
+    keys.put(&key, &next.to_be_bytes()).map_err(storage)?;
+    Ok(next)
+}
+
+/// Keeps a JMAP EmailSubmission, as the JSON object `EmailSubmission/get` returns.
+pub fn put_submission(keys: &mut dyn KeysWrite, id: &str, json: &str) -> MailResult<()> {
+    let mut key = vec![SUBMISSION];
+    key.extend_from_slice(id.as_bytes());
+    keys.put(&key, json.as_bytes()).map_err(storage)
+}
+
+/// Every kept EmailSubmission, as (id, JSON), in id order.
+pub fn submissions(keys: &dyn KeysRead) -> MailResult<Vec<(String, String)>> {
+    Ok(keys
+        .scan(&[SUBMISSION])
+        .map_err(storage)?
+        .into_iter()
+        .map(|(key, value)| (String::from_utf8_lossy(&key[1..]).into_owned(), String::from_utf8_lossy(&value).into_owned()))
+        .collect())
 }
 
 /// Removes the uploads made before `before`; returns how many.

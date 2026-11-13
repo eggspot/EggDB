@@ -1097,3 +1097,4 @@ its full title with its status.
 - [D1070](decisions/D1070.md) Code-only batch 718 (M16): ISO 20022 schema validation
 - [D1071](decisions/D1071.md) Code-only batch 719 (M16): an OPC UA client that ingests data changes
 - [D1072](decisions/D1072.md) Code-only batch 720 (M16): Sparkplug and Modbus ingest as messages arrive
+- [D1073](decisions/D1073.md) Code-only batch 721 (M16): JMAP submission
