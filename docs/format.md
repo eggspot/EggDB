@@ -74,7 +74,7 @@ slot 1. A superblock found in the other slot is refused.
 | 132 | 4 | reserved | written as zero |
 | 136 | 56 | `recycled_segments` | seven first pages of log segments emptied by checkpoints, kept for reuse before the file grows. 0 marks an unused entry. |
 | 192 | 8 | `log_sequence_reserved` | the highest log segment sequence number a writer may have used (see "Segment sequences") |
-| 200 | 32 | reserved for the consensus hard state (term and vote, M15) | written as zero |
+| 200 | 32 | reserved; the consensus hard state lives under the engine's `raft` keys instead (D1036) | written as zero |
 | 232 | 16 | `page_key_check` | for a file with `ENCRYPTED_PAGES`, the first 16 bytes of HMAC-SHA256(derived key, "EggDB page key check"); zero otherwise (D187) |
 | 248 | 264 | reserved | written as zero |
 
@@ -472,6 +472,13 @@ Recovery is analysis and redo from `checkpoint_lsn`, with no undo pass:
   none of these keys, so the layout needs no feature flag: a v0.2.0 file opens unchanged and
   takes collections, and a release before collections reads such a file and shows these keys as
   ordinary keys of its one key space.
+- **Consensus state** (D1036): a file that is a node of a cluster keeps its Raft state under the
+  engine's reserved prefix `FF 43 4F 4C 00 7F` followed by `raft 00`: `state` holds the term
+  (8 bytes, big-endian), a vote flag (1) and the vote (8); `snapshot` holds the last snapshot's
+  index and term (8 each; the database itself is the snapshot's state); `log 00` followed by an
+  index (8, big-endian) holds that entry's term (8) and command. They are written in one durable
+  commit per batch of changes, the snapshot first, so the log after a snapshot is always
+  contiguous; a reader refuses a gap as damage. A file that never joined a cluster holds none.
 
 ### B+tree pages (types 2 and 3, layout 1)
 A tree is a B+tree (D77, D82): values live in leaf pages (type 3), and inner pages (type 2)

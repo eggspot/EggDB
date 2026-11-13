@@ -1735,7 +1735,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M15 Sharding and distributed SQL
 - Raft's term, vote and log persisted in the file's consensus area, snapshots and log compaction
-  (D20, D211).
+  (D20, D211). **Code written, unbuilt** (code-only mode, 2026-11-13, D1036): `Node::take_changes`,
+  `recover`, `compact` and `InstallSnapshot`, stored by `Database::save_consensus` under reserved `raft` keys.
 - Membership changes by joint consensus, pre-vote, and leader leases for reads (D211).
 - The network transport and `eggdb serve --cluster` (D211, D212).
 - The shard map and decision log replicated on Raft (D212).

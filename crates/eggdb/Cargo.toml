@@ -24,6 +24,7 @@ eggdb-auth = { path = "../eggdb-auth" }
 eggdb-bolt = { path = "../eggdb-bolt" }
 eggdb-gremlin = { path = "../eggdb-gremlin" }
 eggdb-commands = { path = "../eggdb-commands" }
+eggdb-consensus = { path = "../eggdb-consensus" }
 eggdb-crypto = { path = "../eggdb-crypto" }
 eggdb-http = { path = "../eggdb-http" }
 eggdb-mcp = { path = "../eggdb-mcp" }

@@ -7,6 +7,7 @@ mod collections;
 mod command_model;
 mod common;
 mod concurrent;
+mod consensus;
 mod copy;
 mod database;
 mod dry_run;
