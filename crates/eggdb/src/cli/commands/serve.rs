@@ -317,6 +317,46 @@ impl Session<'_> {
             }
             None => None,
         };
+        let cluster = match &options.cluster {
+            Some(text) => {
+                let members = super::serve_cluster::parse_members(text).map_err(usage)?;
+                let node = options
+                    .cluster_node
+                    .ok_or_else(|| usage("--cluster needs --cluster-node <id>, this server's id in it".to_owned()))?;
+                if options.replication_listen.is_some() || options.replica_of.is_some() || options.standby_of.is_some() {
+                    return Err(usage(
+                        "--cluster replicates through its own consensus; it goes without --replication-listen, --replica-of and --standby-of".to_owned(),
+                    ));
+                }
+                if !self.request.file.is_file() && self.request.file.exists() {
+                    return Err(usage("--cluster replicates one database file, not a directory of databases".to_owned()));
+                }
+                let settings = super::serve_cluster::ClusterSettings {
+                    node,
+                    members,
+                    ca_file: options.cluster_ca.clone(),
+                };
+                let address = settings
+                    .own_address()
+                    .ok_or_else(|| usage(format!("--cluster-node {node} is not one of the ids in --cluster")))?
+                    .to_owned();
+                if !super::serve_cluster::is_loopback(&address) && tls.is_none() {
+                    return Err(usage(format!(
+                        "--cluster: node {node} listens on {address}, and peers outside this machine connect over TLS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                let listener = std::net::TcpListener::bind(&address).map_err(|error| {
+                    Failure::database(format!("cannot listen for the cluster's peers on {address}: {error}"), Exit::DatabaseError)
+                })?;
+                Some((settings, listener))
+            }
+            None => {
+                if options.cluster_node.is_some() || options.cluster_seed || options.cluster_ca.is_some() {
+                    return Err(usage("--cluster-node, --cluster-seed and --cluster-ca go with --cluster".to_owned()));
+                }
+                None
+            }
+        };
         let kafka_listener = match options.kafka_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -825,6 +865,12 @@ impl Session<'_> {
             super::serve_replication::seed_from_primary(&primary, &self.request.file, &credentials)
                 .map_err(|message| Failure::database(message, Exit::DatabaseError))?;
         }
+        if let Some((settings, _)) = &cluster
+            && options.cluster_seed
+        {
+            super::serve_cluster::seed_from_cluster(settings, &self.request.file, &replication_credentials)
+                .map_err(|message| Failure::database(message, Exit::DatabaseError))?;
+        }
         drop(password);
         let read_only = self.request.read_only;
         let access = if read_only {
@@ -1098,6 +1144,9 @@ impl Session<'_> {
                 tls: super::serve_replication::client_tls(address, options.replica_of_ca.as_deref()).map_err(usage)?,
             })
         };
+        if let Some((settings, _)) = &cluster {
+            db.fence(format!("this server is joining its cluster as node {}; retry the write shortly", settings.node));
+        }
         let replicates = replication_listener.is_some() || options.replica_of.is_some();
         let following = options.replica_of.as_ref().map(&peer_address).transpose()?;
         if let Some(primary) = &following {
@@ -1609,6 +1658,23 @@ impl Session<'_> {
                 }
                 outcome
             });
+            let cluster_node = scope.spawn(|| match &cluster {
+                Some((settings, listener)) => {
+                    let outcome = super::serve_cluster::run_cluster(
+                        &db,
+                        settings,
+                        listener,
+                        replication_tls.clone(),
+                        &replication_credentials,
+                        &stop_signals::requested,
+                    );
+                    if let Err(message) = &outcome {
+                        eprintln!("eggdb serve: the cluster node stopped: {message}");
+                    }
+                    outcome
+                }
+                None => Ok(()),
+            });
             let standby_follower = scope.spawn(|| match &options.standby_of {
                 Some(directory) => {
                     let delay = std::time::Duration::from_secs(options.apply_delay_seconds.unwrap_or(0));
@@ -1701,6 +1767,7 @@ impl Session<'_> {
             let _ = replica_follower.join();
             let _ = replication_monitor.join();
             let _ = standby_follower.join();
+            let _ = cluster_node.join();
             let _ = kafka_server.join();
             let _ = amqp_server.join();
             let _ = mqtt_server.join();

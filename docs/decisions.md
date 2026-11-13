@@ -1062,3 +1062,4 @@ its full title with its status.
 - [D1035](decisions/D1035.md) Code-only batch 683 (M14): eggdb follow of SQL Server type changes, unique-index capture instances, replaced tables and a reconnecting copy
 - [D1036](decisions/D1036.md) Code-only batch 684 (M15): Raft's durable state in the file, snapshots and log compaction
 - [D1037](decisions/D1037.md) Code-only batch 685 (M15): Raft membership changes by joint consensus, pre-vote and leader leases
+- [D1038](decisions/D1038.md) Code-only batch 686 (M15): the cluster transport and eggdb serve --cluster

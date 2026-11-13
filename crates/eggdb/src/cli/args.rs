@@ -299,6 +299,10 @@ impl CommandName {
             | OptionName::ApplyDelay
             | OptionName::CdcCapture
             | OptionName::PgReplication
+            | OptionName::Cluster
+            | OptionName::ClusterNode
+            | OptionName::ClusterSeed
+            | OptionName::ClusterCa
             | OptionName::CdcWebhook
             | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
@@ -529,6 +533,10 @@ enum OptionName {
     ApplyDelay,
     CdcCapture,
     PgReplication,
+    Cluster,
+    ClusterNode,
+    ClusterSeed,
+    ClusterCa,
     CdcWebhook,
     OtlpEndpoint,
     CdcQueue,
@@ -697,6 +705,10 @@ impl OptionName {
             b"apply-delay" => Self::ApplyDelay,
             b"cdc-capture" => Self::CdcCapture,
             b"pg-replication" => Self::PgReplication,
+            b"cluster" => Self::Cluster,
+            b"cluster-node" => Self::ClusterNode,
+            b"cluster-seed" => Self::ClusterSeed,
+            b"cluster-ca" => Self::ClusterCa,
             b"cdc-webhook" => Self::CdcWebhook,
             b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
@@ -848,6 +860,7 @@ impl OptionName {
                 | Self::Differential
                 | Self::Clone
                 | Self::PgReplication
+                | Self::ClusterSeed
         )
     }
 }
@@ -1071,6 +1084,10 @@ pub(crate) struct ServeOptions {
     pub(crate) apply_delay_seconds: Option<u64>,
     pub(crate) cdc_capture_engine: bool,
     pub(crate) pg_replication: bool,
+    pub(crate) cluster: Option<String>,
+    pub(crate) cluster_node: Option<u64>,
+    pub(crate) cluster_seed: bool,
+    pub(crate) cluster_ca: Option<PathBuf>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1817,6 +1834,21 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::StandbyOf => request.serve.standby_of = Some(PathBuf::from(value)),
             OptionName::PgReplication => request.serve.pg_replication = true,
+            OptionName::Cluster => {
+                let text = value.to_str().filter(|text| text.contains('=')).ok_or_else(|| usage(format!("{} takes id=host:port for every voter, separated by commas", option.spelled)))?;
+                request.serve.cluster = Some(text.to_owned());
+            }
+            OptionName::ClusterNode => {
+                request.serve.cluster_node = Some(
+                    value
+                        .to_str()
+                        .and_then(|text| text.parse::<u64>().ok())
+                        .filter(|id| *id != u64::MAX)
+                        .ok_or_else(|| usage(format!("{} takes this server's id in --cluster", option.spelled)))?,
+                );
+            }
+            OptionName::ClusterSeed => request.serve.cluster_seed = true,
+            OptionName::ClusterCa => request.serve.cluster_ca = Some(PathBuf::from(value)),
             OptionName::CdcCapture => {
                 request.serve.cdc_capture_engine = match value.to_str() {
                     Some("engine") => true,

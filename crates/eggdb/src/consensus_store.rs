@@ -5,7 +5,7 @@ use eggdb_consensus::storage::{
     decode_entry, decode_hard_state, decode_snapshot_meta, encode_entry, encode_hard_state,
     encode_snapshot_meta,
 };
-use eggdb_consensus::{Changes, HardState, Recovered};
+use eggdb_consensus::{Changes, HardState, Recovered, Snapshot};
 
 const HARD_STATE_KEY: &[u8] = b"\xffCOL\x00\x7fraft\x00state";
 const SNAPSHOT_KEY: &[u8] = b"\xffCOL\x00\x7fraft\x00snapshot";
@@ -112,6 +112,18 @@ impl Database {
         if let Some(hard_state) = changes.hard_state {
             transaction.put_raw(HARD_STATE_KEY, &encode_hard_state(&hard_state))?;
         }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Replaces the stored Raft state with `snapshot` alone: no log, no term and no vote, as
+    /// a node seeded from a copy of another node's database starts (D1038). The copy carries
+    /// the other node's Raft keys, which are not this node's.
+    pub fn reset_consensus(&self, snapshot: &Snapshot) -> Result<()> {
+        let mut transaction = self.begin_write_unfenced(self.write_timeout())?;
+        delete_log_range(&mut transaction, LOG_PREFIX.to_vec()..log_end())?;
+        transaction.delete_raw(HARD_STATE_KEY)?;
+        transaction.put_raw(SNAPSHOT_KEY, &encode_snapshot_meta(snapshot))?;
         transaction.commit()?;
         Ok(())
     }

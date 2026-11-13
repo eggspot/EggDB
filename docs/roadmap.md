@@ -1739,7 +1739,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `recover`, `compact` and `InstallSnapshot`, stored by `Database::save_consensus` under reserved `raft` keys.
 - Membership changes by joint consensus, pre-vote, and leader leases for reads (D211). **Code written,
   unbuilt** (code-only mode, 2026-11-13, D1037): `Node::propose_membership`, `Role::PreCandidate`, `lease_read_index`.
-- The network transport and `eggdb serve --cluster` (D211, D212).
+- The network transport and `eggdb serve --cluster` (D211, D212). **Code written, unbuilt** (code-only mode,
+  2026-11-13, D1038): `--cluster`, `--cluster-node`, `--cluster-seed`, `--cluster-ca`, batches committed through Raft.
 - The shard map and decision log replicated on Raft (D212).
 - The data copy of online moves over the replication protocol (D209, D212).
 - A distributed SQL planner that pushes work to shards (D212).

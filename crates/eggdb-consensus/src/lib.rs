@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod membership;
 pub mod storage;
+pub mod wire;
 
 pub use membership::Membership;
 
@@ -408,6 +409,12 @@ impl Node {
     /// The last index handed to the state machine by [`Self::take_committed`] or a snapshot.
     pub fn applied_index(&self) -> u64 {
         self.applied
+    }
+
+    /// Whether it leads and has committed an entry of its own term, so everything committed
+    /// before it was elected is known to be committed.
+    pub fn committed_in_own_term(&self) -> bool {
+        self.role == Role::Leader && self.term_at(self.commit) == Some(self.term)
     }
 
     /// The configuration it uses: the newest one in its log, committed or not.

@@ -834,3 +834,62 @@ fn mcp_tables_needs_the_mcp_endpoint_and_names_that_exist() {
         stderr(&unknown)
     );
 }
+
+#[test]
+fn cluster_options_are_checked_before_the_server_starts() {
+    let file = TempPath::new("serve-cluster-options");
+    let path = file.path().to_str().unwrap();
+    let alone = eggdb(
+        &["serve", path, "--create", "--cluster-node", "1"],
+        Some("secret"),
+    );
+    assert_eq!(alone.status.code(), Some(2), "{}", stderr(&alone));
+    assert!(stderr(&alone).contains("go with --cluster"));
+    let no_node = eggdb(
+        &["serve", path, "--create", "--cluster", "1=127.0.0.1:0"],
+        Some("secret"),
+    );
+    assert_eq!(no_node.status.code(), Some(2), "{}", stderr(&no_node));
+    assert!(stderr(&no_node).contains("--cluster needs --cluster-node"));
+    let stranger = eggdb(
+        &[
+            "serve",
+            path,
+            "--create",
+            "--cluster",
+            "1=127.0.0.1:0,2=127.0.0.1:0",
+            "--cluster-node",
+            "3",
+        ],
+        Some("secret"),
+    );
+    assert!(stderr(&stranger).contains("is not one of the ids in --cluster"));
+    let remote = eggdb(
+        &[
+            "serve",
+            path,
+            "--create",
+            "--cluster",
+            "1=10.1.2.3:7400,2=10.1.2.4:7400",
+            "--cluster-node",
+            "1",
+        ],
+        Some("secret"),
+    );
+    assert!(stderr(&remote).contains("connect over TLS"), "{}", stderr(&remote));
+    let mixed = eggdb(
+        &[
+            "serve",
+            path,
+            "--create",
+            "--cluster",
+            "1=127.0.0.1:0",
+            "--cluster-node",
+            "1",
+            "--replica-of",
+            "127.0.0.1:5444",
+        ],
+        Some("secret"),
+    );
+    assert!(stderr(&mixed).contains("goes without --replication-listen"));
+}

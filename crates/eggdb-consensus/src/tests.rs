@@ -640,3 +640,84 @@ fn configurations_encode_and_need_both_majorities_while_joint() {
             == 2
     );
 }
+
+#[test]
+fn every_message_crosses_the_wire_and_damaged_bytes_are_errors() {
+    use crate::wire::{decode_message, encode_message};
+    let messages = vec![
+        Message::PreVote {
+            term: 4,
+            last_index: 9,
+            last_term: 3,
+        },
+        Message::PreVoteReply {
+            term: 4,
+            granted: true,
+        },
+        Message::RequestVote {
+            term: 4,
+            last_index: 9,
+            last_term: 3,
+        },
+        Message::Vote {
+            term: 4,
+            granted: false,
+        },
+        Message::Append {
+            term: 4,
+            previous_index: 8,
+            previous_term: 3,
+            entries: vec![
+                entry(4, 9),
+                crate::Entry {
+                    term: 4,
+                    index: 10,
+                    kind: EntryKind::Membership,
+                    command: Membership::new(&[1, 2]).encode(),
+                },
+            ],
+            commit: 8,
+            round: 17,
+        },
+        Message::AppendReply {
+            term: 4,
+            success: true,
+            index: 10,
+            round: 17,
+        },
+        Message::InstallSnapshot {
+            term: 4,
+            snapshot: Snapshot {
+                index: 7,
+                term: 2,
+                membership: Membership::new(&[1, 2, 3]),
+                data: b"state".to_vec(),
+            },
+            round: 3,
+        },
+    ];
+    for message in &messages {
+        let bytes = encode_message(message);
+        assert_eq!(decode_message(&bytes).as_ref(), Ok(message));
+        for cut in 0..bytes.len() {
+            assert!(decode_message(&bytes[..cut]).is_err());
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(decode_message(&longer).is_err());
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..300 {
+            let mut mutated = bytes.clone();
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let at = (state as usize) % mutated.len();
+            mutated[at] = (state >> 32) as u8;
+            let _ = decode_message(&mutated);
+        }
+    }
+    let mut huge = vec![5u8];
+    huge.extend_from_slice(&[0; 40]);
+    huge.extend_from_slice(&u64::MAX.to_be_bytes());
+    assert!(decode_message(&huge).is_err());
+}

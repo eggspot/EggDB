@@ -40,11 +40,11 @@ pub(super) struct ReplicationCredentials {
     pub(super) password_sha256: [u8; 32],
 }
 
-trait Stream: Read + Write + Send {}
+pub(super) trait Stream: Read + Write + Send {}
 
 impl<T: Read + Write + Send> Stream for T {}
 
-fn write_frame(stream: &mut dyn Stream, kind: u8, payload: &[u8]) -> std::io::Result<()> {
+pub(super) fn write_frame(stream: &mut dyn Stream, kind: u8, payload: &[u8]) -> std::io::Result<()> {
     let length = u32::try_from(payload.len() + 1).map_err(|_| std::io::Error::other("a replication frame is too large"))?;
     let mut frame = Vec::with_capacity(payload.len() + 5);
     frame.extend_from_slice(&length.to_le_bytes());
@@ -54,7 +54,7 @@ fn write_frame(stream: &mut dyn Stream, kind: u8, payload: &[u8]) -> std::io::Re
     stream.flush()
 }
 
-fn read_frame(stream: &mut dyn Stream) -> std::io::Result<(u8, Vec<u8>)> {
+pub(super) fn read_frame(stream: &mut dyn Stream) -> std::io::Result<(u8, Vec<u8>)> {
     let mut length = [0u8; 4];
     stream.read_exact(&mut length)?;
     let length = u32::from_le_bytes(length) as usize;
@@ -133,24 +133,30 @@ fn send_snapshot(stream: &mut dyn Stream, db: &Database) -> std::io::Result<()> 
     let path = directory.join(format!("eggdb-replica-snapshot-{:016x}.eggdb", u64::from_le_bytes(nonce)));
     let outcome = (|| -> std::io::Result<()> {
         db.backup_to(&path).map_err(|error| std::io::Error::other(error.to_string()))?;
-        let mut file = std::fs::File::open(&path)?;
-        let mut hasher = eggdb_crypto::Sha256::new();
-        let mut chunk = vec![0u8; SNAPSHOT_CHUNK_BYTES];
-        loop {
-            let read = file.read(&mut chunk)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&chunk[..read]);
-            write_frame(stream, SNAPSHOT_CHUNK, &chunk[..read])?;
-        }
-        write_frame(stream, SNAPSHOT_END, &hasher.finish())
+        stream_file(stream, &path)
     })();
     let _ = std::fs::remove_file(&path);
     outcome
 }
 
-fn signed_greeting(credentials: &ReplicationCredentials, nonce: &[u8], tail: &[u8]) -> Result<Vec<u8>, String> {
+/// Streams the file at `path` as snapshot chunks and a final SHA-256, as
+/// [`receive_snapshot`] reads them.
+pub(super) fn stream_file(stream: &mut dyn Stream, path: &std::path::Path) -> std::io::Result<()> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = eggdb_crypto::Sha256::new();
+    let mut chunk = vec![0u8; SNAPSHOT_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&chunk[..read]);
+        write_frame(stream, SNAPSHOT_CHUNK, &chunk[..read])?;
+    }
+    write_frame(stream, SNAPSHOT_END, &hasher.finish())
+}
+
+pub(super) fn signed_greeting(credentials: &ReplicationCredentials, nonce: &[u8], tail: &[u8]) -> Result<Vec<u8>, String> {
     let mut greeting = vec![u8::try_from(credentials.user.len()).map_err(|_| "the user name is too long")?];
     greeting.extend_from_slice(credentials.user.as_bytes());
     greeting.extend_from_slice(&proof(credentials, nonce));
@@ -158,7 +164,7 @@ fn signed_greeting(credentials: &ReplicationCredentials, nonce: &[u8], tail: &[u
     Ok(greeting)
 }
 
-fn checked_greeting<'g>(greeting: &'g [u8], credentials: &ReplicationCredentials, nonce: &[u8]) -> Option<&'g [u8]> {
+pub(super) fn checked_greeting<'g>(greeting: &'g [u8], credentials: &ReplicationCredentials, nonce: &[u8]) -> Option<&'g [u8]> {
     let user_length = usize::from(*greeting.first()?);
     let user = greeting.get(1..1 + user_length)?;
     let rest = greeting.get(1 + user_length..)?;
@@ -312,7 +318,7 @@ pub(super) struct PrimaryAddress {
     pub(super) tls: Option<eggdb_tls::ClientConfig>,
 }
 
-fn connect(primary: &PrimaryAddress) -> Result<Box<dyn Stream>, String> {
+pub(super) fn connect(primary: &PrimaryAddress) -> Result<Box<dyn Stream>, String> {
     let stream = TcpStream::connect(&primary.address).map_err(|error| format!("cannot reach the primary {}: {error}", primary.address))?;
     stream.set_read_timeout(Some(READ_TIMEOUT)).map_err(|error| error.to_string())?;
     Ok(match &primary.tls {
@@ -337,6 +343,12 @@ fn greet(stream: &mut dyn Stream, credentials: &ReplicationCredentials, replica_
 pub(super) fn seed_from_primary(primary: &PrimaryAddress, path: &std::path::Path, credentials: &ReplicationCredentials) -> Result<(), String> {
     let mut stream = connect(primary)?;
     greet(stream.as_mut(), credentials, replica_id_of(path), WANTS_SNAPSHOT)?;
+    receive_snapshot(stream.as_mut(), path)
+}
+
+/// Writes the snapshot `send_snapshot` streams to the new file `path`, through a staging file
+/// renamed into place once its digest checks out.
+pub(super) fn receive_snapshot(stream: &mut dyn Stream, path: &std::path::Path) -> Result<(), String> {
     let mut staging = path.as_os_str().to_owned();
     staging.push(SNAPSHOT_STAGING_SUFFIX);
     let staging = std::path::PathBuf::from(staging);
@@ -345,7 +357,7 @@ pub(super) fn seed_from_primary(primary: &PrimaryAddress, path: &std::path::Path
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&staging).map_err(io)?;
         let mut hasher = eggdb_crypto::Sha256::new();
         loop {
-            match read_frame(stream.as_mut()).map_err(io)? {
+            match read_frame(stream).map_err(io)? {
                 (SNAPSHOT_CHUNK, bytes) => {
                     hasher.update(&bytes);
                     file.write_all(&bytes).map_err(io)?;
