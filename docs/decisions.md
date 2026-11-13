@@ -1110,3 +1110,4 @@ its full title with its status.
 - [D1083](decisions/D1083.md) Code-only batch 731 (M17): wear levelling, header slots on flash, and power-loss tests
 - [D1084](decisions/D1084.md) Code-only batch 732 (M17): a QEMU Cortex-M run in CI
 - [D1085](decisions/D1085.md) Code-only batch 733 (M17): a memory floor and size budgets per microcontroller profile
+- [D1086](decisions/D1086.md) Code-only batch 734 (M17): a fixed-memory mode with one limit split across the engine and capped in the allocator

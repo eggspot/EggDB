@@ -27,6 +27,8 @@ static RUNS: Locked<RunSource> = Locked::new(RunSource {
     runs_left: 0,
 });
 static FROM_SYSTEM: AtomicUsize = AtomicUsize::new(0);
+static PROCESS_LIMIT: AtomicUsize = AtomicUsize::new(usize::MAX);
+static REFUSED: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static CACHE: ThreadCache = const { ThreadCache::new() };
@@ -63,13 +65,18 @@ impl EggAllocator {
         FROM_SYSTEM.load(Ordering::Relaxed)
     }
 
+    /// The limit in force: the smaller of this value's budget and the process limit set with
+    /// [`set_process_limit`].
+    pub fn limit(&self) -> usize {
+        self.budget.min(PROCESS_LIMIT.load(Ordering::Relaxed))
+    }
+
     fn reserve(&self, bytes: usize) -> bool {
+        let limit = self.limit();
         let mut held = FROM_SYSTEM.load(Ordering::Relaxed);
         loop {
-            let Some(after) = held
-                .checked_add(bytes)
-                .filter(|after| *after <= self.budget)
-            else {
+            let Some(after) = held.checked_add(bytes).filter(|after| *after <= limit) else {
+                REFUSED.fetch_add(1, Ordering::Relaxed);
                 return false;
             };
             match FROM_SYSTEM.compare_exchange_weak(
@@ -485,6 +492,14 @@ mod tests {
     static NO_BUDGET_LEFT: EggAllocator = EggAllocator::with_budget(0);
 
     #[test]
+    fn the_limit_in_force_is_the_budget_when_the_process_has_none() {
+        assert_eq!(process_limit(), usize::MAX);
+        assert_eq!(NO_BUDGET_LEFT.limit(), 0);
+        assert_eq!(ALLOCATOR.limit(), usize::MAX);
+        assert_eq!(EggAllocator::with_budget(4096).limit(), 4096);
+    }
+
+    #[test]
     fn every_small_size_gets_the_smallest_class_that_holds_it() {
         for class in 1..CLASS_COUNT {
             assert!(class_size(class) > class_size(class - 1));
@@ -622,4 +637,22 @@ mod tests {
         // SAFETY: allocated above with this layout.
         unsafe { ALLOCATOR.dealloc(block, large) };
     }
+}
+
+/// Caps the bytes every [`EggAllocator`] in the process may take from the system, on top of
+/// each value's own budget: the fixed-memory mode of `eggdb serve --memory-limit` (D41, D1086).
+/// Takes effect at once; a limit below what is already held refuses every new chunk and large
+/// block until enough is freed. `usize::MAX` lifts it.
+pub fn set_process_limit(bytes: usize) {
+    PROCESS_LIMIT.store(bytes, Ordering::Relaxed);
+}
+
+/// The process limit set with [`set_process_limit`]; `usize::MAX` when there is none.
+pub fn process_limit() -> usize {
+    PROCESS_LIMIT.load(Ordering::Relaxed)
+}
+
+/// How many allocations the limits have refused since the process started.
+pub fn refused_allocations() -> usize {
+    REFUSED.load(Ordering::Relaxed)
 }

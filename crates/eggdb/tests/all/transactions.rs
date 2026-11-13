@@ -444,3 +444,20 @@ fn key_value_writes_and_sql_share_one_commit_or_one_rollback() {
         .unwrap();
     assert_eq!(rows, vec![vec![eggdb::sql::Value::Integer(1)]]);
 }
+
+#[test]
+fn a_memory_limit_gives_half_to_the_page_cache_unless_the_cache_is_chosen() {
+    let file = TempPath::new("memory-limit");
+    let db = Database::open_with(file.path(), Options::new().memory_limit(32 << 20)).unwrap();
+    let stats = db.stats().unwrap();
+    assert!(stats.cache_pages * stats.page_size <= 16 << 20);
+    assert!(stats.cache_pages * stats.page_size > 15 << 20);
+    db.close().unwrap();
+    let db = Database::open_with(
+        file.path(),
+        Options::new().memory_limit(32 << 20).cache_bytes(4 << 20),
+    )
+    .unwrap();
+    let stats = db.stats().unwrap();
+    assert!(stats.cache_pages * stats.page_size <= 4 << 20);
+}

@@ -246,6 +246,18 @@ impl Options {
         self
     }
 
+    /// Splits one memory budget, in bytes, across what the database holds for itself: half
+    /// for the page cache and an eighth for read transactions' snapshots, leaving the rest to
+    /// statements and connections (D41, D1086). Set [`Options::cache_bytes`] or
+    /// [`Options::snapshot_memory_bytes`] after it to choose either share yourself. A program
+    /// that must never hold more also installs [`eggdb_platform::EggAllocator`] and calls
+    /// [`eggdb_platform::set_process_limit`] with the same budget.
+    pub fn memory_limit(mut self, bytes: usize) -> Self {
+        self.cache_bytes = bytes / 2;
+        self.snapshot_memory_bytes = Some(bytes / 8);
+        self
+    }
+
     /// How much memory, in bytes, may keep the pages read transactions' snapshots still need
     /// after the writer changed them; as much as the page cache by default. When the writer
     /// needs more, the oldest snapshots expire, and their transactions fail with

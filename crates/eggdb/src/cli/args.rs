@@ -13,6 +13,7 @@ const MOST_TIME_LIMIT_SECONDS: u64 = 300;
 const MOST_CALL_GAP_MS: u64 = 10_000;
 const MOST_BUSY_TIMEOUT_MS: u64 = 3_600_000;
 const SMALLEST_CONNECTION_MEMORY: usize = 1 << 20;
+const SMALLEST_MEMORY_LIMIT: usize = 16 << 20;
 const MOST_LOCK_DAYS: u64 = 36_500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +350,7 @@ impl CommandName {
             | OptionName::Database
             | OptionName::MaxConnections
             | OptionName::MaxConnectionMemory
+            | OptionName::MemoryLimit
             | OptionName::LogSlowStatements
             | OptionName::StatementStatistics
             | OptionName::IdleTimeout
@@ -594,6 +596,7 @@ enum OptionName {
     Database,
     MaxConnections,
     MaxConnectionMemory,
+    MemoryLimit,
     LogSlowStatements,
     StatementStatistics,
     IdleTimeout,
@@ -775,6 +778,7 @@ impl OptionName {
             b"database" => Self::Database,
             b"max-connections" => Self::MaxConnections,
             b"max-connection-memory" => Self::MaxConnectionMemory,
+            b"memory-limit" => Self::MemoryLimit,
             b"log-slow-statements" => Self::LogSlowStatements,
             b"statement-statistics" => Self::StatementStatistics,
             b"idle-timeout" => Self::IdleTimeout,
@@ -1160,6 +1164,7 @@ pub(crate) struct ServeOptions {
     pub(crate) database: Option<String>,
     pub(crate) max_connections: Option<usize>,
     pub(crate) max_connection_memory: Option<usize>,
+    pub(crate) memory_limit: Option<usize>,
     pub(crate) idle_timeout_seconds: Option<u64>,
     pub(crate) rate_limit: Option<u32>,
     pub(crate) tcp_keepalive_seconds: Option<u64>,
@@ -2105,6 +2110,17 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     )));
                 }
                 request.serve.max_connection_memory = Some(bytes);
+            }
+            OptionName::MemoryLimit => {
+                let bytes = parse_size(&option.spelled, value).map_err(usage)?;
+                if bytes < SMALLEST_MEMORY_LIMIT {
+                    return Err(usage(format!(
+                        "{} needs at least 16m, enough for the page cache, the catalog and one connection, not '{}'",
+                        option.spelled,
+                        shown(value)
+                    )));
+                }
+                request.serve.memory_limit = Some(bytes);
             }
             OptionName::IdleTimeout => {
                 let seconds = parse_whole_number(value.as_encoded_bytes()).ok_or_else(|| {
@@ -3682,6 +3698,23 @@ mod tests {
         );
         assert_eq!(request("put app.db photo").value, None);
         assert_eq!(request("delete app.db k").command, CommandName::Del);
+    }
+
+    #[test]
+    fn a_memory_limit_is_a_size_of_at_least_sixteen_megabytes() {
+        assert_eq!(
+            request("serve app.db --memory-limit 256m").serve.memory_limit,
+            Some(256 << 20)
+        );
+        assert_eq!(request("serve app.db").serve.memory_limit, None);
+        assert_eq!(
+            usage_message("serve app.db --memory-limit 8m"),
+            "--memory-limit needs at least 16m, enough for the page cache, the catalog and one connection, not '8m'"
+        );
+        assert_eq!(
+            usage_message("get app.db k --memory-limit 64m"),
+            "unknown option '--memory-limit' for eggdb get"
+        );
     }
 
     #[test]

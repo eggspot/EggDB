@@ -80,6 +80,31 @@ impl Session<'_> {
         Ok(())
     }
 
+    fn fix_memory_limit(&mut self, limit: usize) -> Result<(), Failure> {
+        let usage = |message: String| Failure::usage(message, Some(CommandName::Serve));
+        if let Some(cache) = self.request.cache_bytes
+            && cache >= limit
+        {
+            return Err(usage(format!(
+                "--cache {cache} leaves nothing of --memory-limit {limit} for connections and statements; give the cache less"
+            )));
+        }
+        if let Some(connections) = self.request.serve.max_connection_memory
+            && connections >= limit
+        {
+            return Err(usage(format!(
+                "--max-connection-memory {connections} is not below --memory-limit {limit}"
+            )));
+        }
+        eggdb_platform::set_process_limit(limit);
+        if !cfg!(feature = "egg-allocator") {
+            self.messages.text(&format!(
+                "eggdb: --memory-limit {limit}: the page cache, snapshots and connections share it; a build with the egg-allocator feature also refuses any allocation past it\n"
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn serve(&mut self) -> Result<Exit, Failure> {
         super::foreign::allow_from_environment();
         super::model_endpoints::allow_from_environment();
@@ -108,9 +133,13 @@ impl Session<'_> {
             .unwrap_or_else(|| DEFAULT_USER.to_owned());
         let password = self.serve_password(&user)?;
         let max_connections = options.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
+        if let Some(limit) = options.memory_limit {
+            self.fix_memory_limit(limit)?;
+        }
         let memory_budget = Arc::new(
             options
                 .max_connection_memory
+                .or(options.memory_limit.map(connection_share))
                 .map_or_else(MemoryBudget::default, MemoryBudget::new),
         );
         if !password.is_ascii() {
@@ -2767,3 +2796,7 @@ fn audit_server_events_from_environment(database: &std::path::Path) -> Result<()
     Ok(())
 }
 
+
+fn connection_share(limit: usize) -> usize {
+    limit / 4
+}

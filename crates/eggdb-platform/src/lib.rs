@@ -143,7 +143,7 @@ pub mod user_files;
 pub mod window;
 
 pub use aligned::AlignedBuffer;
-pub use allocator::EggAllocator;
+pub use allocator::{EggAllocator, process_limit, refused_allocations, set_process_limit};
 pub use cache::{CACHE_LINE_PADDING, CachePadded};
 pub use clock::{Clock, SimClock, SystemClock};
 pub use cpus::{CpuId, CpuSet, Cpus};

@@ -576,6 +576,18 @@ the way an out-of-memory allocation does. `EggAllocator::new()` has no budget. T
 binary uses it when built with `--features egg-allocator`; the default build keeps the system
 allocator until the benchmark line `allocator.small_blocks` shows ours ahead on every system.
 
+A fixed-memory mode puts one limit on the whole process (D1086). `Options::memory_limit(bytes)`
+splits it across what the database holds: half for the page cache, an eighth for snapshots; the
+rest is left for statements and connections. `eggdb_platform::set_process_limit(bytes)` caps
+every `EggAllocator` in the process at the same number, on top of each one's own budget, and can
+be changed while the program runs; `eggdb_platform::refused_allocations()` counts what the limits
+refused. `eggdb serve --memory-limit 256m` does all three for the server (docs/cli.md).
+
+```rust
+eggdb_platform::set_process_limit(64 << 20);
+let database = eggdb::Database::open_with("app.egg", eggdb::Options::new().memory_limit(64 << 20))?;
+```
+
 ## Checking and measuring
 - `db.check()` reads every page of the tree and every large value as of the last commit, checks
   how the pages fit together, and accounts for every page of the file: each must belong to the

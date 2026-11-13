@@ -826,6 +826,12 @@ impl<'a> Session<'a> {
         let mut options = Options::new()
             .cache_bytes(cache)
             .busy_timeout(self.busy_timeout());
+        if let Some(limit) = self.request.serve.memory_limit {
+            options = options.memory_limit(limit);
+            if let Some(cache) = self.request.cache_bytes {
+                options = options.cache_bytes(cache);
+            }
+        }
         options = match access {
             Access::ReadOnly => options.read_only(true).create_if_missing(false),
             Access::Write { create } => options.create_if_missing(create),
