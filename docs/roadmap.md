@@ -379,7 +379,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M2 Storage engine
 - Users can choose the LSM tree per table with `WITH (storage = lsm)`, kept in the catalog (D170).
-  Check: the B-tree and LSM bake-off in the benchmarks, recorded as a decision.
+  Check: the B-tree and LSM bake-off in the benchmarks, recorded as a decision. **Code written, unbuilt** (code-only
+  mode, 2026-11-13, D1119); the bake-off is left to the build-and-fix pass.
 - Dirty pages spill before commit, so a write needn't fit the cache (D86, D167). Check: a 1 GiB
   `put_reader` peaks near 32 MiB, the 16 MiB default cache plus snapshots (`eggdb/src/options.rs`).
 - A Zstandard-class codec of our own (RFC 8878) for cold data (D171). Check: RFC test vectors and
