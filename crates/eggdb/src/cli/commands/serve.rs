@@ -285,6 +285,22 @@ impl Session<'_> {
             }
             None => None,
         };
+        let gremlin_listener = match options.gremlin_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--gremlin-listen {address}: the Gremlin listener has no TLS yet, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(
+                        format!("cannot listen for Gremlin clients on {address}: {error}"),
+                        Exit::DatabaseError,
+                    )
+                })?)
+            }
+            None => None,
+        };
         let kafka_listener = match options.kafka_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -659,6 +675,11 @@ impl Session<'_> {
             max_connections,
             memory_budget: Arc::clone(&memory_budget),
         };
+        let gremlin_config = eggdb_gremlin::ServerConfig {
+            user: user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+            max_connections,
+        };
         let mongo_config = match &mongo_listener {
             Some(_) => Some(
                 super::serve_mongo::config(&user, &password, max_connections, &memory_budget)
@@ -860,6 +881,7 @@ impl Session<'_> {
                 es_listener.as_ref(),
                 mongo_listener.as_ref(),
                 bolt_listener.as_ref(),
+                gremlin_listener.as_ref(),
                 kafka_listener.as_ref(),
                 amqp_listener.as_ref(),
                 mqtt_listener.as_ref(),
@@ -1466,6 +1488,15 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
+            let gremlin_server = scope.spawn(|| match &gremlin_listener {
+                Some(listener) => eggdb_gremlin::serve(
+                    &graph_database,
+                    listener,
+                    &gremlin_config,
+                    &stop_signals::requested,
+                ),
+                None => Ok(()),
+            });
             let mongo_server = scope.spawn(|| match (&mongo_listener, &mongo_config) {
                 (Some(listener), Some(mongo_config)) => eggdb_mongowire::serve(
                     &mongo_store,
@@ -1528,6 +1559,7 @@ impl Session<'_> {
             let _ = es_server.join();
             let _ = mongo_server.join();
             let _ = bolt_server.join();
+            let _ = gremlin_server.join();
             let _ = kafka_server.join();
             let _ = amqp_server.join();
             let _ = mqtt_server.join();

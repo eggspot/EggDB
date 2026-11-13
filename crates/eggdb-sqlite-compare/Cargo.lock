@@ -38,6 +38,7 @@ dependencies = [
  "eggdb-dynamodb",
  "eggdb-esrest",
  "eggdb-flight",
+ "eggdb-gremlin",
  "eggdb-http",
  "eggdb-kafka",
  "eggdb-keyspace",
@@ -230,6 +231,16 @@ version = "0.5.0"
 dependencies = [
  "eggdb-bson",
  "eggdb-keyspace",
+]
+
+[[package]]
+name = "eggdb-gremlin"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-graph",
+ "eggdb-keyspace",
+ "eggdb-platform",
 ]
 
 [[package]]

@@ -260,6 +260,7 @@ impl CommandName {
             | OptionName::MongoListen
             | OptionName::MongoReplicaSet
             | OptionName::BoltListen
+            | OptionName::GremlinListen
             | OptionName::CdcWebhook
             | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
@@ -478,6 +479,7 @@ enum OptionName {
     MongoListen,
     MongoReplicaSet,
     BoltListen,
+    GremlinListen,
     CdcWebhook,
     OtlpEndpoint,
     CdcQueue,
@@ -624,6 +626,7 @@ impl OptionName {
             b"mongo-listen" => Self::MongoListen,
             b"mongo-replica-set" => Self::MongoReplicaSet,
             b"bolt-listen" => Self::BoltListen,
+            b"gremlin-listen" => Self::GremlinListen,
             b"cdc-webhook" => Self::CdcWebhook,
             b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
@@ -977,6 +980,7 @@ pub(crate) struct ServeOptions {
     pub(crate) mongo_listen: Option<SocketAddr>,
     pub(crate) mongo_replica_set: Option<String>,
     pub(crate) bolt_listen: Option<SocketAddr>,
+    pub(crate) gremlin_listen: Option<SocketAddr>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1671,6 +1675,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::BoltListen => {
                 request.serve.bolt_listen =
                     Some(parse_listen(&option.spelled, value, 7687).map_err(usage)?);
+            }
+            OptionName::GremlinListen => {
+                request.serve.gremlin_listen =
+                    Some(parse_listen(&option.spelled, value, 8182).map_err(usage)?);
             }
             OptionName::MongoListen => {
                 request.serve.mongo_listen =
