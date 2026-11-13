@@ -301,6 +301,10 @@ name = "eggdb-http2"
 version = "0.5.0"
 
 [[package]]
+name = "eggdb-jepsen"
+version = "0.5.0"
+
+[[package]]
 name = "eggdb-kafka"
 version = "0.5.0"
 dependencies = [

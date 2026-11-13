@@ -1,0 +1,13 @@
+[package]
+name = "eggdb-jepsen"
+description = "Jepsen-style checks of EggDB's replication against real eggdb serve processes: a set workload under crashes, pauses and failovers, checked for lost acknowledged writes and divergent replicas."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

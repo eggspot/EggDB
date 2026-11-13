@@ -1,0 +1,65 @@
+name: jepsen
+
+on:
+  schedule:
+    - cron: "53 5 * * 6"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "How long each run's workload lasts, in seconds"
+        required: false
+        default: "120"
+
+concurrency:
+  group: jepsen
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  JEPSEN_SECONDS: ${{ inputs.seconds || '120' }}
+
+jobs:
+  jepsen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-jepsen-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-jepsen-${{ runner.os }}-
+      - name: Crash, pause and fail over a replication group under a write workload (D9, D209, D1029)
+        run: |
+          cargo build --release -p eggdb -p eggdb-jepsen
+          set -o pipefail
+          for seed in 1 2 3; do
+            target/release/eggdb-jepsen target/release/eggdb "$RUNNER_TEMP/jepsen-$seed" --seconds "$JEPSEN_SECONDS" --seed "$seed" | tee -a "$RUNNER_TEMP/jepsen.txt"
+          done
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Jepsen-style replication checks"
+            echo
+            echo '```'
+            grep -E "acknowledged|LOST|UNEXPECTED|DIVERGENT|no lost" "$RUNNER_TEMP/jepsen.txt" 2>/dev/null || echo "no results"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the histories
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jepsen-${{ github.run_number }}
+          path: ${{ runner.temp }}/jepsen.txt
+          retention-days: 90
