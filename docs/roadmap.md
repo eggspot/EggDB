@@ -440,7 +440,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   errors (D172, D173). Check: Flyway's default two-connection lock (D138). **Code written, unbuilt** (code-only mode, 2026-11-13,
   D1123): explicit `REPEATABLE READ` and `SERIALIZABLE` blocks run on concurrent transactions; `40001` on conflict.
 - Users can choose the isolation level per database, table or request, from strict serializable
-  to read committed with per-statement snapshots (D18, D173).
+  to read committed with per-statement snapshots (D18, D173). Per request and per session (`eggdb.isolation`): **code written,
+  unbuilt** (code-only mode, 2026-11-13, D1125); left: per database (`ALTER DATABASE ... SET`) and per table.
 - Row versions in the storage engine (MVCC), so changes larger than memory spill (D172).
 - Collections and expiring keys inside concurrent transactions (D172). **Code written, unbuilt** (code-only mode, 2026-11-13, D1124).
 - Waiting on a predicate lock instead of failing at commit (D172).

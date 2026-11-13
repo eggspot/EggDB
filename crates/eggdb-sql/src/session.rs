@@ -4282,7 +4282,10 @@ impl<'s> Session<'s> {
     }
 
     fn concurrent_isolation(&self) -> Option<crate::store::ConcurrentIsolation> {
-        let requested = self.transaction_mode.isolation.as_deref()?.to_ascii_lowercase();
+        let requested = match self.transaction_mode.isolation.as_deref() {
+            Some(level) => level.to_ascii_lowercase(),
+            None => self.settings.get("eggdb.isolation").ok()?.to_ascii_lowercase(),
+        };
         match requested.split_whitespace().collect::<Vec<_>>().join(" ").as_str() {
             "serializable" => Some(crate::store::ConcurrentIsolation::Serializable),
             "repeatable read" | "snapshot" => Some(crate::store::ConcurrentIsolation::Snapshot),

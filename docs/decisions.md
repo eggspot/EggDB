@@ -1149,3 +1149,4 @@ its full title with its status.
 - [D1122](decisions/D1122.md) Code-only batch 771 (M2): index builds that block neither reads nor writes with CREATE INDEX CONCURRENTLY
 - [D1123](decisions/D1123.md) Code-only batch 772 (M3): SQL sessions on concurrent transactions for REPEATABLE READ and SERIALIZABLE blocks
 - [D1124](decisions/D1124.md) Code-only batch 773 (M3): collections and expiring keys inside concurrent transactions
+- [D1125](decisions/D1125.md) Code-only batch 774 (M3): isolation per request and per session with eggdb.isolation

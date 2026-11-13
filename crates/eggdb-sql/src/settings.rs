@@ -105,6 +105,13 @@ const KNOWN: &[Known] = &[
         description: "Remembered, for old pg_dump scripts; EggDB tables have no OIDs.",
     },
     Known {
+        name: "eggdb.isolation",
+        default: fixed_text!("strict serializable"),
+        change: Change::Free,
+        reported: false,
+        description: "How explicit transaction blocks without an isolation level of their own run (D1125): strict serializable on the one writer, or serializable or snapshot beside other writers, checked at commit.",
+    },
+    Known {
         name: "default_transaction_isolation",
         default: fixed_text!("serializable"),
         change: Change::Free,
