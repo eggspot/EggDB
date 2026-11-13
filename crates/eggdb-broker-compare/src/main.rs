@@ -12,6 +12,7 @@
 
 mod amqp;
 mod kafka;
+mod mqtt;
 mod measure;
 
 use std::process::ExitCode;
@@ -19,6 +20,8 @@ use std::process::ExitCode;
 const BATCHES: usize = 2_000;
 const BATCH_SIZE: usize = 100;
 const AMQP_BATCHES: usize = 200;
+const MQTT_MESSAGES: u16 = 20_000;
+const MQTT_WINDOW: u16 = 100;
 
 fn address(variable: &str, default: &str) -> String {
     std::env::var(variable).unwrap_or_else(|_| default.to_owned())
@@ -65,6 +68,28 @@ fn rabbitmq(lines: &mut Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+fn mqtt_brokers(lines: &mut Vec<String>) -> Result<(), String> {
+    let eggdb = address("EGGDB_MQTT_ADDRESS", "127.0.0.1:11883");
+    let eggdb_password = address("EGGDB_PASSWORD", "compare");
+    if std::net::TcpStream::connect(&eggdb).is_err() {
+        println!("eggdb-broker-compare: nothing listens at {eggdb}; MQTT not measured");
+        return Ok(());
+    }
+    let topic = format!("compare/{}", std::process::id());
+    let (published_eggdb, received_eggdb) = mqtt::publish_and_receive(&eggdb, Some(("eggdb", &eggdb_password)), &topic, MQTT_MESSAGES, MQTT_WINDOW)?;
+    for (name, variable, default) in [("Mosquitto", "MOSQUITTO_ADDRESS", "127.0.0.1:1883"), ("EMQX", "EMQX_ADDRESS", "127.0.0.1:2883")] {
+        let other = address(variable, default);
+        if std::net::TcpStream::connect(&other).is_err() {
+            println!("eggdb-broker-compare: nothing listens at {other}; {name} not measured");
+            continue;
+        }
+        let (published, received) = mqtt::publish_and_receive(&other, None, &topic, MQTT_MESSAGES, MQTT_WINDOW)?;
+        measure::report(&format!("mqtt.publish against {name} (QoS 1, 100 in flight)"), &published_eggdb, &published, name, lines);
+        measure::report(&format!("mqtt.receive against {name} (a QoS 0 subscriber)"), &received_eggdb, &received, name, lines);
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let broker = arguments.next().unwrap_or_default();
@@ -73,7 +98,7 @@ fn main() -> ExitCode {
         match (argument.as_str(), arguments.next()) {
             ("--results", Some(path)) => results = Some(path),
             _ => {
-                eprintln!("usage: eggdb-broker-compare kafka|rabbitmq [--results <file>]");
+                eprintln!("usage: eggdb-broker-compare kafka|rabbitmq|mqtt [--results <file>]");
                 return ExitCode::from(2);
             }
         }
@@ -82,8 +107,9 @@ fn main() -> ExitCode {
     let outcome = match broker.as_str() {
         "kafka" => kafka(&mut lines),
         "rabbitmq" => rabbitmq(&mut lines),
+        "mqtt" => mqtt_brokers(&mut lines),
         _ => {
-            eprintln!("usage: eggdb-broker-compare kafka|rabbitmq [--results <file>]");
+            eprintln!("usage: eggdb-broker-compare kafka|rabbitmq|mqtt [--results <file>]");
             return ExitCode::from(2);
         }
     };

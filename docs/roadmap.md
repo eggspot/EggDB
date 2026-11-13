@@ -1826,7 +1826,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   aliases, message expiry and reason strings: **code written, unbuilt** (code-only mode, 2026-11-11, D480);
   shared subscriptions: **code written, unbuilt** (code-only mode, 2026-11-11, D481).
 - MQTT over WebSockets (D215). **Code written, unbuilt** (code-only mode, 2026-11-11, D517).
-- A benchmark against Mosquitto and EMQX (D33, D215).
+- A benchmark against Mosquitto and EMQX (D33, D215). **Code written, unbuilt** (code-only mode, 2026-11-13,
+  D1059): `eggdb-broker-compare mqtt` in CI's `broker-compare` job.
 - SQS, after D58's legal check: FIFO queues, attributes, batches, long polling, dead-letter
   queues and a non-zero `ChangeMessageVisibility` (D33, D216).
 - NATS JetStream: durable streams and consumers (D33, D216). **Code written, unbuilt** (code-only mode, 2026-11-12,

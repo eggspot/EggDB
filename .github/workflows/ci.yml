@@ -670,12 +670,19 @@ jobs:
         image: rabbitmq:3.13
         ports:
           - 5672:5672
+      emqx:
+        image: emqx/emqx:5.6.0
+        ports:
+          - 2883:1883
     env:
       COMPARE_MANIFEST: crates/eggdb-broker-compare/Cargo.toml
       EGGDB_KAFKA_ADDRESS: 127.0.0.1:19092
       KAFKA_ADDRESS: 127.0.0.1:9092
       EGGDB_AMQP_ADDRESS: 127.0.0.1:15672
       RABBITMQ_ADDRESS: 127.0.0.1:5672
+      EGGDB_MQTT_ADDRESS: 127.0.0.1:11883
+      MOSQUITTO_ADDRESS: 127.0.0.1:1883
+      EMQX_ADDRESS: 127.0.0.1:2883
       EGGDB_PASSWORD: compare
     steps:
       - uses: actions/checkout@v7
@@ -698,13 +705,15 @@ jobs:
       - name: Start EggDB's Kafka listener
         run: |
           cargo build --release -p eggdb
-          target/release/eggdb serve "$RUNNER_TEMP/broker.eggdb" --create --listen 127.0.0.1:15432 --kafka-listen "$EGGDB_KAFKA_ADDRESS" --amqp-listen "$EGGDB_AMQP_ADDRESS" > "$RUNNER_TEMP/eggdb.log" 2>&1 &
+          target/release/eggdb serve "$RUNNER_TEMP/broker.eggdb" --create --listen 127.0.0.1:15432 --kafka-listen "$EGGDB_KAFKA_ADDRESS" --amqp-listen "$EGGDB_AMQP_ADDRESS" --mqtt-listen "$EGGDB_MQTT_ADDRESS" > "$RUNNER_TEMP/eggdb.log" 2>&1 &
+          docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
           for attempt in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/19092) 2>/dev/null && break; sleep 1; done
-      - name: EggDB against Kafka and RabbitMQ (D7, D213, D214, D1056, D1058)
+      - name: EggDB against Kafka, RabbitMQ, Mosquitto and EMQX (D7, D213, D214, D215, D1056, D1058, D1059)
         run: |
           mkdir -p compare-results
           cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- kafka --results compare-results/eggdb-kafka-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
           cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- rabbitmq --results compare-results/eggdb-rabbitmq-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- mqtt --results compare-results/eggdb-mqtt-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Keep the broker comparison results of this change
         if: always()
         uses: actions/upload-artifact@v7

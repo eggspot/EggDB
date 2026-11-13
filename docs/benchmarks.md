@@ -287,4 +287,7 @@ comparisons the ratio is reported, not gated.
 `rabbitmq` publishes 200 batches of 100 persistent 100-byte messages in confirm mode, waiting
 for each batch's confirmation, to EggDB's `--amqp-listen` and to RabbitMQ, then consumes them with
 a prefetch of 1,000, acknowledging every hundredth with `multiple` (D1058).
+`mqtt` publishes 20,000 messages of 100 bytes at QoS 1 with 100 in flight while a QoS 0
+subscriber on another connection receives them, on EggDB's `--mqtt-listen`, Mosquitto and EMQX,
+and reports both sides (D1059).
 
