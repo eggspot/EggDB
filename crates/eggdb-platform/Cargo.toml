@@ -13,3 +13,6 @@ workspace = true
 [[test]]
 name = "all"
 path = "tests/all/main.rs"
+
+[dependencies]
+eggdb-platform-core = { path = "../eggdb-platform-core" }

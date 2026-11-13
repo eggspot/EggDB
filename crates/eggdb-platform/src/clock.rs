@@ -1,17 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// A source of time.
-pub trait Clock: Send + Sync {
-    /// Time elapsed since a fixed, arbitrary origin. Never goes backwards; use it for timeouts
-    /// and durations.
-    fn monotonic(&self) -> Duration;
+pub use eggdb_platform_core::Clock;
 
-    /// Nanoseconds since the Unix epoch by the wall clock, or 0 if the wall clock is set before
-    /// the epoch. May jump in either direction when the clock is adjusted; hybrid logical clocks
-    /// (D20) build on it without trusting it to be monotonic.
-    fn unix_time_nanos(&self) -> u64;
-}
 
 /// The operating system's clocks.
 #[derive(Debug, Clone, Copy)]

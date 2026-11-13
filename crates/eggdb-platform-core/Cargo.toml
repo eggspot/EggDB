@@ -1,0 +1,16 @@
+[package]
+name = "eggdb-platform-core"
+description = "The part of EggDB's platform layer that needs no operating system: its error type and the File and Clock traits, usable without std."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
