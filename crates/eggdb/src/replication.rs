@@ -30,6 +30,7 @@ pub struct ReplicationPrimary {
     more: Condvar,
     acknowledged: Condvar,
     retain: usize,
+    retired: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for ReplicationPrimary {
@@ -74,6 +75,28 @@ impl ReplicationPrimary {
     pub fn remove_replica(&self, replica: ReplicaId) -> Result<()> {
         self.lock()?.remove_replica(replica);
         Ok(())
+    }
+
+    /// Stops capturing commits for good, as an old primary that handed over in a switchover
+    /// does before it follows the new primary (D1026).
+    pub fn retire(&self) {
+        self.retired.store(true, std::sync::atomic::Ordering::Release);
+        self.more.notify_all();
+    }
+
+    /// Whether the primary retired.
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The last sequence `replica` acknowledged, while it is connected.
+    pub fn applied_by(&self, replica: ReplicaId) -> Result<Option<u64>> {
+        Ok(self.lock()?.applied_by(replica))
+    }
+
+    /// The last sequence of the primary's history.
+    pub fn last(&self) -> Result<u64> {
+        Ok(self.lock()?.last())
     }
 
     /// Records that `replica` applied everything up to `sequence`.
@@ -137,8 +160,30 @@ impl Database {
             more: Condvar::new(),
             acknowledged: Condvar::new(),
             retain: DEFAULT_RETAINED_BATCHES,
+            retired: std::sync::atomic::AtomicBool::new(false),
         });
         self.set_primary(std::sync::Arc::clone(&primary))?;
+        Ok(primary)
+    }
+
+    /// Makes this database the primary of `term` (D1026), above every term its history holds,
+    /// as a promoted replica or a switchover's new primary: it continues the sequence where its
+    /// last applied batch left it, records that batch's term as the one before its first, and
+    /// takes the fence away.
+    pub fn promote(&self, term: u64, mode: Mode) -> Result<std::sync::Arc<ReplicationPrimary>> {
+        let (last_term, sequence) = self.replication_position()?.unwrap_or((0, 0));
+        if term <= last_term {
+            return Err(replication_error(format!("a promotion starts a term above {last_term}, not {term}")));
+        }
+        let primary = std::sync::Arc::new(ReplicationPrimary {
+            state: Mutex::new(Primary::resume(term, sequence, last_term, mode)),
+            more: Condvar::new(),
+            acknowledged: Condvar::new(),
+            retain: DEFAULT_RETAINED_BATCHES,
+            retired: std::sync::atomic::AtomicBool::new(false),
+        });
+        self.set_primary(std::sync::Arc::clone(&primary))?;
+        self.unfence();
         Ok(primary)
     }
 
@@ -197,7 +242,7 @@ impl Database {
     /// Applies a batch a primary shipped, all of its changes in one write transaction, as a
     /// replica does. Changes outside the default key space are refused.
     pub fn apply_batch(&self, batch: &Batch) -> Result<()> {
-        let mut transaction = self.begin_write()?;
+        let mut transaction = self.begin_write_unfenced(self.write_timeout())?;
         transaction.note_expiring_keys();
         for change in &batch.changes {
             match change {

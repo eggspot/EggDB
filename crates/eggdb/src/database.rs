@@ -83,6 +83,7 @@ pub struct Database {
     change_archive: Option<crate::change_archive::ChangeArchive>,
     encrypted: bool,
     primary: OnceLock<Arc<crate::replication::ReplicationPrimary>>,
+    fence: std::sync::Mutex<Option<String>>,
 }
 
 struct ClockHandle(Arc<dyn Clock>);
@@ -377,7 +378,29 @@ impl Database {
             change_archive,
             encrypted: options.encryption_key.is_some(),
             primary: OnceLock::new(),
+            fence: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Refuses every write transaction from now on with `reason` (D1026), as a replica, an old
+    /// primary that lost its lease, or a primary handing over in a switchover is; transactions
+    /// already open finish. Batches a replica applies still go through.
+    pub fn fence(&self, reason: impl Into<String>) {
+        if let Ok(mut fence) = self.fence.lock() {
+            *fence = Some(reason.into());
+        }
+    }
+
+    /// Takes the fence away: write transactions begin again.
+    pub fn unfence(&self) {
+        if let Ok(mut fence) = self.fence.lock() {
+            *fence = None;
+        }
+    }
+
+    /// Why writes are refused, while the database is fenced.
+    pub fn fenced(&self) -> Option<String> {
+        self.fence.lock().ok().and_then(|fence| fence.clone())
     }
 
     pub(crate) fn write_timeout(&self) -> Duration {
@@ -385,7 +408,7 @@ impl Database {
     }
 
     pub(crate) fn primary(&self) -> Option<&Arc<crate::replication::ReplicationPrimary>> {
-        self.primary.get()
+        self.primary.get().filter(|primary| !primary.is_retired())
     }
 
     pub(crate) fn set_primary(&self, primary: Arc<crate::replication::ReplicationPrimary>) -> Result<()> {
@@ -423,6 +446,16 @@ impl Database {
     }
 
     pub(crate) fn begin_write_within(&self, timeout: Duration) -> Result<WriteTransaction<'_>> {
+        if self.read_only {
+            return Err(Error::storage(StorageError::ReadOnly));
+        }
+        if let Some(reason) = self.fenced() {
+            return Err(Error::new(ErrorKind::ReadOnly, reason));
+        }
+        self.begin_write_unfenced(timeout)
+    }
+
+    pub(crate) fn begin_write_unfenced(&self, timeout: Duration) -> Result<WriteTransaction<'_>> {
         if self.read_only {
             return Err(Error::storage(StorageError::ReadOnly));
         }

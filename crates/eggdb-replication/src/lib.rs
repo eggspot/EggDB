@@ -130,6 +130,25 @@ impl Primary {
         self.term
     }
 
+    /// A primary that takes over a history ending at `last`, whose last batch was written in
+    /// `last_term`, and starts `term` (above `last_term`), as a promoted replica or a planned
+    /// switchover's new primary does: its first batch names `last_term` as the term before it.
+    pub fn resume(term: u64, last: u64, last_term: u64, mode: Mode) -> Self {
+        Self {
+            term,
+            last,
+            last_term,
+            mode,
+            retained: VecDeque::new(),
+            acknowledged: BTreeMap::new(),
+        }
+    }
+
+    /// The last sequence `replica` acknowledged, while it is shipped to.
+    pub fn applied_by(&self, replica: ReplicaId) -> Option<u64> {
+        self.acknowledged.get(&replica).copied()
+    }
+
     /// Records a commit's changes; returns its batch and the token to read it back with.
     pub fn commit(&mut self, changes: Vec<Change>) -> (Batch, ReadToken) {
         self.last += 1;

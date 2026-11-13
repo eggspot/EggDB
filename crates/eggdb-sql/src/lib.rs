@@ -465,6 +465,7 @@ pub use settings::POSTGRESQL_COMPATIBLE_VERSION;
 pub use sqlite_errors::sqlite_result_code_name;
 pub use sqlserver_catalog::is_catalog_procedure;
 pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
+pub use session::switchover::set_switchover_hook;
 pub use store::{
     EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
     SnapshotHandle, StoreBackup, StoreFailure,

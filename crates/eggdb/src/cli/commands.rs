@@ -45,6 +45,7 @@ mod restore_sqlite;
 mod row;
 mod serve;
 mod serve_databases;
+mod serve_failover;
 mod report_delivery;
 mod serve_jobs;
 mod serve_mcp;

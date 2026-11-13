@@ -292,6 +292,9 @@ impl CommandName {
             | OptionName::ReplicaOf
             | OptionName::ReplicaOfCa
             | OptionName::SynchronousReplicas
+            | OptionName::ReplicationPeers
+            | OptionName::ReplicationAdvertise
+            | OptionName::FailoverAfter
             | OptionName::CdcWebhook
             | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
@@ -515,6 +518,9 @@ enum OptionName {
     ReplicaOf,
     ReplicaOfCa,
     SynchronousReplicas,
+    ReplicationPeers,
+    ReplicationAdvertise,
+    FailoverAfter,
     CdcWebhook,
     OtlpEndpoint,
     CdcQueue,
@@ -676,6 +682,9 @@ impl OptionName {
             b"replica-of" => Self::ReplicaOf,
             b"replica-of-ca" => Self::ReplicaOfCa,
             b"synchronous-replicas" => Self::SynchronousReplicas,
+            b"replication-peers" => Self::ReplicationPeers,
+            b"replication-advertise" => Self::ReplicationAdvertise,
+            b"failover-after" => Self::FailoverAfter,
             b"cdc-webhook" => Self::CdcWebhook,
             b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
@@ -1042,6 +1051,9 @@ pub(crate) struct ServeOptions {
     pub(crate) replica_of: Option<String>,
     pub(crate) replica_of_ca: Option<PathBuf>,
     pub(crate) synchronous_replicas: Option<usize>,
+    pub(crate) replication_peers: Vec<String>,
+    pub(crate) replication_advertise: Option<String>,
+    pub(crate) failover_after_seconds: Option<u64>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1773,6 +1785,26 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.replica_of = Some(address);
             }
             OptionName::ReplicaOfCa => request.serve.replica_of_ca = Some(PathBuf::from(value)),
+            OptionName::ReplicationPeers => {
+                let text = value.to_str().ok_or_else(|| usage(format!("{} takes host:port addresses separated by commas", option.spelled)))?;
+                request.serve.replication_peers = text
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|address| !address.is_empty())
+                    .map(|address| if address.contains(':') { address.to_owned() } else { format!("{address}:5444") })
+                    .collect();
+            }
+            OptionName::ReplicationAdvertise => {
+                let address = value.to_str().filter(|text| text.contains(':')).ok_or_else(|| usage(format!("{} takes the host:port peers reach this server's replication listener at", option.spelled)))?;
+                request.serve.replication_advertise = Some(address.to_owned());
+            }
+            OptionName::FailoverAfter => {
+                request.serve.failover_after_seconds = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|seconds| (2..=3_600).contains(seconds))
+                        .ok_or_else(|| usage(format!("{} takes the seconds without the primary before a failover, 2 to 3600", option.spelled)))?,
+                );
+            }
             OptionName::SynchronousReplicas => {
                 request.serve.synchronous_replicas = Some(
                     parse_whole_number(value.as_encoded_bytes())

@@ -1050,3 +1050,4 @@ its full title with its status.
 - [D1023](decisions/D1023.md) Code-only batch 671 (M14): backups through serve's SQL clients and progress reports
 - [D1024](decisions/D1024.md) Code-only batch 672 (M14): replication wired into the engine and eggdb serve
 - [D1025](decisions/D1025.md) Code-only batch 673 (M14): a replica's first copy from a snapshot
+- [D1026](decisions/D1026.md) Code-only batch 674 (M14): failure detection, fencing and planned switchover
