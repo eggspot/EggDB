@@ -4,9 +4,10 @@ use crate::json::{Json, parse};
 use crate::traversal::{Step, parse_bytecode, parse_script};
 use crate::websocket::{OPCODE_BINARY, OPCODE_TEXT, Message, frame, handshake, read_message};
 use eggdb_graph::Value;
-use eggdb_keyspace::Keyspace;
+use eggdb_keyspace::{Keyspace, Overlay, StagedChanges};
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ const GRAPHSON_V3: &str = "application/vnd.gremlin-v3.0+json";
 const DEFAULT_BATCH_SIZE: usize = 64;
 const MAX_BATCH_SIZE: usize = 10_000;
 const MAX_RESULTS: usize = 1_000_000;
+const MAX_SESSIONS: usize = 16;
 
 const SUCCESS: i64 = 200;
 const NO_CONTENT: i64 = 204;
@@ -52,10 +54,41 @@ struct Request {
 }
 
 struct Connection<'s> {
-    keyspace: &'s dyn Keyspace,
+    keyspace: &'s (dyn Keyspace + Sync),
     config: &'s ServerConfig,
     authenticated: bool,
     waiting: Option<Request>,
+    sessions: Vec<(String, Mutex<StagedChanges>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionEnd {
+    Commit,
+    Rollback,
+}
+
+fn transaction_end(request: &Request) -> Option<TransactionEnd> {
+    let gremlin = request.args.field("gremlin")?;
+    if let Some(script) = gremlin.text() {
+        let compact: String = script.chars().filter(|character| !character.is_whitespace() && *character != ';').collect();
+        return match compact.as_str() {
+            "g.tx().commit()" => Some(TransactionEnd::Commit),
+            "g.tx().rollback()" => Some(TransactionEnd::Rollback),
+            _ => None,
+        };
+    }
+    let body = gremlin.field("@value").unwrap_or(gremlin);
+    let Some(Json::Array(sources)) = body.field("source") else {
+        return None;
+    };
+    sources.iter().find_map(|instruction| match instruction {
+        Json::Array(parts) if parts.first().and_then(Json::text) == Some("tx") => match parts.get(1).and_then(Json::text) {
+            Some("commit") => Some(TransactionEnd::Commit),
+            Some("rollback") => Some(TransactionEnd::Rollback),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 fn empty_map() -> Json {
@@ -194,10 +227,47 @@ impl Connection<'_> {
         }
     }
 
-    fn run(&self, request: &Request) -> Vec<Json> {
+    fn session_index(&mut self, session: &str) -> Result<usize, String> {
+        if let Some(index) = self.sessions.iter().position(|(id, _)| id == session) {
+            return Ok(index);
+        }
+        if self.sessions.len() >= MAX_SESSIONS {
+            return Err(format!("a connection holds at most {MAX_SESSIONS} sessions; close one first"));
+        }
+        self.sessions.push((session.to_owned(), Mutex::new(StagedChanges::new())));
+        Ok(self.sessions.len() - 1)
+    }
+
+    fn end_transaction(&self, index: usize, end: TransactionEnd) -> Result<(), String> {
+        let staged = &self.sessions[index].1;
+        match end {
+            TransactionEnd::Commit => Overlay::new(self.keyspace, staged).commit(),
+            TransactionEnd::Rollback => {
+                staged.lock().map_err(|_| "the transaction failed".to_owned())?.clear();
+                Ok(())
+            }
+        }
+    }
+
+    fn run(&mut self, request: &Request) -> Vec<Json> {
+        let session = request.args.field("session").and_then(request_id);
         if request.op == "close" {
+            if let Some(session) = &session {
+                self.sessions.retain(|(id, _)| id != session);
+            }
             return vec![response(&request.id, NO_CONTENT, "", None)];
         }
+        let index = match session.as_deref().map(|session| self.session_index(session)).transpose() {
+            Ok(index) => index,
+            Err(message) => return vec![response(&request.id, INVALID_REQUEST_ARGUMENTS, &message, None)],
+        };
+        if let (Some(index), Some(end)) = (index, transaction_end(request)) {
+            return match self.end_transaction(index, end) {
+                Ok(()) => vec![response(&request.id, NO_CONTENT, "", None)],
+                Err(message) => vec![response(&request.id, SERVER_ERROR, &message, None)],
+            };
+        }
+        let manage = matches!(request.args.field("manageTransaction"), Some(Json::Bool(true)));
         let steps = match Self::steps(request) {
             Ok(steps) => steps,
             Err((code, message)) => return vec![response(&request.id, code, &message, None)],
@@ -206,7 +276,21 @@ impl Connection<'_> {
             Ok(compiled) => compiled,
             Err(message) => return vec![response(&request.id, SCRIPT_EVALUATION_ERROR, &message, None)],
         };
-        let result = match eggdb_graph::run(self.keyspace, &compiled.query, &compiled.parameters, !compiled.writes) {
+        let outcome = match index {
+            None => eggdb_graph::run(self.keyspace, &compiled.query, &compiled.parameters, !compiled.writes),
+            Some(index) => {
+                let overlay = Overlay::new(self.keyspace, &self.sessions[index].1);
+                let outcome = eggdb_graph::run(&overlay, &compiled.query, &compiled.parameters, !compiled.writes);
+                match (manage, outcome) {
+                    (true, Ok(result)) => overlay.commit().map(|()| result).map_err(|message| eggdb_graph::GraphError {
+                        code: "Neo.DatabaseError.Transaction.TransactionCommitFailed".into(),
+                        message,
+                    }),
+                    (_, outcome) => outcome,
+                }
+            }
+        };
+        let result = match outcome {
             Ok(result) => result,
             Err(error) => return vec![response(&request.id, SCRIPT_EVALUATION_ERROR, &error.message, None)],
         };
@@ -269,14 +353,14 @@ impl Connection<'_> {
 }
 
 fn serve_stream(
-    keyspace: &dyn Keyspace,
+    keyspace: &(dyn Keyspace + Sync),
     config: &ServerConfig,
     mut stream: TcpStream,
     stop: &(dyn Fn() -> bool + Sync),
 ) -> io::Result<()> {
     handshake(&mut stream)?;
     let mut writer = stream.try_clone()?;
-    let mut connection = Connection { keyspace, config, authenticated: false, waiting: None };
+    let mut connection = Connection { keyspace, config, authenticated: false, waiting: None, sessions: Vec::new() };
     loop {
         let message = match read_message(&mut stream, &mut writer, &mut || !stop()) {
             Ok(Some(message)) => message,
@@ -349,7 +433,7 @@ mod tests {
     fn a_client_authenticates_then_writes_and_reads_the_graph() {
         let keyspace = MemoryKeyspace::default();
         let config = ServerConfig { user: "ada".into(), password_sha256: eggdb_crypto::sha256(b"secret"), max_connections: 4 };
-        let mut connection = Connection { keyspace: &keyspace, config: &config, authenticated: false, waiting: None };
+        let mut connection = Connection { keyspace: &keyspace, config: &config, authenticated: false, waiting: None, sessions: Vec::new() };
         let first = request(&mut connection, r#"{"requestId":"1","op":"eval","processor":"","args":{"gremlin":"g.addV('person').property('name','marko').id()"}}"#);
         assert!(first[0].contains("\"code\":407"));
         let sasl = eggdb_crypto::base64_encode(b"\0ada\0secret");
@@ -359,5 +443,12 @@ mod tests {
         assert!(names[0].contains(r#""data":{"@type":"g:List","@value":["marko"]}"#));
         let none = request(&mut connection, r#"{"requestId":"3","op":"eval","args":{"gremlin":"g.V().has('name','nobody')"}}"#);
         assert!(none[0].contains("\"code\":204"));
+        let session = r#""session":"5e55107e-0000-4000-8000-000000000001""#;
+        request(&mut connection, &format!(r#"{{"requestId":"4","op":"eval","processor":"session","args":{{"gremlin":"g.addV('person').property('name','grace')",{session}}}}}"#));
+        let outside = r#"{"requestId":"5","op":"eval","args":{"gremlin":"g.V().hasLabel('person').count()"}}"#;
+        assert!(request(&mut connection, outside)[0].contains(r#"{"@type":"g:Int64","@value":1}"#));
+        let committed = request(&mut connection, &format!(r#"{{"requestId":"6","op":"eval","processor":"session","args":{{"gremlin":"g.tx().commit()",{session}}}}}"#));
+        assert!(committed[0].contains("\"code\":204"));
+        assert!(request(&mut connection, outside)[0].contains(r#"{"@type":"g:Int64","@value":2}"#));
     }
 }

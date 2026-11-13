@@ -1629,7 +1629,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   scripts and bytecode (`eggdb serve --gremlin-listen`): **code written, unbuilt** (code-only mode, 2026-11-13, D1011).
   The branching steps (`where`, `not`, `and`, `or`, `union`, `coalesce`, `optional`, `repeat`): **code written,
   unbuilt** (code-only mode, 2026-11-13, D1016). GraphBinary: **code written, unbuilt** (code-only mode, 2026-11-13, D1017).
-  Left: sessions, and Cosmos DB's Gremlin API after D58's legal check.
+  Sessions and remote transactions: **code written, unbuilt** (code-only mode, 2026-11-13, D1018). Left: Cosmos DB's
+  Gremlin API after D58's legal check.
 - Louvain, Leiden, betweenness and closeness centrality, weighted shortest paths, k-core and graph
   embeddings (D55, D248). Louvain, betweenness, closeness, weighted shortest paths and k-core:
   **code written, unbuilt** (code-only mode, 2026-11-11, D436), with FastRP embeddings; Leiden: **code
