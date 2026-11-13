@@ -220,6 +220,19 @@ impl Session<'_> {
             }
             None => None,
         };
+        let connect_listener = match options.connect_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(usage(format!(
+                        "--connect-listen {address}: Kafka Connect's REST API has no authentication, so it listens only on a loopback address"
+                    )));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for Kafka Connect on {address}: {error}"), Exit::DatabaseError)
+                })?)
+            }
+            None => None,
+        };
         let etcd_listener = match options.etcd_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -1289,6 +1302,10 @@ impl Session<'_> {
             db: &db,
             prefix: super::serve_resp::ZOOKEEPER_COLLECTIONS,
         };
+        let connect_database = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::CONNECT_COLLECTIONS,
+        };
         let etcd_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::ETCD_COLLECTIONS,
@@ -1540,6 +1557,10 @@ impl Session<'_> {
                     },
                     &stop_signals::requested,
                 ),
+                None => Ok(()),
+            });
+            let connect_server = scope.spawn(|| match &connect_listener {
+                Some(listener) => eggdb_connect::serve(listener, &connect_database, &kafka_database, &stop_signals::requested),
                 None => Ok(()),
             });
             let etcd_server = scope.spawn(|| match &etcd_listener {
@@ -1852,6 +1873,7 @@ impl Session<'_> {
             let _ = memcached_server.join();
             let _ = zookeeper_server.join();
             let _ = etcd_server.join();
+            let _ = connect_server.join();
             let _ = es_server.join();
             let _ = mongo_server.join();
             let _ = bolt_server.join();

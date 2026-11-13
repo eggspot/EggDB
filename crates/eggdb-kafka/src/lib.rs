@@ -38,5 +38,35 @@ pub fn publish(keyspace: &dyn eggdb_keyspace::Keyspace, topic: &str, value: &[u8
     }
 }
 
+/// A record read from a topic partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KafkaRecord {
+    /// Its offset.
+    pub offset: i64,
+    /// Its key, if any.
+    pub key: Option<Vec<u8>>,
+    /// Its value; `None` for a tombstone.
+    pub value: Option<Vec<u8>>,
+}
+
+/// The committed records of `partition` of `topic` from offset `from`, up to about a mebibyte,
+/// and the partition's next offset, so the server's own consumers (Kafka Connect's sink
+/// connectors, D1055) read what Kafka producers wrote. A missing topic has no records.
+pub fn read_records(
+    keyspace: &dyn eggdb_keyspace::Keyspace,
+    topic: &str,
+    partition: i32,
+    from: i64,
+) -> Result<(Vec<KafkaRecord>, i64), String> {
+    const MOST_BYTES: usize = 1 << 20;
+    let fetched = log::fetch(keyspace, topic, partition, from, MOST_BYTES, true)?;
+    let records = compaction::decode_batches(&fetched.records)
+        .into_iter()
+        .filter(|(offset, _, _)| *offset >= from && *offset < fetched.last_stable)
+        .map(|(offset, key, value)| KafkaRecord { offset, key, value })
+        .collect();
+    Ok((records, fetched.last_stable))
+}
+
 #[cfg(test)]
 mod tests;

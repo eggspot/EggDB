@@ -1,0 +1,15 @@
+[package]
+name = "eggdb-connect"
+description = "EggDB's Kafka Connect: the Connect REST API, a worker that runs EggDB's own Rust connectors against the server's Kafka topics, and Connect's worker group protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eggdb-http = { path = "../eggdb-http" }
+eggdb-kafka = { path = "../eggdb-kafka" }
+eggdb-keyspace = { path = "../eggdb-keyspace" }
+
+[lints]
+workspace = true

@@ -39,6 +39,8 @@ pub const NATS_COLLECTIONS: &str = "nats";
 pub const ZOOKEEPER_COLLECTIONS: &str = "zookeeper";
 /// The etcd-compatible keys, revisions and leases.
 pub const ETCD_COLLECTIONS: &str = "etcd";
+/// Kafka Connect's connectors, with their states and positions.
+pub const CONNECT_COLLECTIONS: &str = "connect";
 /// The S3-compatible objects.
 pub const OBJECT_COLLECTIONS: &str = "objects";
 /// The DynamoDB-compatible tables.

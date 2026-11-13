@@ -17,6 +17,7 @@ pub(crate) const COMPACT_EVERY: i64 = 1000;
 struct Record<'b> {
     offset_delta: i64,
     key: Option<&'b [u8]>,
+    value: Option<&'b [u8]>,
     null_value: bool,
     framed: &'b [u8],
 }
@@ -87,11 +88,36 @@ fn records(batch: &[u8]) -> Option<Vec<Record<'_>>> {
         found.push(Record {
             offset_delta,
             key,
+            value,
             null_value: value.is_none(),
             framed: &batch[start..body_start + length],
         });
     }
     Some(found)
+}
+
+/// One record read back from stored batches: its offset, key and value.
+pub(crate) type DecodedRecord = (i64, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// The records of the batches laid end to end in `bytes`, in offset order; control batches,
+/// compressed batches and anything cut short are passed over.
+pub(crate) fn decode_batches(bytes: &[u8]) -> Vec<DecodedRecord> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let Some(header) = bytes.get(at..at + 12) {
+        let base = i64::from_be_bytes(header[..8].try_into().unwrap_or_default());
+        let Ok(length) = usize::try_from(i32::from_be_bytes(header[8..12].try_into().unwrap_or_default())) else {
+            break;
+        };
+        let Some(batch) = bytes.get(at..at + 12 + length) else {
+            break;
+        };
+        for record in records(batch).unwrap_or_default() {
+            out.push((base + record.offset_delta, record.key.map(<[u8]>::to_vec), record.value.map(<[u8]>::to_vec)));
+        }
+        at += 12 + length;
+    }
+    out
 }
 
 fn rebuilt(batch: &[u8], kept: &[&Record<'_>]) -> Vec<u8> {

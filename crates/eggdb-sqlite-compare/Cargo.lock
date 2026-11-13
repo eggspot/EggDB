@@ -31,6 +31,7 @@ dependencies = [
  "eggdb-clickhouse",
  "eggdb-cluster",
  "eggdb-commands",
+ "eggdb-connect",
  "eggdb-consensus",
  "eggdb-content",
  "eggdb-cql",
@@ -153,6 +154,15 @@ version = "0.5.0"
 [[package]]
 name = "eggdb-commands"
 version = "0.5.0"
+
+[[package]]
+name = "eggdb-connect"
+version = "0.5.0"
+dependencies = [
+ "eggdb-http",
+ "eggdb-kafka",
+ "eggdb-keyspace",
+]
 
 [[package]]
 name = "eggdb-consensus"
