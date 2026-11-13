@@ -672,14 +672,26 @@ fn tables_by_id(reader: &dyn crate::store::KeyValueRead) -> SqlResult<std::colle
     Ok(tables)
 }
 
+fn with_transaction(event: String, transaction: &str, total_order: u64, collection_order: u64) -> String {
+    let Some(body) = event.strip_suffix('}') else {
+        return event;
+    };
+    format!(
+        "{body},\"transaction\":{{\"id\":{},\"total_order\":{total_order},\"data_collection_order\":{collection_order}}}}}",
+        json_string(transaction)
+    )
+}
+
 fn captured_events(
     tables: &std::collections::HashMap<u32, crate::encoding::TableDefinition>,
     database: &str,
+    transaction: &str,
     keys: &[CapturedKey],
     now_ms: i64,
 ) -> SqlResult<Vec<String>> {
     let id_at = crate::encoding::NAMESPACE.len() + 1;
     let mut events = Vec::new();
+    let mut per_table: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     for (key, before, after) in keys {
         let Some(id) = key.get(id_at..id_at + 4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_be_bytes) else {
             continue;
@@ -701,7 +713,10 @@ fn captured_events(
         };
         let before = before.as_deref().map(|stored| row_json(definition, stored)).transpose()?;
         let after = after.as_deref().map(|stored| row_json(definition, stored)).transpose()?;
-        events.push(debezium_event(database, schema, table, op, before.as_deref(), after.as_deref(), now_ms));
+        let collection_order = per_table.entry(id).or_insert(0);
+        *collection_order += 1;
+        let event = debezium_event(database, schema, table, op, before.as_deref(), after.as_deref(), now_ms);
+        events.push(with_transaction(event, transaction, events.len() as u64 + 1, *collection_order));
     }
     Ok(events)
 }
@@ -730,7 +745,13 @@ pub fn deliver_captured_changes<S: KeyValueStore>(
     let mut delivered = 0;
     for (key, value) in records {
         let keys = decode_capture(&value).ok_or_else(|| crate::encoding::corrupt("captured changes"))?;
-        let events = captured_events(&tables, database, &keys, now_ms)?;
+        let transaction = key
+            .get(CAPTURE_PREFIX.len()..)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_be_bytes)
+            .unwrap_or_default()
+            .to_string();
+        let events = captured_events(&tables, database, &transaction, &keys, now_ms)?;
         if !events.iter().all(|event| deliver(event)) {
             break;
         }
