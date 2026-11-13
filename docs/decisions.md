@@ -1132,3 +1132,4 @@ its full title with its status.
 - [D1105](decisions/D1105.md) Code-only batch 753 (M18): placement rules per table and residency per row
 - [D1106](decisions/D1106.md) Code-only batch 754 (M18): offline-first sync over HTTP with a space per signed-in application user
 - [D1107](decisions/D1107.md) Code-only batch 755 (M18): SQL tables synced offline-first through a capture trigger and the sync replica
+- [D1108](decisions/D1108.md) Code-only batch 756 (M18): sync log compaction, partial sync, field merges and CRDTs, and end-to-end sealing

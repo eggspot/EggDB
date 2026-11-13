@@ -11,6 +11,8 @@
 use eggdb_keyspace::{Entries as Rows, KeysRead, KeysWrite, Keyspace};
 
 pub mod http;
+pub mod merge;
+pub mod seal;
 
 const ROW: u8 = b'r';
 const LOG: u8 = b'l';
@@ -281,6 +283,11 @@ impl<'k> Replica<'k> {
         Self { keyspace, db, id }
     }
 
+    /// The replica's id.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     fn transact<T>(
         &self,
         body: impl FnOnce(&mut dyn KeysWrite) -> Result<T, SyncError>,
@@ -371,6 +378,87 @@ impl<'k> Replica<'k> {
                 }
             }
             Ok(rows)
+        })
+    }
+
+    /// Every live key starting with `prefix` and its value, in key order.
+    pub fn rows_with_prefix(&self, prefix: &[u8]) -> Result<Rows, SyncError> {
+        self.read(|keys| {
+            let mut stored_prefix = vec![ROW];
+            stored_prefix.extend_from_slice(prefix);
+            let mut rows = Vec::new();
+            for (stored, bytes) in keys.scan(&stored_prefix).map_err(storage)? {
+                if let Some(value) = decode_row(&stored[1..], &bytes)?.value {
+                    rows.push((stored[1..].to_vec(), value));
+                }
+            }
+            Ok(rows)
+        })
+    }
+
+    /// The changes logged at or after `cursor` whose key starts with one of `prefixes` (every
+    /// change when `prefixes` is empty), reading at most `limit` log entries, and the cursor
+    /// after them: partial sync, a device taking only the keys it wants (D1108).
+    pub fn changes_after_matching(
+        &self,
+        cursor: u64,
+        limit: usize,
+        prefixes: &[Vec<u8>],
+    ) -> Result<(Vec<Change>, u64), SyncError> {
+        let (changes, next) = self.changes_after(cursor, limit)?;
+        if prefixes.is_empty() {
+            return Ok((changes, next));
+        }
+        Ok((
+            changes
+                .into_iter()
+                .filter(|change| prefixes.iter().any(|prefix| change.key.starts_with(prefix)))
+                .collect(),
+            next,
+        ))
+    }
+
+    /// Compacts the change log (D1108): every logged change a later change of the same key has
+    /// superseded is emptied, so the log keeps one entry per key and syncing from an old cursor
+    /// sends only each key's newest change. Positions stay, so every cursor stays valid. Returns
+    /// how many entries were emptied.
+    pub fn compact_log(&self) -> Result<usize, SyncError> {
+        self.transact(|keys| {
+            let meta = Meta::read(&*keys)?;
+            let mut emptied = 0;
+            let mut empty = Vec::new();
+            encode(&[], &mut empty);
+            for position in 0..meta.next_position {
+                let Some(entry) = keys.get(&log_key(position)).map_err(storage)? else {
+                    continue;
+                };
+                let changes = decode(&entry)?;
+                if changes.is_empty() {
+                    continue;
+                }
+                let mut kept = Vec::with_capacity(changes.len());
+                for change in changes {
+                    let current = keys
+                        .get(&row_key(&change.key))
+                        .map_err(storage)?
+                        .map(|bytes| decode_row(&change.key, &bytes))
+                        .transpose()?;
+                    if current.is_some_and(|row| row.stamp == change.stamp) {
+                        kept.push(change);
+                    }
+                }
+                if kept.is_empty() {
+                    keys.put(&log_key(position), &empty).map_err(storage)?;
+                    emptied += 1;
+                } else {
+                    let mut rewritten = Vec::new();
+                    encode(&kept, &mut rewritten);
+                    if rewritten != entry {
+                        keys.put(&log_key(position), &rewritten).map_err(storage)?;
+                    }
+                }
+            }
+            Ok(emptied)
         })
     }
 

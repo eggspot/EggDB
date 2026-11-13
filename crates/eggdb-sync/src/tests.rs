@@ -120,3 +120,21 @@ fn a_replica_keeps_its_offline_writes_and_clock_across_reopening() {
     assert_eq!(reopened.get(b"note").unwrap(), None);
     assert!(reopened.rows().unwrap().is_empty());
 }
+
+#[test]
+fn compaction_keeps_one_logged_change_per_key_and_every_cursor_valid() {
+    let keys = eggdb_keyspace::MemoryKeyspace::default();
+    let replica = crate::Replica::new(&keys, 0, 1);
+    replica.write(b"a", Some(b"1"), 10).unwrap();
+    replica.write(b"b", Some(b"x"), 11).unwrap();
+    replica.write(b"a", Some(b"2"), 12).unwrap();
+    replica.write(b"a", None, 13).unwrap();
+    let (before, end) = replica.changes_after(0, 100).unwrap();
+    assert_eq!(before.len(), 4);
+    assert_eq!(replica.compact_log().unwrap(), 2);
+    let (after, compacted_end) = replica.changes_after(0, 100).unwrap();
+    assert_eq!(compacted_end, end);
+    assert_eq!(after.iter().map(|change| (change.key.clone(), change.value.clone())).collect::<Vec<_>>(), vec![(b"b".to_vec(), Some(b"x".to_vec())), (b"a".to_vec(), None)]);
+    assert_eq!(replica.changes_after(2, 100).unwrap().0.len(), 1);
+    assert_eq!(replica.compact_log().unwrap(), 0);
+}

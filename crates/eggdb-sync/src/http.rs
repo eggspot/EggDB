@@ -25,6 +25,48 @@ fn received_of(query: Option<&str>) -> Option<u64> {
         .and_then(|text| text.parse().ok())
 }
 
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 || text.len() > 2_048 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
+fn prefixes_of(query: Option<&str>) -> Option<Vec<Vec<u8>>> {
+    query
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("prefix="))
+        .map(hex_bytes)
+        .collect()
+}
+
+/// How a client syncs: how many changes it sends at once, how long it waits, which key
+/// prefixes it takes from the server (all when empty), and the sealer that keeps the server
+/// from reading its changes (D1108).
+#[derive(Debug)]
+pub struct SyncOptions<'s> {
+    /// The most changes sent in one request.
+    pub batch: usize,
+    /// How long each step of the request may take.
+    pub timeout: Duration,
+    /// The key prefixes to take from the server; empty takes every key. With a sealer, the
+    /// server sees only sealed keys, so a prefix must be a whole sealed key.
+    pub prefixes: Vec<Vec<u8>>,
+    /// The sealer for end-to-end encryption, the same secret on every device of the user.
+    pub sealer: Option<&'s crate::seal::Sealer>,
+}
+
+impl SyncOptions<'_> {
+    /// Batches of 500, 30 seconds per step, every key, no sealing.
+    pub fn plain() -> Self {
+        Self { batch: 500, timeout: Duration::from_secs(30), prefixes: Vec::new(), sealer: None }
+    }
+}
+
 /// A sync server: who a bearer token signs in, and where each user's space is kept.
 pub struct SyncEndpoint<'k> {
     /// The keyspace holding every user's space, database `n` for user `n`.
@@ -61,6 +103,9 @@ impl SyncEndpoint<'_> {
         let Some(received) = received_of(request.query.as_deref()) else {
             return Response::text(400, "received= must be a whole number");
         };
+        let Some(prefixes) = prefixes_of(request.query.as_deref()) else {
+            return Response::text(400, "prefix= must be hexadecimal bytes");
+        };
         let incoming = match decode(&request.body) {
             Ok(changes) => changes,
             Err(error) => return Response::text(400, &error.to_string()),
@@ -69,7 +114,7 @@ impl SyncEndpoint<'_> {
         if let Err(error) = space.apply(&incoming) {
             return Response::text(500, &error.to_string());
         }
-        match space.changes_after(received, CHANGES_PER_ANSWER) {
+        match space.changes_after_matching(received, CHANGES_PER_ANSWER, &prefixes) {
             Ok((outgoing, next)) => {
                 let mut body = Vec::new();
                 encode(&outgoing, &mut body);
@@ -105,16 +150,37 @@ pub fn sync_over_http_changed(
     batch: usize,
     timeout: Duration,
 ) -> Result<Vec<crate::Change>, SyncError> {
+    let options = SyncOptions { batch, timeout, ..SyncOptions::plain() };
+    sync_over_http_with(client, cursors, url, token, &options)
+}
+
+/// Syncs as [`sync_over_http_changed`] does, with `options`: only the keys under its prefixes
+/// come back, and with a sealer every change leaves sealed and comes back opened (D1108).
+pub fn sync_over_http_with(
+    client: &Replica<'_>,
+    cursors: &mut Cursors,
+    url: &str,
+    token: &str,
+    options: &SyncOptions<'_>,
+) -> Result<Vec<crate::Change>, SyncError> {
     let target = eggdb_http::client::parse_http_url(url).map_err(SyncError::Storage)?;
-    let (outgoing, sent) = client.changes_after(cursors.sent, batch)?;
+    let (outgoing, sent) = client.changes_after(cursors.sent, options.batch)?;
+    let outgoing: Vec<crate::Change> = match options.sealer {
+        Some(sealer) => outgoing.iter().map(|change| sealer.seal(change)).collect(),
+        None => outgoing,
+    };
     let mut body = Vec::new();
     encode(&outgoing, &mut body);
     let headers = vec![
         ("Authorization".to_owned(), format!("Bearer {token}")),
         ("Content-Type".to_owned(), CONTENT_TYPE.to_owned()),
     ];
-    let path = format!("/sync?received={}", cursors.received);
-    let answer = eggdb_http::client::request(&target, "POST", &path, &headers, &body, timeout, 256 << 20)
+    let mut path = format!("/sync?received={}", cursors.received);
+    for prefix in &options.prefixes {
+        path.push_str("&prefix=");
+        path.extend(prefix.iter().map(|byte| format!("{byte:02x}")));
+    }
+    let answer = eggdb_http::client::request(&target, "POST", &path, &headers, &body, options.timeout, 256 << 20)
         .map_err(|error| SyncError::Storage(format!("cannot reach {url}: {error}")))?;
     if answer.status != 200 {
         return Err(SyncError::Storage(format!(
@@ -130,6 +196,10 @@ pub fn sync_over_http_changed(
         .and_then(|(_, value)| value.trim().parse::<u64>().ok())
         .ok_or(SyncError::Malformed("the answer has no received cursor"))?;
     let incoming = decode(&answer.body)?;
+    let incoming = match options.sealer {
+        Some(sealer) => incoming.iter().map(|change| sealer.open(change)).collect::<Result<Vec<_>, _>>()?,
+        None => incoming,
+    };
     cursors.sent = sent;
     let changed = client.apply_changed(&incoming)?;
     cursors.received = next;
@@ -181,6 +251,22 @@ mod tests {
             empty
         }));
         assert_eq!(decode(&ada_answer.body).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_device_takes_only_the_prefixes_it_asks_for() {
+        let server = MemoryKeyspace::default();
+        let endpoint = SyncEndpoint { keyspace: &server, server_id: 0, authenticate: &signed_in };
+        let space = Replica::new(&server, 1, 0);
+        space.write(b"notes/1", Some(b"kept"), 1).unwrap();
+        space.write(b"photos/1", Some(b"large"), 2).unwrap();
+        let mut empty = Vec::new();
+        encode(&[], &mut empty);
+        let answer = endpoint.answer(&request(Some("ada"), "received=0&prefix=6e6f746573", empty.clone()));
+        let changes = decode(&answer.body).unwrap();
+        assert_eq!(changes.iter().map(|change| change.key.clone()).collect::<Vec<_>>(), vec![b"notes/1".to_vec()]);
+        assert_eq!(answer.headers.iter().find(|(name, _)| name == "X-EggDB-Sync-Received").map(|(_, value)| value.as_str()), Some("2"));
+        assert_eq!(endpoint.answer(&request(Some("ada"), "received=0&prefix=zz", empty)).status, 400);
     }
 
     #[test]

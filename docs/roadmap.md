@@ -2079,7 +2079,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (`SyncEndpoint`, `sync_over_http`), `eggdb serve --sync-listen` signing devices in with `eggdb_app_auth` sessions.
 - Sync of SQL tables through change capture (D210, D228). **Code written, unbuilt** (code-only mode, 2026-11-13, D1107): the `eggdb_sync`
   extension's capture trigger and outbox, and `eggdb::table_sync::sync_tables`.
-- Sync log compaction, partial sync, per-field merges and CRDTs, and end-to-end encryption (D228).
+- Sync log compaction, partial sync, per-field merges and CRDTs, and end-to-end encryption (D228). **Code written, unbuilt**
+  (code-only mode, 2026-11-13, D1108): `Replica::compact_log`, `prefix=` partial sync, `eggdb_sync::merge` (fields,
+  counters, sets) and `eggdb_sync::seal::Sealer`.
 - CouchDB's replication protocol (D48).
 - Foreign tables with declared columns and filter pushdown (D29, D229). `CREATE SERVER` and `CREATE FOREIGN TABLE`
   with declared columns, as views over `eggdb_foreign`: **code written, unbuilt** (code-only mode, 2026-11-12, D916).
