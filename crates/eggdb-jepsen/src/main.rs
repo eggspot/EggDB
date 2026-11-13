@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: eggdb-jepsen <eggdb binary> <work directory> [--seconds N] [--seed N]";
+const USAGE: &str = "usage: eggdb-jepsen <eggdb binary> <work directory> [--seconds N] [--seed N] [--partitions 1]";
 const NODES: usize = 3;
 const CLIENTS: usize = 4;
 const USER: &str = "eggdb";
@@ -185,12 +185,38 @@ impl Random {
     }
 }
 
-fn nemesis(cluster: &Cluster, stop: &AtomicBool, seed: u64, log: &Mutex<Vec<String>>) {
+fn iptables(action: &str, port: u16) -> bool {
+    Command::new("sudo")
+        .args(["-n", "iptables", action, "INPUT", "-p", "tcp", "-i", "lo", "--dport", &port.to_string(), "-j", "DROP"])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Cuts every connection to `node`'s replication listener for `length`, so its peers and,
+/// for a primary, its replicas cannot reach it while it keeps running: needs `sudo iptables`.
+fn partition(node: usize, length: Duration) -> bool {
+    let port = ports(node).replication;
+    if !iptables("-A", port) {
+        return false;
+    }
+    std::thread::sleep(length);
+    while iptables("-D", port) {}
+    true
+}
+
+fn nemesis(cluster: &Cluster, stop: &AtomicBool, seed: u64, partitions: bool, log: &Mutex<Vec<String>>) {
     let mut random = Random(seed.max(1));
     while !stop.load(Ordering::Acquire) {
         std::thread::sleep(Duration::from_secs(4));
         let node = random.below(NODES);
-        let entry = match random.below(3) {
+        let entry = match random.below(if partitions { 4 } else { 3 }) {
+            3 => {
+                if partition(node, Duration::from_secs(8)) {
+                    format!("cut node {node}'s replication listener off for 8 s")
+                } else {
+                    "could not partition: sudo iptables failed".to_owned()
+                }
+            }
             0 => {
                 cluster.kill(node);
                 std::thread::sleep(Duration::from_secs(5));
@@ -212,7 +238,7 @@ fn nemesis(cluster: &Cluster, stop: &AtomicBool, seed: u64, log: &Mutex<Vec<Stri
     }
 }
 
-fn run(binary: &Path, directory: &Path, seconds: u64, seed: u64) -> Result<bool, String> {
+fn run(binary: &Path, directory: &Path, seconds: u64, seed: u64, partitions: bool) -> Result<bool, String> {
     std::fs::create_dir_all(directory).map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
     let cluster = Arc::new(Cluster {
         binary: binary.to_path_buf(),
@@ -235,7 +261,7 @@ fn run(binary: &Path, directory: &Path, seconds: u64, seed: u64) -> Result<bool,
             let (stop, counter, history) = (&stop, &counter, &history);
             scope.spawn(move || client_loop(id, stop, counter, history));
         }
-        scope.spawn(|| nemesis(&cluster, &stop, seed, &log));
+        scope.spawn(|| nemesis(&cluster, &stop, seed, partitions, &log));
         while started.elapsed() < Duration::from_secs(seconds) {
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -303,18 +329,20 @@ fn main() -> std::process::ExitCode {
     };
     let mut seconds = 60u64;
     let mut seed = 1u64;
+    let mut partitions = false;
     while let Some(argument) = arguments.next() {
         let value = arguments.next().and_then(|value| value.parse::<u64>().ok());
         match (argument.as_str(), value) {
             ("--seconds", Some(value)) => seconds = value,
             ("--seed", Some(value)) => seed = value,
+            ("--partitions", Some(value)) => partitions = value != 0,
             _ => {
                 eprintln!("{USAGE}");
                 return std::process::ExitCode::from(2);
             }
         }
     }
-    match run(Path::new(&binary), Path::new(&directory), seconds, seed) {
+    match run(Path::new(&binary), Path::new(&directory), seconds, seed, partitions) {
         Ok(true) => {
             println!("no lost writes and no divergence");
             std::process::ExitCode::SUCCESS

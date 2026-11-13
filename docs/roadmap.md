@@ -1694,7 +1694,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   or eventual (D18). **Code written, unbuilt** (code-only mode, 2026-11-13, D1028): `eggdb.read_freshness`,
   `eggdb.read_after` and `SHOW eggdb.replication_token`.
 - Jepsen-style checks against real processes (D9, D209). **Code written, unbuilt** (code-only mode, 2026-11-13, D1029):
-  `eggdb-jepsen` with kills, pauses and failovers, weekly. Left: network partitions.
+  `eggdb-jepsen` with kills, pauses, partitions and failovers, weekly.
 - Logical replication to other EggDB clusters, across versions, for upgrades without downtime
   (D18).
 - PostgreSQL's replication protocol served, so other systems can follow EggDB (D18, D103).

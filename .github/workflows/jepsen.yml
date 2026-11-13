@@ -44,7 +44,7 @@ jobs:
           cargo build --release -p eggdb -p eggdb-jepsen
           set -o pipefail
           for seed in 1 2 3; do
-            target/release/eggdb-jepsen target/release/eggdb "$RUNNER_TEMP/jepsen-$seed" --seconds "$JEPSEN_SECONDS" --seed "$seed" | tee -a "$RUNNER_TEMP/jepsen.txt"
+            target/release/eggdb-jepsen target/release/eggdb "$RUNNER_TEMP/jepsen-$seed" --seconds "$JEPSEN_SECONDS" --seed "$seed" --partitions 1 | tee -a "$RUNNER_TEMP/jepsen.txt"
           done
       - name: Summarise
         if: always()
