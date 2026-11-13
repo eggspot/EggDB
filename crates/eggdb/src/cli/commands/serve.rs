@@ -1051,6 +1051,8 @@ impl Session<'_> {
         let tds_events = events.clone();
         let syslog_events = events.clone();
         let opcua_events = events.clone();
+        let sparkplug_events = events.clone();
+        let modbus_events = events.clone();
         eggdb_sql::statement_statistics::collect(
             options
                 .statement_statistics
@@ -1092,6 +1094,34 @@ impl Session<'_> {
             opcua_collector.prepare().map_err(|error| {
                 Failure::database(
                     format!("cannot create the opcua_values table: {error}"),
+                    Exit::DatabaseError,
+                )
+            })?;
+        }
+        let sparkplug_collector = eggdb_iot::SparkplugCollector::new(
+            &store,
+            &config.user,
+            &config.database,
+            options.sparkplug_sources.clone(),
+        );
+        if !options.sparkplug_sources.is_empty() {
+            sparkplug_collector.prepare().map_err(|error| {
+                Failure::database(
+                    format!("cannot create the sparkplug tables: {error}"),
+                    Exit::DatabaseError,
+                )
+            })?;
+        }
+        let modbus_poller = eggdb_iot::ModbusPoller::new(
+            &store,
+            &config.user,
+            &config.database,
+            options.modbus_devices.clone(),
+        );
+        if !options.modbus_devices.is_empty() {
+            modbus_poller.prepare().map_err(|error| {
+                Failure::database(
+                    format!("cannot create the modbus_values table: {error}"),
                     Exit::DatabaseError,
                 )
             })?;
@@ -1684,6 +1714,26 @@ impl Session<'_> {
                 };
                 opcua_collector.serve(&stop_signals::requested, &log);
             });
+            let sparkplug_follower = scope.spawn(|| {
+                if options.sparkplug_sources.is_empty() {
+                    drop(sparkplug_events);
+                    return;
+                }
+                let log = move |line: &str| {
+                    let _ = sparkplug_events.send(stamped(&format!("sparkplug {line}")));
+                };
+                sparkplug_collector.serve(&stop_signals::requested, &log);
+            });
+            let modbus_follower = scope.spawn(|| {
+                if options.modbus_devices.is_empty() {
+                    drop(modbus_events);
+                    return;
+                }
+                let log = move |line: &str| {
+                    let _ = modbus_events.send(stamped(&format!("modbus {line}")));
+                };
+                modbus_poller.serve(&stop_signals::requested, &log);
+            });
             let nats_server = scope.spawn(|| match &nats_listener {
                 Some(listener) => {
                     eggdb_nats::serve_with_jetstream(&nats_database, listener, &nats_config, &stop_signals::requested)
@@ -1918,6 +1968,8 @@ impl Session<'_> {
             let _ = nats_server.join();
             let _ = syslog_server.join();
             let _ = opcua_follower.join();
+            let _ = sparkplug_follower.join();
+            let _ = modbus_follower.join();
             let _ = stomp_server.join();
             let _ = cql_server.join();
             let _ = observability_server.join();

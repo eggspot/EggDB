@@ -1963,8 +1963,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D775). OPC UA binary Variants and DataValues decoded in SQL (`opcua_decode`):
   **code written, unbuilt** (code-only mode, 2026-11-12, D833); an OPC UA client with a secure channel, sessions and
   subscriptions, storing data changes as they arrive (`eggdb-opcua`, `--opcua-subscribe`): **code written, unbuilt**
-  (code-only mode, 2026-11-13, D1071). Left: Sparkplug and Modbus ingest as messages arrive, and OPC UA's signed and
-  encrypted security policies.
+  (code-only mode, 2026-11-13, D1071); Sparkplug and Modbus ingest as messages arrive (`eggdb-iot`,
+  `--sparkplug-subscribe`, `--modbus-poll`): **code written, unbuilt** (code-only mode, 2026-11-13, D1072). Left: OPC
+  UA's signed and encrypted security policies.
 - Email stores with IMAP, JMAP and SMTP (D56). The store and an SMTP receiver (`eggdb-mail`, `--smtp-listen`): **code
   written, unbuilt** (code-only mode, 2026-11-12, D892); IMAP (`--imap-listen`): **code written, unbuilt** (code-only
   mode, 2026-11-12, D893); JMAP (`--jmap-listen`): **code written, unbuilt** (code-only mode, 2026-11-12, D894); MIME

@@ -1,0 +1,13 @@
+[package]
+name = "eggdb-iot"
+description = "EggDB's industrial ingest: Sparkplug B messages taken from any MQTT broker and Modbus TCP registers polled from devices, each stored as rows as they arrive."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-sql = { path = "../eggdb-sql" }

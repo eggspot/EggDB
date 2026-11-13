@@ -336,6 +336,8 @@ impl CommandName {
             | OptionName::NatsNkey
             | OptionName::NatsRemote
             | OptionName::OpcuaSubscribe
+            | OptionName::SparkplugSubscribe
+            | OptionName::ModbusPoll
             | OptionName::RespEviction
             | OptionName::McpTokenFile
             | OptionName::McpTables
@@ -575,6 +577,8 @@ enum OptionName {
     NatsNkey,
     NatsRemote,
     OpcuaSubscribe,
+    SparkplugSubscribe,
+    ModbusPoll,
     RespEviction,
     McpTokenFile,
     McpTables,
@@ -752,6 +756,8 @@ impl OptionName {
             b"nats-nkey" => Self::NatsNkey,
             b"nats-remote" => Self::NatsRemote,
             b"opcua-subscribe" => Self::OpcuaSubscribe,
+            b"sparkplug-subscribe" => Self::SparkplugSubscribe,
+            b"modbus-poll" => Self::ModbusPoll,
             b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
             b"mcp-tables" => Self::McpTables,
@@ -1136,6 +1142,8 @@ pub(crate) struct ServeOptions {
     pub(crate) nats_nkeys: Vec<String>,
     pub(crate) nats_remotes: Vec<(String, String)>,
     pub(crate) opcua_subscriptions: Vec<eggdb_opcua::Subscription>,
+    pub(crate) sparkplug_sources: Vec<eggdb_iot::SparkplugSource>,
+    pub(crate) modbus_devices: Vec<eggdb_iot::Device>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
     pub(crate) resp_cluster: bool,
@@ -1673,6 +1681,18 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 let subscription = eggdb_opcua::Subscription::parse(text)
                     .map_err(|error| usage(format!("{} {error}", option.spelled)))?;
                 request.serve.opcua_subscriptions.push(subscription);
+            }
+            OptionName::SparkplugSubscribe => {
+                let text = value.to_str().unwrap_or_default();
+                let source = eggdb_iot::SparkplugSource::parse(text)
+                    .map_err(|error| usage(format!("{} {error}", option.spelled)))?;
+                request.serve.sparkplug_sources.push(source);
+            }
+            OptionName::ModbusPoll => {
+                let text = value.to_str().unwrap_or_default();
+                let device = eggdb_iot::Device::parse(text)
+                    .map_err(|error| usage(format!("{} {error}", option.spelled)))?;
+                request.serve.modbus_devices.push(device);
             }
             OptionName::NatsRemote => {
                 let text = value.to_str().unwrap_or_default();
