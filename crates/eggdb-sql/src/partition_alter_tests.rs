@@ -355,6 +355,10 @@ fn mysql_insert_ignore_skips_rows_outside_the_named_partitions_with_a_warning() 
     assert_eq!(error.vendor_code(), Some(1748), "{error}");
 }
 
+fn first_value(session: &mut Session<'_>, sql: &str) -> String {
+    answer(session, sql).lines().nth(1).unwrap_or_default().to_owned()
+}
+
 fn composite(store: &MemoryStore) -> Session<'_> {
     let mut session = Session::with_dialect(store, Dialect::Oracle);
     answer(
@@ -381,13 +385,13 @@ fn composite(store: &MemoryStore) -> Session<'_> {
 fn oracle_names_template_subpartitions_after_their_partition() {
     let store = MemoryStore::new();
     let mut session = composite(&store);
-    assert_eq!(answer(&mut session, "SELECT COUNT(*) FROM sales PARTITION (p1)"), "2");
+    assert_eq!(first_value(&mut session, "SELECT COUNT(*) FROM sales PARTITION (p1)"), "2");
     answer(&mut session, "ALTER TABLE sales TRUNCATE SUBPARTITION p1_east");
-    assert_eq!(answer(&mut session, "SELECT COUNT(*) FROM sales"), "2");
+    assert_eq!(first_value(&mut session, "SELECT COUNT(*) FROM sales"), "2");
     let error = failure(&mut session, "ALTER TABLE sales DROP SUBPARTITION p0_east, p0_rest");
     assert!(error.to_string().contains("only subpartition"), "{error}");
     answer(&mut session, "ALTER TABLE sales DROP SUBPARTITION p0_east");
-    assert_eq!(answer(&mut session, "SELECT COUNT(*) FROM sales"), "1");
+    assert_eq!(first_value(&mut session, "SELECT COUNT(*) FROM sales"), "1");
 }
 
 #[test]
@@ -396,9 +400,9 @@ fn oracle_gives_an_added_partition_the_same_subpartitions() {
     let mut session = composite(&store);
     answer(&mut session, "ALTER TABLE sales ADD PARTITION p2 VALUES LESS THAN (2040)");
     answer(&mut session, "INSERT INTO sales VALUES (4, 2030, 'east'), (5, 2031, 'north')");
-    assert_eq!(answer(&mut session, "SELECT COUNT(*) FROM sales PARTITION (p2)"), "2");
+    assert_eq!(first_value(&mut session, "SELECT COUNT(*) FROM sales PARTITION (p2)"), "2");
     answer(&mut session, "ALTER TABLE sales TRUNCATE SUBPARTITION p2_rest");
-    assert_eq!(answer(&mut session, "SELECT id FROM sales WHERE y > 2020"), "4");
+    assert_eq!(first_value(&mut session, "SELECT id FROM sales WHERE y > 2020"), "4");
     answer(&mut session, "ALTER TABLE sales TRUNCATE PARTITION p2");
-    assert_eq!(answer(&mut session, "SELECT COUNT(*) FROM sales"), "3");
+    assert_eq!(first_value(&mut session, "SELECT COUNT(*) FROM sales"), "3");
 }
