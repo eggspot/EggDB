@@ -20,6 +20,7 @@ mod connection;
 mod content_coding;
 mod rate_limit;
 mod reader;
+mod socket;
 mod streamed;
 
 pub use client::{ClientResponse, HttpTarget, host_header, parse_http_url, post, request};
@@ -278,6 +279,9 @@ pub struct Limits<'b> {
     /// The requests a second each client address may send; a request over it is answered
     /// `429` with `Retry-After` without reaching the handler. None by default.
     pub rate_limit: Option<&'b RateLimiter>,
+    /// The certificate and key every connection is secured with before its first request
+    /// (HTTPS); plain HTTP when `None`, the default.
+    pub tls: Option<&'b eggdb_tls::ServerConfig>,
 }
 
 fn no_request(_: &Request) -> bool {
@@ -300,7 +304,13 @@ impl<'b> Limits<'b> {
             max_requests_per_connection: MAX_REQUESTS_PER_CONNECTION,
             decode_content_encoding: no_request,
             rate_limit: None,
+            tls: None,
         }
+    }
+
+    /// These limits, securing every connection with `config` (HTTPS) when one is given.
+    pub fn with_tls(self, config: Option<&'b eggdb_tls::ServerConfig>) -> Self {
+        Self { tls: config, ..self }
     }
 
     /// These limits, answering `429` to a client address over `limiter`'s rate.
@@ -462,6 +472,43 @@ mod keep_alive_tests;
 mod tests {
     use super::*;
     use std::net::TcpStream;
+
+    #[test]
+    fn a_listener_with_tls_serves_https() {
+        use eggdb_tls::self_signed::{SelfSignedCertificateRequest, generate_self_signed_certificate};
+        use eggdb_tls::x509::SubjectAlternativeName;
+        use std::io::{Read, Write};
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs() as i64);
+        let request = SelfSignedCertificateRequest {
+            common_name: "localhost".to_owned(),
+            subject_alternative_names: vec![SubjectAlternativeName::DnsName("localhost".to_owned())],
+            not_before_unix_seconds: now - 86_400,
+            not_after_unix_seconds: now + 86_400,
+        };
+        let (certificate, key) = generate_self_signed_certificate(&request, &mut eggdb_platform::secure_random::fill).unwrap();
+        let config = eggdb_tls::ServerConfig::new(vec![certificate], key).unwrap();
+        let budget = MemoryBudget::new(1 << 24);
+        let limits = Limits::new(1 << 20, &budget).with_tls(Some(&config));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve_with_limits(&listener, &|_| Response::text(200, "secured"), &|| stopped.load(Ordering::Acquire), &limits));
+            let client = eggdb_tls::ClientConfig::new(eggdb_tls::ServerVerification::EncryptionOnly, "localhost");
+            let mut secured = eggdb_tls::TlsStream::connect(TcpStream::connect(address).unwrap(), &client).unwrap();
+            secured.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut answer = Vec::new();
+            let _ = secured.read_to_end(&mut answer);
+            let answer = String::from_utf8_lossy(&answer);
+            assert!(answer.starts_with("HTTP/1.1 200") && answer.ends_with("secured"), "{answer}");
+            let mut plain = TcpStream::connect(address).unwrap();
+            plain.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let mut refused = Vec::new();
+            let _ = plain.read_to_end(&mut refused);
+            assert!(!String::from_utf8_lossy(&refused).contains("secured"), "a plain request gets no answer");
+            stopped.store(true, Ordering::Release);
+        });
+    }
 
     #[test]
     fn a_body_limit_is_kept_and_a_waiting_client_is_told_to_continue() {

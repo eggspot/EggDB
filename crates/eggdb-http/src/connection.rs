@@ -3,7 +3,8 @@ use crate::reader::{RequestReader, RequestSource, Version};
 use crate::streamed::{BodyWriter, Reply, StreamedResponse};
 use crate::{HttpError, Limits, Request, Response, reason};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use crate::socket::Socket;
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -91,7 +92,7 @@ enum Phase {
 }
 
 struct ConnectionStream<'s> {
-    stream: TcpStream,
+    stream: Socket,
     stop: &'s (dyn Fn() -> bool + Sync),
     deadline: Instant,
     phase: Phase,
@@ -327,8 +328,8 @@ fn refusal(error: &HttpError, limits: &Limits<'_>) -> Option<Response> {
     })
 }
 
-fn linger(source: &mut ConnectionStream<'_>, writer: &TcpStream) {
-    if writer.shutdown(Shutdown::Write).is_err() {
+fn linger(source: &mut ConnectionStream<'_>, writer: &Socket) {
+    if writer.shutdown_write().is_err() {
         return;
     }
     source.wait_for_request(LINGER_TIMEOUT);
@@ -356,6 +357,13 @@ pub(crate) fn serve_connection<'h>(
         return;
     }
     let _ = stream.set_nodelay(true);
+    let stream = match limits.tls {
+        Some(config) => match Socket::secure(stream, config, READ_POLL) {
+            Ok(secured) => secured,
+            Err(_) => return,
+        },
+        None => Socket::Plain(stream),
+    };
     let Ok(mut writer) = stream.try_clone() else {
         return;
     };

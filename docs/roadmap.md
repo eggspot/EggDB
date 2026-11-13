@@ -1974,7 +1974,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-12, D904); JMAP submission (`Identity`, `EmailSubmission`, local delivery and `--smtp-relay`): **code
   written, unbuilt** (code-only mode, 2026-11-13, D1073); JMAP push (EventSource and PushSubscription): **code
   written, unbuilt** (code-only mode, 2026-11-13, D1074); `STARTTLS` for SMTP and IMAP: **code written, unbuilt**
-  (code-only mode, 2026-11-13, D1075). Left: JMAP over HTTPS, with TLS in the shared HTTP layer.
+  (code-only mode, 2026-11-13, D1075); JMAP over HTTPS, through TLS in the shared HTTP layer: **code written, unbuilt**
+  (code-only mode, 2026-11-13, D1076).
 - CalDAV, CardDAV and WebDAV (D56). iCalendar and vCard read as jCal and jCard (`icalendar_parse`,
   `vcard_parse`): **code written, unbuilt** (code-only mode, 2026-11-12, D702); the WebDAV, CalDAV and CardDAV server
   (`eggdb-dav`, `--dav-listen`): **code written, unbuilt** (code-only mode, 2026-11-12, D895); `time-range` filters

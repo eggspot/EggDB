@@ -1503,6 +1503,7 @@ impl Session<'_> {
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_mail::MAX_JMAP_REQUEST_BYTES, &memory_budget)
                         .with_rate_limit(rate_limiter.as_ref())
+                        .with_tls(tls.as_ref().map(|setup| &*setup.postgresql))
                         .decoding_content_encoding(),
                 ),
                 None => Ok(()),
