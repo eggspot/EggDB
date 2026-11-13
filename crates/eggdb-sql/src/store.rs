@@ -677,9 +677,50 @@ impl KeyValueRead for ConcurrentBoxed<'_> {
     ) -> SqlResult<()> {
         self.0.scan(start, end, direction, visit)
     }
+
+    fn collection_names(&self) -> SqlResult<Vec<String>> {
+        self.0.collection_names()
+    }
+
+    fn has_collection(&self, name: &str) -> SqlResult<bool> {
+        self.0.has_collection(name)
+    }
+
+    fn collection_get(&self, name: &str, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.0.collection_get(name, key)
+    }
+
+    fn collection_scan(
+        &self,
+        name: &str,
+        start: &[u8],
+        end: &[u8],
+        direction: ScanDirection,
+        visit: &mut EntryVisitor<'_>,
+    ) -> SqlResult<()> {
+        self.0.collection_scan(name, start, end, direction, visit)
+    }
 }
 
 impl KeyValueWrite for ConcurrentBoxed<'_> {
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        self.0.put_with_expiry(key, value, ttl)
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        self.0.collection_put(name, key, value, ttl)
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.0.collection_delete(name, key)
+    }
+
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
         self.0.put(key, value)
     }

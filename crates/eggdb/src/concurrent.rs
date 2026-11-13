@@ -6,6 +6,7 @@ use crate::transaction::ReadTransaction;
 use eggdb_storage::CommitStamp;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
+use std::time::Duration;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
@@ -92,8 +93,11 @@ pub struct ConcurrentTransaction<'db> {
     snapshot: ReadTransaction<'db>,
     isolation: Isolation,
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    expiring: HashMap<Vec<u8>, Duration>,
     reads: HashMap<Vec<u8>, Option<Vec<u8>>>,
     ranges: Vec<ScannedRange>,
+    collection_writes: BTreeMap<(String, Vec<u8>), Option<(Vec<u8>, Option<Duration>)>>,
+    collection_reads: HashMap<(String, Vec<u8>), Option<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for ConcurrentTransaction<'_> {
@@ -138,8 +142,11 @@ impl Database {
             snapshot: self.begin_read()?,
             isolation,
             writes: BTreeMap::new(),
+            expiring: HashMap::new(),
             reads: HashMap::new(),
             ranges: Vec::new(),
+            collection_writes: BTreeMap::new(),
+            collection_reads: HashMap::new(),
         })
     }
 }
@@ -175,7 +182,86 @@ impl<'db> ConcurrentTransaction<'db> {
         collection::refuse_reserved(key)?;
         self.check_limits(key, value.len())?;
         self.writes.insert(key.to_vec(), Some(value.to_vec()));
+        self.expiring.remove(key);
         Ok(())
+    }
+
+    /// Stores `value` under `key` with a time to live of `ttl` from the commit, as
+    /// [`WriteTransaction::put_with_expiry`](crate::WriteTransaction::put_with_expiry) does,
+    /// in memory until the commit (D1124). Its own reads see the value; the time runs from the
+    /// commit, when the key is written.
+    pub fn put_with_expiry(
+        &mut self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+        ttl: Duration,
+    ) -> Result<()> {
+        let key = key.as_ref();
+        self.put(key, value)?;
+        self.expiring.insert(key.to_vec(), ttl);
+        Ok(())
+    }
+
+    /// The names of the collections the snapshot has, in byte order.
+    pub fn collection_names(&self) -> Result<Vec<String>> {
+        self.snapshot.collection_names()
+    }
+
+    /// Whether the snapshot has a collection named `name`.
+    pub fn has_collection(&self, name: &str) -> Result<bool> {
+        match self.snapshot.collection(name) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::CollectionNotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The value under `key` in the collection named `name`, this transaction's own changes
+    /// included, or `None` (D1124). Fails with
+    /// [`ErrorKind::CollectionNotFound`](crate::ErrorKind::CollectionNotFound) when the snapshot
+    /// has no such collection. Under [`Isolation::Serializable`] the read is checked at the
+    /// commit.
+    pub fn collection_get(&mut self, name: &str, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
+        let key = key.as_ref();
+        let slot = (name.to_owned(), key.to_vec());
+        if let Some(written) = self.collection_writes.get(&slot) {
+            return Ok(written.as_ref().map(|(value, _)| value.clone()));
+        }
+        if let Some(seen) = self.collection_reads.get(&slot) {
+            return Ok(seen.clone());
+        }
+        let found = self.snapshot.collection(name)?.get(key)?;
+        if self.isolation == Isolation::Serializable {
+            self.collection_reads.insert(slot, found.clone());
+        }
+        Ok(found)
+    }
+
+    /// Stores `value` under `key` in the collection named `name`, with a time to live when
+    /// `ttl` is given, in memory until the commit (D1124). The collection must exist when the
+    /// transaction commits.
+    pub fn collection_put(
+        &mut self,
+        name: &str,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+        ttl: Option<Duration>,
+    ) -> Result<()> {
+        let key = key.as_ref();
+        let value = value.as_ref();
+        self.check_limits(key, value.len())?;
+        self.collection_writes
+            .insert((name.to_owned(), key.to_vec()), Some((value.to_vec(), ttl)));
+        Ok(())
+    }
+
+    /// Removes `key` from the collection named `name`, in memory until the commit, and returns
+    /// whether it held a value (D1124).
+    pub fn collection_delete(&mut self, name: &str, key: impl AsRef<[u8]>) -> Result<bool> {
+        let key = key.as_ref();
+        let existed = self.collection_get(name, key)?.is_some();
+        self.collection_writes.insert((name.to_owned(), key.to_vec()), None);
+        Ok(existed)
     }
 
     /// Removes `key`, in memory until the commit, and returns whether it held a value.
@@ -257,6 +343,11 @@ impl<'db> ConcurrentTransaction<'db> {
                         return Err(conflict("a key it read"));
                     }
                 }
+                for ((name, key), seen) in &self.collection_reads {
+                    if writer.collection(name)?.get(key)? != *seen {
+                        return Err(conflict("a collection key it read"));
+                    }
+                }
                 for range in &self.ranges {
                     let mut now = Fingerprint::new();
                     for entry in writer.scan((range.start.clone(), range.end.clone())) {
@@ -274,13 +365,34 @@ impl<'db> ConcurrentTransaction<'db> {
                         return Err(conflict("a key it writes"));
                     }
                 }
+                for (name, key) in self.collection_writes.keys() {
+                    let before = match self.snapshot.collection(name) {
+                        Ok(collection) => collection.get(key)?,
+                        Err(error) if error.kind() == ErrorKind::CollectionNotFound => None,
+                        Err(error) => return Err(error),
+                    };
+                    if writer.collection(name)?.get(key)? != before {
+                        return Err(conflict("a collection key it writes"));
+                    }
+                }
             }
         }
         for (key, written) in self.writes {
-            match written {
-                Some(value) => writer.put(&key, &value)?,
-                None => {
+            match (written, self.expiring.get(&key)) {
+                (Some(value), Some(ttl)) => writer.put_with_expiry(&key, &value, *ttl)?,
+                (Some(value), None) => writer.put(&key, &value)?,
+                (None, _) => {
                     writer.delete(&key)?;
+                }
+            }
+        }
+        for ((name, key), written) in self.collection_writes {
+            let mut collection = writer.collection(&name)?;
+            match written {
+                Some((value, Some(ttl))) => collection.put_with_expiry(&key, &value, ttl)?,
+                Some((value, None)) => collection.put(&key, &value)?,
+                None => {
+                    collection.delete(&key)?;
                 }
             }
         }

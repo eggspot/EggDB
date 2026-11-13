@@ -572,7 +572,7 @@ fn concurrent_writer(
 
 /// A write transaction that SQL runs beside other writers for an explicit `REPEATABLE READ` or
 /// `SERIALIZABLE` block (D1123): a [`crate::ConcurrentTransaction`], checked when it commits.
-/// Collections, keys with a time to live and counters are refused inside it for now.
+/// Collections and keys with a time to live work inside it (D1124); counters are refused for now.
 #[derive(Debug)]
 pub struct SqlConcurrentWriter<'db>(std::cell::RefCell<crate::ConcurrentTransaction<'db>>);
 
@@ -604,9 +604,51 @@ impl KeyValueRead for SqlConcurrentWriter<'_> {
         }
         Ok(())
     }
+
+    fn collection_names(&self) -> SqlResult<Vec<String>> {
+        self.0.borrow().collection_names().map_err(store_error)
+    }
+
+    fn has_collection(&self, name: &str) -> SqlResult<bool> {
+        self.0.borrow().has_collection(name).map_err(store_error)
+    }
+
+    fn collection_get(&self, name: &str, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        match self.0.borrow_mut().collection_get(name, key) {
+            Err(error) if error.kind() == ErrorKind::CollectionNotFound => Ok(None),
+            other => other.map_err(store_error),
+        }
+    }
 }
 
 impl KeyValueWrite for SqlConcurrentWriter<'_> {
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        self.0.get_mut().put_with_expiry(key, value, ttl).map_err(store_error)
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        let transaction = self.0.get_mut();
+        if !transaction.has_collection(name).map_err(store_error)? {
+            return Ok(false);
+        }
+        transaction.collection_put(name, key, value, ttl).map_err(store_error)?;
+        Ok(true)
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        let transaction = self.0.get_mut();
+        if !transaction.has_collection(name).map_err(store_error)? {
+            return Ok(None);
+        }
+        transaction.collection_delete(name, key).map(Some).map_err(store_error)
+    }
+
     fn put(&mut self, key: &[u8], value: &[u8]) -> SqlResult<()> {
         self.0.get_mut().put(key, value).map_err(store_error)
     }

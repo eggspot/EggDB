@@ -195,3 +195,27 @@ fn transactions_on_many_threads_keep_every_transfer() {
         .sum();
     assert_eq!(total, 4000);
 }
+
+#[test]
+fn collections_and_expiring_keys_commit_from_concurrent_transactions() {
+    use std::time::Duration;
+    let file = common::TempPath::new("concurrent-collections");
+    let db = eggdb::Database::open(file.path()).unwrap();
+    db.create_collection("carts").unwrap();
+    let mut first = db.begin_concurrent(eggdb::Isolation::Serializable).unwrap();
+    let mut second = db.begin_concurrent(eggdb::Isolation::Serializable).unwrap();
+    assert_eq!(first.collection_get("carts", "ada").unwrap(), None);
+    first.collection_put("carts", "ada", "apples", None).unwrap();
+    first.put_with_expiry("session:ada", "open", Duration::from_secs(600)).unwrap();
+    assert_eq!(first.collection_get("carts", "ada").unwrap(), Some(b"apples".to_vec()));
+    assert_eq!(second.collection_get("carts", "ada").unwrap(), None);
+    second.collection_put("carts", "ada", "pears", None).unwrap();
+    first.commit().unwrap();
+    assert_eq!(
+        second.commit().unwrap_err().kind(),
+        eggdb::ErrorKind::Conflict
+    );
+    assert_eq!(db.collection("carts").get("ada").unwrap(), Some(b"apples".to_vec()));
+    let left = db.begin_read().unwrap().time_to_live("session:ada").unwrap();
+    assert!(left.is_some_and(|left| left <= Duration::from_secs(600)));
+}
