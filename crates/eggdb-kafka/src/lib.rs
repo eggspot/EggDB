@@ -7,6 +7,7 @@
 //! Foundation; EggDB is compatible with its protocol.
 
 mod compaction;
+mod consumer_groups;
 mod groups;
 mod log;
 mod producers;

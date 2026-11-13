@@ -161,6 +161,7 @@ impl Group {
 pub(crate) struct Coordinator {
     groups: Mutex<BTreeMap<String, Group>>,
     changed: Condvar,
+    pub(crate) consumer_groups: Mutex<BTreeMap<String, crate::consumer_groups::ConsumerGroup>>,
 }
 
 fn group_offsets_prefix(group: &str) -> Vec<u8> {

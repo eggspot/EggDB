@@ -1,5 +1,5 @@
 use crate::server::{ServerConfig, answer, serve_stream};
-use crate::wire::{Reader, Writer, crc32c};
+use crate::wire::{Reader, Writer, crc32c, topic_id};
 use eggdb_keyspace::MemoryKeyspace;
 use eggdb_platform::connection_limits::MemoryBudget;
 use std::sync::Arc;
@@ -95,7 +95,7 @@ fn api_versions_lists_what_is_supported_and_refuses_newer_versions() {
     let keyspace = MemoryKeyspace::default();
     let body = response(&keyspace, &request(18, 0, |_| {}));
     assert_eq!(i16::from_be_bytes([body[0], body[1]]), 0);
-    assert_eq!(i32::from_be_bytes(body[2..6].try_into().unwrap()), 20);
+    assert_eq!(i32::from_be_bytes(body[2..6].try_into().unwrap()), 25);
     let newer = response(&keyspace, &request(18, 3, |_| {}));
     assert_eq!(i16::from_be_bytes([newer[0], newer[1]]), 35);
     assert!(answer(&keyspace, &config(), &request(1, 99, |_| {})).is_none());
@@ -518,3 +518,109 @@ fn init_producer_id_hands_out_new_ids_and_refuses_transactional_ids() {
     assert_eq!(reader.i32().unwrap(), 0);
     assert_eq!(reader.i16().unwrap(), 42);
 }
+
+fn flexible_request(key: i16, version: i16, body: impl FnOnce(&mut Writer)) -> Vec<u8> {
+    let mut writer = Writer::default();
+    writer.i16(key).i16(version).i32(7).string(Some("test")).no_tags();
+    body(&mut writer);
+    writer.out
+}
+
+#[test]
+fn metadata_version_12_carries_topic_ids_in_the_flexible_encoding() {
+    let keyspace = MemoryKeyspace::default();
+    let wanted = flexible_request(3, 12, |writer| {
+        writer.compact_count(Some(1)).uuid(&[0; 16]).compact_string(Some("orders")).no_tags();
+        writer.i8(1).i8(0).no_tags();
+    });
+    let body = response(&keyspace, &wanted);
+    let mut reader = Reader::new(&body);
+    reader.skip_tags().unwrap();
+    assert_eq!(reader.i32().unwrap(), 0);
+    let brokers = reader
+        .compact_array(|reader| {
+            let id = reader.i32()?;
+            let _host = reader.compact_string()?;
+            let _port = reader.i32()?;
+            let _rack = reader.compact_string()?;
+            reader.skip_tags()?;
+            Ok(id)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(brokers.len(), 1);
+    assert_eq!(reader.compact_string().unwrap().as_deref(), Some("eggdb"));
+    reader.i32().unwrap();
+    assert_eq!(reader.uvarint().unwrap(), 2);
+    assert_eq!(reader.i16().unwrap(), 0);
+    assert_eq!(reader.compact_string().unwrap().as_deref(), Some("orders"));
+    assert_eq!(reader.uuid().unwrap(), topic_id("orders"));
+    assert_ne!(topic_id("orders"), topic_id("order"));
+}
+
+#[test]
+fn a_consumer_joining_with_the_new_protocol_gets_its_partitions_from_the_coordinator() {
+    let keyspace = MemoryKeyspace::default();
+    response(
+        &keyspace,
+        &flexible_request(3, 12, |writer| {
+            writer.compact_count(Some(1)).uuid(&[0; 16]).compact_string(Some("orders")).no_tags();
+            writer.i8(1).i8(0).no_tags();
+        }),
+    );
+    let join = flexible_request(68, 0, |writer| {
+        writer
+            .compact_string(Some("billing"))
+            .compact_string(Some(""))
+            .i32(0)
+            .compact_string(None)
+            .compact_string(None)
+            .i32(60_000)
+            .compact_count(Some(1))
+            .compact_string(Some("orders"))
+            .compact_string(Some("range"))
+            .compact_count(Some(0))
+            .no_tags();
+    });
+    let body = response(&keyspace, &join);
+    let mut reader = Reader::new(&body);
+    reader.skip_tags().unwrap();
+    assert_eq!(reader.i32().unwrap(), 0);
+    assert_eq!(reader.i16().unwrap(), 0);
+    assert_eq!(reader.compact_string().unwrap(), None);
+    assert!(reader.compact_string().unwrap().unwrap().starts_with("eggdb-member-"));
+    assert_eq!(reader.i32().unwrap(), 1);
+    assert_eq!(reader.i32().unwrap(), 5_000);
+    assert_eq!(reader.i8().unwrap(), 1);
+    let assigned = reader
+        .compact_array(|reader| {
+            let id = reader.uuid()?;
+            let partitions = reader.compact_array(|reader| reader.i32())?.unwrap_or_default();
+            reader.skip_tags()?;
+            Ok((id, partitions))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(assigned.len(), 1);
+    assert_eq!(assigned[0].0, topic_id("orders"));
+    assert!(!assigned[0].1.is_empty());
+    let unknown = flexible_request(68, 0, |writer| {
+        writer
+            .compact_string(Some("billing"))
+            .compact_string(Some("nobody"))
+            .i32(3)
+            .compact_string(None)
+            .compact_string(None)
+            .i32(60_000)
+            .compact_count(None)
+            .compact_string(None)
+            .compact_count(None)
+            .no_tags();
+    });
+    let refused = response(&keyspace, &unknown);
+    let mut reader = Reader::new(&refused);
+    reader.skip_tags().unwrap();
+    reader.i32().unwrap();
+    assert_eq!(reader.i16().unwrap(), 25);
+}
+

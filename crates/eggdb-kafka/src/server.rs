@@ -1,6 +1,6 @@
 use crate::groups::Coordinator;
 use crate::log::{self, error};
-use crate::wire::{Parsed, Reader, Writer};
+use crate::wire::{Parsed, Reader, Writer, topic_id};
 use eggdb_keyspace::Keyspace;
 use eggdb_platform::connection_limits::MemoryBudget;
 use std::io::{self, Read, Write};
@@ -45,9 +45,11 @@ const ADD_PARTITIONS_TO_TXN: i16 = 24;
 const ADD_OFFSETS_TO_TXN: i16 = 25;
 const END_TXN: i16 = 26;
 const TXN_OFFSET_COMMIT: i16 = 28;
+const CONSUMER_GROUP_HEARTBEAT: i16 = 68;
 const UNKNOWN_SERVER_ERROR: i16 = -1;
 
-const SUPPORTED: [(i16, i16, i16); 24] = [
+const SUPPORTED: [(i16, i16, i16); 25] = [
+    (CONSUMER_GROUP_HEARTBEAT, 0, 0),
     (INIT_PRODUCER_ID, 0, 1),
     (ADD_PARTITIONS_TO_TXN, 0, 1),
     (ADD_OFFSETS_TO_TXN, 0, 1),
@@ -68,7 +70,7 @@ const SUPPORTED: [(i16, i16, i16); 24] = [
     (PRODUCE, 3, 3),
     (FETCH, 4, 4),
     (LIST_OFFSETS, 1, 1),
-    (METADATA, 0, 1),
+    (METADATA, 0, 12),
     (API_VERSIONS, 0, 2),
     (CREATE_TOPICS, 0, 1),
     (DELETE_TOPICS, 0, 1),
@@ -312,6 +314,29 @@ fn api_versions(version: i16, body: &mut Writer) {
     }
 }
 
+fn metadata_topics(version: i16, request: &mut Reader<'_>, known: &[(String, i32)]) -> Parsed<Option<Vec<String>>> {
+    if version >= 9 {
+        let wanted = request.compact_array(|reader| {
+            let id = if version >= 10 { Some(reader.uuid()?) } else { None };
+            let name = reader.compact_string()?;
+            reader.skip_tags()?;
+            Ok(name.or_else(|| {
+                id.and_then(|id| known.iter().find(|(name, _)| topic_id(name) == id).map(|(name, _)| name.clone()))
+            }))
+        })?;
+        return Ok(wanted.map(|names| names.into_iter().flatten().collect()));
+    }
+    let count = request.i32()?;
+    if count < 0 || (count == 0 && version == 0) {
+        return Ok(None);
+    }
+    let mut names = Vec::new();
+    for _ in 0..count {
+        names.push(request.string()?.unwrap_or_default());
+    }
+    Ok(Some(names))
+}
+
 fn metadata(
     keyspace: &dyn Keyspace,
     config: &ServerConfig,
@@ -319,53 +344,122 @@ fn metadata(
     request: &mut Reader<'_>,
     body: &mut Writer,
 ) -> Parsed<()> {
-    let wanted = request.array(|reader| Ok(reader.string()?.unwrap_or_default()))?;
+    let flexible = version >= 9;
     let all = log::topics(keyspace)?;
-    let listed: Vec<(String, Option<i32>)> = if wanted.is_empty() {
-        all.into_iter()
-            .map(|(name, partitions)| (name, Some(partitions)))
-            .collect()
-    } else {
-        wanted
+    let wanted = metadata_topics(version, request, &all)?;
+    let mut create = true;
+    if version >= 4 {
+        create = request.i8()? != 0;
+    }
+    if (8..=10).contains(&version) {
+        request.i8()?;
+    }
+    if version >= 8 {
+        request.i8()?;
+    }
+    if flexible {
+        request.skip_tags()?;
+    }
+    let listed: Vec<(String, Option<i32>)> = match wanted {
+        None => all.into_iter().map(|(name, partitions)| (name, Some(partitions))).collect(),
+        Some(names) => names
             .into_iter()
             .map(|name| {
-                let partitions = log::partitions(keyspace, &name, Some(DEFAULT_PARTITIONS))?;
+                let partitions = log::partitions(keyspace, &name, create.then_some(DEFAULT_PARTITIONS))?;
                 Ok((name, partitions))
             })
-            .collect::<Parsed<_>>()?
+            .collect::<Parsed<_>>()?,
     };
-    body.count(1)
-        .i32(BROKER_ID)
-        .string(Some(&config.advertised.ip().to_string()))
-        .i32(i32::from(config.advertised.port()));
+    let count = |body: &mut Writer, count: usize| {
+        if flexible {
+            body.compact_count(Some(count));
+        } else {
+            body.count(count);
+        }
+    };
+    let text = |body: &mut Writer, value: Option<&str>| {
+        if flexible {
+            body.compact_string(value);
+        } else {
+            body.string(value);
+        }
+    };
+    if version >= 3 {
+        body.i32(0);
+    }
+    count(body, 1);
+    body.i32(BROKER_ID);
+    text(body, Some(&config.advertised.ip().to_string()));
+    body.i32(i32::from(config.advertised.port()));
     if version >= 1 {
-        body.string(None);
+        text(body, None);
+    }
+    if flexible {
+        body.no_tags();
+    }
+    if version >= 2 {
+        text(body, Some("eggdb"));
+    }
+    if version >= 1 {
         body.i32(BROKER_ID);
     }
-    body.count(listed.len());
+    count(body, listed.len());
     for (name, partitions) in listed {
         let code = match partitions {
             Some(_) => error::NONE,
             None if !log::valid_topic(&name) => error::INVALID_TOPIC,
             None => error::UNKNOWN_TOPIC_OR_PARTITION,
         };
-        body.i16(code).string(Some(&name));
+        body.i16(code);
+        text(body, Some(&name));
+        if version >= 10 {
+            body.uuid(&if partitions.is_some() { topic_id(&name) } else { [0; 16] });
+        }
         if version >= 1 {
             body.i8(0);
         }
-        let count = partitions.unwrap_or(0).max(0);
-        body.count(count as usize);
-        for partition in 0..count {
-            body.i16(error::NONE)
-                .i32(partition)
-                .i32(BROKER_ID)
-                .count(1)
-                .i32(BROKER_ID)
-                .count(1)
-                .i32(BROKER_ID);
+        let partition_count = partitions.unwrap_or(0).max(0);
+        count(body, partition_count as usize);
+        for partition in 0..partition_count {
+            body.i16(error::NONE).i32(partition).i32(BROKER_ID);
+            if version >= 7 {
+                body.i32(0);
+            }
+            count(body, 1);
+            body.i32(BROKER_ID);
+            count(body, 1);
+            body.i32(BROKER_ID);
+            if version >= 5 {
+                count(body, 0);
+            }
+            if flexible {
+                body.no_tags();
+            }
+        }
+        if version >= 8 {
+            body.i32(i32::MIN);
+        }
+        if flexible {
+            body.no_tags();
         }
     }
+    if (8..=10).contains(&version) {
+        body.i32(i32::MIN);
+    }
+    if flexible {
+        body.no_tags();
+    }
     Ok(())
+}
+
+/// Whether a request of `key` at `version` uses the flexible header (version 2) and its answer
+/// the flexible response header (version 1).
+fn flexible_header(key: i16, version: i16) -> bool {
+    match key {
+        METADATA => version >= 9,
+        CONSUMER_GROUP_HEARTBEAT => true,
+        _ => false,
+    }
 }
 
 fn partition_exists(keyspace: &dyn Keyspace, topic: &str, partition: i32) -> Parsed<bool> {
@@ -559,8 +653,15 @@ pub(crate) fn answer_for(
     let version = request.i16().ok()?;
     let correlation = request.i32().ok()?;
     let _client = request.string().ok()?;
+    let flexible = key != API_VERSIONS && flexible_header(key, version);
+    if flexible {
+        request.skip_tags().ok()?;
+    }
     let mut body = Writer::default();
     body.i32(correlation);
+    if flexible {
+        body.no_tags();
+    }
     let supported = SUPPORTED
         .iter()
         .any(|(known, min, max)| *known == key && (*min..=*max).contains(&version));
@@ -600,6 +701,9 @@ pub(crate) fn answer_for(
             )
             .map(|()| true),
             JOIN_GROUP => coordinator.join_group(version, &mut request, &mut body).map(|()| true),
+            CONSUMER_GROUP_HEARTBEAT => coordinator
+                .consumer_heartbeat(keyspace, &mut request, &mut body)
+                .map(|()| true),
             SYNC_GROUP => coordinator.sync_group(version, &mut request, &mut body).map(|()| true),
             HEARTBEAT => coordinator.heartbeat(version, &mut request, &mut body).map(|()| true),
             LEAVE_GROUP => coordinator.leave_group(version, &mut request, &mut body).map(|()| true),

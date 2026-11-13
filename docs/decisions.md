@@ -1078,3 +1078,4 @@ its full title with its status.
 - [D1051](decisions/D1051.md) Code-only batch 699 (M15): resumable large migrations with range digests and parallel ranges
 - [D1052](decisions/D1052.md) Code-only batch 700 (M15): the etcd v3 API in eggdb-etcd
 - [D1053](decisions/D1053.md) Code-only batch 701 (M15): YCSB and a TPC-C mix on a Raft cluster
+- [D1054](decisions/D1054.md) Code-only batch 702 (M16): Kafka's new consumer group protocol (KIP-848)
