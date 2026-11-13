@@ -1,0 +1,14 @@
+[package]
+name = "eggdb-opcua"
+description = "EggDB's OPC UA client, from the OPC UA specification's binary protocol: a secure channel with the None policy, a session signed in anonymously or with a user name, and a subscription whose data changes are stored as rows as they arrive."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-sql = { path = "../eggdb-sql" }

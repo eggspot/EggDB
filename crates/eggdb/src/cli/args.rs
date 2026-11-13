@@ -335,6 +335,7 @@ impl CommandName {
             | OptionName::MemcachedMaxMemory
             | OptionName::NatsNkey
             | OptionName::NatsRemote
+            | OptionName::OpcuaSubscribe
             | OptionName::RespEviction
             | OptionName::McpTokenFile
             | OptionName::McpTables
@@ -573,6 +574,7 @@ enum OptionName {
     MemcachedMaxMemory,
     NatsNkey,
     NatsRemote,
+    OpcuaSubscribe,
     RespEviction,
     McpTokenFile,
     McpTables,
@@ -749,6 +751,7 @@ impl OptionName {
             b"memcached-max-memory" => Self::MemcachedMaxMemory,
             b"nats-nkey" => Self::NatsNkey,
             b"nats-remote" => Self::NatsRemote,
+            b"opcua-subscribe" => Self::OpcuaSubscribe,
             b"resp-eviction" => Self::RespEviction,
             b"mcp-token-file" => Self::McpTokenFile,
             b"mcp-tables" => Self::McpTables,
@@ -1132,6 +1135,7 @@ pub(crate) struct ServeOptions {
     pub(crate) memcached_max_memory: Option<u64>,
     pub(crate) nats_nkeys: Vec<String>,
     pub(crate) nats_remotes: Vec<(String, String)>,
+    pub(crate) opcua_subscriptions: Vec<eggdb_opcua::Subscription>,
     pub(crate) resp_eviction: Option<eggdb_resp::EvictionPolicy>,
     pub(crate) log_batches: bool,
     pub(crate) resp_cluster: bool,
@@ -1663,6 +1667,12 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                     )));
                 }
                 request.serve.nats_nkeys.push(key.to_owned());
+            }
+            OptionName::OpcuaSubscribe => {
+                let text = value.to_str().unwrap_or_default();
+                let subscription = eggdb_opcua::Subscription::parse(text)
+                    .map_err(|error| usage(format!("{} {error}", option.spelled)))?;
+                request.serve.opcua_subscriptions.push(subscription);
             }
             OptionName::NatsRemote => {
                 let text = value.to_str().unwrap_or_default();

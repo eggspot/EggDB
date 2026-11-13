@@ -408,6 +408,7 @@ mod xml_functions;
 mod xml_path;
 
 pub use mysql_spatial::mysql_geometry_bytes;
+pub use opcua::opcua_data_value_prefix;
 pub use arrays::{ArrayElement, ArrayValue};
 pub use bulk_load::{
     BcpCharacterReader, BcpFileFormat, BcpFileReader, BcpFileWriter, BcpFormat, BcpTableWritten,

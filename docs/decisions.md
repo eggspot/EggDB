@@ -1095,3 +1095,4 @@ its full title with its status.
 - [D1068](decisions/D1068.md) Code-only batch 716 (M16): FHIR validation against StructureDefinitions and profiles
 - [D1069](decisions/D1069.md) Code-only batch 717 (M16): full FIX and EDIFACT dictionaries, loaded from the standards' files
 - [D1070](decisions/D1070.md) Code-only batch 718 (M16): ISO 20022 schema validation
+- [D1071](decisions/D1071.md) Code-only batch 719 (M16): an OPC UA client that ingests data changes

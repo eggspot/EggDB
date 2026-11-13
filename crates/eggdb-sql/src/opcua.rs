@@ -309,6 +309,15 @@ pub(crate) fn decode(bytes: &[u8], encoded: Encoded) -> SqlResult<String> {
     Ok(json)
 }
 
+/// The OPC UA binary DataValue at the start of `bytes` as JSON (the shape `opcua_decode` gives),
+/// with the number of bytes it took, for readers of messages that carry DataValues among other
+/// fields (D1071).
+pub fn opcua_data_value_prefix(bytes: &[u8]) -> Result<(String, usize), String> {
+    let mut reader = Reader { bytes, at: 0 };
+    let json = reader.data_value(0).map_err(|error| error.message().to_owned())?;
+    Ok((json, reader.at))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

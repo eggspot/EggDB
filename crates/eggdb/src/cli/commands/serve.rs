@@ -1050,6 +1050,7 @@ impl Session<'_> {
         let mysql_events = events.clone();
         let tds_events = events.clone();
         let syslog_events = events.clone();
+        let opcua_events = events.clone();
         eggdb_sql::statement_statistics::collect(
             options
                 .statement_statistics
@@ -1081,6 +1082,20 @@ impl Session<'_> {
             Some(setup) => syslog_collector.with_tls(Arc::clone(&setup.postgresql)),
             None => syslog_collector,
         };
+        let opcua_collector = eggdb_opcua::OpcUaCollector::new(
+            &store,
+            &config.user,
+            &config.database,
+            options.opcua_subscriptions.clone(),
+        );
+        if !options.opcua_subscriptions.is_empty() {
+            opcua_collector.prepare().map_err(|error| {
+                Failure::database(
+                    format!("cannot create the opcua_values table: {error}"),
+                    Exit::DatabaseError,
+                )
+            })?;
+        }
         if syslog_sockets.is_some() {
             syslog_collector.prepare().map_err(|error| {
                 Failure::database(
@@ -1659,6 +1674,16 @@ impl Session<'_> {
                     Ok(())
                 }
             });
+            let opcua_follower = scope.spawn(|| {
+                if options.opcua_subscriptions.is_empty() {
+                    drop(opcua_events);
+                    return;
+                }
+                let log = move |line: &str| {
+                    let _ = opcua_events.send(stamped(&format!("opcua {line}")));
+                };
+                opcua_collector.serve(&stop_signals::requested, &log);
+            });
             let nats_server = scope.spawn(|| match &nats_listener {
                 Some(listener) => {
                     eggdb_nats::serve_with_jetstream(&nats_database, listener, &nats_config, &stop_signals::requested)
@@ -1892,6 +1917,7 @@ impl Session<'_> {
             let _ = mqtt_server.join();
             let _ = nats_server.join();
             let _ = syslog_server.join();
+            let _ = opcua_follower.join();
             let _ = stomp_server.join();
             let _ = cql_server.join();
             let _ = observability_server.join();

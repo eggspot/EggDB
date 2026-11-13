@@ -40,6 +40,7 @@ dependencies = [
  "eggdb-mysqlwire",
  "eggdb-nats",
  "eggdb-observability",
+ "eggdb-opcua",
  "eggdb-parquet",
  "eggdb-pgwire",
  "eggdb-platform",
@@ -448,6 +449,14 @@ name = "eggdb-odbc"
 version = "0.5.0"
 dependencies = [
  "eggdb-capi",
+]
+
+[[package]]
+name = "eggdb-opcua"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-sql",
 ]
 
 [[package]]
