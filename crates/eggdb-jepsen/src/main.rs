@@ -310,15 +310,12 @@ fn nemesis(cluster: &Cluster, stop: &AtomicBool, seed: u64, faults: Faults, log:
                 cluster.kill(node);
                 std::thread::sleep(Duration::from_secs(5));
                 let primary = primary_of(cluster);
-                let _ = cluster.start(node, primary.filter(|primary| *primary != node));
+                let follow = match cluster.mode {
+                    Mode::Cluster => None,
+                    Mode::Replication => primary.filter(|primary| *primary != node),
+                };
+                let _ = cluster.start(node, follow);
                 format!("killed node {node}{} and restarted it following {primary:?}", if choice == 5 { " (the primary)" } else { "" })
-            }
-            0 => {
-                cluster.kill(node);
-                std::thread::sleep(Duration::from_secs(5));
-                let primary = primary_of(cluster);
-                let _ = cluster.start(node, primary.filter(|primary| *primary != node));
-                format!("killed node {node} and restarted it following {primary:?}")
             }
             1 => {
                 cluster.signal(node, "-STOP");
@@ -366,9 +363,14 @@ fn run(binary: &Path, directory: &Path, seconds: u64, seed: u64, faults: Faults,
     });
     for node in 0..NODES {
         cluster.signal(node, "-CONT");
-        if cluster.exited_by_itself(node) || !cluster.running(node) {
+        let exited = cluster.exited_by_itself(node);
+        if exited || !cluster.running(node) {
             let primary = primary_of(&cluster);
-            let _ = cluster.start(node, primary.filter(|primary| *primary != node));
+            let follow = match cluster.mode {
+                Mode::Cluster => exited.then_some(node),
+                Mode::Replication => primary.filter(|primary| *primary != node),
+            };
+            let _ = cluster.start(node, follow);
         }
     }
     std::thread::sleep(HEAL_WAIT);

@@ -1759,7 +1759,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `survives_region_loss`). Left: measuring latencies and traffic in `serve --cluster` and acting on the plan.
 - Rebalancing simulated under load, with partitions, clock skew and node failures (D18, D212). **Code written,
   unbuilt** (code-only mode, 2026-11-13, D1045): `eggdb_cluster::simulation::simulate_rebalancing`, 25 seeds in tests.
-- Chaos testing of clusters (D44, D252).
+- Chaos testing of clusters (D44, D252). **Code written, unbuilt** (code-only mode, 2026-11-13, D1046):
+  `eggdb-jepsen --cluster 1 --delays 1` against three `serve --cluster` voters, weekly in `jepsen.yml`.
 - The tenant prefix in the key layout, so tenants move online between shards (D20, D234).
 - Databases per tenant moved and rebalanced online (D18, D32).
 - Rolling upgrades with mixed versions in a cluster (D20).
