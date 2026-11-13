@@ -1670,8 +1670,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** for the PostgreSQL dialect (code-only mode, 2026-11-11, D446). Roles, memberships, table grants, routines and triggers
   in the PostgreSQL dump: **code written, unbuilt** (code-only mode, 2026-11-12, D842).
 - Immutable (WORM) backups that ransomware can't alter (D53). Copies archived into S3-compatible buckets under Object
-  Lock (`eggdb backup --lock-days`): **code written, unbuilt** (code-only mode, 2026-11-12, D919). Left: a locked
-  manifest, and WORM for local archives.
+  Lock (`eggdb backup --lock-days`): **code written, unbuilt** (code-only mode, 2026-11-12, D919). A locked
+  manifest, and WORM for local archives: **code written, unbuilt** (code-only mode, 2026-11-13, D1022).
 - Backups through `eggdb serve`'s clients, compaction of a file `serve` holds, and progress
   reports (D141).
 - Compaction's lock window closed: the platform layer tells whether a file it locked is still
