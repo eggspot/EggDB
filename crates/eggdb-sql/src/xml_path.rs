@@ -163,6 +163,31 @@ impl Document {
         }
     }
 
+    /// The text inside node `id`, its descendants' text included.
+    pub(crate) fn text_of(&self, id: usize) -> String {
+        if id >= self.nodes.len() {
+            return String::new();
+        }
+        self.string_value(Target::Node(id))
+    }
+
+    /// Whether element `id` holds text other than white space directly.
+    pub(crate) fn has_direct_text(&self, id: usize) -> bool {
+        self.nodes.get(id).is_some_and(|node| {
+            node.children
+                .iter()
+                .any(|child| matches!(&self.nodes[*child].kind, Kind::Text(text) if !text.trim().is_empty()))
+        })
+    }
+
+    /// The attributes of element `id`, names as written.
+    pub(crate) fn attributes_of(&self, id: usize) -> &[(String, String)] {
+        match self.nodes.get(id).map(|node| &node.kind) {
+            Some(Kind::Element { attributes, .. }) => attributes,
+            _ => &[],
+        }
+    }
+
     /// The value of element `id`'s attribute `name`.
     pub(crate) fn attribute(&self, id: usize, name: &str) -> Option<&str> {
         match &self.nodes.get(id)?.kind {

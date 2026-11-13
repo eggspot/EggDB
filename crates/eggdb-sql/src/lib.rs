@@ -241,6 +241,7 @@ mod sqlserver_types;
 mod square_root;
 mod stack_depth;
 mod dictionaries;
+mod xsd;
 mod standards;
 pub mod statement_statistics;
 mod standards_build;

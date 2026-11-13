@@ -11,7 +11,7 @@ use crate::json::{Json, Node, parse_document};
 use crate::types::{SqlType, Value};
 use crate::xml_path::Document;
 
-pub(crate) const FUNCTIONS: [&str; 4] = ["fix_dictionary", "fix_annotate", "edifact_directory", "edifact_annotate"];
+pub(crate) const FUNCTIONS: [&str; 5] = ["fix_dictionary", "fix_annotate", "edifact_directory", "edifact_annotate", "iso20022_validate"];
 
 const MOST_LAYOUT_DEPTH: usize = 32;
 const MOST_INPUT_BYTES: usize = 64 << 20;
@@ -556,8 +556,8 @@ fn text_argument(value: &Value, what: &str) -> SqlResult<String> {
 }
 
 /// `fix_dictionary(xml)`, `fix_annotate(message, dictionary)`,
-/// `edifact_directory('segments' | 'codes', text)` and
-/// `edifact_annotate(message, segments, codes)`.
+/// `edifact_directory('segments' | 'codes', text)`,
+/// `edifact_annotate(message, segments, codes)` and `iso20022_validate(message, schema)`.
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if !FUNCTIONS.contains(&name) {
         return None;
@@ -584,6 +584,14 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 _ => return Err(invalid("EDIFACT message", "it could not be parsed")),
             };
             jsonb(edifact_annotate(&parsed, &text_argument(segments, "EDIFACT directory")?, &text_argument(codes, "EDIFACT code lists")?)?)
+        }
+        ("iso20022_validate", [message, schema]) => {
+            let issues = crate::xsd::validate(&text_argument(message, "XML message")?, &text_argument(schema, "XML Schema")?)?;
+            let listed: Vec<String> = issues
+                .iter()
+                .map(|(path, problem)| format!("{{\"path\":{},\"message\":{}}}", quoted(path), quoted(problem)))
+                .collect();
+            jsonb(format!("{{\"valid\":{},\"issues\":[{}]}}", issues.is_empty(), listed.join(",")))
         }
         _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("{name} does not take {} arguments", values.len()))),
     })())
