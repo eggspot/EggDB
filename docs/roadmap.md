@@ -1645,7 +1645,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-13, D1014). `LOAD` from allowed URLs: **code written, unbuilt**
   (code-only mode, 2026-11-12, D923); `SERVICE` to allowed endpoints: **code written, unbuilt** (code-only mode,
   2026-11-12, D924).
-- The LDBC benchmark against Neo4j (D7, D206).
+- The LDBC benchmark against Neo4j (D7, D206). LDBC-shaped data and Interactive-style queries against Neo4j in CI
+  (`ldbc-compare`): **code written, unbuilt** (code-only mode, 2026-11-13, D1015). Left: an audited run at SF1 and above,
+  which needs the owner's decision on cost.
 
 ### M14 Backup, point-in-time recovery and replication
 - Continuous log shipping and replay to any commit (D24, D208). Check: the simulator test of

@@ -709,6 +709,57 @@ jobs:
           overwrite: true
           if-no-files-found: warn
 
+  ldbc-compare:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      neo4j:
+        image: neo4j:5-community
+        env:
+          NEO4J_AUTH: neo4j/ci-ldbc-compare-password
+        ports:
+          - 7687:7687
+    env:
+      COMPARE_MANIFEST: crates/eggdb-ldbc-compare/Cargo.toml
+      EGGDB_PASSWORD: ci-ldbc-compare
+      NEO4J_PASSWORD: ci-ldbc-compare-password
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+            crates/eggdb-ldbc-compare/target
+          key: cargo-v2-ldbc-compare-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb-ldbc-compare/Cargo.lock') }}
+          restore-keys: cargo-v2-ldbc-compare-${{ runner.os }}-
+      - name: Format and lint
+        run: |
+          cargo fmt --manifest-path "$COMPARE_MANIFEST" --check
+          cargo clippy --manifest-path "$COMPARE_MANIFEST" --release --locked --all-targets -- -D warnings
+      - name: EggDB against Neo4j with LDBC-shaped data (D7, D206, D1015)
+        run: |
+          cargo build --release -p eggdb
+          target/release/eggdb serve "$RUNNER_TEMP/ldbc-compare.eggdb" --create --listen 127.0.0.1:55436 --bolt-listen 127.0.0.1:7688 &
+          for _ in $(seq 1 50); do (exec 3<> /dev/tcp/127.0.0.1/7688) 2> /dev/null && break; sleep 0.2; done
+          for _ in $(seq 1 90); do (exec 3<> /dev/tcp/127.0.0.1/7687) 2> /dev/null && break; sleep 1; done
+          mkdir -p compare-results
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- --results compare-results/eggdb-ldbc-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Keep the Neo4j comparison results of this change
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ldbc-compare-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: compare-results/
+          retention-days: 90
+          overwrite: true
+
   mongo-compare:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -1772,7 +1823,7 @@ jobs:
           PY
 
   check:
-    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, opensearch-compare, mongo-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
+    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, opensearch-compare, mongo-compare, ldbc-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
