@@ -99,6 +99,20 @@ pub(crate) fn accept_loop(
     Ok(())
 }
 
+/// Each recipient's outcome of a relayed message: the relay's reply, or why it refused.
+pub type RelayOutcome = Vec<(String, Result<String, String>)>;
+
+/// Sends `message` from `from` to `recipients` through the SMTP server at `relay`, greeting it
+/// as `helo` (RFC 5321).
+pub fn relay_message(relay: &str, helo: &str, from: &str, recipients: &[String], message: &[u8]) -> Result<RelayOutcome, String> {
+    smtp_client::relay(relay, helo, from, recipients, message)
+}
+
+/// Stores `message` in the INBOX of `keyspace`'s mail store, as delivered mail.
+pub fn deliver_local(keyspace: &(dyn Keyspace + Sync), message: &[u8]) -> Result<(), String> {
+    keyspace.write(0, &mut |keys| store::append(keys, store::INBOX, &[], now_seconds(), message).map(drop).map_err(|error| error.0))
+}
+
 /// Receives mail over SMTP on `listener` until `stop`, storing every accepted message in the
 /// `INBOX` of `keyspace`'s database 0. It relays nothing.
 pub fn serve_smtp(

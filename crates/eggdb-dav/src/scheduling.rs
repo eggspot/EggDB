@@ -173,7 +173,7 @@ pub(crate) fn outgoing(text: &str, user: &str, method: &str) -> Option<(String, 
     Some((folded(&message), recipients))
 }
 
-fn civil(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted - era * 146_097;

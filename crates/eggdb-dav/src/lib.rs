@@ -6,9 +6,11 @@
 
 mod acl;
 pub mod ical;
+mod imip;
 mod scheduling;
 mod server;
 pub mod store;
 pub mod xml;
 
+pub use imip::{Invitation, imip_message, remove_invitation, waiting_invitations};
 pub use server::{Endpoint, MAX_REQUEST_BYTES};

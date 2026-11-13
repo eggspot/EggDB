@@ -1051,6 +1051,7 @@ impl Session<'_> {
         let tds_events = events.clone();
         let syslog_events = events.clone();
         let opcua_events = events.clone();
+        let imip_events = events.clone();
         let sparkplug_events = events.clone();
         let modbus_events = events.clone();
         eggdb_sql::statement_statistics::collect(
@@ -1507,6 +1508,56 @@ impl Session<'_> {
                         .decoding_content_encoding(),
                 ),
                 None => Ok(()),
+            });
+            let imip_sender = scope.spawn(|| {
+                if dav_listener.is_none() || read_only {
+                    drop(imip_events);
+                    return;
+                }
+                let from = format!("{}@{}", config.user, mail_config.domain);
+                let mut reported_waiting = false;
+                while !stop_signals::requested() {
+                    for invitation in eggdb_dav::waiting_invitations(&dav_database, &config.user).unwrap_or_default() {
+                        let message = eggdb_dav::imip_message(&from, &invitation, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs()));
+                        let (local, remote): (Vec<String>, Vec<String>) = invitation.recipients.iter().cloned().partition(|recipient| {
+                            recipient.rsplit_once('@').is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(&mail_config.domain) || domain.eq_ignore_ascii_case("localhost"))
+                        });
+                        let relayed = match (&mail_config.relay, remote.is_empty()) {
+                            (_, true) => true,
+                            (Some(relay), false) => match eggdb_mail::relay_message(relay, &mail_config.domain, &from, &remote, &message) {
+                                Ok(outcomes) => {
+                                    for (recipient, outcome) in outcomes {
+                                        if let Err(reply) = outcome {
+                                            let _ = imip_events.send(stamped(&format!("imip {recipient} refused the invitation: {reply}")));
+                                        }
+                                    }
+                                    true
+                                }
+                                Err(error) => {
+                                    let _ = imip_events.send(stamped(&format!("imip the relay did not take an invitation: {error}")));
+                                    false
+                                }
+                            },
+                            (None, false) => {
+                                if !reported_waiting {
+                                    let _ = imip_events.send(stamped("imip invitations to other domains wait in the outbox until --smtp-relay is set"));
+                                    reported_waiting = true;
+                                }
+                                false
+                            }
+                        };
+                        if relayed {
+                            if !local.is_empty() {
+                                let _ = eggdb_mail::deliver_local(&mail_database, &message);
+                            }
+                            let _ = eggdb_dav::remove_invitation(&dav_database, &invitation.path);
+                        }
+                    }
+                    let waited = std::time::Instant::now();
+                    while !stop_signals::requested() && waited.elapsed() < std::time::Duration::from_secs(10) {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                }
             });
             let dav_server = scope.spawn(|| match &dav_listener {
                 Some(listener) => eggdb_http::serve_with_limits(
@@ -1991,6 +2042,7 @@ impl Session<'_> {
             let _ = imap_server.join();
             let _ = jmap_server.join();
             let _ = jmap_push.join();
+            let _ = imip_sender.join();
             let _ = dav_server.join();
             let _ = cdc_queue_delivery.join();
             let _ = cdc_topic_delivery.join();
