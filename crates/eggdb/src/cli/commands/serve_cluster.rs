@@ -1,6 +1,6 @@
 use super::serve_replication::{
-    PrimaryAddress, ReplicationCredentials, Stream, checked_greeting, connect, read_frame,
-    receive_snapshot, signed_greeting, stream_file, write_frame,
+    PrimaryAddress, ReplicationCredentials, SHARD_COPY, Stream, checked_greeting, connect,
+    read_frame, receive_snapshot, serve_shard_copy, signed_greeting, stream_file, write_frame,
 };
 use eggdb::consensus::wire::{decode_message, encode_message};
 use eggdb::consensus::{EntryKind, Membership, Message, Node, NodeId, Role, Snapshot, Timing};
@@ -110,6 +110,7 @@ struct Shared {
     leader: AtomicU64,
     finished: AtomicBool,
     seed_point: Mutex<SeedPoint>,
+    primary: Mutex<Option<Arc<ReplicationPrimary>>>,
 }
 
 impl Shared {
@@ -280,6 +281,10 @@ fn serve_peer(
         std::thread::sleep(FAILED_LOGIN_PAUSE);
         return write_frame(stream, REFUSED, b"the user or password is not this cluster's");
     };
+    if kind == SHARD_COPY {
+        let primary = shared.primary.lock().ok().and_then(|primary| primary.clone());
+        return serve_shard_copy(stream, db, primary, rest);
+    }
     let Some(from) = rest
         .get(..8)
         .and_then(|bytes| bytes.try_into().ok())
@@ -469,10 +474,16 @@ impl Driver<'_> {
                     .add_replica(CLUSTER_REPLICA, local.1)
                     .map_err(failed)?;
                 self.proposed = local.1;
+                if let Ok(mut shared) = self.shared.primary.lock() {
+                    *shared = Some(Arc::clone(&primary));
+                }
                 self.primary = Some(primary);
             }
             (Some(primary), false) if self.node.role() != Role::Leader => {
                 primary.retire();
+                if let Ok(mut shared) = self.shared.primary.lock() {
+                    *shared = None;
+                }
                 self.primary = None;
                 self.fence();
             }
@@ -595,6 +606,7 @@ pub(super) fn run_cluster(
         leader: AtomicU64::new(NO_LEADER),
         finished: AtomicBool::new(false),
         seed_point: Mutex::new(SeedPoint::default()),
+        primary: Mutex::new(None),
     };
     let (inbox_sender, inbox) = mpsc::channel::<(NodeId, Message)>();
     let mut outboxes: BTreeMap<NodeId, Sender<Message>> = BTreeMap::new();

@@ -31,6 +31,7 @@ mod incremental;
 mod invisible;
 mod logical_slots;
 pub(crate) mod freshness;
+pub(crate) mod shard_move;
 pub(crate) mod switchover;
 mod property_graphs;
 mod transaction_settings;
@@ -2006,6 +2007,7 @@ impl<'s> Session<'s> {
         self.prepare_database_links(text)?;
         if self.prepare_backup(text, on_result)?
             || self.prepare_switchover(text, on_result)?
+            || self.prepare_shard_move(text, on_result)?
             || self.prepare_freshness(text, on_result)?
             || self.prepare_incremental_views(text, on_result)?
         {

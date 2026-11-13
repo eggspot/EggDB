@@ -19,6 +19,14 @@ const STATUS: u8 = 11;
 const PROMOTE: u8 = 12;
 const FOLLOW: u8 = 13;
 const DONE: u8 = 14;
+pub(super) const SHARD_COPY: u8 = 15;
+const SHARD_PAGE: u8 = 16;
+const SHARD_COPIED: u8 = 17;
+const CATCH_UP: u8 = 18;
+const SHARD_CHANGES: u8 = 19;
+const CAUGHT_UP: u8 = 20;
+const KEYS_PER_SHARD_PAGE: usize = 4096;
+const CATCH_UP_ROUNDS: usize = 1000;
 const WANTS_SNAPSHOT: u64 = u64::MAX;
 const SNAPSHOT_CHUNK_BYTES: usize = 1 << 20;
 const SNAPSHOT_STAGING_SUFFIX: &str = ".replica-seeding";
@@ -215,6 +223,7 @@ fn serve_replica(stream: &mut dyn Stream, node: &ReplicationNode<'_>, stop: &(dy
             node.follow(&address);
             return write_frame(stream, DONE, &[]);
         }
+        SHARD_COPY => return serve_shard_copy(stream, node.db, node.current_primary(), rest),
         HELLO => {}
         _ => return write_frame(stream, REFUSED, b"an unknown greeting"),
     }
@@ -469,4 +478,224 @@ pub(super) fn client_tls(address: &str, ca_file: Option<&std::path::Path>) -> Re
     let trust = eggdb_tls::verify::TrustStore::from_pem(&text).map_err(|error| format!("--replica-of-ca {}: {error}", ca_file.display()))?;
     let server_name = eggdb_tls::verify::ServerName::parse(host).map_err(|error| format!("--replica-of {address}: {error}"))?;
     Ok(Some(eggdb_tls::ClientConfig::new(eggdb_tls::ServerVerification::Full { trust, server_name }, host)))
+}
+
+fn shard_request(rest: &[u8]) -> Option<(eggdb::cluster::ShardId, u64)> {
+    Some((u32::from_le_bytes(rest.get(..4)?.try_into().ok()?), number(rest, 4)?))
+}
+
+pub(super) fn serve_shard_copy(
+    stream: &mut dyn Stream,
+    db: &Database,
+    primary: Option<Arc<ReplicationPrimary>>,
+    rest: &[u8],
+) -> std::io::Result<()> {
+    let failed = |error: eggdb::Error| std::io::Error::other(error.to_string());
+    let Some((shard, epoch)) = shard_request(rest) else {
+        return write_frame(stream, REFUSED, b"the shard copy request is malformed");
+    };
+    let Some(primary) = primary else {
+        return write_frame(stream, REFUSED, b"this server is not the primary of the shard's owner now");
+    };
+    let Some(map) = db.shard_map().map_err(failed)? else {
+        return write_frame(stream, REFUSED, b"this server has no shard map");
+    };
+    if map.epoch != epoch || !map.shards.contains_key(&shard) {
+        return write_frame(
+            stream,
+            REFUSED,
+            format!("the shard map here is at epoch {}, not {epoch}, or has no shard {shard}", map.epoch).as_bytes(),
+        );
+    }
+    let start = primary.last().map_err(failed)?;
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        let page = db.shard_page(&map, shard, after.as_deref(), KEYS_PER_SHARD_PAGE).map_err(failed)?;
+        let changes: Vec<eggdb::ShardChange> = page.entries.into_iter().map(|(key, value)| (key, Some(value))).collect();
+        write_frame(stream, SHARD_PAGE, &eggdb::encode_shard_changes(&changes))?;
+        match page.next_after {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    write_frame(stream, SHARD_COPIED, &start.to_le_bytes())?;
+    loop {
+        let (kind, payload) = read_frame(stream)?;
+        if kind == DONE {
+            return Ok(());
+        }
+        if kind != CATCH_UP {
+            return write_frame(stream, REFUSED, b"an unexpected frame during the shard copy");
+        }
+        let mut applied = number(&payload, 0).unwrap_or(start);
+        let batches = match primary.batches_after(applied, BATCHES_PER_ROUND).map_err(failed)? {
+            Ok(batches) => batches,
+            Err(first_kept) => match db.archived_batches(applied, first_kept).map_err(failed)? {
+                Some(batches) => batches,
+                None => {
+                    return write_frame(stream, REFUSED, b"the changes since the copy started are no longer kept; move the shard again");
+                }
+            },
+        };
+        let mut changes = Vec::new();
+        for batch in &batches {
+            changes.extend(eggdb::shard_changes(batch, &map, shard));
+            applied = batch.sequence;
+        }
+        write_frame(stream, SHARD_CHANGES, &eggdb::encode_shard_changes(&changes))?;
+        let caught_up = batches.len() < BATCHES_PER_ROUND;
+        let mut status = applied.to_le_bytes().to_vec();
+        status.push(u8::from(caught_up));
+        write_frame(stream, CAUGHT_UP, &status)?;
+    }
+}
+
+/// What a shard move copied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct ShardCopyReport {
+    pub(super) keys: u64,
+    pub(super) changes: u64,
+    pub(super) epoch: u64,
+}
+
+/// Moves `shard` from the server at `from` into `db` over the replication protocol (D1040):
+/// copies its keys page by page while that server keeps serving, applies the changes made
+/// meanwhile from its replication batches until a round finds nothing new, then publishes the
+/// shard map with this server as the owner and the epoch raised, and applies the last changes
+/// written before the cut-over. `owner` is this server's id in the map.
+pub(super) fn copy_shard(
+    from: &PrimaryAddress,
+    credentials: &ReplicationCredentials,
+    db: &Database,
+    shard: eggdb::cluster::ShardId,
+    owner: u64,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Result<ShardCopyReport, String> {
+    let map = db
+        .shard_map()
+        .map_err(|error| error.to_string())?
+        .ok_or("this server has no shard map; publish one before moving shards")?;
+    if !map.shards.contains_key(&shard) {
+        return Err(format!("the shard map has no shard {shard}"));
+    }
+    let mut stream = connect(from)?;
+    let io = |error: std::io::Error| format!("the shard copy from {} failed: {error}", from.address);
+    let (kind, nonce) = read_frame(stream.as_mut()).map_err(io)?;
+    if kind != CHALLENGE {
+        return Err(format!("{} did not send its challenge", from.address));
+    }
+    let mut tail = shard.to_le_bytes().to_vec();
+    tail.extend_from_slice(&map.epoch.to_le_bytes());
+    write_frame(stream.as_mut(), SHARD_COPY, &signed_greeting(credentials, &nonce, &tail)?).map_err(io)?;
+    let mut report = ShardCopyReport::default();
+    let start = loop {
+        match read_frame(stream.as_mut()).map_err(io)? {
+            (SHARD_PAGE, bytes) => {
+                let changes = eggdb::decode_shard_changes(&bytes).ok_or("a shard page arrived damaged")?;
+                report.keys += changes.len() as u64;
+                db.apply_shard_changes(&changes).map_err(|error| error.to_string())?;
+            }
+            (SHARD_COPIED, bytes) => break number(&bytes, 0).ok_or("the copy's end arrived damaged")?,
+            (REFUSED, message) => return Err(format!("{} refused the shard copy: {}", from.address, String::from_utf8_lossy(&message))),
+            _ => return Err(format!("{} sent an unexpected frame during the shard copy", from.address)),
+        }
+        if stop() {
+            return Err("the shard copy was stopped".into());
+        }
+    };
+    let mut applied = start;
+    let mut catch_up = |applied: &mut u64, report: &mut ShardCopyReport| -> Result<bool, String> {
+        write_frame(stream.as_mut(), CATCH_UP, &applied.to_le_bytes()).map_err(io)?;
+        let changes = match read_frame(stream.as_mut()).map_err(io)? {
+            (SHARD_CHANGES, bytes) => eggdb::decode_shard_changes(&bytes).ok_or("catch-up changes arrived damaged")?,
+            (REFUSED, message) => return Err(format!("{} stopped the shard copy: {}", from.address, String::from_utf8_lossy(&message))),
+            _ => return Err(format!("{} sent an unexpected frame during the catch-up", from.address)),
+        };
+        report.changes += changes.len() as u64;
+        db.apply_shard_changes(&changes).map_err(|error| error.to_string())?;
+        match read_frame(stream.as_mut()).map_err(io)? {
+            (CAUGHT_UP, status) => {
+                *applied = number(&status, 0).ok_or("the catch-up status arrived damaged")?;
+                Ok(status.get(8) == Some(&1))
+            }
+            _ => Err(format!("{} sent an unexpected frame during the catch-up", from.address)),
+        }
+    };
+    let mut caught_up = false;
+    for _ in 0..CATCH_UP_ROUNDS {
+        if stop() {
+            return Err("the shard copy was stopped".into());
+        }
+        if catch_up(&mut applied, &mut report)? {
+            caught_up = true;
+            break;
+        }
+    }
+    if !caught_up {
+        return Err(format!("shard {shard} kept changing faster than it could be copied; try the move again when it is quieter"));
+    }
+    let mut moved = map.clone();
+    if let Some(entry) = moved.shards.get_mut(&shard) {
+        entry.owner = owner;
+    }
+    moved.epoch = map.epoch + 1;
+    if !db.publish_shard_map(&moved, Some(map.epoch)).map_err(|error| error.to_string())? {
+        return Err("the shard map changed while the shard was copied; the move was not cut over".into());
+    }
+    report.epoch = moved.epoch;
+    catch_up(&mut applied, &mut report)?;
+    write_frame(stream.as_mut(), DONE, &[]).map_err(io)?;
+    Ok(report)
+}
+
+type ShardMoveRequest = (eggdb::cluster::ShardId, String, std::sync::mpsc::Sender<Result<String, String>>);
+
+static SHARD_MOVES: std::sync::Mutex<Option<std::sync::mpsc::Sender<ShardMoveRequest>>> = std::sync::Mutex::new(None);
+
+const SHARD_MOVE_REPLY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The hook `MOVE SHARD` calls in this process: it hands the move to the server's shard mover
+/// and waits for its answer.
+pub(super) fn request_shard_move(shard: eggdb::cluster::ShardId, from: &str) -> Result<String, String> {
+    let sender = SHARD_MOVES
+        .lock()
+        .map_err(|_| "the shard mover failed".to_owned())?
+        .clone()
+        .ok_or("this server does not move shards")?;
+    let (reply, answer) = std::sync::mpsc::channel();
+    sender.send((shard, from.to_owned(), reply)).map_err(|_| "the shard mover stopped".to_owned())?;
+    answer.recv_timeout(SHARD_MOVE_REPLY).map_err(|_| "the shard move did not finish in time".to_owned())?
+}
+
+/// Runs the shard moves `MOVE SHARD` asks for, one at a time, until `stop` turns true:
+/// each copies the shard into `db` from the named server and cuts it over to `owner`.
+pub(super) fn serve_shard_moves(
+    db: &Database,
+    credentials: &ReplicationCredentials,
+    ca_file: Option<&std::path::Path>,
+    owner: u64,
+    stop: &(dyn Fn() -> bool + Sync),
+) {
+    let (sender, requests) = std::sync::mpsc::channel::<ShardMoveRequest>();
+    if let Ok(mut slot) = SHARD_MOVES.lock() {
+        *slot = Some(sender);
+    }
+    while !stop() {
+        let Ok((shard, from, reply)) = requests.recv_timeout(ACCEPT_POLL * 5) else {
+            continue;
+        };
+        let outcome = client_tls(&from, ca_file)
+            .map(|tls| PrimaryAddress { address: from.clone(), tls })
+            .and_then(|address| copy_shard(&address, credentials, db, shard, owner, stop))
+            .map(|report| {
+                format!(
+                    "shard {shard} moved from {from}: {} keys copied, {} changes caught up, shard map epoch {}",
+                    report.keys, report.changes, report.epoch
+                )
+            });
+        let _ = reply.send(outcome);
+    }
+    if let Ok(mut slot) = SHARD_MOVES.lock() {
+        *slot = None;
+    }
 }

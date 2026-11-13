@@ -1743,7 +1743,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-13, D1038): `--cluster`, `--cluster-node`, `--cluster-seed`, `--cluster-ca`, batches committed through Raft.
 - The shard map and decision log replicated on Raft (D212). **Code written, unbuilt** (code-only mode,
   2026-11-13, D1039): `Database::shard_map`, `publish_shard_map` by epoch, `decision_log` as a `DecisionLog`.
-- The data copy of online moves over the replication protocol (D209, D212).
+- The data copy of online moves over the replication protocol (D209, D212). **Code written, unbuilt** (code-only
+  mode, 2026-11-13, D1040): `MOVE SHARD <n> FROM 'host:port'`, `shard_page`, catch-up from batches, epoch cut-over.
 - A distributed SQL planner that pushes work to shards (D212).
 - Snapshot reads across shards by timestamp, and serializable distributed transactions (D18,
   D212).

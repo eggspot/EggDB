@@ -1178,6 +1178,15 @@ impl Session<'_> {
         if replication_listener.is_some() {
             eggdb_sql::set_switchover_hook(super::serve_failover::request_switchover);
         }
+        let moves_shards = replicates || cluster.is_some();
+        if moves_shards {
+            eggdb_sql::set_shard_move_hook(super::serve_replication::request_shard_move);
+        }
+        let shard_owner = match &cluster {
+            Some((settings, _)) => settings.node,
+            None => u64::from(super::serve_replication::replica_id_of(&self.request.file)),
+        };
+        let shard_ca = options.cluster_ca.clone().or_else(|| options.replica_of_ca.clone());
         if options.cdc_capture_engine && !options.pg_replication && options.cdc_webhook.is_none() && options.cdc_topic.is_none() && options.cdc_queue.is_none() {
             return Err(usage("--cdc-capture engine captures every change for a sink: give --cdc-webhook, --cdc-topic or --cdc-queue too".to_owned()));
         }
@@ -1658,6 +1667,17 @@ impl Session<'_> {
                 }
                 outcome
             });
+            let shard_mover = scope.spawn(|| {
+                if moves_shards {
+                    super::serve_replication::serve_shard_moves(
+                        &db,
+                        &replication_credentials,
+                        shard_ca.as_deref(),
+                        shard_owner,
+                        &stop_signals::requested,
+                    );
+                }
+            });
             let cluster_node = scope.spawn(|| match &cluster {
                 Some((settings, listener)) => {
                     let outcome = super::serve_cluster::run_cluster(
@@ -1768,6 +1788,7 @@ impl Session<'_> {
             let _ = replication_monitor.join();
             let _ = standby_follower.join();
             let _ = cluster_node.join();
+            let _ = shard_mover.join();
             let _ = kafka_server.join();
             let _ = amqp_server.join();
             let _ = mqtt_server.join();

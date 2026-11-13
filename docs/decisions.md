@@ -1064,3 +1064,4 @@ its full title with its status.
 - [D1037](decisions/D1037.md) Code-only batch 685 (M15): Raft membership changes by joint consensus, pre-vote and leader leases
 - [D1038](decisions/D1038.md) Code-only batch 686 (M15): the cluster transport and eggdb serve --cluster
 - [D1039](decisions/D1039.md) Code-only batch 687 (M15): the shard map and the decision log replicated on Raft
+- [D1040](decisions/D1040.md) Code-only batch 688 (M15): online shard moves copy their data over the replication protocol

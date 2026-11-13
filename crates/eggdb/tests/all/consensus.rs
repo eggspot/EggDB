@@ -149,3 +149,73 @@ fn decisions_are_recorded_once_and_outlive_the_coordinator() {
     let mut log = db.decision_log();
     assert_eq!(log.begin().unwrap(), second + 1);
 }
+
+#[test]
+fn a_shard_is_copied_page_by_page_and_caught_up_from_batches() {
+    use eggdb::cluster::{Placement, ShardMap, Strategy, route};
+    use eggdb::{ReplicationBatch, decode_shard_changes, encode_shard_changes, shard_changes};
+    let source_file = TempPath::new("shard-source");
+    let target_file = TempPath::new("shard-target");
+    let source = Database::open(source_file.path()).unwrap();
+    let target = Database::open(target_file.path()).unwrap();
+    let placement = Placement {
+        nodes: [(1, "eu".to_owned()), (2, "eu".to_owned())].into_iter().collect(),
+    };
+    let map = ShardMap::new(Strategy::Hash { shards: 4 }, &placement);
+    for index in 0..500u32 {
+        source.put(format!("key {index}"), format!("value {index}")).unwrap();
+    }
+    let shard = route(&map.strategy, b"key 7").unwrap();
+    let mut after: Option<Vec<u8>> = None;
+    let mut copied = 0;
+    loop {
+        let page = source.shard_page(&map, shard, after.as_deref(), 64).unwrap();
+        assert!(page.entries.iter().all(|(key, _)| route(&map.strategy, key) == Some(shard)));
+        let changes: Vec<eggdb::ShardChange> = page
+            .entries
+            .into_iter()
+            .map(|(key, value)| (key, Some(value)))
+            .collect();
+        copied += changes.len();
+        let wire = encode_shard_changes(&changes);
+        target
+            .apply_shard_changes(&decode_shard_changes(&wire).unwrap())
+            .unwrap();
+        match page.next_after {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    let expected = (0..500u32)
+        .filter(|index| route(&map.strategy, format!("key {index}").as_bytes()) == Some(shard))
+        .count();
+    assert_eq!(copied, expected);
+    assert_eq!(target.get(b"key 7").unwrap(), Some(b"value 7".to_vec()));
+    let batch = ReplicationBatch {
+        term: 1,
+        sequence: 9,
+        previous_term: 1,
+        changes: vec![
+            eggdb::ReplicationChange::Put {
+                collection: String::new(),
+                key: b"key 7".to_vec(),
+                value: b"changed".to_vec(),
+            },
+            eggdb::ReplicationChange::Put {
+                collection: String::new(),
+                key: b"\xffCOL\x00\x7fraft\x00state".to_vec(),
+                value: b"x".to_vec(),
+            },
+        ],
+    };
+    let caught_up = shard_changes(&batch, &map, shard);
+    assert_eq!(caught_up, vec![(b"key 7".to_vec(), Some(b"changed".to_vec()))]);
+    target.apply_shard_changes(&caught_up).unwrap();
+    assert_eq!(target.get(b"key 7").unwrap(), Some(b"changed".to_vec()));
+    assert!(
+        target
+            .apply_shard_changes(&[(b"\xffCOL\x00\x7fraft\x00state".to_vec(), None)])
+            .is_err()
+    );
+    assert_eq!(decode_shard_changes(&[9, 0, 0, 0]), None);
+}
