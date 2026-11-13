@@ -1089,3 +1089,4 @@ its full title with its status.
 - [D1062](decisions/D1062.md) Code-only batch 710 (M16): JMS clients over AMQP 1.0
 - [D1063](decisions/D1063.md) Code-only batch 711 (M16): a benchmark against Cassandra and ScyllaDB
 - [D1064](decisions/D1064.md) Code-only batch 712 (M16): more of Flux: join package, standard packages, query functions, windows in SQL
+- [D1065](decisions/D1065.md) Code-only batch 713 (M16): rsyslog and syslog-ng in CI
