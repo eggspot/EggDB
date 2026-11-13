@@ -65,6 +65,7 @@ mod execute;
 mod explain;
 mod foreign;
 mod foreign_tables;
+mod foreign_pushdown;
 mod column_lineage;
 mod fuzzy_functions;
 mod generated_columns;

@@ -2086,7 +2086,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `eggdb serve --couch-listen` (revision trees, `_changes`, `_revs_diff`, `_bulk_docs`, `_bulk_get`, `_local`).
 - Foreign tables with declared columns and filter pushdown (D29, D229). `CREATE SERVER` and `CREATE FOREIGN TABLE`
   with declared columns, as views over `eggdb_foreign`: **code written, unbuilt** (code-only mode, 2026-11-12, D916).
-  `IMPORT FOREIGN SCHEMA`: **code written, unbuilt** (code-only mode, 2026-11-12, D917). Left: filter pushdown.
+  `IMPORT FOREIGN SCHEMA`: **code written, unbuilt** (code-only mode, 2026-11-12, D917). Filter pushdown: **code
+  written, unbuilt** (code-only mode, 2026-11-13, D1110).
 - Foreign sources: MySQL, SQL Server, HTTP, S3 and Parquet over object storage (D29, D229). SQL Server: **code
   written, unbuilt** (code-only mode, 2026-11-12, D769); CSV and Parquet objects in S3-compatible storage: **code
   written, unbuilt** (code-only mode, 2026-11-12, D913); MySQL: **code written, unbuilt** (code-only mode, 2026-11-12,
