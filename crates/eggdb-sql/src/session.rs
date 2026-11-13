@@ -2011,6 +2011,8 @@ impl<'s> Session<'s> {
         let _workload_slot = self.admit_workload()?;
         self.prepare_writer_snapshot(text)?;
         self.prepare_database_links(text)?;
+        let federated = self.prepare_federated_names(text)?;
+        let text = federated.as_deref().unwrap_or(text);
         if self.prepare_backup(text, on_result)?
             || self.prepare_switchover(text, on_result)?
             || self.prepare_shard_move(text, on_result)?

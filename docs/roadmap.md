@@ -2095,7 +2095,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Credentials per source, permission per role, and a timeout and row limit per call (D229). **Code written, unbuilt**
   (code-only mode, 2026-11-12, D770).
 - Joins across servers planned as one distributed query, and federated SQL across EggDB clusters
-  in Trino's style (D18, D46, D229).
+  in Trino's style (D18, D46, D229). **Code written, unbuilt** (code-only mode, 2026-11-13, D1111): `server.schema.table` names
+  imported on first use, so one statement joins tables of several servers, each read with its filters pushed down.
 - A fleet control plane: inventory, upgrades in canary waves and placement by hardware class
   (D58).
 - Tenant lifecycle APIs, and databases per user at millions of tenants (D58).

@@ -158,6 +158,80 @@ impl Session<'_> {
         Ok(())
     }
 
+    /// Rewrites, before a statement runs, each three-part name `server.schema.table` whose first
+    /// part names a foreign server, as Trino names a table of another catalog (D1111): the table
+    /// is imported on first use into the local schema `eggdb_federated_<server>_<schema>`, and
+    /// the name is replaced by that foreign table's, so one statement joins tables of several
+    /// servers, each read with its filters pushed down (D1110). Returns the rewritten text, or
+    /// `None` when the statement names no such table.
+    pub(super) fn prepare_federated_names(&mut self, text: &str) -> SqlResult<Option<String>> {
+        if text.matches('.').count() < 2 || self.dialect == Dialect::Oracle {
+            return Ok(None);
+        }
+        let Ok(tokens) = crate::lexer::tokenize_in(text, self.dialect) else {
+            return Ok(None);
+        };
+        let word = |index: usize| match tokens.get(index).map(|token| &token.kind) {
+            Some(crate::lexer::TokenKind::Word(word)) => Some(word.to_ascii_lowercase()),
+            Some(crate::lexer::TokenKind::QuotedIdentifier(name)) => Some(name.clone()),
+            _ => None,
+        };
+        let dot = |index: usize| matches!(tokens.get(index).map(|token| &token.kind), Some(crate::lexer::TokenKind::Dot));
+        let mut found: Vec<(usize, usize, String, String, String)> = Vec::new();
+        let mut at = 0;
+        while at + 4 < tokens.len() {
+            if at > 0 && dot(at - 1) {
+                at += 1;
+                continue;
+            }
+            let (Some(server), Some(schema), Some(table)) = (word(at), word(at + 2), word(at + 4)) else {
+                at += 1;
+                continue;
+            };
+            if !dot(at + 1) || !dot(at + 3) || dot(at + 5) {
+                at += 1;
+                continue;
+            }
+            found.push((tokens[at].start, tokens[at + 4].end, server, schema, table));
+            at += 5;
+        }
+        if found.is_empty() {
+            return Ok(None);
+        }
+        let servers: Vec<String> = match self.foreign_texts(&format!("SELECT name FROM {SERVERS_TABLE}")) {
+            Ok(names) => names,
+            Err(_) => return Ok(None),
+        };
+        let mut rewritten = String::with_capacity(text.len());
+        let mut copied = 0;
+        let mut changed = false;
+        for (start, end, server, schema, table) in found {
+            if !servers.contains(&server) {
+                continue;
+            }
+            let local = federated_schema(&server, &schema);
+            let name = crate::schemas::written_qualified(&local, &table);
+            let known = !self
+                .foreign_texts(&format!("SELECT name FROM {TABLES_TABLE} WHERE name = {}", literal(&name)))
+                .unwrap_or_default()
+                .is_empty();
+            if !known {
+                self.foreign_sql(CREATE_REGISTRY)?;
+                self.foreign_sql(&format!("CREATE SCHEMA IF NOT EXISTS {}", crate::schema::quoted(&local)))?;
+                self.import_foreign_schema(&schema, Some(&(false, vec![table.clone()])), &server, &local)?;
+            }
+            rewritten.push_str(&text[copied..start]);
+            rewritten.push_str(&format!("{}.{}", crate::schema::quoted(&local), crate::schema::quoted(&table)));
+            copied = end;
+            changed = true;
+        }
+        if !changed {
+            return Ok(None);
+        }
+        rewritten.push_str(&text[copied..]);
+        Ok(Some(rewritten))
+    }
+
     fn server_of(&mut self, name: &str) -> SqlResult<Option<String>> {
         Ok(self
             .foreign_texts(&format!("SELECT source FROM {SERVERS_TABLE} WHERE name = {}", literal(name)))?
@@ -248,6 +322,14 @@ impl Session<'_> {
     }
 }
 
+/// The local schema a federated server's remote schema is imported into (D1111).
+pub(crate) fn federated_schema(server: &str, schema: &str) -> String {
+    let clean = |part: &str| -> String {
+        part.chars().map(|character| if character.is_ascii_alphanumeric() { character.to_ascii_lowercase() } else { '_' }).collect()
+    };
+    format!("eggdb_federated_{}_{}", clean(server), clean(schema))
+}
+
 fn default_remote_schema(source: &str) -> String {
     if source.starts_with("mysql://") {
         let path = source.splitn(4, '/').nth(3).unwrap_or_default();
@@ -256,5 +338,34 @@ fn default_remote_schema(source: &str) -> String {
         "dbo".to_owned()
     } else {
         "public".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod federated_tests {
+    use super::federated_schema;
+    use crate::memory_store::MemoryStore;
+    use crate::{Session, SqlError};
+
+    fn run(session: &mut Session<'_>, sql: &str) -> Result<(), SqlError> {
+        session.execute(sql, &mut |_| {})
+    }
+
+    #[test]
+    fn federated_schemas_are_named_for_the_server_and_schema() {
+        assert_eq!(federated_schema("Sales-EU", "public"), "eggdb_federated_sales_eu_public");
+    }
+
+    #[test]
+    fn a_three_part_name_reads_through_the_server_it_names() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        run(&mut session, "CREATE SERVER sales FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'sales.example', dbname 'sales')").unwrap();
+        let routed = run(&mut session, "SELECT o.id FROM sales.public.orders AS o JOIN sales.public.customers AS c ON c.id = o.customer").unwrap_err();
+        assert!(routed.to_string().contains("foreign sources are off"), "{routed}");
+        run(&mut session, "CREATE SCHEMA app").unwrap();
+        run(&mut session, "CREATE TABLE app.t (id integer)").unwrap();
+        let local = run(&mut session, "SELECT * FROM nowhere.app.t");
+        assert!(local.is_err_and(|error| !error.to_string().contains("foreign sources")));
     }
 }

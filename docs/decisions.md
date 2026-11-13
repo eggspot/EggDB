@@ -1135,3 +1135,4 @@ its full title with its status.
 - [D1108](decisions/D1108.md) Code-only batch 756 (M18): sync log compaction, partial sync, field merges and CRDTs, and end-to-end sealing
 - [D1109](decisions/D1109.md) Code-only batch 757 (M18): CouchDB's replication protocol through a CouchDB-compatible HTTP API
 - [D1110](decisions/D1110.md) Code-only batch 758 (M18): filter pushdown into foreign tables
+- [D1111](decisions/D1111.md) Code-only batch 759 (M18): federated SQL in Trino's style with server.schema.table names imported on first use
