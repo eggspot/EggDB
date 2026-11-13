@@ -163,6 +163,20 @@ impl Primary {
         }
     }
 
+    /// The last sequence the primary's history holds.
+    pub fn last(&self) -> u64 {
+        self.last
+    }
+
+    /// Forgets the oldest kept batches beyond `count`, so a replica that stays away long, or a
+    /// primary without replicas, holds bounded memory; a replica that then needs a forgotten
+    /// batch is told to copy again from a snapshot.
+    pub fn retain_at_most(&mut self, count: usize) {
+        while self.retained.len() > count {
+            self.retained.pop_front();
+        }
+    }
+
     /// Starts shipping to `replica`, which has applied up to `applied`; batches it still needs
     /// are kept until it acknowledges them.
     pub fn add_replica(&mut self, replica: ReplicaId, applied: u64) {

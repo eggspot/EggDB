@@ -1680,7 +1680,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Tenant-aware backup and restore (D234). Logical, per tenant (`eggdb_tenancy.backup_tenant`, `restore_tenant`):
   **code written, unbuilt** (code-only mode, 2026-11-12, D784).
 - Replication wired into the engine: the commit hook and its change log, a transport with TLS and
-  authentication, and `eggdb serve --replica-of` (D209).
+  authentication, and `eggdb serve --replica-of` (D209). **Code written, unbuilt** (code-only mode, 2026-11-13, D1024):
+  asynchronous, with `--replication-listen` and `--replica-of`. Left: synchronous commits that wait for replicas.
 - Initial copy of a replica from a snapshot archive (D208, D209).
 - Automatic failure detection, fencing of an old primary, and planned switchover (D18, D209).
 - Delayed replicas, and standbys in another region fed by log shipping (D18).

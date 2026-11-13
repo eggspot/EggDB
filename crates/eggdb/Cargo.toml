@@ -60,6 +60,7 @@ eggdb-pgwire = { path = "../eggdb-pgwire" }
 eggdb-resp = { path = "../eggdb-resp" }
 eggdb-format = { path = "../eggdb-format" }
 eggdb-platform = { path = "../eggdb-platform" }
+eggdb-replication = { path = "../eggdb-replication" }
 eggdb-sql = { path = "../eggdb-sql" }
 eggdb-sqlite-format = { path = "../eggdb-sqlite-format" }
 eggdb-storage = { path = "../eggdb-storage" }

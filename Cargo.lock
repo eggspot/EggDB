@@ -41,6 +41,7 @@ dependencies = [
  "eggdb-platform",
  "eggdb-queues",
  "eggdb-rdf",
+ "eggdb-replication",
  "eggdb-resp",
  "eggdb-s3",
  "eggdb-sql",

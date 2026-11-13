@@ -288,6 +288,9 @@ impl CommandName {
             | OptionName::MongoReplicaSet
             | OptionName::BoltListen
             | OptionName::GremlinListen
+            | OptionName::ReplicationListen
+            | OptionName::ReplicaOf
+            | OptionName::ReplicaOfCa
             | OptionName::CdcWebhook
             | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
@@ -507,6 +510,9 @@ enum OptionName {
     MongoReplicaSet,
     BoltListen,
     GremlinListen,
+    ReplicationListen,
+    ReplicaOf,
+    ReplicaOfCa,
     CdcWebhook,
     OtlpEndpoint,
     CdcQueue,
@@ -664,6 +670,9 @@ impl OptionName {
             b"mongo-replica-set" => Self::MongoReplicaSet,
             b"bolt-listen" => Self::BoltListen,
             b"gremlin-listen" => Self::GremlinListen,
+            b"replication-listen" => Self::ReplicationListen,
+            b"replica-of" => Self::ReplicaOf,
+            b"replica-of-ca" => Self::ReplicaOfCa,
             b"cdc-webhook" => Self::CdcWebhook,
             b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
@@ -1026,6 +1035,9 @@ pub(crate) struct ServeOptions {
     pub(crate) mongo_replica_set: Option<String>,
     pub(crate) bolt_listen: Option<SocketAddr>,
     pub(crate) gremlin_listen: Option<SocketAddr>,
+    pub(crate) replication_listen: Option<SocketAddr>,
+    pub(crate) replica_of: Option<String>,
+    pub(crate) replica_of_ca: Option<PathBuf>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1747,6 +1759,16 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                 request.serve.gremlin_listen =
                     Some(parse_listen(&option.spelled, value, 8182).map_err(usage)?);
             }
+            OptionName::ReplicationListen => {
+                request.serve.replication_listen =
+                    Some(parse_listen(&option.spelled, value, 5444).map_err(usage)?);
+            }
+            OptionName::ReplicaOf => {
+                let address = value.to_str().filter(|text| !text.is_empty()).ok_or_else(|| usage(format!("{} takes the primary's host:port", option.spelled)))?;
+                let address = if address.contains(':') { address.to_owned() } else { format!("{address}:5444") };
+                request.serve.replica_of = Some(address);
+            }
+            OptionName::ReplicaOfCa => request.serve.replica_of_ca = Some(PathBuf::from(value)),
             OptionName::MongoListen => {
                 request.serve.mongo_listen =
                     Some(parse_listen(&option.spelled, value, 27017).map_err(usage)?);

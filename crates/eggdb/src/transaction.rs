@@ -289,7 +289,7 @@ impl<'db> WriteTransaction<'db> {
             sweeps_on_commit: true,
             journal: None,
             counts: KeptCounts::default(),
-            archived_keys: database.change_archive().map(|_| Vec::new()),
+            archived_keys: (database.change_archive().is_some() || database.primary().is_some()).then(Vec::new),
             turn,
         })
     }
@@ -710,6 +710,12 @@ impl<'db> WriteTransaction<'db> {
                 ..Features::default()
             });
         }
+        if let Some(primary) = self.database.primary()
+            && self.archived_keys.as_ref().is_some_and(|keys| !keys.is_empty())
+        {
+            let position = primary.next_position()?;
+            self.put_raw(crate::replication::POSITION_KEY, &position)?;
+        }
         let archived = self.archived_changes()?.filter(|changes| !changes.is_empty());
         if let (Some(changes), Some(archive)) = (&archived, self.database.change_archive()) {
             archive.pending(changes)?;
@@ -723,6 +729,9 @@ impl<'db> WriteTransaction<'db> {
             ..
         } = self;
         let committed = inner.commit().map_err(Error::storage);
+        if let (Some(changes), Some(primary), Ok(_)) = (&archived, database.primary(), &committed) {
+            let _ = primary.committed(changes);
+        }
         if let (Some(_), Some(archive)) = (&archived, database.change_archive()) {
             match &committed {
                 Ok(stamp) => {

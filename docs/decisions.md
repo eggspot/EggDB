@@ -1048,3 +1048,4 @@ its full title with its status.
 - [D1021](decisions/D1021.md) Code-only batch 669 (M14): instant copy-on-write clones and branches
 - [D1022](decisions/D1022.md) Code-only batch 670 (M14): a locked manifest and WORM for local archives
 - [D1023](decisions/D1023.md) Code-only batch 671 (M14): backups through serve's SQL clients and progress reports
+- [D1024](decisions/D1024.md) Code-only batch 672 (M14): replication wired into the engine and eggdb serve

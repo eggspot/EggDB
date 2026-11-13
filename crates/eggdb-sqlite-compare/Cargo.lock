@@ -57,6 +57,7 @@ dependencies = [
  "eggdb-platform",
  "eggdb-queues",
  "eggdb-rdf",
+ "eggdb-replication",
  "eggdb-resp",
  "eggdb-s3",
  "eggdb-sql",
@@ -406,6 +407,10 @@ dependencies = [
  "eggdb-http",
  "eggdb-keyspace",
 ]
+
+[[package]]
+name = "eggdb-replication"
+version = "0.5.0"
 
 [[package]]
 name = "eggdb-resp"

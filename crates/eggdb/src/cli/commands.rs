@@ -51,6 +51,7 @@ mod serve_mcp;
 mod serve_metrics;
 mod serve_otlp;
 mod serve_mongo;
+mod serve_replication;
 mod serve_resp;
 mod serve_tls;
 mod shell;

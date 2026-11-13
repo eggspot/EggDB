@@ -82,6 +82,7 @@ pub struct Database {
     collection_drops: AtomicU8,
     change_archive: Option<crate::change_archive::ChangeArchive>,
     encrypted: bool,
+    primary: OnceLock<Arc<crate::replication::ReplicationPrimary>>,
 }
 
 struct ClockHandle(Arc<dyn Clock>);
@@ -375,7 +376,18 @@ impl Database {
             collection_drops: AtomicU8::new(crate::collection::DROPS_UNKNOWN),
             change_archive,
             encrypted: options.encryption_key.is_some(),
+            primary: OnceLock::new(),
         })
+    }
+
+    pub(crate) fn primary(&self) -> Option<&Arc<crate::replication::ReplicationPrimary>> {
+        self.primary.get()
+    }
+
+    pub(crate) fn set_primary(&self, primary: Arc<crate::replication::ReplicationPrimary>) -> Result<()> {
+        self.primary
+            .set(primary)
+            .map_err(|_| Error::new(ErrorKind::InvalidOption, "the database already replicates as a primary"))
     }
 
     pub(crate) fn change_archive(&self) -> Option<&crate::change_archive::ChangeArchive> {

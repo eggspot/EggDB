@@ -301,6 +301,25 @@ impl Session<'_> {
             }
             None => None,
         };
+        let replication_listener = match options.replication_listen {
+            Some(address) => {
+                if !address.ip().is_loopback() && tls.is_none() {
+                    return Err(usage(format!(
+                        "--replication-listen {address}: replicas outside this machine connect over TLS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                if !self.request.file.is_file() && self.request.file.exists() {
+                    return Err(usage("--replication-listen replicates one database file, not a directory of databases".to_owned()));
+                }
+                Some(std::net::TcpListener::bind(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for replicas on {address}: {error}"), Exit::DatabaseError)
+                })?)
+            }
+            None => None,
+        };
+        if options.replica_of.is_some() && options.replication_listen.is_some() {
+            return Err(usage("a server is either a primary (--replication-listen) or a replica (--replica-of); cascading replicas come later".to_owned()));
+        }
         let kafka_listener = match options.kafka_listen {
             Some(address) => {
                 if !address.ip().is_loopback() {
@@ -675,6 +694,10 @@ impl Session<'_> {
             max_connections,
             memory_budget: Arc::clone(&memory_budget),
         };
+        let replication_credentials = super::serve_replication::ReplicationCredentials {
+            user: user.clone(),
+            password_sha256: eggdb_crypto::sha256(password.as_bytes()),
+        };
         let gremlin_config = eggdb_gremlin::ServerConfig {
             user: user.clone(),
             password_sha256: eggdb_crypto::sha256(password.as_bytes()),
@@ -792,8 +815,8 @@ impl Session<'_> {
             None => None,
         };
         drop(password);
-        let read_only = self.request.read_only;
-        let access = if read_only {
+        let read_only = self.request.read_only || options.replica_of.is_some();
+        let access = if self.request.read_only {
             Access::ReadOnly
         } else {
             Access::Write {
@@ -882,6 +905,7 @@ impl Session<'_> {
                 mongo_listener.as_ref(),
                 bolt_listener.as_ref(),
                 gremlin_listener.as_ref(),
+                replication_listener.as_ref(),
                 kafka_listener.as_ref(),
                 amqp_listener.as_ref(),
                 mqtt_listener.as_ref(),
@@ -1051,6 +1075,21 @@ impl Session<'_> {
         let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password)
             .with_memory_budget(Arc::clone(&memory_budget))
             .with_search_users(es_readers, options.es_permission_field.as_deref().unwrap_or("readers"));
+        let replication_primary = match &replication_listener {
+            Some(_) => Some(db.start_primary(eggdb::ReplicationMode::Asynchronous).map_err(|error| {
+                Failure::database(format!("cannot start replicating {}: {error}", self.file), Exit::DatabaseError)
+            })?),
+            None => None,
+        };
+        let replication_tls = tls.as_ref().map(|setup| Arc::clone(&setup.postgresql));
+        let replica_id = super::serve_replication::replica_id_of(&self.request.file);
+        let replica_primary = match &options.replica_of {
+            Some(address) => Some(super::serve_replication::PrimaryAddress {
+                address: address.clone(),
+                tls: replica_tls(address, options.replica_of_ca.as_deref()).map_err(usage)?,
+            }),
+            None => None,
+        };
         let graph_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::GRAPH_COLLECTIONS,
@@ -1488,6 +1527,32 @@ impl Session<'_> {
                 ),
                 None => Ok(()),
             });
+            let replication_server = scope.spawn(|| match (&replication_listener, &replication_primary) {
+                (Some(listener), Some(primary)) => super::serve_replication::serve_primary(
+                    listener,
+                    primary,
+                    &replication_credentials,
+                    replication_tls.clone(),
+                    &stop_signals::requested,
+                ),
+                _ => Ok(()),
+            });
+            let replica_follower = scope.spawn(|| match &replica_primary {
+                Some(primary) => {
+                    let outcome = super::serve_replication::follow_primary(
+                        primary,
+                        &db,
+                        &replication_credentials,
+                        replica_id,
+                        &stop_signals::requested,
+                    );
+                    if let Err(message) = &outcome {
+                        eprintln!("eggdb serve: the replica stopped following its primary: {message}");
+                    }
+                    outcome
+                }
+                None => Ok(()),
+            });
             let gremlin_server = scope.spawn(|| match &gremlin_listener {
                 Some(listener) => eggdb_gremlin::serve(
                     &graph_database,
@@ -1560,6 +1625,8 @@ impl Session<'_> {
             let _ = mongo_server.join();
             let _ = bolt_server.join();
             let _ = gremlin_server.join();
+            let _ = replication_server.join();
+            let _ = replica_follower.join();
             let _ = kafka_server.join();
             let _ = amqp_server.join();
             let _ = mqtt_server.join();
@@ -2298,4 +2365,21 @@ fn audit_server_events_from_environment(database: &std::path::Path) -> Result<()
         }
     }));
     Ok(())
+}
+
+fn replica_tls(address: &str, ca_file: Option<&std::path::Path>) -> Result<Option<eggdb_tls::ClientConfig>, String> {
+    let host = address.rsplit_once(':').map_or(address, |(host, _)| host).trim_start_matches('[').trim_end_matches(']');
+    let loopback = host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    let Some(ca_file) = ca_file else {
+        if loopback {
+            return Ok(None);
+        }
+        return Err(format!(
+            "--replica-of {address}: a primary on another machine is reached over TLS; give the CA that signed its certificate with --replica-of-ca <file>"
+        ));
+    };
+    let text = std::fs::read_to_string(ca_file).map_err(|error| format!("cannot read --replica-of-ca {}: {error}", ca_file.display()))?;
+    let trust = eggdb_tls::verify::TrustStore::from_pem(&text).map_err(|error| format!("--replica-of-ca {}: {error}", ca_file.display()))?;
+    let server_name = eggdb_tls::verify::ServerName::parse(host).map_err(|error| format!("--replica-of {address}: {error}"))?;
+    Ok(Some(eggdb_tls::ClientConfig::new(eggdb_tls::ServerVerification::Full { trust, server_name }, host)))
 }
