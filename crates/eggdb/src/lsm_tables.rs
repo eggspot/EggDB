@@ -231,6 +231,11 @@ mod tests {
         assert_eq!(keys(&db).len(), 201);
         let report = db.check().unwrap();
         assert_eq!(report.leaked_pages, 0);
+        let (bytes, backup) = db.backup_to_bytes().unwrap();
+        assert_eq!(backup.entries, 201);
+        let copy = Database::from_image(bytes, crate::Options::new()).unwrap();
+        assert!(!copy.has_lsm_tables());
+        assert_eq!(keys(&copy), keys(&db));
     }
 
     #[test]

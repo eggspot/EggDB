@@ -1026,10 +1026,12 @@ impl Database {
         let copy = Path::new("/backup.eggdb");
         let staging = Path::new("/backup.eggdb.backing-up");
         let snapshot = self.store.begin_read().map_err(Error::storage)?;
+        let lsm_roots = self.lsm_root_range();
         let destination = CopyDestination {
             path: copy,
             staging,
             replaces: false,
+            lsm_roots: lsm_roots.as_ref().map(|(start, end)| (start.as_slice(), end.as_slice())),
         };
         let report = snapshot
             .copy_to_reporting(&fs, &OsMemory::new(), Arc::clone(&self.clock.0), destination, &mut |_| {})
@@ -1058,10 +1060,12 @@ impl Database {
         let copy = path.as_ref();
         let staging = staging_path(copy, BACKUP_STAGING_SUFFIX);
         let snapshot = self.store.begin_read().map_err(Error::storage)?;
+        let lsm_roots = self.lsm_root_range();
         let destination = CopyDestination {
             path: copy,
             staging: &staging,
             replaces: false,
+            lsm_roots: lsm_roots.as_ref().map(|(start, end)| (start.as_slice(), end.as_slice())),
         };
         let report = snapshot
             .copy_to_reporting(
@@ -1138,15 +1142,18 @@ impl Database {
         }
         let staging = staging_path(&self.path, COMPACTION_STAGING_SUFFIX);
         let before = self.store.superblock().map_err(Error::storage)?;
+        let roots = self.lsm_root_range();
         let checked = self
             .store
-            .check()
+            .check_with_lsm_roots(roots.as_ref().map(|(start, end)| (start.as_slice(), end.as_slice())))
             .map_err(|error| self.compaction_check_failure(error))?;
         let snapshot = self.store.begin_read().map_err(Error::storage)?;
+        let lsm_roots = self.lsm_root_range();
         let destination = CopyDestination {
             path: &self.path,
             staging: &staging,
             replaces: true,
+            lsm_roots: lsm_roots.as_ref().map(|(start, end)| (start.as_slice(), end.as_slice())),
         };
         let report = snapshot
             .copy_to(
@@ -1294,6 +1301,11 @@ impl Database {
 
     pub(crate) fn remember_tree(&self, tree: BTree) {
         let _ = self.tree.set(tree);
+    }
+
+    fn lsm_root_range(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.has_lsm_tables()
+            .then(|| (crate::lsm_tables::routes_start(), crate::lsm_tables::routes_end()))
     }
 
     pub(crate) fn has_lsm_tables(&self) -> bool {

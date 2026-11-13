@@ -130,6 +130,7 @@ fn backup_destination() -> CopyDestination<'static> {
         path: Path::new(COPY),
         staging: Path::new(COPY_STAGING),
         replaces: false,
+        lsm_roots: None,
     }
 }
 
@@ -138,6 +139,7 @@ fn compaction_destination() -> CopyDestination<'static> {
         path: Path::new(DB),
         staging: Path::new(DB_STAGING),
         replaces: true,
+        lsm_roots: None,
     }
 }
 

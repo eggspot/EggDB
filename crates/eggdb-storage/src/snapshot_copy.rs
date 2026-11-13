@@ -1,7 +1,8 @@
 use crate::btree::BTree;
 use crate::cursor::ScanOrder;
 use crate::error::StorageError;
-use crate::format::{Access, FileId, NO_PAGE, PageSize};
+use crate::format::{Access, Features, FileId, NO_PAGE, PageSize};
+use crate::lsm::LsmTree;
 use crate::hybrid_clock::CommitStamp;
 use crate::log::Durability;
 use crate::overflow;
@@ -30,6 +31,12 @@ pub struct CopyDestination<'p> {
     /// Whether a file at `path` is replaced, as compacting a file does with the file itself;
     /// otherwise a file at `path` refuses the copy.
     pub replaces: bool,
+    /// Where the catalog tree keeps the roots of LSM trees (D1119), from the first key
+    /// (inclusive) to the second (exclusive), each value an 8-byte big-endian root. The copy
+    /// folds those trees' live entries into its catalog tree, leaves the root keys out and
+    /// clears [`Features::LSM_TABLES`](crate::Features::LSM_TABLES), so it holds the same
+    /// entries in plain B-tree form. `None` copies the catalog tree as it is.
+    pub lsm_roots: Option<(&'p [u8], &'p [u8])>,
 }
 
 /// How far a copy has come, as [`ReadTransaction::copy_to_reporting`] reports it.
@@ -191,8 +198,12 @@ impl<F: File> ReadTransaction<'_, F> {
             NO_PAGE => None,
             root => Some(self.open_tree(root)?),
         };
+        let folded = match (&source, destination.lsm_roots) {
+            (Some(tree), Some((start, end))) => self.folded_lsm_trees(tree, start, end)?,
+            _ => Vec::new(),
+        };
         let survey = match &source {
-            Some(tree) => self.survey(tree)?,
+            Some(tree) => self.survey(tree, destination.lsm_roots, &folded)?,
             None => Survey::default(),
         };
         let options = CreateOptions {
@@ -209,22 +220,58 @@ impl<F: File> ReadTransaction<'_, F> {
                 let _ = fs.remove_file(destination.staging);
             })?;
         }
-        self.fill(file, memory, clock, source, survey, progress)
+        let skipped = destination.lsm_roots;
+        self.fill(file, memory, clock, source, survey, Folding { skipped, trees: &folded }, progress)
             .inspect_err(|_| {
                 let _ = fs.remove_file(destination.staging);
             })
     }
 
-    fn survey(&self, tree: &BTree) -> Result<Survey, StorageError> {
+    fn folded_lsm_trees(
+        &self,
+        tree: &BTree,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<LsmTree>, StorageError> {
+        let mut cursor = tree.scan(Bound::Included(start), Bound::Excluded(end), ScanOrder::Ascending);
+        let mut roots = Vec::new();
+        while let Some((_, value)) = self.next(&mut cursor)? {
+            let bytes: [u8; 8] = value.try_into().map_err(|_| {
+                StorageError::from(crate::error::FormatError::CorruptLsm {
+                    problem: "an LSM table's root is not 8 bytes",
+                })
+            })?;
+            roots.push(u64::from_be_bytes(bytes));
+        }
+        roots.into_iter().map(|root| self.open_lsm_tree(root)).collect()
+    }
+
+    fn survey(
+        &self,
+        tree: &BTree,
+        skipped: Option<(&[u8], &[u8])>,
+        folded: &[LsmTree],
+    ) -> Result<Survey, StorageError> {
         let mut cursor = tree.scan(Bound::Unbounded, Bound::Unbounded, ScanOrder::Ascending);
         let mut survey = Survey::default();
-        while let Some((_, value_bytes)) = self.next_key_and_value_len(&mut cursor)? {
+        while let Some((key, value_bytes)) = self.next_key_and_value_len(&mut cursor)? {
+            if skipped.is_some_and(|(start, end)| key >= start && key < end) {
+                continue;
+            }
             survey.entries += 1;
             survey.largest_value_bytes = survey.largest_value_bytes.max(value_bytes);
+        }
+        for lsm in folded {
+            let mut cursor = self.lsm_scan(lsm, Bound::Unbounded, Bound::Unbounded, ScanOrder::Ascending)?;
+            while let Some((_, value)) = self.lsm_next(&mut cursor)? {
+                survey.entries += 1;
+                survey.largest_value_bytes = survey.largest_value_bytes.max(value.len() as u64);
+            }
         }
         Ok(survey)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fill<G: File>(
         &self,
         file: PageFile<G>,
@@ -232,6 +279,7 @@ impl<F: File> ReadTransaction<'_, F> {
         clock: Arc<dyn Clock>,
         source: Option<BTree>,
         survey: Survey,
+        folding: Folding<'_>,
         progress: &mut dyn FnMut(CopyProgress),
     ) -> Result<CopyReport, StorageError> {
         let page_size = file.page_size();
@@ -243,7 +291,10 @@ impl<F: File> ReadTransaction<'_, F> {
             None => None,
         };
         let catalog_root = target.map_or(NO_PAGE, |tree| tree.root());
-        let features = self.features();
+        let mut features = self.features();
+        if folding.skipped.is_some() {
+            features.incompatible &= !Features::LSM_TABLES;
+        }
         let high_water = self.stamp().bits();
         cache.commit(|superblock| {
             superblock.catalog_root = catalog_root;
@@ -258,7 +309,7 @@ impl<F: File> ReadTransaction<'_, F> {
         if let (Some(source), Some(target)) = (source, target) {
             let batch_bytes =
                 (frames as u64).saturating_mul(page_size.bytes() as u64) / BATCH_SHARE_OF_CACHE;
-            self.copy_entries(&source, &store, &target, batch_bytes, &mut report, survey.entries, progress)?;
+            self.copy_entries(&source, &store, &target, batch_bytes, &mut report, survey.entries, folding, progress)?;
         }
         store.checkpoint()?;
         store.sync()?;
@@ -276,6 +327,7 @@ impl<F: File> ReadTransaction<'_, F> {
         Ok(report)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn copy_entries<G: File>(
         &self,
         source: &BTree,
@@ -284,27 +336,70 @@ impl<F: File> ReadTransaction<'_, F> {
         batch_bytes: u64,
         report: &mut CopyReport,
         total: u64,
+        folding: Folding<'_>,
         progress: &mut dyn FnMut(CopyProgress),
     ) -> Result<(), StorageError> {
         let mut cursor = source.scan(Bound::Unbounded, Bound::Unbounded, ScanOrder::Ascending);
-        let mut transaction = store.begin_write()?;
-        let mut batch = 0u64;
+        let mut batch = Batch {
+            transaction: store.begin_write()?,
+            bytes: 0,
+            limit: batch_bytes,
+        };
         while let Some((key, value)) = self.next(&mut cursor)? {
-            let entry_bytes = (key.len() + value.len()) as u64 + ENTRY_OVERHEAD_BYTES;
-            if batch > 0 && batch.saturating_add(entry_bytes) > batch_bytes {
-                transaction.commit()?;
-                progress(CopyProgress { entries: report.entries, total_entries: total });
-                transaction = store.begin_write()?;
-                batch = 0;
+            if folding.skipped.is_some_and(|(start, end)| key >= start && key < end) {
+                continue;
             }
-            transaction.put(target, key, value)?;
-            batch = batch.saturating_add(entry_bytes);
-            report.entries += 1;
-            report.key_bytes += key.len() as u64;
-            report.value_bytes += value.len() as u64;
+            batch.put(store, target, key, value, report, total, progress)?;
         }
+        for lsm in folding.trees {
+            let mut lsm_cursor = self.lsm_scan(lsm, Bound::Unbounded, Bound::Unbounded, ScanOrder::Ascending)?;
+            while let Some((key, value)) = self.lsm_next(&mut lsm_cursor)? {
+                batch.put(store, target, key, value, report, total, progress)?;
+            }
+        }
+        let transaction = batch.transaction;
         transaction.commit()?;
         progress(CopyProgress { entries: report.entries, total_entries: total });
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Folding<'f> {
+    skipped: Option<(&'f [u8], &'f [u8])>,
+    trees: &'f [LsmTree],
+}
+
+struct Batch<'s, G: File> {
+    transaction: crate::store::WriteTransaction<'s, G>,
+    bytes: u64,
+    limit: u64,
+}
+
+impl<'s, G: File> Batch<'s, G> {
+    #[allow(clippy::too_many_arguments)]
+    fn put(
+        &mut self,
+        store: &'s Store<G>,
+        target: &BTree,
+        key: &[u8],
+        value: &[u8],
+        report: &mut CopyReport,
+        total: u64,
+        progress: &mut dyn FnMut(CopyProgress),
+    ) -> Result<(), StorageError> {
+        let entry_bytes = (key.len() + value.len()) as u64 + ENTRY_OVERHEAD_BYTES;
+        if self.bytes > 0 && self.bytes.saturating_add(entry_bytes) > self.limit {
+            let finished = core::mem::replace(&mut self.transaction, store.begin_write()?);
+            finished.commit()?;
+            progress(CopyProgress { entries: report.entries, total_entries: total });
+            self.bytes = 0;
+        }
+        self.transaction.put(target, key, value)?;
+        self.bytes = self.bytes.saturating_add(entry_bytes);
+        report.entries += 1;
+        report.key_bytes += key.len() as u64;
+        report.value_bytes += value.len() as u64;
         Ok(())
     }
 }
