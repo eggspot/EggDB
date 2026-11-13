@@ -422,8 +422,46 @@ impl Session<'_> {
                 Some((settings, listener))
             }
             None => {
-                if options.cluster_node.is_some() || options.cluster_seed || options.cluster_ca.is_some() {
+                if options.cluster_node.is_some() || options.cluster_seed || (options.cluster_ca.is_some() && options.quorum.is_none()) {
                     return Err(usage("--cluster-node, --cluster-seed and --cluster-ca go with --cluster".to_owned()));
+                }
+                None
+            }
+        };
+        let quorum = match &options.quorum {
+            Some(text) => {
+                let members = super::serve_cluster::parse_members(text).map_err(|message| usage(message.replace("--cluster", "--quorum")))?;
+                let node = options
+                    .quorum_node
+                    .ok_or_else(|| usage("--quorum needs --quorum-node <id>, this server's id in it".to_owned()))?;
+                let address = members
+                    .get(&node)
+                    .cloned()
+                    .ok_or_else(|| usage(format!("--quorum-node {node} is not one of the ids in --quorum")))?;
+                if !super::serve_cluster::is_loopback(&address) && tls.is_none() {
+                    return Err(usage(format!(
+                        "--quorum: node {node} listens on {address}, and nodes and clients outside this machine connect over TLS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                }
+                let settings = super::serve_quorum::QuorumSettings {
+                    node,
+                    replicas: options.quorum_replicas.unwrap_or_else(|| super::serve_quorum::default_replicas(members.len())),
+                    members,
+                    resolution: super::serve_quorum::resolution_named(options.quorum_resolution.as_deref()),
+                    ca_file: options.cluster_ca.clone(),
+                };
+                settings
+                    .config()
+                    .validate()
+                    .map_err(|_| usage("--quorum-replicas n,r,w needs 1 <= r, w <= n <= the nodes in --quorum".to_owned()))?;
+                let listener = std::net::TcpListener::bind(&address).map_err(|error| {
+                    Failure::database(format!("cannot listen for the quorum's nodes and clients on {address}: {error}"), Exit::DatabaseError)
+                })?;
+                Some((settings, listener))
+            }
+            None => {
+                if options.quorum_node.is_some() || options.quorum_replicas.is_some() || options.quorum_resolution.is_some() {
+                    return Err(usage("--quorum-node, --quorum-replicas and --quorum-resolution go with --quorum".to_owned()));
                 }
                 None
             }
@@ -1965,6 +2003,23 @@ impl Session<'_> {
                 }
                 None => Ok(()),
             });
+            let quorum_node = scope.spawn(|| match &quorum {
+                Some((settings, listener)) => {
+                    let outcome = super::serve_quorum::run_quorum(
+                        &db,
+                        settings,
+                        listener,
+                        replication_tls.clone(),
+                        &password,
+                        &stop_signals::requested,
+                    );
+                    if let Err(message) = &outcome {
+                        eprintln!("eggdb serve: the quorum node stopped: {message}");
+                    }
+                    outcome
+                }
+                None => Ok(()),
+            });
             let standby_follower = scope.spawn(|| match &options.standby_of {
                 Some(directory) => {
                     let delay = std::time::Duration::from_secs(options.apply_delay_seconds.unwrap_or(0));
@@ -2060,6 +2115,7 @@ impl Session<'_> {
             let _ = replication_monitor.join();
             let _ = standby_follower.join();
             let _ = cluster_node.join();
+            let _ = quorum_node.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();
             let _ = database_arrivals.join();

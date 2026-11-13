@@ -937,3 +937,166 @@ fn a_rolling_upgrade_raises_the_level_only_when_every_member_speaks_it() {
     assert_eq!(negotiated_level(2, &members, &ranges), 2);
     assert_eq!(negotiated_level(1, &members, &ranges), 1);
 }
+
+mod quorum_over_the_network {
+    use crate::quorum::{Resolution, Stamp, Version, VersionVector};
+    use crate::quorum_net::{MemoryReplicaStore, QuorumClient, QuorumConfig, QuorumNode, ReplicaStore, plain_acceptor};
+    use crate::quorum_wire::{Request, Response, decode_versions, encode_versions, read_frame, write_frame};
+    use std::collections::BTreeMap;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    fn version(node: u64, value: &[u8]) -> Version {
+        let mut vector = VersionVector::default();
+        vector.bump(node);
+        Version { vector, stamp: Stamp { millis: 7, counter: 1, node }, value: Some(value.to_vec()) }
+    }
+
+    #[test]
+    fn every_message_survives_its_frame() {
+        let messages = [
+            Request::Put { key: b"k".to_vec(), value: None, context: version(1, b"v").vector },
+            Request::Get { key: b"k".to_vec() },
+            Request::Store { key: b"k".to_vec(), version: version(2, b"v") },
+            Request::Fetch { key: Vec::new() },
+            Request::Hint { owner: 3, key: b"k".to_vec(), version: version(2, b"") },
+            Request::Tree { peer: 9 },
+            Request::KeysAt { peer: 9, leaves: vec![0, 5, 1023] },
+        ];
+        for message in messages {
+            assert_eq!(Request::decode(&message.encode()), Some(message));
+        }
+        let answers = [
+            Response::Ack,
+            Response::Written(version(1, b"v")),
+            Response::Values { values: vec![Some(b"a".to_vec()), None], context: VersionVector::default() },
+            Response::Versions(vec![version(1, b"a"), version(2, b"b")]),
+            Response::Leaves(vec![1, u128::MAX]),
+            Response::Keys(vec![b"x".to_vec()]),
+            Response::Failed("no".to_owned()),
+        ];
+        for answer in answers {
+            assert_eq!(Response::decode(&answer.encode()), Some(answer));
+        }
+        let versions = vec![version(4, b"x")];
+        assert_eq!(decode_versions(&encode_versions(&versions)), Some(versions));
+    }
+
+    #[test]
+    fn damaged_frames_are_refused_without_panicking() {
+        let encoded = Request::Store { key: b"key".to_vec(), version: version(1, b"value") }.encode();
+        for cut in 0..encoded.len() {
+            assert_eq!(Request::decode(&encoded[..cut]), None);
+        }
+        assert_eq!(Request::decode(&[99]), None);
+        assert_eq!(Response::decode(&[0x83, 0xff, 0xff, 0xff, 0xff]), None);
+        let mut oversized = Vec::new();
+        oversized.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(read_frame(&mut oversized.as_slice()).is_err());
+        let mut framed = Vec::new();
+        write_frame(&mut framed, b"body").unwrap();
+        assert_eq!(read_frame(&mut framed.as_slice()).unwrap(), Some(b"body".to_vec()));
+    }
+
+    fn cluster(listeners: &[TcpListener]) -> Vec<QuorumNode<MemoryReplicaStore>> {
+        let addresses: BTreeMap<u64, String> = listeners
+            .iter()
+            .enumerate()
+            .map(|(at, listener)| (at as u64 + 1, listener.local_addr().unwrap().to_string()))
+            .collect();
+        addresses
+            .keys()
+            .map(|node| {
+                let peers = addresses.iter().filter(|(other, _)| *other != node).map(|(id, address)| (*id, address.clone())).collect();
+                let config = QuorumConfig {
+                    node: *node,
+                    peers,
+                    n: 3,
+                    r: 2,
+                    w: 2,
+                    resolution: Resolution::LastWriterWins,
+                    timeout: Duration::from_millis(500),
+                };
+                QuorumNode::new(config, MemoryReplicaStore::default()).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn writes_reach_a_quorum_and_anti_entropy_catches_a_late_node_up() {
+        let listeners: Vec<TcpListener> = (0..3).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+        let nodes = cluster(&listeners);
+        let stop = AtomicBool::new(false);
+        let stopped = || stop.load(Ordering::Relaxed);
+        let late = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| nodes[0].serve(&listeners[0], &plain_acceptor, &stopped));
+            scope.spawn(|| nodes[1].serve(&listeners[1], &plain_acceptor, &stopped));
+            scope.spawn(|| {
+                while !late.load(Ordering::Relaxed) && !stopped() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                nodes[2].serve(&listeners[2], &plain_acceptor, &stopped)
+            });
+            let mut client = QuorumClient::connect(&listeners[0].local_addr().unwrap().to_string(), Duration::from_secs(5)).unwrap();
+            let written = client.put(b"cart", b"eggs", &VersionVector::default()).unwrap();
+            assert_eq!(written.value.as_deref(), Some(&b"eggs"[..]));
+            assert!(nodes[2].store().versions(b"cart").unwrap().is_empty());
+            let read = client.get(b"cart").unwrap();
+            assert_eq!(read.values, vec![Some(b"eggs".to_vec())]);
+            let replaced = client.put(b"cart", b"eggs and milk", &read.context).unwrap();
+            assert!(replaced.vector.descends(&written.vector));
+            late.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(nodes[0].anti_entropy() >= 1);
+            assert_eq!(
+                nodes[2].store().versions(b"cart").unwrap().last().and_then(|version| version.value.clone()),
+                Some(b"eggs and milk".to_vec())
+            );
+            let mut third = QuorumClient::connect(&listeners[2].local_addr().unwrap().to_string(), Duration::from_secs(5)).unwrap();
+            assert_eq!(third.get(b"cart").unwrap().values, vec![Some(b"eggs and milk".to_vec())]);
+            third.delete(b"cart", &third.get(b"cart").unwrap().context).unwrap();
+            assert_eq!(client.get(b"cart").unwrap().values, vec![None]);
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+
+    #[test]
+    fn a_node_with_a_password_turns_away_a_client_without_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let config = QuorumConfig {
+            node: 1,
+            peers: BTreeMap::new(),
+            n: 1,
+            r: 1,
+            w: 1,
+            resolution: Resolution::KeepSiblings,
+            timeout: Duration::from_millis(500),
+        };
+        let node = QuorumNode::new(config, MemoryReplicaStore::default()).unwrap().with_password(b"secret".to_vec());
+        let stop = AtomicBool::new(false);
+        let stopped = || stop.load(Ordering::Relaxed);
+        std::thread::scope(|scope| {
+            scope.spawn(|| node.serve(&listener, &plain_acceptor, &stopped));
+            let mut stranger = QuorumClient::connect(&address, Duration::from_secs(5)).unwrap();
+            assert!(stranger.get(b"k").is_err());
+            let mut wrong = QuorumClient::connect(&address, Duration::from_secs(5)).unwrap();
+            assert!(wrong.login(b"guess").is_err());
+            let mut member = QuorumClient::connect(&address, Duration::from_secs(5)).unwrap();
+            member.login(b"secret").unwrap();
+            member.put(b"k", b"v", &VersionVector::default()).unwrap();
+            assert_eq!(member.get(b"k").unwrap().values, vec![Some(b"v".to_vec())]);
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+
+    #[test]
+    fn a_write_without_a_quorum_fails() {
+        let listeners: Vec<TcpListener> = (0..3).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+        let nodes = cluster(&listeners);
+        assert!(nodes[0].put(b"k", Some(b"v".to_vec()), &VersionVector::default()).is_err());
+        assert_eq!(nodes[0].store().versions(b"k").unwrap().len(), 1);
+    }
+}

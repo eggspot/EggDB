@@ -304,6 +304,10 @@ impl CommandName {
             | OptionName::CdcCapture
             | OptionName::PgReplication
             | OptionName::Cluster
+            | OptionName::Quorum
+            | OptionName::QuorumNode
+            | OptionName::QuorumReplicas
+            | OptionName::QuorumResolution
             | OptionName::ClusterNode
             | OptionName::ClusterSeed
             | OptionName::ClusterCa
@@ -548,6 +552,10 @@ enum OptionName {
     CdcCapture,
     PgReplication,
     Cluster,
+    Quorum,
+    QuorumNode,
+    QuorumReplicas,
+    QuorumResolution,
     ClusterNode,
     ClusterSeed,
     ClusterCa,
@@ -730,6 +738,10 @@ impl OptionName {
             b"cdc-capture" => Self::CdcCapture,
             b"pg-replication" => Self::PgReplication,
             b"cluster" => Self::Cluster,
+            b"quorum" => Self::Quorum,
+            b"quorum-node" => Self::QuorumNode,
+            b"quorum-replicas" => Self::QuorumReplicas,
+            b"quorum-resolution" => Self::QuorumResolution,
             b"cluster-node" => Self::ClusterNode,
             b"cluster-seed" => Self::ClusterSeed,
             b"cluster-ca" => Self::ClusterCa,
@@ -1118,6 +1130,10 @@ pub(crate) struct ServeOptions {
     pub(crate) cdc_capture_engine: bool,
     pub(crate) pg_replication: bool,
     pub(crate) cluster: Option<String>,
+    pub(crate) quorum: Option<String>,
+    pub(crate) quorum_node: Option<u64>,
+    pub(crate) quorum_replicas: Option<(usize, usize, usize)>,
+    pub(crate) quorum_resolution: Option<String>,
     pub(crate) moves_listen: Option<SocketAddr>,
     pub(crate) cluster_node: Option<u64>,
     pub(crate) cluster_seed: bool,
@@ -1944,6 +1960,34 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                         .filter(|id| *id != u64::MAX)
                         .ok_or_else(|| usage(format!("{} takes this server's id in --cluster", option.spelled)))?,
                 );
+            }
+            OptionName::Quorum => {
+                let text = value.to_str().filter(|text| text.contains('=')).ok_or_else(|| usage(format!("{} takes id=host:port for every node, separated by commas", option.spelled)))?;
+                request.serve.quorum = Some(text.to_owned());
+            }
+            OptionName::QuorumNode => {
+                request.serve.quorum_node = Some(
+                    value
+                        .to_str()
+                        .and_then(|text| text.parse::<u64>().ok())
+                        .ok_or_else(|| usage(format!("{} takes this server's id in --quorum", option.spelled)))?,
+                );
+            }
+            OptionName::QuorumReplicas => {
+                let numbers: Vec<usize> = value
+                    .to_str()
+                    .map(|text| text.split(',').filter_map(|part| part.trim().parse().ok()).collect())
+                    .unwrap_or_default();
+                let [n, r, w] = numbers[..] else {
+                    return Err(usage(format!("{} takes n,r,w: the replicas of each key, the answers a read needs and the acknowledgements a write needs, such as 3,2,2", option.spelled)));
+                };
+                request.serve.quorum_replicas = Some((n, r, w));
+            }
+            OptionName::QuorumResolution => {
+                let text = value.to_str().filter(|text| matches!(*text, "lww" | "siblings" | "counter" | "set")).ok_or_else(|| {
+                    usage(format!("{} must be lww, siblings, counter or set, not '{}'", option.spelled, shown(value)))
+                })?;
+                request.serve.quorum_resolution = Some(text.to_owned());
             }
             OptionName::ClusterSeed => request.serve.cluster_seed = true,
             OptionName::ClusterCa => request.serve.cluster_ca = Some(PathBuf::from(value)),

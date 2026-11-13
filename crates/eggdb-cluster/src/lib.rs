@@ -7,7 +7,8 @@
 //! changes that span shards with two-phase commit, recording each decision in a
 //! [`transaction::DecisionLog`]. [`ShardMap::encode`] gives the map's stored form, so the map and
 //! the decisions live in the cluster's Raft-replicated database (D1039). [`quorum`] replicates
-//! keys without a leader: any node takes writes, quorums decide success, and replicas converge.
+//! keys without a leader: any node takes writes, quorums decide success, and replicas converge;
+//! [`quorum_net`] runs it between processes over TCP.
 
 pub mod clock;
 mod codec;
@@ -16,6 +17,8 @@ pub mod databases;
 pub mod global_index;
 pub mod merkle;
 pub mod quorum;
+pub mod quorum_net;
+pub mod quorum_wire;
 pub mod regions;
 pub mod simulation;
 pub mod tenants;

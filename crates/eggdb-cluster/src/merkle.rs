@@ -74,6 +74,11 @@ impl MerkleTree {
         Self { depth, nodes }
     }
 
+    /// The leaves' digests, in leaf order: what one node sends another to compare (D1097).
+    pub fn leaves(&self) -> &[u128] {
+        self.nodes.get(1usize << self.depth..).unwrap_or(&[])
+    }
+
     /// The root digest.
     pub fn root(&self) -> u128 {
         self.nodes.get(1).copied().unwrap_or_else(|| self.nodes.first().copied().unwrap_or(0))

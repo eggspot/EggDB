@@ -2038,7 +2038,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-13, D1096): `scripts/footprint-image.sh`, the release's "Container image" notes, and the `container` budgets.
 
 ### M18 The other ways of scaling
-- Leaderless quorums over the network, wired under `eggdb serve` (D225).
+- Leaderless quorums over the network, wired under `eggdb serve` (D225). **Code written, unbuilt** (code-only mode, 2026-11-13,
+  D1097): `eggdb_cluster::quorum_net` and `quorum_wire`, `eggdb::quorum_store`, and `eggdb serve --quorum`.
 - Merkle trees for anti-entropy (D225). **Code written, unbuilt** (code-only mode, 2026-11-11, D443).
 - CRDT types (counters, sets) as resolution policies (D18, D225). **Code written, unbuilt** (code-only mode,
   2026-11-11, D442).

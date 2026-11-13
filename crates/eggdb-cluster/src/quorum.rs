@@ -10,9 +10,9 @@
 use crate::NodeId;
 use std::collections::{BTreeMap, BTreeSet};
 
-const MERKLE_DEPTH: u32 = 10;
+pub(crate) const MERKLE_DEPTH: u32 = 10;
 
-fn versions_digest(versions: &[Version]) -> u128 {
+pub(crate) fn versions_digest(versions: &[Version]) -> u128 {
     let mut digest = crate::merkle::Digest::default();
     for version in versions {
         for (node, count) in &version.vector.0 {
@@ -47,6 +47,21 @@ pub struct Stamp {
 pub struct VersionVector(BTreeMap<NodeId, u64>);
 
 impl VersionVector {
+    /// Each node and how many of its writes the vector has seen, by node.
+    pub fn entries(&self) -> impl Iterator<Item = (NodeId, u64)> + '_ {
+        self.0.iter().map(|(node, count)| (*node, *count))
+    }
+
+    /// A vector of the given counts; a node named twice keeps the larger count.
+    pub fn from_entries(entries: impl IntoIterator<Item = (NodeId, u64)>) -> Self {
+        let mut vector = Self::default();
+        for (node, count) in entries {
+            let mine = vector.0.entry(node).or_insert(0);
+            *mine = (*mine).max(count);
+        }
+        vector
+    }
+
     /// Counts one more write by `node`.
     pub fn bump(&mut self, node: NodeId) {
         *self.0.entry(node).or_insert(0) += 1;
@@ -97,62 +112,74 @@ pub struct Replica {
     versions: BTreeMap<Vec<u8>, Vec<Version>>,
 }
 
+/// Takes `incoming` into `held`, the versions kept for one key, by `resolution`: drops what it
+/// supersedes, ignores it when something held already supersedes it, and merges concurrent
+/// versions as the resolution says. Returns whether `held` changed. [`Replica`] keeps its keys
+/// this way, and so does a replica kept in a database (D1097).
+pub fn reconcile(held: &mut Vec<Version>, incoming: &Version, resolution: Resolution) -> bool {
+    if held.iter().any(|version| {
+        version == incoming
+            || (version.vector.descends(&incoming.vector) && version.vector != incoming.vector)
+    }) {
+        return false;
+    }
+    if held
+        .iter()
+        .any(|version| version.vector == incoming.vector && version.stamp >= incoming.stamp)
+    {
+        return false;
+    }
+    held.retain(|version| !incoming.vector.descends(&version.vector));
+    held.push(incoming.clone());
+    if let Resolution::Crdt(kind) = resolution
+        && held.len() > 1
+    {
+        let mut merged = VersionVector::default();
+        let mut value: Option<Vec<u8>> = None;
+        let mut stamp = Stamp::default();
+        for version in held.iter() {
+            merged.merge(&version.vector);
+            stamp = stamp.max(version.stamp);
+            value = Some(crate::crdt::merged(
+                kind,
+                value.as_deref(),
+                version.value.as_deref(),
+            ));
+        }
+        *held = vec![Version {
+            vector: merged,
+            stamp,
+            value,
+        }];
+    }
+    if resolution == Resolution::LastWriterWins && held.len() > 1 {
+        let mut merged = VersionVector::default();
+        for version in held.iter() {
+            merged.merge(&version.vector);
+        }
+        let winner = held
+            .iter()
+            .max_by_key(|version| version.stamp)
+            .cloned()
+            .unwrap_or_else(|| incoming.clone());
+        *held = vec![Version {
+            vector: merged,
+            ..winner
+        }];
+    }
+    held.sort_by_key(|version| version.stamp);
+    true
+}
+
 impl Replica {
     /// Takes in `incoming` for `key`; returns whether it changed what the replica holds.
     pub fn apply(&mut self, key: &[u8], incoming: &Version, resolution: Resolution) -> bool {
-        let held = self.versions.entry(key.to_vec()).or_default();
-        if held.iter().any(|version| {
-            version == incoming
-                || (version.vector.descends(&incoming.vector) && version.vector != incoming.vector)
-        }) {
-            return false;
-        }
-        if held
-            .iter()
-            .any(|version| version.vector == incoming.vector && version.stamp >= incoming.stamp)
-        {
-            return false;
-        }
-        held.retain(|version| !incoming.vector.descends(&version.vector));
-        held.push(incoming.clone());
-        if let Resolution::Crdt(kind) = resolution
-            && held.len() > 1
-        {
-            let mut merged = VersionVector::default();
-            let mut value: Option<Vec<u8>> = None;
-            let mut stamp = Stamp::default();
-            for version in held.iter() {
-                merged.merge(&version.vector);
-                stamp = stamp.max(version.stamp);
-                value = Some(crate::crdt::merged(
-                    kind,
-                    value.as_deref(),
-                    version.value.as_deref(),
-                ));
-            }
-            *held = vec![Version {
-                vector: merged,
-                stamp,
-                value,
-            }];
-        }
-        if resolution == Resolution::LastWriterWins && held.len() > 1 {
-            let mut merged = VersionVector::default();
-            for version in held.iter() {
-                merged.merge(&version.vector);
-            }
-            let winner = held
-                .iter()
-                .max_by_key(|version| version.stamp)
-                .cloned()
-                .unwrap_or_else(|| incoming.clone());
-            *held = vec![Version {
-                vector: merged,
-                ..winner
-            }];
-        }
-        held.sort_by_key(|version| version.stamp);
-        true
+        reconcile(self.versions.entry(key.to_vec()).or_default(), incoming, resolution)
+    }
+
+    /// Every key the replica holds, in key order.
+    pub fn keys(&self) -> impl Iterator<Item = &Vec<u8>> {
+        self.versions.keys()
     }
 
     /// The versions held for `key`, oldest stamp first.
@@ -187,7 +214,7 @@ pub struct ReadResult {
     pub context: VersionVector,
 }
 
-fn rendezvous(key: &[u8], node: NodeId) -> u64 {
+pub(crate) fn rendezvous(key: &[u8], node: NodeId) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in key.iter().chain(node.to_le_bytes().iter()) {
         hash ^= u64::from(*byte);

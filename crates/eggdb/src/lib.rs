@@ -76,6 +76,7 @@ mod expiry;
 pub mod inbox;
 pub mod keyspace;
 mod options;
+pub mod quorum_store;
 mod replay;
 mod replication;
 mod scan;
