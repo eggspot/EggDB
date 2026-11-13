@@ -1897,8 +1897,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Flux's core: **code written, unbuilt** (code-only mode, 2026-11-12, D682); `SHOW SERIES`, `DROP` and `DELETE`:
   **code written, unbuilt** (code-only mode, 2026-11-12, D712); Flux's `map`, `pivot` and row expressions: **code
   written, unbuilt** (code-only mode, 2026-11-12, D713); variables, several results and `join`: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D912). Left: the rest of Flux (`join.*` and other packages, functions
-  defined in the query) and pushing its windows into SQL.
+  unbuilt** (code-only mode, 2026-11-12, D912); `join.*`, the `strings`, `math` and `date` packages, functions
+  defined in the query and `aggregateWindow` pushed into SQL: **code written, unbuilt** (code-only mode,
+  2026-11-13, D1064). Left: Flux's other packages (`array`, `dict`, `experimental`, `http`, `sql` and the rest)
+  and functions that transform streams (`(tables=<-) => ...`).
 - Remote write 2.0, native histograms and exemplars (D220). Remote write 2.0 with native histograms kept as
   `_count` and `_sum`: **code written, unbuilt** (code-only mode, 2026-11-12, D665); histogram buckets and exemplars:
   **code written, unbuilt** (code-only mode, 2026-11-12, D683).

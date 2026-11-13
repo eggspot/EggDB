@@ -178,7 +178,7 @@ fn digits_at(bytes: &[u8], from: usize, count: usize) -> Option<i64> {
     number(bytes.get(from..from + count)?)
 }
 
-fn rfc3339(stamp: &[u8]) -> Option<i64> {
+pub(crate) fn rfc3339(stamp: &[u8]) -> Option<i64> {
     let separators = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')];
     if separators
         .iter()

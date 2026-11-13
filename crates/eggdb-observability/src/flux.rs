@@ -1,3 +1,6 @@
+mod joins;
+mod packages;
+
 use crate::store::{SCHEMA, identifier, literal, run};
 use eggdb_sql::{Session, Value};
 use std::collections::BTreeMap;
@@ -174,9 +177,11 @@ enum Expr {
     Or(Box<Expr>, Box<Expr>),
     Compare(Box<Expr>, &'static str, Box<Expr>),
     Arithmetic(Box<Expr>, &'static str, Box<Expr>),
-    Record { extends_row: bool, fields: Vec<(String, Expr)> },
-    Function(String, Vec<Expr>),
+    Record { base: Option<String>, fields: Vec<(String, Expr)> },
+    Function(String, Vec<(String, Expr)>),
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    Variable(String),
+    Constant(Flux),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,6 +196,47 @@ enum Argument {
     List(Vec<Argument>),
     Record(Vec<(String, Argument)>),
     Predicate { parameter: String, body: Expr },
+    PairFunction { left: String, right: String, body: Expr },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Definition {
+    parameters: Vec<(String, Option<Expr>)>,
+    body: Expr,
+}
+
+const MOST_INLINING_DEPTH: usize = 32;
+
+fn substitute(expr: &Expr, bound: &BTreeMap<String, Expr>, depth: usize) -> Result<Expr, String> {
+    if depth > MOST_INLINING_DEPTH {
+        return Err("functions call each other too deeply".to_owned());
+    }
+    let again = |inner: &Expr| substitute(inner, bound, depth + 1).map(Box::new);
+    Ok(match expr {
+        Expr::Variable(name) => bound.get(name).cloned().unwrap_or_else(|| expr.clone()),
+        Expr::Not(inner) => Expr::Not(again(inner)?),
+        Expr::Exists(inner) => Expr::Exists(again(inner)?),
+        Expr::And(left, right) => Expr::And(again(left)?, again(right)?),
+        Expr::Or(left, right) => Expr::Or(again(left)?, again(right)?),
+        Expr::Compare(left, operator, right) => Expr::Compare(again(left)?, operator, again(right)?),
+        Expr::Arithmetic(left, operator, right) => Expr::Arithmetic(again(left)?, operator, again(right)?),
+        Expr::Conditional(condition, then, otherwise) => Expr::Conditional(again(condition)?, again(then)?, again(otherwise)?),
+        Expr::Record { base, fields } => Expr::Record {
+            base: base.clone(),
+            fields: fields
+                .iter()
+                .map(|(name, inner)| Ok((name.clone(), substitute(inner, bound, depth + 1)?)))
+                .collect::<Result<_, String>>()?,
+        },
+        Expr::Function(name, arguments) => Expr::Function(
+            name.clone(),
+            arguments
+                .iter()
+                .map(|(key, inner)| Ok((key.clone(), substitute(inner, bound, depth + 1)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+        other => other.clone(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -208,9 +254,52 @@ impl Call {
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
+    functions: BTreeMap<String, Definition>,
+    pair: Option<(String, String)>,
 }
 
 impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, at: 0, functions: BTreeMap::new(), pair: None }
+    }
+
+    fn parameters(&mut self) -> Result<Vec<(String, Option<Expr>)>, String> {
+        let mut parameters = Vec::new();
+        while !self.eat(")") {
+            let name = self.name()?;
+            let default = if self.eat("=") { Some(self.or()?) } else { None };
+            parameters.push((name, default));
+            if !self.eat(",") {
+                self.expect(")")?;
+                break;
+            }
+        }
+        self.expect("=>")?;
+        Ok(parameters)
+    }
+
+    fn inline(&self, name: &str, arguments: Vec<(String, Expr)>) -> Result<Expr, String> {
+        let Some(definition) = self.functions.get(name) else {
+            return Ok(Expr::Function(name.to_owned(), arguments));
+        };
+        let mut bound = BTreeMap::new();
+        for (parameter, default) in &definition.parameters {
+            let given = arguments.iter().find(|(key, _)| key == parameter).map(|(_, value)| value.clone());
+            let value = given.or_else(|| default.clone()).ok_or_else(|| format!("{name}() is missing its {parameter} argument"))?;
+            bound.insert(parameter.clone(), value);
+        }
+        if let Some((unknown, _)) = arguments.iter().find(|(key, _)| !definition.parameters.iter().any(|(parameter, _)| parameter == key)) {
+            return Err(format!("{name}() has no parameter {unknown}"));
+        }
+        substitute(&definition.body, &bound, 0)
+    }
+
+    fn column(&self, owner: &str, column: String) -> Expr {
+        match &self.pair {
+            Some((left, right)) if owner == left || owner == right => Expr::Column(format!("{owner}.{column}")),
+            _ => Expr::Column(column),
+        }
+    }
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
     }
@@ -267,6 +356,19 @@ impl Parser {
         let assign = if assigns {
             let name = self.name()?;
             self.expect("=")?;
+            if self.eat("(") {
+                let parameters = self.parameters()?;
+                let body = if self.eat("{") && matches!(self.peek(), Some(Token::Name(word)) if word == "return") {
+                    self.at += 1;
+                    let body = self.or()?;
+                    self.expect("}")?;
+                    body
+                } else {
+                    self.or()?
+                };
+                self.functions.insert(name, Definition { parameters, body });
+                return self.statement();
+            }
             Some(name)
         } else {
             None
@@ -277,7 +379,11 @@ impl Parser {
             (Head::Variable(self.name()?), Vec::new())
         } else {
             let first = self.call()?;
-            if first.name == "join" { (Head::Join(first), Vec::new()) } else { (Head::From, vec![first]) }
+            if first.name == "join" || first.name.starts_with("join.") {
+                (Head::Join(first), Vec::new())
+            } else {
+                (Head::From, vec![first])
+            }
         };
         while self.eat("|>") {
             calls.push(self.call()?);
@@ -339,11 +445,17 @@ impl Parser {
             return Ok(Argument::List(items));
         }
         if self.eat("(") {
-            let parameter = self.name()?;
-            self.expect(")")?;
-            self.expect("=>")?;
-            let body = self.or()?;
-            return Ok(Argument::Predicate { parameter, body });
+            let parameters = self.parameters()?;
+            return match parameters.as_slice() {
+                [(parameter, None)] => Ok(Argument::Predicate { parameter: parameter.clone(), body: self.or()? }),
+                [(left, None), (right, None)] => {
+                    let outer = self.pair.replace((left.clone(), right.clone()));
+                    let body = self.or();
+                    self.pair = outer;
+                    Ok(Argument::PairFunction { left: left.clone(), right: right.clone(), body: body? })
+                }
+                _ => Err("a function argument takes one row, or a left and a right row".to_owned()),
+            };
         }
         match self.next() {
             Some(Token::Text(text)) => Ok(Argument::Text(text)),
@@ -431,9 +543,13 @@ impl Parser {
     fn record(&mut self) -> Result<Expr, String> {
         let extends_row = matches!(self.peek(), Some(Token::Name(_)))
             && matches!(self.tokens.get(self.at + 1), Some(Token::Name(word)) if word == "with");
-        if extends_row {
-            self.at += 2;
-        }
+        let base = if extends_row {
+            let owner = self.name()?;
+            self.at += 1;
+            Some(owner)
+        } else {
+            None
+        };
         let mut fields = Vec::new();
         while !self.eat("}") {
             let key = match self.next() {
@@ -447,7 +563,21 @@ impl Parser {
                 break;
             }
         }
-        Ok(Expr::Record { extends_row, fields })
+        Ok(Expr::Record { base, fields })
+    }
+
+    fn call_arguments(&mut self) -> Result<Vec<(String, Expr)>, String> {
+        let mut arguments = Vec::new();
+        while !self.eat(")") {
+            let key = self.name()?;
+            self.expect(":")?;
+            arguments.push((key, self.or()?));
+            if !self.eat(",") {
+                self.expect(")")?;
+                break;
+            }
+        }
+        Ok(arguments)
     }
 
     fn primary(&mut self) -> Result<Expr, String> {
@@ -474,17 +604,19 @@ impl Parser {
         }
         if let (Some(Token::Name(function)), Some(Token::Symbol("("))) = (self.peek().cloned(), self.tokens.get(self.at + 1)) {
             self.at += 2;
-            let mut arguments = Vec::new();
-            while !self.eat(")") {
-                self.name()?;
-                self.expect(":")?;
-                arguments.push(self.or()?);
-                if !self.eat(",") {
-                    self.expect(")")?;
-                    break;
-                }
-            }
-            return Ok(Expr::Function(function, arguments));
+            let arguments = self.call_arguments()?;
+            return self.inline(&function, arguments);
+        }
+        if let (Some(Token::Name(package)), Some(Token::Symbol(".")), Some(Token::Name(member)), Some(Token::Symbol("("))) = (
+            self.peek().cloned(),
+            self.tokens.get(self.at + 1),
+            self.tokens.get(self.at + 2).cloned(),
+            self.tokens.get(self.at + 3),
+        ) && packages::is_package(&package)
+        {
+            self.at += 4;
+            let arguments = self.call_arguments()?;
+            return Ok(Expr::Function(format!("{package}.{member}"), arguments));
         }
         if self.eat("-") {
             return match self.next() {
@@ -496,17 +628,25 @@ impl Parser {
             Some(Token::Text(text)) => Ok(Expr::Text(text)),
             Some(Token::Number(number)) => Ok(Expr::Number(number.parse().map_err(|_| format!("invalid number {number}"))?)),
             Some(Token::Regex(pattern)) => Ok(Expr::Regex(pattern)),
+            Some(Token::Duration(micros)) => Ok(Expr::Constant(Flux::Integer(micros))),
+            Some(Token::Time(text)) => packages::time_constant(&text).map(Expr::Constant),
             Some(Token::Name(word)) if word == "true" || word == "false" => Ok(Expr::Boolean(word == "true")),
-            Some(Token::Name(_)) => {
+            Some(Token::Name(owner)) => {
                 if self.eat(".") {
-                    return Ok(Expr::Column(self.name()?));
+                    let member = self.name()?;
+                    if let Some(constant) = packages::constant(&owner, &member) {
+                        return Ok(Expr::Constant(constant));
+                    }
+                    return Ok(self.column(&owner, member));
                 }
-                self.expect("[")?;
+                if !self.eat("[") {
+                    return Ok(Expr::Variable(owner));
+                }
                 let Some(Token::Text(column)) = self.next() else {
                     return Err("expected a quoted column name in r[...]".to_owned());
                 };
                 self.expect("]")?;
-                Ok(Expr::Column(column))
+                Ok(self.column(&owner, column))
             }
             other => Err(format!("expected a value, found {other:?}")),
         }
@@ -625,7 +765,7 @@ fn partial(expr: &Expr, candidate: &Candidate<'_>) -> Partial {
 
 fn pushable(expr: &Expr) -> bool {
     match expr {
-        Expr::Record { .. } | Expr::Function(..) | Expr::Conditional(..) => false,
+        Expr::Record { .. } | Expr::Function(..) | Expr::Conditional(..) | Expr::Variable(_) | Expr::Constant(_) => false,
         Expr::Not(inner) | Expr::Exists(inner) => pushable(inner),
         Expr::And(left, right) | Expr::Or(left, right) | Expr::Compare(left, _, right) | Expr::Arithmetic(left, _, right) => {
             pushable(left) && pushable(right)
@@ -750,9 +890,18 @@ fn evaluate(expr: &Expr, row: &Row) -> Result<Flux, String> {
                 evaluate(otherwise, row)?
             }
         }
+        Expr::Variable(name) => return Err(format!("undefined identifier {name}")),
+        Expr::Constant(value) => value.clone(),
+        Expr::Function(name, arguments) if name.contains('.') => {
+            let mut values = Vec::with_capacity(arguments.len());
+            for (key, argument) in arguments {
+                values.push((key.as_str(), evaluate(argument, row)?));
+            }
+            packages::call(name, &values)?
+        }
         Expr::Function(name, arguments) => {
             let argument = match arguments.first() {
-                Some(argument) => evaluate(argument, row)?,
+                Some((_, argument)) => evaluate(argument, row)?,
                 None => Flux::Null,
             };
             match (name.as_str(), argument) {
@@ -829,11 +978,41 @@ fn timestamp_sql(micros: i64) -> String {
     format!("{}::timestamptz", literal(&text))
 }
 
+/// An `aggregateWindow` computed by the SQL that reads the source: windows of `every`
+/// microseconds from the Unix epoch, each reduced with `aggregate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PushedWindow {
+    every: i64,
+    aggregate: &'static str,
+}
+
+fn pushed_window(call: &Call) -> Option<PushedWindow> {
+    if call.name != "aggregateWindow" || call.argument("timeSrc").is_some() || call.argument("column").is_some() {
+        return None;
+    }
+    let Some(Argument::Duration(every)) = call.argument("every") else {
+        return None;
+    };
+    let aggregate = match call.argument("fn") {
+        Some(Argument::Name(name)) => match name.as_str() {
+            "mean" => "avg",
+            "sum" => "sum",
+            "count" => "count",
+            "min" => "min",
+            "max" => "max",
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (*every > 0).then_some(PushedWindow { every: *every, aggregate })
+}
+
 fn source_tables(
     session: &mut Session<'_>,
     start: i64,
     stop: i64,
     predicates: &[Expr],
+    window: Option<PushedWindow>,
 ) -> Result<Vec<Table>, String> {
     let catalog = crate::store::catalog(session)?;
     let mut tables: Vec<Table> = Vec::new();
@@ -867,14 +1046,26 @@ fn source_tables(
             if excluded {
                 continue;
             }
-            let selected: Vec<String> = tags
-                .iter()
-                .map(|tag| identifier(tag))
-                .chain(["\"time\"".to_owned(), identifier(field)])
-                .collect();
+            let (time_sql, value_sql, grouping) = match window {
+                Some(PushedWindow { every, aggregate }) => {
+                    let value = if aggregate == "avg" {
+                        format!("avg({})::double precision", identifier(field))
+                    } else {
+                        format!("{aggregate}({})", identifier(field))
+                    };
+                    let positions: Vec<String> = (1..=tags.len() + 1).map(|at| at.to_string()).collect();
+                    (
+                        format!("date_bin('{every} microseconds'::interval, \"time\", '1970-01-01T00:00:00Z'::timestamptz)"),
+                        value,
+                        format!(" GROUP BY {}", positions.join(", ")),
+                    )
+                }
+                None => ("\"time\"".to_owned(), identifier(field), String::new()),
+            };
+            let selected: Vec<String> = tags.iter().map(|tag| identifier(tag)).chain([time_sql, value_sql]).collect();
             let order: Vec<String> = (1..=tags.len() + 1).map(|at| at.to_string()).collect();
             let sql = format!(
-                "SELECT {} FROM {SCHEMA}.{} WHERE {} ORDER BY {} LIMIT {}",
+                "SELECT {} FROM {SCHEMA}.{} WHERE {}{grouping} ORDER BY {} LIMIT {}",
                 selected.join(", "),
                 identifier(measurement),
                 conditions.join(" AND "),
@@ -990,16 +1181,33 @@ fn function_name(argument: Option<&Argument>) -> Result<String, String> {
     }
 }
 
-fn aggregate_window(tables: Vec<Table>, call: &Call, start: i64, stop: i64) -> Result<Vec<Table>, String> {
+fn window_every(call: &Call) -> Result<i64, String> {
     let Some(Argument::Duration(every)) = call.argument("every") else {
         return Err("aggregateWindow needs every: a duration".to_owned());
     };
-    let every = *every;
-    if every <= 0 {
+    if *every <= 0 {
         return Err("aggregateWindow's every must be positive".to_owned());
     }
+    Ok(*every)
+}
+
+fn aggregate_window(tables: Vec<Table>, call: &Call, start: i64, stop: i64) -> Result<Vec<Table>, String> {
+    let every = window_every(call)?;
     let function = function_name(call.argument("fn"))?;
     let create_empty = !matches!(call.argument("createEmpty"), Some(Argument::Boolean(false)));
+    let empty = if function == "count" { Value::BigInt(0) } else { Value::Null };
+    reduce_windows(tables, every, create_empty, empty, start, stop, &|members| aggregate(&function, members))
+}
+
+fn reduce_windows(
+    tables: Vec<Table>,
+    every: i64,
+    create_empty: bool,
+    empty_value: Value,
+    start: i64,
+    stop: i64,
+    reduce: &dyn Fn(&[Row]) -> Result<Option<Row>, String>,
+) -> Result<Vec<Table>, String> {
     let origin = -UNIX_EPOCH_FROM_2000_MICROS;
     let floor = |at: i64| origin + (at - origin).div_euclid(every) * every;
     if (stop - start) / every > MOST_WINDOWS {
@@ -1026,10 +1234,10 @@ fn aggregate_window(tables: Vec<Table>, call: &Call, start: i64, stop: i64) -> R
                     continue;
                 }
                 let mut empty = template.clone();
-                empty.insert("_value".to_owned(), if function == "count" { Value::BigInt(0) } else { Value::Null });
+                empty.insert("_value".to_owned(), empty_value.clone());
                 Some(empty)
             } else {
-                aggregate(&function, members)?
+                reduce(members)?
             };
             if let Some(mut row) = reduced {
                 row.insert("_time".to_owned(), Value::TimestampTz(end.min(stop)));
@@ -1127,7 +1335,15 @@ fn execute(session: &mut Session<'_>, calls: &[Call]) -> Result<Applied, String>
         }
         next += 1;
     }
-    let tables = source_tables(session, start, stop, &pushed)?;
+    let window = calls.get(next).and_then(pushed_window);
+    let mut tables = source_tables(session, start, stop, &pushed, window)?;
+    if let Some(window) = window {
+        let call = &calls[next];
+        let create_empty = !matches!(call.argument("createEmpty"), Some(Argument::Boolean(false)));
+        let empty = if window.aggregate == "count" { Value::BigInt(0) } else { Value::Null };
+        tables = reduce_windows(tables, window.every, create_empty, empty, start, stop, &|members| Ok(members.first().cloned()))?;
+        next += 1;
+    }
     let rest: Vec<&Call> = calls
         .iter()
         .enumerate()
@@ -1162,14 +1378,14 @@ fn apply(stream: Stream, calls: &[&Call]) -> Result<Applied, String> {
                 kept
             }
             "map" => {
-                let Some(Argument::Predicate { body: Expr::Record { extends_row, fields }, .. }) = call.argument("fn") else {
+                let Some(Argument::Predicate { body: Expr::Record { base, fields }, .. }) = call.argument("fn") else {
                     return Err("map needs fn: (r) => ({...})".to_owned());
                 };
                 let mut mapped = Vec::with_capacity(tables.len());
                 for mut table in tables {
                     let mut rows = Vec::with_capacity(table.rows.len());
                     for row in table.rows {
-                        let mut out = if *extends_row {
+                        let mut out = if base.is_some() {
                             row.clone()
                         } else {
                             table.key.iter().filter_map(|column| row.get(column).map(|value| (column.clone(), value.clone()))).collect()
@@ -1452,7 +1668,8 @@ fn run_statement(session: &mut Session<'_>, statement: &Statement, streams: &BTr
             let stream = streams.get(name).cloned().ok_or_else(|| format!("undefined identifier {name}"))?;
             apply(stream, &statement.calls.iter().collect::<Vec<_>>())
         }
-        Head::Join(call) => apply(joined(call, streams)?, &statement.calls.iter().collect::<Vec<_>>()),
+        Head::Join(call) if call.name == "join" => apply(joined(call, streams)?, &statement.calls.iter().collect::<Vec<_>>()),
+        Head::Join(call) => apply(joins::joined(call, streams)?, &statement.calls.iter().collect::<Vec<_>>()),
     }
 }
 
@@ -1555,7 +1772,7 @@ pub(crate) fn query_text(body: &[u8], content_type: Option<&str>) -> Result<Stri
 /// Runs a Flux query (a `from() |> range() |> ...` pipeline over the metrics tables) and
 /// returns InfluxDB 2's annotated CSV.
 pub(crate) fn answer(session: &mut Session<'_>, query: &str) -> Result<String, String> {
-    let mut parser = Parser { tokens: tokens(query)?, at: 0 };
+    let mut parser = Parser::new(tokens(query)?);
     let mut streams: BTreeMap<String, Stream> = BTreeMap::new();
     let mut outcomes = Vec::new();
     while let Some(statement) = parser.statement()? {
@@ -1583,13 +1800,12 @@ mod tests {
 
     #[test]
     fn pipelines_parse_and_filters_fold() {
-        let mut parser = Parser {
-            tokens: tokens(
+        let mut parser = Parser::new(
+            tokens(
                 r#"from(bucket: "b") |> range(start: -1h) |> filter(fn: (r) => r._measurement == "cpu" and r["host"] =~ /^a/) |> aggregateWindow(every: 1m, fn: mean)"#,
             )
             .unwrap(),
-            at: 0,
-        };
+        );
         let calls = parser.pipeline().unwrap();
         assert_eq!(calls.len(), 4);
         assert_eq!(calls[1].argument("start"), Some(&Argument::Duration(-3_600_000_000)));
@@ -1635,12 +1851,11 @@ mod tests {
 
     #[test]
     fn row_expressions_compute_and_records_extend_rows() {
-        let mut parser = Parser {
-            tokens: tokens(r#"map(fn: (r) => ({r with _value: r._value * 2.0 + 1.0, label: if r._value > 3 then "high" else "low"}))"#).unwrap(),
-            at: 0,
-        };
+        let mut parser = Parser::new(
+            tokens(r#"map(fn: (r) => ({r with _value: r._value * 2.0 + 1.0, label: if r._value > 3 then "high" else "low"}))"#).unwrap(),
+        );
         let call = parser.call().unwrap();
-        let Some(Argument::Predicate { body: Expr::Record { extends_row: true, fields }, .. }) = call.argument("fn") else {
+        let Some(Argument::Predicate { body: Expr::Record { base: Some(_), fields }, .. }) = call.argument("fn") else {
             panic!("a record");
         };
         let mut row = Row::new();
@@ -1651,16 +1866,15 @@ mod tests {
 
     #[test]
     fn programs_assign_streams_and_join_them() {
-        let mut parser = Parser {
-            tokens: tokens(
+        let mut parser = Parser::new(
+            tokens(
                 r#"import "join"
                 cpu = from(bucket: "b") |> range(start: -1h) |> filter(fn: (r) => r._measurement == "cpu")
                 mem = from(bucket: "b") |> range(start: -1h)
                 join(tables: {cpu: cpu, mem: mem}, on: ["_time", "host"]) |> yield(name: "both")"#,
             )
             .unwrap(),
-            at: 0,
-        };
+        );
         let first = parser.statement().unwrap().unwrap();
         assert_eq!(first.assign.as_deref(), Some("cpu"));
         assert!(matches!(first.head, Head::From));
@@ -1697,5 +1911,98 @@ mod tests {
         let applied = apply(joined, &third.calls.iter().collect::<Vec<_>>()).unwrap();
         assert!(applied.yielded);
         assert_eq!(applied.result, "both");
+    }
+
+    #[test]
+    fn functions_defined_in_the_query_and_packages_compute_row_values() {
+        let mut parser = Parser::new(
+            tokens(
+                r#"square = (x, offset=1.0) => x * x + offset
+                map(fn: (r) => ({r with squared: square(x: r._value), host: strings.toUpper(v: r.host), hour: date.hour(t: r._time), root: math.sqrt(x: 16.0) * math.pi, hourly: date.truncate(t: r._time, unit: 1h)}))"#,
+            )
+            .unwrap(),
+        );
+        let statement = parser.statement().unwrap().unwrap();
+        let Some(Argument::Predicate { body: Expr::Record { fields, .. }, .. }) = statement.calls[0].argument("fn") else {
+            panic!("a record");
+        };
+        let mut row = Row::new();
+        row.insert("_value".to_owned(), Value::Double(3.0));
+        row.insert("host".to_owned(), Value::Text("edge-1".to_owned()));
+        let half_past_two = 2 * 3_600_000_000 + 30 * 60_000_000;
+        row.insert("_time".to_owned(), Value::TimestampTz(half_past_two));
+        let field = |name: &str| fields.iter().find(|(key, _)| key == name).map(|(_, expr)| evaluate(expr, &row).unwrap()).unwrap();
+        assert_eq!(field("squared"), Flux::Float(10.0));
+        assert_eq!(field("host"), Flux::Text("EDGE-1".to_owned()));
+        assert_eq!(field("hour"), Flux::Integer(2));
+        assert_eq!(field("root"), Flux::Float(4.0 * std::f64::consts::PI));
+        assert_eq!(field("hourly"), Flux::Time(2 * 3_600_000_000));
+        let missing = Parser::new(tokens("map(fn: (r) => ({r with x: undefined_thing}))").unwrap()).call().unwrap();
+        let Some(Argument::Predicate { body: Expr::Record { fields, .. }, .. }) = missing.argument("fn") else {
+            panic!("a record");
+        };
+        assert!(evaluate(&fields[0].1, &row).is_err());
+    }
+
+    #[test]
+    fn join_package_pairs_rows_on_a_predicate_and_keeps_unmatched_ones() {
+        let mut parser = Parser::new(
+            tokens(
+                r#"join.left(left: cpu, right: mem, on: (l, r) => l.host == r.host and l._time == r._time, as: (l, r) => ({l with memory: r._value}))"#,
+            )
+            .unwrap(),
+        );
+        let statement = parser.statement().unwrap().unwrap();
+        let Head::Join(call) = &statement.head else {
+            panic!("a join");
+        };
+        let row = |host: &str, value: f64| {
+            let mut row = Row::new();
+            row.insert("_time".to_owned(), Value::BigInt(1));
+            row.insert("host".to_owned(), Value::Text(host.to_owned()));
+            row.insert("_value".to_owned(), Value::Double(value));
+            row
+        };
+        let stream = |rows: Vec<Row>| Stream {
+            tables: vec![Table { key: vec!["host".to_owned()], rows }],
+            start: 0,
+            stop: 10,
+        };
+        let streams = BTreeMap::from([
+            ("cpu".to_owned(), stream(vec![row("a", 0.5), row("b", 0.25)])),
+            ("mem".to_owned(), stream(vec![row("a", 512.0)])),
+        ]);
+        let joined = joins::joined(call, &streams).unwrap();
+        let mut rows: Vec<&Row> = joined.tables.iter().flat_map(|table| table.rows.iter()).collect();
+        rows.sort_by_key(|row| row["host"].to_text());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["_value"], Value::Double(0.5));
+        assert_eq!(rows[0]["memory"], Value::Double(512.0));
+        assert_eq!(rows[1]["memory"], Value::Null);
+    }
+
+    #[test]
+    fn simple_aggregate_windows_are_pushed_into_sql() {
+        let call = |function: &str| Call {
+            name: "aggregateWindow".to_owned(),
+            arguments: vec![
+                ("every".to_owned(), Argument::Duration(60_000_000)),
+                ("fn".to_owned(), Argument::Name(function.to_owned())),
+            ],
+        };
+        assert_eq!(pushed_window(&call("mean")), Some(PushedWindow { every: 60_000_000, aggregate: "avg" }));
+        assert_eq!(pushed_window(&call("median")), None);
+        let minute = 60_000_000;
+        let start = -UNIX_EPOCH_FROM_2000_MICROS;
+        let bucket = |at: i64, count: i64| {
+            let mut row = Row::new();
+            row.insert("_time".to_owned(), Value::TimestampTz(start + at));
+            row.insert("_value".to_owned(), Value::BigInt(count));
+            row
+        };
+        let table = Table { key: Vec::new(), rows: vec![bucket(0, 4), bucket(2 * minute, 1)] };
+        let filled = reduce_windows(vec![table], minute, true, Value::BigInt(0), start, start + 3 * minute, &|members| Ok(members.first().cloned())).unwrap();
+        let counts: Vec<Value> = filled[0].rows.iter().map(|row| row["_value"].clone()).collect();
+        assert_eq!(counts, vec![Value::BigInt(4), Value::BigInt(0), Value::BigInt(1)]);
     }
 }
