@@ -1841,7 +1841,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - NATS no-responders, token and NKey authentication, clusters and leaf nodes (D216). No-responders and
   token authentication: **code written, unbuilt** (code-only mode, 2026-11-11, D476); NKeys: **code written,
   unbuilt** (code-only mode, 2026-11-12, D617).
-- Benchmarks against ElasticMQ and nats-server (D216).
+- Benchmarks against ElasticMQ and nats-server (D216). **Code written, unbuilt** (code-only mode, 2026-11-13,
+  D1061): `eggdb-broker-compare nats` and `sqs` in CI's `broker-compare` job.
 - AMQP 1.0: annotations and properties end to end, transactions, dynamic nodes, link resumption,
   `amqp:modified`, and the `idle-time-out` enforced and heartbeats sent (D217, D352). Dynamic nodes: **code
   written, unbuilt** (code-only mode, 2026-11-11, D538); the idle time-out enforced: **code

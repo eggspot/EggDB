@@ -674,6 +674,10 @@ jobs:
         image: emqx/emqx:5.6.0
         ports:
           - 2883:1883
+      elasticmq:
+        image: softwaremill/elasticmq-native:1.6.0
+        ports:
+          - 9324:9324
     env:
       COMPARE_MANIFEST: crates/eggdb-broker-compare/Cargo.toml
       EGGDB_KAFKA_ADDRESS: 127.0.0.1:19092
@@ -683,6 +687,10 @@ jobs:
       EGGDB_MQTT_ADDRESS: 127.0.0.1:11883
       MOSQUITTO_ADDRESS: 127.0.0.1:1883
       EMQX_ADDRESS: 127.0.0.1:2883
+      EGGDB_NATS_ADDRESS: 127.0.0.1:14222
+      NATS_ADDRESS: 127.0.0.1:4222
+      EGGDB_SQS_ADDRESS: 127.0.0.1:19324
+      ELASTICMQ_ADDRESS: 127.0.0.1:9324
       EGGDB_PASSWORD: compare
     steps:
       - uses: actions/checkout@v7
@@ -702,18 +710,21 @@ jobs:
         run: |
           cargo fmt --manifest-path "$COMPARE_MANIFEST" --check
           cargo clippy --manifest-path "$COMPARE_MANIFEST" --release --locked --all-targets -- -D warnings
-      - name: Start EggDB's Kafka listener
+      - name: Start EggDB's broker listeners
         run: |
           cargo build --release -p eggdb
-          target/release/eggdb serve "$RUNNER_TEMP/broker.eggdb" --create --listen 127.0.0.1:15432 --kafka-listen "$EGGDB_KAFKA_ADDRESS" --amqp-listen "$EGGDB_AMQP_ADDRESS" --mqtt-listen "$EGGDB_MQTT_ADDRESS" > "$RUNNER_TEMP/eggdb.log" 2>&1 &
+          target/release/eggdb serve "$RUNNER_TEMP/broker.eggdb" --create --listen 127.0.0.1:15432 --kafka-listen "$EGGDB_KAFKA_ADDRESS" --amqp-listen "$EGGDB_AMQP_ADDRESS" --mqtt-listen "$EGGDB_MQTT_ADDRESS" --nats-listen "$EGGDB_NATS_ADDRESS" --sqs-listen "$EGGDB_SQS_ADDRESS" > "$RUNNER_TEMP/eggdb.log" 2>&1 &
           docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+          docker run -d --name nats -p 4222:4222 nats:2.10 -js
           for attempt in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/19092) 2>/dev/null && break; sleep 1; done
-      - name: EggDB against Kafka, RabbitMQ, Mosquitto and EMQX (D7, D213, D214, D215, D1056, D1058, D1059)
+      - name: EggDB against Kafka, RabbitMQ, Mosquitto, EMQX, nats-server and ElasticMQ (D7, D213, D214, D215, D216, D1056, D1058, D1059, D1061)
         run: |
           mkdir -p compare-results
           cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- kafka --results compare-results/eggdb-kafka-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
           cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- rabbitmq --results compare-results/eggdb-rabbitmq-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
           cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- mqtt --results compare-results/eggdb-mqtt-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- nats --results compare-results/eggdb-nats-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- sqs --results compare-results/eggdb-sqs-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Keep the broker comparison results of this change
         if: always()
         uses: actions/upload-artifact@v7

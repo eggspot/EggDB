@@ -5,15 +5,21 @@
 //! kafka [--results <file>]`, with `eggdb serve --kafka-listen` at `EGGDB_KAFKA_ADDRESS`
 //! (`127.0.0.1:19092` by default) and Apache Kafka at `KAFKA_ADDRESS` (`127.0.0.1:9092`), or
 //! `rabbitmq`, with `eggdb serve --amqp-listen` at `EGGDB_AMQP_ADDRESS` (`127.0.0.1:15672`, user
-//! `eggdb` with `EGGDB_PASSWORD`) and RabbitMQ at `RABBITMQ_ADDRESS` (`127.0.0.1:5672`). Both
+//! `eggdb` with `EGGDB_PASSWORD`) and RabbitMQ at `RABBITMQ_ADDRESS` (`127.0.0.1:5672`), `mqtt`
+//! (Mosquitto and EMQX), `nats`, with `--nats-listen` at `EGGDB_NATS_ADDRESS`
+//! (`127.0.0.1:14222`) and nats-server with JetStream at `NATS_ADDRESS` (`127.0.0.1:4222`), or
+//! `sqs`, with `--sqs-listen` at `EGGDB_SQS_ADDRESS` (`127.0.0.1:19324`) and ElasticMQ at
+//! `ELASTICMQ_ADDRESS` (`127.0.0.1:9324`). Both
 //! sides get the same records over the same wire, so the ratio compares the servers, not the
 //! clients. The ratios are reported, not gated. A side that is not running is reported and the
 //! program exits successfully.
 
 mod amqp;
 mod kafka;
-mod mqtt;
 mod measure;
+mod mqtt;
+mod nats;
+mod sqs;
 
 use std::process::ExitCode;
 
@@ -22,6 +28,10 @@ const BATCH_SIZE: usize = 100;
 const AMQP_BATCHES: usize = 200;
 const MQTT_MESSAGES: u16 = 20_000;
 const MQTT_WINDOW: u16 = 100;
+const NATS_MESSAGES: u64 = 200_000;
+const JETSTREAM_MESSAGES: u64 = 20_000;
+const NATS_WINDOW: u64 = 100;
+const SQS_MESSAGES: u64 = 5_000;
 
 fn address(variable: &str, default: &str) -> String {
     std::env::var(variable).unwrap_or_else(|_| default.to_owned())
@@ -90,6 +100,48 @@ fn mqtt_brokers(lines: &mut Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+fn nats_servers(lines: &mut Vec<String>) -> Result<(), String> {
+    let eggdb = address("EGGDB_NATS_ADDRESS", "127.0.0.1:14222");
+    let other = address("NATS_ADDRESS", "127.0.0.1:4222");
+    let eggdb_password = address("EGGDB_PASSWORD", "compare");
+    for side in [&eggdb, &other] {
+        if std::net::TcpStream::connect(side).is_err() {
+            println!("eggdb-broker-compare: nothing listens at {side}; NATS not measured");
+            return Ok(());
+        }
+    }
+    let login = Some(("eggdb", eggdb_password.as_str()));
+    let subject = format!("compare.{}", std::process::id());
+    let (published_eggdb, received_eggdb) = nats::publish_and_receive(&eggdb, login, &subject, NATS_MESSAGES, NATS_WINDOW)?;
+    let (published_nats, received_nats) = nats::publish_and_receive(&other, None, &subject, NATS_MESSAGES, NATS_WINDOW)?;
+    measure::report("nats.publish (core, 100 bytes, a PING after every 100)", &published_eggdb, &published_nats, "nats-server", lines);
+    measure::report("nats.receive (core, one subscriber)", &received_eggdb, &received_nats, "nats-server", lines);
+    let stream = format!("COMPARE_{}", std::process::id());
+    let stored_subject = format!("stored.{}", std::process::id());
+    let stored_eggdb = nats::jetstream_publish(&eggdb, login, &stream, &stored_subject, JETSTREAM_MESSAGES, NATS_WINDOW)?;
+    let stored_nats = nats::jetstream_publish(&other, None, &stream, &stored_subject, JETSTREAM_MESSAGES, NATS_WINDOW)?;
+    measure::report("nats.jetstream.publish (file storage, 100 awaiting acknowledgement)", &stored_eggdb, &stored_nats, "nats-server", lines);
+    Ok(())
+}
+
+fn sqs_queues(lines: &mut Vec<String>) -> Result<(), String> {
+    let eggdb = address("EGGDB_SQS_ADDRESS", "127.0.0.1:19324");
+    let other = address("ELASTICMQ_ADDRESS", "127.0.0.1:9324");
+    let eggdb_password = address("EGGDB_PASSWORD", "compare");
+    for side in [&eggdb, &other] {
+        if std::net::TcpStream::connect(side).is_err() {
+            println!("eggdb-broker-compare: nothing listens at {side}; SQS not measured");
+            return Ok(());
+        }
+    }
+    let queue = format!("compare-{}", std::process::id());
+    let (sent_eggdb, received_eggdb) = sqs::send_and_receive(&eggdb, "eggdb", &eggdb_password, &queue, SQS_MESSAGES)?;
+    let (sent_elasticmq, received_elasticmq) = sqs::send_and_receive(&other, "x", "x", &queue, SQS_MESSAGES)?;
+    measure::report("sqs.send (one message per request)", &sent_eggdb, &sent_elasticmq, "ElasticMQ", lines);
+    measure::report("sqs.receive and delete (ten per receive)", &received_eggdb, &received_elasticmq, "ElasticMQ", lines);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let broker = arguments.next().unwrap_or_default();
@@ -98,7 +150,7 @@ fn main() -> ExitCode {
         match (argument.as_str(), arguments.next()) {
             ("--results", Some(path)) => results = Some(path),
             _ => {
-                eprintln!("usage: eggdb-broker-compare kafka|rabbitmq|mqtt [--results <file>]");
+                eprintln!("usage: eggdb-broker-compare kafka|rabbitmq|mqtt|nats|sqs [--results <file>]");
                 return ExitCode::from(2);
             }
         }
@@ -108,8 +160,10 @@ fn main() -> ExitCode {
         "kafka" => kafka(&mut lines),
         "rabbitmq" => rabbitmq(&mut lines),
         "mqtt" => mqtt_brokers(&mut lines),
+        "nats" => nats_servers(&mut lines),
+        "sqs" => sqs_queues(&mut lines),
         _ => {
-            eprintln!("usage: eggdb-broker-compare kafka|rabbitmq|mqtt [--results <file>]");
+            eprintln!("usage: eggdb-broker-compare kafka|rabbitmq|mqtt|nats|sqs [--results <file>]");
             return ExitCode::from(2);
         }
     };

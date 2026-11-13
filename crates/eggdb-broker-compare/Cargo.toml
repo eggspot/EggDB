@@ -10,6 +10,7 @@ publish = false
 [workspace]
 
 [dependencies]
+eggdb-auth = { path = "../eggdb-auth" }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

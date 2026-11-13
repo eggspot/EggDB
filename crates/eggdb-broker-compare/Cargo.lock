@@ -3,5 +3,32 @@
 version = 4
 
 [[package]]
+name = "eggdb-auth"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-tls",
+]
+
+[[package]]
 name = "eggdb-broker-compare"
 version = "0.1.0"
+dependencies = [
+ "eggdb-auth",
+]
+
+[[package]]
+name = "eggdb-crypto"
+version = "0.5.0"
+
+[[package]]
+name = "eggdb-platform"
+version = "0.5.0"
+
+[[package]]
+name = "eggdb-tls"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-platform",
+]
