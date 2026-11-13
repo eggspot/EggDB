@@ -1,7 +1,7 @@
 //! Copy-on-write clones of whole files, where the file system makes them (D1021): APFS's
-//! `clonefile` on Apple systems and the `FICLONE` ioctl on Linux file systems with shared
-//! extents (Btrfs, XFS, bcachefs). A clone takes no time and no space until either file
-//! changes.
+//! `clonefile` on Apple systems, the `FICLONE` ioctl on Linux file systems with shared
+//! extents (Btrfs, XFS, bcachefs), and block cloning on Windows' ReFS. A clone takes no time
+//! and no space until either file changes.
 
 use std::path::Path;
 
@@ -83,7 +83,182 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android")))]
+#[cfg(windows)]
+mod imp {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+
+    const FSCTL_DUPLICATE_EXTENTS_TO_FILE: u32 = 0x0009_8344;
+    const FSCTL_GET_INTEGRITY_INFORMATION: u32 = 0x0009_027C;
+    const FILE_SUPPORTS_BLOCK_REFCOUNTING: u32 = 0x0800_0000;
+    const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x0200;
+    const MOST_BYTES_PER_CLONE: u64 = 1 << 31;
+
+    #[repr(C)]
+    struct DuplicateExtentsData {
+        file_handle: *mut c_void,
+        source_file_offset: i64,
+        target_file_offset: i64,
+        byte_count: i64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct IntegrityInformation {
+        _checksum_algorithm: u16,
+        _reserved: u16,
+        flags: u32,
+        _checksum_chunk_size_in_bytes: u32,
+        cluster_size_in_bytes: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileInformation {
+        attributes: u32,
+        _creation: [u32; 2],
+        _last_access: [u32; 2],
+        _last_write: [u32; 2],
+        _volume_serial: u32,
+        _size_high: u32,
+        _size_low: u32,
+        _links: u32,
+        _index_high: u32,
+        _index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn DeviceIoControl(
+            device: *mut c_void,
+            code: u32,
+            input: *const c_void,
+            input_size: u32,
+            output: *mut c_void,
+            output_size: u32,
+            returned: *mut u32,
+            overlapped: *mut c_void,
+        ) -> i32;
+        fn GetVolumeInformationByHandleW(
+            file: *mut c_void,
+            volume_name: *mut u16,
+            volume_name_size: u32,
+            serial: *mut u32,
+            component_length: *mut u32,
+            flags: *mut u32,
+            file_system_name: *mut u16,
+            file_system_name_size: u32,
+        ) -> i32;
+        fn GetFileInformationByHandle(file: *mut c_void, information: *mut FileInformation) -> i32;
+    }
+
+    fn supports_cloning(file: &std::fs::File) -> bool {
+        let mut flags = 0u32;
+        // SAFETY: the handle is an open file borrowed for the call; only `flags` is asked for, a
+        // live u32, and every other out pointer is null with a size of zero, as the API allows.
+        let read = unsafe {
+            GetVolumeInformationByHandleW(
+                file.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut flags,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        read != 0 && flags & FILE_SUPPORTS_BLOCK_REFCOUNTING != 0
+    }
+
+    fn is_sparse(file: &std::fs::File) -> bool {
+        let mut information = FileInformation::default();
+        // SAFETY: the handle is an open file borrowed for the call, and `information` a live
+        // BY_HANDLE_FILE_INFORMATION it fills.
+        let read = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut information) };
+        read == 0 || information.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0
+    }
+
+    fn cluster_size(file: &std::fs::File) -> Option<u64> {
+        let mut information = IntegrityInformation::default();
+        let mut returned = 0u32;
+        // SAFETY: the handle is an open file borrowed for the call; the output buffer is a live
+        // FSCTL_GET_INTEGRITY_INFORMATION_BUFFER of the size given, and `returned` a live u32.
+        let read = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_GET_INTEGRITY_INFORMATION,
+                std::ptr::null(),
+                0,
+                (&raw mut information).cast(),
+                std::mem::size_of::<IntegrityInformation>() as u32,
+                &raw mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        (read != 0 && information.cluster_size_in_bytes > 0 && information.flags == 0)
+            .then_some(u64::from(information.cluster_size_in_bytes))
+    }
+
+    pub(super) fn clone_file(source: &Path, target: &Path) -> std::io::Result<bool> {
+        let from = std::fs::File::open(source)?;
+        if !supports_cloning(&from) || is_sparse(&from) {
+            return Ok(false);
+        }
+        let Some(cluster) = cluster_size(&from) else {
+            return Ok(false);
+        };
+        let length = from.metadata()?.len();
+        let to = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(target)?;
+        let cloned = (|| -> std::io::Result<bool> {
+            to.set_len(length)?;
+            let rounded = length.div_ceil(cluster) * cluster;
+            let mut offset = 0u64;
+            while offset < rounded {
+                let count = (rounded - offset).min(MOST_BYTES_PER_CLONE);
+                let request = DuplicateExtentsData {
+                    file_handle: from.as_raw_handle(),
+                    source_file_offset: offset as i64,
+                    target_file_offset: offset as i64,
+                    byte_count: count as i64,
+                };
+                let mut returned = 0u32;
+                // SAFETY: both handles are open files borrowed for the call; the input is a live
+                // DUPLICATE_EXTENTS_DATA of the size given, there is no output, and `returned` is
+                // a live u32.
+                let done = unsafe {
+                    DeviceIoControl(
+                        to.as_raw_handle(),
+                        FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+                        (&raw const request).cast(),
+                        std::mem::size_of::<DuplicateExtentsData>() as u32,
+                        std::ptr::null_mut(),
+                        0,
+                        &raw mut returned,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if done == 0 {
+                    return Ok(false);
+                }
+                offset += count;
+            }
+            to.sync_all()?;
+            Ok(true)
+        })();
+        match cloned {
+            Ok(true) => Ok(true),
+            outcome => {
+                drop(to);
+                std::fs::remove_file(target)?;
+                outcome
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", windows)))]
 mod imp {
     use std::path::Path;
 
