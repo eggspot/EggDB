@@ -1,8 +1,9 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 30] = [
+pub(crate) const FUNCTIONS: [&str; 31] = [
     "eggdb_column_lineage",
+    "image_rendition",
     "eggdb_pdf_table",
     "fhir_validate",
     "opcua_decode",
@@ -420,6 +421,30 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_pdf_table takes a title and rows")),
         });
     }
+    if name == "image_rendition" {
+        let integer = |value: &Value| value.as_integer().and_then(|number| usize::try_from(number).ok());
+        return Some(match values {
+            [Value::Bytea(file), width, height, rest @ ..] if rest.len() <= 2 => {
+                let format = match rest.first().and_then(Value::to_text).map(|text| text.to_ascii_lowercase()) {
+                    None => Ok(None),
+                    Some(format) if format == "png" => Ok(Some(eggdb_content::RenditionFormat::Png)),
+                    Some(format) if format == "jpeg" || format == "jpg" => {
+                        let quality = rest.get(1).and_then(Value::as_integer).unwrap_or(85).clamp(1, 100) as u8;
+                        Ok(Some(eggdb_content::RenditionFormat::Jpeg(quality)))
+                    }
+                    Some(other) => Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("image_rendition writes png or jpeg, not {other}"))),
+                };
+                match (format, integer(width), integer(height)) {
+                    (Ok(format), Some(width), Some(height)) => eggdb_content::rendition(file, width, height, format)
+                        .map(Value::Bytea)
+                        .map_err(|error| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("image_rendition: {error}"))),
+                    (Err(error), _, _) => Err(error),
+                    _ => Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "image_rendition takes the largest width and height as positive integers")),
+                }
+            }
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "image_rendition takes an image as bytea, a width, a height, and optionally a format and a quality")),
+        });
+    }
     if matches!(name, "dicom_parse" | "sparkplug_decode" | "geotiff_info" | "image_metadata") {
         return Some(match values {
             [Value::Bytea(file)] if name == "image_metadata" => crate::image_metadata::metadata(file).and_then(jsonb),
@@ -620,7 +645,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 }
 
 pub(crate) fn result_type(name: &str) -> crate::types::SqlType {
-    if name == "eggdb_pdf_table" {
+    if matches!(name, "eggdb_pdf_table" | "image_rendition") {
         crate::types::SqlType::Bytea
     } else if matches!(name, "fix_field" | "extract_text") {
         crate::types::SqlType::Text

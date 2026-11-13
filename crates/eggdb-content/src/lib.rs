@@ -8,6 +8,7 @@
 //! reader bounds what it produces, so a hostile file cannot exhaust memory.
 
 mod deflate;
+mod image;
 mod inflate;
 mod pdf;
 mod sheet;
@@ -15,6 +16,7 @@ mod text;
 mod zip;
 
 pub use deflate::{deflate, gzip};
+pub use image::{Image, RenditionFormat, decode_image, encode_image, fit, rendition, source_format};
 pub use inflate::{
     DecompressError, gunzip, gunzip_within_memory, inflate, zlib_inflate,
     zlib_inflate_within_memory,
