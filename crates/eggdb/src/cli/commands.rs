@@ -54,6 +54,7 @@ mod serve_otlp;
 mod serve_mongo;
 mod serve_replication;
 mod serve_resp;
+mod serve_standby;
 mod serve_tls;
 mod shell;
 mod shell_block;

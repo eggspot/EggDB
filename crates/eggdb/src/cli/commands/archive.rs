@@ -645,6 +645,13 @@ impl Session<'_> {
             }
         };
         replayed_commits += replayed.map_or(0, |report| report.commits);
+        let position = replayed.map(|report| report.reached.bits()).or(reached);
+        if let Some(position) = position
+            && let Err(message) = record_standby_position(&staging, position)
+        {
+            let _ = std::fs::remove_file(&staging);
+            return Err(failed(message));
+        }
         std::fs::rename(&staging, &target)
             .map_err(|error| failed(format!("cannot move the restored copy into place: {error}")))?;
         match self.format {
@@ -840,6 +847,18 @@ fn owner_writable(permissions: &mut std::fs::Permissions) {
 fn owner_writable(permissions: &mut std::fs::Permissions) {
     #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(false);
+}
+
+/// Records in a restored copy the stamp of the last archived commit it holds, so it can start
+/// as a standby fed by the same change archive (D1027).
+fn record_standby_position(path: &Path, stamp: u64) -> Result<(), String> {
+    let db = eggdb::Database::open(path).map_err(|error| format!("cannot open the restored copy: {error}"))?;
+    let recorded = db
+        .set_standby_position(eggdb::CommitStamp::from_bits(stamp))
+        .map_err(|error| format!("cannot record the restored copy's position: {error}"));
+    let closed = db.close().map_err(|error| format!("cannot close the restored copy: {error}"));
+    recorded?;
+    closed
 }
 
 fn append_manifest(directory: &Path, line: &str) -> std::io::Result<()> {

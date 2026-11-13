@@ -295,6 +295,8 @@ impl CommandName {
             | OptionName::ReplicationPeers
             | OptionName::ReplicationAdvertise
             | OptionName::FailoverAfter
+            | OptionName::StandbyOf
+            | OptionName::ApplyDelay
             | OptionName::CdcWebhook
             | OptionName::OtlpEndpoint
             | OptionName::CdcQueue
@@ -521,6 +523,8 @@ enum OptionName {
     ReplicationPeers,
     ReplicationAdvertise,
     FailoverAfter,
+    StandbyOf,
+    ApplyDelay,
     CdcWebhook,
     OtlpEndpoint,
     CdcQueue,
@@ -685,6 +689,8 @@ impl OptionName {
             b"replication-peers" => Self::ReplicationPeers,
             b"replication-advertise" => Self::ReplicationAdvertise,
             b"failover-after" => Self::FailoverAfter,
+            b"standby-of" => Self::StandbyOf,
+            b"apply-delay" => Self::ApplyDelay,
             b"cdc-webhook" => Self::CdcWebhook,
             b"otlp-endpoint" => Self::OtlpEndpoint,
             b"cdc-queue" => Self::CdcQueue,
@@ -1054,6 +1060,8 @@ pub(crate) struct ServeOptions {
     pub(crate) replication_peers: Vec<String>,
     pub(crate) replication_advertise: Option<String>,
     pub(crate) failover_after_seconds: Option<u64>,
+    pub(crate) standby_of: Option<PathBuf>,
+    pub(crate) apply_delay_seconds: Option<u64>,
     pub(crate) cdc_webhook: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) cdc_queue: Option<String>,
@@ -1797,6 +1805,14 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::ReplicationAdvertise => {
                 let address = value.to_str().filter(|text| text.contains(':')).ok_or_else(|| usage(format!("{} takes the host:port peers reach this server's replication listener at", option.spelled)))?;
                 request.serve.replication_advertise = Some(address.to_owned());
+            }
+            OptionName::StandbyOf => request.serve.standby_of = Some(PathBuf::from(value)),
+            OptionName::ApplyDelay => {
+                request.serve.apply_delay_seconds = Some(
+                    parse_whole_number(value.as_encoded_bytes())
+                        .filter(|seconds| *seconds <= 30 * 86_400)
+                        .ok_or_else(|| usage(format!("{} takes how many seconds a standby stays behind its primary, at most 30 days", option.spelled)))?,
+                );
             }
             OptionName::FailoverAfter => {
                 request.serve.failover_after_seconds = Some(

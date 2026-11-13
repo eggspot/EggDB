@@ -1688,7 +1688,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Automatic failure detection, fencing of an old primary, and planned switchover (D18, D209). **Code written, unbuilt**
   (code-only mode, 2026-11-13, D1026): `--replication-peers`, `--failover-after`, a primary's majority lease, and
   `SWITCHOVER TO`.
-- Delayed replicas, and standbys in another region fed by log shipping (D18).
+- Delayed replicas, and standbys in another region fed by log shipping (D18). **Code written, unbuilt** (code-only mode,
+  2026-11-13, D1027): `--standby-of` with `--apply-delay`, fed by the change archive.
 - Replica freshness chosen per request: linearizable, read-your-writes, causal, bounded staleness
   or eventual (D18).
 - Jepsen-style checks against real processes (D9, D209).

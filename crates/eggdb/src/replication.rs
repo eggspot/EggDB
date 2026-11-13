@@ -4,6 +4,7 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 pub(crate) const POSITION_KEY: &[u8] = b"\xffCOL\x00\x7freplication";
+pub(crate) const STANDBY_KEY: &[u8] = b"\xffCOL\x00\x7fstandby";
 const DEFAULT_RETAINED_BATCHES: usize = 100_000;
 
 fn replication_error(message: impl Into<Box<str>>) -> Error {
@@ -237,6 +238,44 @@ impl Database {
             && batches.windows(2).all(|pair| pair[1].sequence == pair[0].sequence + 1)
             && batches.last().is_some_and(|last| last.sequence + 1 == before);
         Ok(complete.then_some(batches))
+    }
+
+    /// The stamp of the last archived commit this database holds as a standby fed by a change
+    /// archive (D1027), recorded by a restore from an archive and by every commit a standby
+    /// applies; `None` when it was never restored from one.
+    pub fn standby_position(&self) -> Result<Option<crate::CommitStamp>> {
+        let read = self.begin_read()?;
+        Ok(read
+            .get_raw(STANDBY_KEY)?
+            .and_then(|bytes| bytes.get(..8).and_then(|bytes| bytes.try_into().ok()).map(u64::from_le_bytes))
+            .map(crate::CommitStamp::from_bits))
+    }
+
+    /// Records that this database holds every archived commit up to `stamp`, as a restore from
+    /// an archive leaves it (D1027).
+    pub fn set_standby_position(&self, stamp: crate::CommitStamp) -> Result<()> {
+        let mut transaction = self.begin_write_unfenced(self.write_timeout())?;
+        transaction.put_raw(STANDBY_KEY, &stamp.bits().to_le_bytes())?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Applies one archived commit as a standby does, its changes and the standby position in
+    /// one write transaction that the fence lets through.
+    pub fn apply_archived(&self, stamp: crate::CommitStamp, changes: &[crate::change_archive::ArchivedChange]) -> Result<()> {
+        let mut transaction = self.begin_write_unfenced(self.write_timeout())?;
+        transaction.note_expiring_keys();
+        for (key, value) in changes {
+            match value {
+                Some(value) => transaction.put_raw(key, value)?,
+                None => {
+                    transaction.delete_raw(key)?;
+                }
+            }
+        }
+        transaction.put_raw(STANDBY_KEY, &stamp.bits().to_le_bytes())?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Applies a batch a primary shipped, all of its changes in one write transaction, as a

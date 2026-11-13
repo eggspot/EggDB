@@ -186,6 +186,15 @@ pub fn read_change_archive(directory: &Path) -> Result<Vec<ArchivedEvent>> {
     events_of(&files, directory)
 }
 
+/// Reads the change archive in `directory` from the segment numbered `first` on and returns
+/// its events with the numbers of every segment the archive holds, so a reader that follows a
+/// growing archive rereads only its newest segments (D1027).
+pub fn read_change_archive_from(directory: &Path, first: u64) -> Result<(Vec<ArchivedEvent>, Vec<u64>)> {
+    let numbers = segment_numbers(directory)?;
+    let files: Vec<PathBuf> = numbers.iter().filter(|number| **number >= first).map(|number| directory.join(segment_name(*number))).collect();
+    Ok((events_of(&files, directory)?, numbers))
+}
+
 /// Reads one file in the change archive's format, such as a differential backup, into its
 /// events.
 pub fn read_change_file(path: &Path) -> Result<Vec<ArchivedEvent>> {

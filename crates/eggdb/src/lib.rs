@@ -86,7 +86,7 @@ pub use concurrent::{ConcurrentTransaction, Isolation};
 pub use database::{BackupReport, CheckReport, CloneReport, CompactReport, Database, DifferentialReport, Stats};
 pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;
-pub use change_archive::{ArchivedChange, ArchivedEvent, read_change_archive, read_change_file};
+pub use change_archive::{ArchivedChange, ArchivedEvent, read_change_archive, read_change_archive_from, read_change_file};
 pub use replay::{ReplayReport, replay_changes, replay_events};
 pub use replication::{DatabaseApply, ReplicationPrimary};
 pub use eggdb_replication::{Batch as ReplicationBatch, Mode as ReplicationMode, Refusal as ReplicationRefusal, Replica, ReplicaId, decode_batch, encode_batch};

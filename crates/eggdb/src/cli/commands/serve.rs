@@ -1128,6 +1128,15 @@ impl Session<'_> {
         if replication_listener.is_some() {
             eggdb_sql::set_switchover_hook(super::serve_failover::request_switchover);
         }
+        if let Some(directory) = &options.standby_of {
+            if replicates {
+                return Err(usage("--standby-of follows a change archive; it goes without --replica-of and --replication-listen".to_owned()));
+            }
+            db.fence(format!("this server is a standby fed by the change archive in {}; send writes to the primary", directory.display()));
+        }
+        if options.apply_delay_seconds.is_some() && options.standby_of.is_none() {
+            return Err(usage("--apply-delay delays a standby; give --standby-of <archive directory>".to_owned()));
+        }
         let graph_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::GRAPH_COLLECTIONS,
@@ -1584,6 +1593,17 @@ impl Session<'_> {
                 }
                 outcome
             });
+            let standby_follower = scope.spawn(|| match &options.standby_of {
+                Some(directory) => {
+                    let delay = std::time::Duration::from_secs(options.apply_delay_seconds.unwrap_or(0));
+                    let outcome = super::serve_standby::follow_archive(&db, directory, delay, &stop_signals::requested);
+                    if let Err(message) = &outcome {
+                        eprintln!("eggdb serve: the standby stopped following its change archive: {message}");
+                    }
+                    outcome
+                }
+                None => Ok(()),
+            });
             let replication_monitor = scope.spawn(|| {
                 if replicates {
                     replication_node.monitor(&stop_signals::requested);
@@ -1664,6 +1684,7 @@ impl Session<'_> {
             let _ = replication_server.join();
             let _ = replica_follower.join();
             let _ = replication_monitor.join();
+            let _ = standby_follower.join();
             let _ = kafka_server.join();
             let _ = amqp_server.join();
             let _ = mqtt_server.join();
