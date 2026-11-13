@@ -1721,7 +1721,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D900); invisible (`HIDDEN`) period columns: **code written, unbuilt** (code-only
   mode, 2026-11-13, D1032).
 - Materialized views kept up to date incrementally at commit, and continuous queries (D28,
-  PR #86).
+  PR #86). **Code written, unbuilt** (code-only mode, 2026-11-13, D1033): `CREATE INCREMENTAL MATERIALIZED VIEW` over one
+  table, with `LISTEN <view>_changes`. Left: joins.
 - `eggdb follow` of `pgoutput`'s parallel streaming and two-phase messages, binary arrays,
   domains, enums, ranges, network and geometric types, and tables renamed, moved or recreated
   during a follow (D296).

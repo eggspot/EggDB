@@ -27,6 +27,7 @@ mod sqlserver_ddl_triggers;
 mod sqlserver_partitions;
 mod oracle_system_triggers;
 mod backup;
+mod incremental;
 mod invisible;
 mod logical_slots;
 pub(crate) mod freshness;
@@ -2003,7 +2004,11 @@ impl<'s> Session<'s> {
     ) -> SqlResult<()> {
         self.prepare_writer_snapshot(text)?;
         self.prepare_database_links(text)?;
-        if self.prepare_backup(text, on_result)? || self.prepare_switchover(text, on_result)? || self.prepare_freshness(text, on_result)? {
+        if self.prepare_backup(text, on_result)?
+            || self.prepare_switchover(text, on_result)?
+            || self.prepare_freshness(text, on_result)?
+            || self.prepare_incremental_views(text, on_result)?
+        {
             return Ok(());
         }
         let rewritten = match self.prepare_property_graphs(text, on_result)? {
