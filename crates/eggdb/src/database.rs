@@ -1086,6 +1086,43 @@ impl Database {
         })
     }
 
+    /// Checks that a copy made by [`Database::backup_to`] opens in release `major.minor`
+    /// (D1121), the downgrade path to an earlier release: copies hold plain values and keep
+    /// LSM tables as B-tree tables, so only the other features count. Fails with
+    /// [`ErrorKind::Incompatible`](crate::ErrorKind::Incompatible), naming what that release
+    /// lacks, when the file uses a feature it does not know, such as encryption before 0.2.
+    pub fn check_copy_for_release(&self, major: u32, minor: u32) -> Result<()> {
+        let features = self.store.superblock().map_err(Error::storage)?.features;
+        let incompatible = features.incompatible
+            & !(Features::COMPRESSED_VALUES | Features::ZSTD_VALUES | Features::LSM_TABLES)
+            & !Features::incompatible_known_by(major, minor);
+        let read_only = features.read_only_compatible & !Features::read_only_compatible_known_by(major, minor);
+        let mut missing = Vec::new();
+        if incompatible & Features::ENCRYPTED_PAGES != 0 {
+            missing.push("encrypted pages");
+        }
+        if read_only & Features::EXPIRING_KEYS != 0 {
+            missing.push("keys with a time to live");
+        }
+        if read_only & Features::COLLECTION_COUNTS != 0 {
+            missing.push("kept collection counts");
+        }
+        let other = incompatible & !Features::ENCRYPTED_PAGES;
+        if other != 0 {
+            missing.push("features added after it");
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorKind::Incompatible,
+            format!(
+                "release {major}.{minor} cannot open a copy of this file: it does not know its {}. Copy it for a later release, or restore its data into a file made by that release.",
+                missing.join(", ")
+            ),
+        ))
+    }
+
     /// Opens the database file at `path` read-only and compacts it (see
     /// [`Database::compact`]), so programs reading the file keep working throughout.
     pub fn compact_file(path: impl AsRef<Path>) -> Result<CompactReport> {

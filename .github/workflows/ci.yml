@@ -1038,6 +1038,38 @@ jobs:
           $starting.Stop()
           "| Step | Seconds |`n|------|--------:|`n| download and install | $([math]::Round($installing.Elapsed.TotalSeconds, 2)) |`n| first start | $([math]::Round($starting.Elapsed.TotalSeconds, 2)) |" >> $env:GITHUB_STEP_SUMMARY
 
+  release-compat:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-release-compat-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-release-compat-${{ runner.os }}-
+      - name: Download the previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
+          gh release download "$previous" --repo "$GITHUB_REPOSITORY" --pattern "eggdb-$previous-x86_64-unknown-linux-musl.tar.gz" --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/eggdb-$previous-x86_64-unknown-linux-musl.tar.gz" -C "$RUNNER_TEMP"
+          echo "PREVIOUS_EGGDB=$RUNNER_TEMP/eggdb-$previous-x86_64-unknown-linux-musl/eggdb" >> "$GITHUB_ENV"
+      - name: Upgrade, downgrade and mixed-version file tests against the previous release
+        run: |
+          cargo build -p eggdb
+          scripts/release-compat.sh target/debug/eggdb "$PREVIOUS_EGGDB"
+
   system-allocator:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -2182,7 +2214,7 @@ jobs:
           PY
 
   check:
-    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, cortex-m, opensearch-compare, mongo-compare, ldbc-compare, installers, system-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, android, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
+    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, cortex-m, opensearch-compare, mongo-compare, ldbc-compare, installers, system-allocator, release-compat, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, android, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

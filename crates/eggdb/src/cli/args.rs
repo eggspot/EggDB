@@ -235,6 +235,7 @@ impl CommandName {
             OptionName::Kql | OptionName::Sparql => self == Self::Sql,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
             OptionName::LockDays => self == Self::Backup,
+            OptionName::ForRelease => self == Self::Backup,
             OptionName::Differential | OptionName::Keep | OptionName::Clone => self == Self::Backup,
             OptionName::BackupKeyFile => matches!(self, Self::Backup | Self::Restore),
             OptionName::ArchiveChanges => matches!(
@@ -675,6 +676,7 @@ enum OptionName {
     SqlDump,
     WholeDump,
     LockDays,
+    ForRelease,
     ArchiveChanges,
     Differential,
     Keep,
@@ -717,6 +719,7 @@ impl OptionName {
             b"version" => Self::Version,
             b"page-size" => Self::PageSize,
             b"lock-days" => Self::LockDays,
+            b"for-release" => Self::ForRelease,
             b"archive-changes" => Self::ArchiveChanges,
             b"differential" => Self::Differential,
             b"clone" => Self::Clone,
@@ -1045,6 +1048,7 @@ pub(crate) struct Request {
     pub(crate) swap: SwapOptions,
     pub(crate) copy: Option<PathBuf>,
     pub(crate) lock_days: Option<u32>,
+    pub(crate) for_release: Option<(u32, u32)>,
     pub(crate) archive_changes: Option<PathBuf>,
     pub(crate) differential: bool,
     pub(crate) clone_copy: bool,
@@ -1567,6 +1571,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         swap: SwapOptions::default(),
         copy: None,
         lock_days: None,
+        for_release: None,
         memory: None,
         rdf: None,
         archive_changes: None,
@@ -1628,6 +1633,15 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::BackupKeyFile => {
                 request.backup_key = Some(read_key_file(value).map_err(|message| usage(message.replace("--key-file", "--backup-key-file")))?);
+            }
+            OptionName::ForRelease => {
+                request.for_release = Some(parse_release(value.as_encoded_bytes()).ok_or_else(|| {
+                    usage(format!(
+                        "{} takes a release as MAJOR.MINOR, such as 0.5, not '{}'",
+                        option.spelled,
+                        shown(value)
+                    ))
+                })?);
             }
             OptionName::LockDays => {
                 request.lock_days = Some(
@@ -3626,6 +3640,19 @@ fn parse_whole_number(digits: &[u8]) -> Option<u64> {
     })
 }
 
+
+fn parse_release(text: &[u8]) -> Option<(u32, u32)> {
+    let text = std::str::from_utf8(text).ok()?;
+    let text = text.strip_prefix('v').unwrap_or(text);
+    let mut parts = text.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    match parts.next() {
+        None => Some((major, minor)),
+        Some(patch) if patch.parse::<u32>().is_ok() && parts.next().is_none() => Some((major, minor)),
+        Some(_) => None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{

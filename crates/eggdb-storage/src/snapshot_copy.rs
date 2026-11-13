@@ -292,6 +292,7 @@ impl<F: File> ReadTransaction<'_, F> {
         };
         let catalog_root = target.map_or(NO_PAGE, |tree| tree.root());
         let mut features = self.features();
+        features.incompatible &= !(Features::COMPRESSED_VALUES | Features::ZSTD_VALUES);
         if folding.skipped.is_some() {
             features.incompatible &= !Features::LSM_TABLES;
         }

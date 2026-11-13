@@ -51,6 +51,12 @@ impl Session<'_> {
         }
         self.refuse_backup_destination(&copy, &copy_shown)?;
         if self.request.clone_copy {
+            if self.request.for_release.is_some() {
+                return Err(Failure::usage(
+                    "--clone copies the file's pages as they are; --for-release needs the entry-by-entry copy",
+                    Some(crate::cli::args::CommandName::Backup),
+                ));
+            }
             return self.clone_into(&copy, &copy_shown);
         }
         let started = Instant::now();
@@ -62,6 +68,10 @@ impl Session<'_> {
             }
             Err(error) => return Err(self.open_failure(&error, Access::ReadOnly)),
         };
+        if let Some((major, minor)) = self.request.for_release {
+            db.check_copy_for_release(major, minor)
+                .map_err(|error| engine_failure(&error))?;
+        }
         let show_progress = self.format != Format::Json && std::io::IsTerminal::is_terminal(&std::io::stderr());
         let mut last_shown = Instant::now();
         let report = db

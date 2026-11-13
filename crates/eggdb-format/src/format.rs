@@ -207,6 +207,29 @@ impl Features {
     pub const KNOWN_INCOMPATIBLE: u64 =
         Self::COMPRESSED_VALUES | Self::ENCRYPTED_PAGES | Self::ZSTD_VALUES | Self::LSM_TABLES;
 
+    /// The incompatible features release `major.minor` knows (D1121): what a copy made for
+    /// that release may carry. Releases before 0.2 knew none; 0.2 to 0.5 knew
+    /// [`Features::COMPRESSED_VALUES`] and [`Features::ENCRYPTED_PAGES`]; later ones know
+    /// [`Features::KNOWN_INCOMPATIBLE`].
+    pub const fn incompatible_known_by(major: u32, minor: u32) -> u64 {
+        match (major, minor) {
+            (0, 0..=1) => 0,
+            (0, 2..=5) => Self::COMPRESSED_VALUES | Self::ENCRYPTED_PAGES,
+            _ => Self::KNOWN_INCOMPATIBLE,
+        }
+    }
+
+    /// The read-only-compatible features release `major.minor` knows (D1121): releases before
+    /// 0.2 knew none, 0.2 and 0.3 knew [`Features::EXPIRING_KEYS`], and 0.4 and later know
+    /// [`Features::KNOWN_READ_ONLY_COMPATIBLE`].
+    pub const fn read_only_compatible_known_by(major: u32, minor: u32) -> u64 {
+        match (major, minor) {
+            (0, 0..=1) => 0,
+            (0, 2..=3) => Self::EXPIRING_KEYS,
+            _ => Self::KNOWN_READ_ONLY_COMPATIBLE,
+        }
+    }
+
     /// Whether this release may open a file with these features for `access`. Unknown
     /// compatible bits are ignored, unknown read-only-compatible bits refuse a write, and
     /// unknown incompatible bits refuse any open.

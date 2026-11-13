@@ -426,7 +426,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `CHECK`, `OPTIMIZE` and `REPAIR`: **code written, unbuilt** (code-only mode, 2026-11-12, D629);
   Oracle's `MERGE PARTITIONS a TO b` range form: **code written, unbuilt** (code-only mode, 2026-11-12, D630).
 - Online upgrades with a tested downgrade path to the previous minor version (D20, D35). Check:
-  the upgrade, downgrade and mixed-version file tests in CI.
+  the upgrade, downgrade and mixed-version file tests in CI. **Code written, unbuilt** (code-only mode, 2026-11-13,
+  D1121): `backup --for-release` and CI's `release-compat` job against the previous release.
 - Online schema changes and reindexing that block neither reads nor writes (D20). Check: a
   concurrent workload test across an `ALTER TABLE` and a reindex.
 - Learned indexes, first over the LSM tree's sealed runs, after the per-table LSM switch above,
