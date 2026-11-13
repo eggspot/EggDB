@@ -3,7 +3,11 @@
 //! extensions, references, date and time formats, and the required elements and code values of
 //! common core resources. It is not a full profile validator.
 
+mod profile;
+
 use crate::json::{Json, Node, parse_document};
+
+pub(crate) use profile::validate as validate_against_profile;
 
 const MOST_DEPTH: usize = 64;
 const MOST_ISSUES: usize = 1000;
@@ -367,11 +371,14 @@ pub(crate) fn validate(resource: &str) -> String {
         Ok(document) => validator.resource(&document, "", 0),
         Err(error) => validator.issue("fatal", "structure", "", format!("the resource is not JSON: {}", error.message)),
     }
-    if validator.issues.is_empty() {
+    outcome(&validator.issues)
+}
+
+fn outcome(issues: &[Issue]) -> String {
+    if issues.is_empty() {
         return "{\"resourceType\":\"OperationOutcome\",\"issue\":[{\"severity\":\"information\",\"code\":\"informational\",\"diagnostics\":\"All OK\"}]}".to_owned();
     }
-    let issues: Vec<String> = validator
-        .issues
+    let issues: Vec<String> = issues
         .iter()
         .map(|issue| {
             let expression = if issue.expression.is_empty() { String::new() } else { format!(",\"expression\":[{}]", json_string(&issue.expression)) };
@@ -424,5 +431,39 @@ mod tests {
         assert!(!valid_instant("2024-05-01"));
         assert!(valid_date_time("2024"));
         assert!(!valid_date_time("2024-05-01T10:00"));
+    }
+
+    #[test]
+    fn profiles_check_cardinality_types_fixed_values_patterns_and_required_bindings() {
+        let profile = r#"{"resourceType":"StructureDefinition","url":"http://example.org/vitals","type":"Observation","snapshot":{"element":[
+            {"path":"Observation"},
+            {"path":"Observation.status","min":1,"max":"1","type":[{"code":"code"}],"fixedCode":"final"},
+            {"path":"Observation.code","min":1,"max":"1","type":[{"code":"CodeableConcept"}],"binding":{"strength":"required","valueSet":"http://example.org/vs/vitals|1.0"}},
+            {"path":"Observation.category","min":1,"max":"*","type":[{"code":"CodeableConcept"}],"patternCodeableConcept":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/observation-category","code":"vital-signs"}]}},
+            {"path":"Observation.value[x]","min":1,"max":"1","type":[{"code":"Quantity"}]},
+            {"path":"Observation.note","max":"0"},
+            {"path":"Observation.component","sliceName":"systolic"}
+        ]}}"#;
+        let value_sets = r#"{"resourceType":"ValueSet","url":"http://example.org/vs/vitals","compose":{"include":[{"system":"http://loinc.org","concept":[{"code":"8867-4"},{"code":"8310-5"}]}]}}"#;
+        let good = r#"{"resourceType":"Observation","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"category":[{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/observation-category","code":"vital-signs"}],"text":"Vital"}],"valueQuantity":{"value":72,"unit":"/min"}}"#;
+        let outcome = validate_against_profile(good, profile, Some(value_sets));
+        assert!(!outcome.contains(""error""), "{outcome}");
+        assert!(outcome.contains("slice of Observation.component is not checked"), "{outcome}");
+        let bad = r#"{"resourceType":"Observation","status":"preliminary","code":{"coding":[{"system":"http://loinc.org","code":"1234-5"}]},"category":[{"coding":[{"system":"http://example.org","code":"lab"}]}],"valueString":"fast","note":[{"text":"x"}]}"#;
+        let outcome = validate_against_profile(bad, profile, Some(value_sets));
+        for expected in [
+            "Observation.status must equal the profile's fixed value",
+            "Observation.code has no code from the required ValueSet",
+            "Observation.category must contain the profile's pattern",
+            "Observation.value[x] must be of type Quantity",
+            "Observation.note allows at most 0, found 1",
+        ] {
+            assert!(outcome.contains(expected), "{expected}: {outcome}");
+        }
+        let missing = validate_against_profile(r#"{"resourceType":"Observation","status":"final","code":{"text":"x"}}"#, profile, None);
+        assert!(missing.contains("Observation.category needs at least 1, found 0"), "{missing}");
+        assert!(missing.contains("was not given"), "{missing}");
+        let wrong = validate_against_profile(r#"{"resourceType":"Patient"}"#, profile, None);
+        assert!(wrong.contains("constrains Observation, not Patient"), "{wrong}");
     }
 }

@@ -552,7 +552,24 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 )),
                 None => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "fhir_validate takes the resource as jsonb or text")),
             },
-            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "fhir_validate takes one resource")),
+            [resource, profile, rest @ ..] if rest.len() <= 1 => {
+                let texts = (resource.to_text(), profile.to_text(), rest.first().map(Value::to_text));
+                match texts {
+                    (Some(resource), Some(profile), sets) if sets.as_ref().is_none_or(Option::is_some) => {
+                        let sets = sets.flatten();
+                        if resource.len() + profile.len() + sets.as_ref().map_or(0, String::len) > MOST_MESSAGE_BYTES * 4 {
+                            Err(SqlError::new(
+                                SqlState::PROGRAM_LIMIT_EXCEEDED,
+                                format!("fhir_validate reads at most {} bytes of resource, profile and value sets", MOST_MESSAGE_BYTES * 4),
+                            ))
+                        } else {
+                            jsonb(crate::fhir::validate_against_profile(&resource, &profile, sets.as_deref()))
+                        }
+                    }
+                    _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "fhir_validate takes the resource, a StructureDefinition and optional ValueSets as jsonb or text")),
+                }
+            }
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "fhir_validate takes a resource, then optionally a StructureDefinition and ValueSets")),
         });
     }
     if name == "extract_text" {

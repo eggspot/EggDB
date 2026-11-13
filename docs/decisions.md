@@ -1092,3 +1092,4 @@ its full title with its status.
 - [D1065](decisions/D1065.md) Code-only batch 713 (M16): rsyslog and syslog-ng in CI
 - [D1066](decisions/D1066.md) Code-only batch 714 (M16): Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus
 - [D1067](decisions/D1067.md) Code-only batch 715 (M16): the MATCH_RECOGNIZE clause and MEASURES
+- [D1068](decisions/D1068.md) Code-only batch 716 (M16): FHIR validation against StructureDefinitions and profiles
