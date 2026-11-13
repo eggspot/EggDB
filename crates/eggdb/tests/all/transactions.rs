@@ -593,3 +593,30 @@ fn a_read_only_compute_node_follows_the_writers_manifest() {
     assert!(reader.refresh_page_store(objects, &options).unwrap());
     assert_eq!(reader.read(|tx| tx.get("count")).unwrap(), Some(b"3".to_vec()));
 }
+
+#[test]
+fn a_read_only_database_moves_to_a_newer_copy_when_no_reader_holds_the_old_one() {
+    let source = TempPath::new("edge-source");
+    let db = Database::open(source.path()).unwrap();
+    db.write(|tx| tx.put("version", "1")).unwrap();
+    let first = TempPath::new("edge-first");
+    db.backup_to(first.path()).unwrap();
+    db.write(|tx| tx.put("version", "2")).unwrap();
+    let second = TempPath::new("edge-second");
+    db.backup_to(second.path()).unwrap();
+    let options = Options::new().read_only(true);
+    let edge = Database::open_with(first.path(), options.clone()).unwrap();
+    assert_eq!(edge.read(|tx| tx.get("version")).unwrap(), Some(b"1".to_vec()));
+    let held = edge.begin_read().unwrap();
+    assert_eq!(
+        edge.switch_to_copy(second.path(), &options).err().map(|error| error.kind()),
+        Some(ErrorKind::SnapshotTooOld)
+    );
+    drop(held);
+    edge.switch_to_copy(second.path(), &options).unwrap();
+    assert_eq!(edge.read(|tx| tx.get("version")).unwrap(), Some(b"2".to_vec()));
+    assert_eq!(
+        db.switch_to_copy(first.path(), &options).err().map(|error| error.kind()),
+        Some(ErrorKind::InvalidOption)
+    );
+}

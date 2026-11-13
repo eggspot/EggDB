@@ -1128,3 +1128,4 @@ its full title with its status.
 - [D1101](decisions/D1101.md) Code-only batch 749 (M18): stateless compute nodes: read-only servers over a page store that follow the writer
 - [D1102](decisions/D1102.md) Code-only batch 750 (M18): serverless: stop when idle, wake by socket activation, and a timed cold start
 - [D1103](decisions/D1103.md) Code-only batch 751 (M18): tiered storage: memory, local disk and object storage by how recently pages were read
+- [D1104](decisions/D1104.md) Code-only batch 752 (M18): an edge server on archived copies that follows the manifest and evicts old copies

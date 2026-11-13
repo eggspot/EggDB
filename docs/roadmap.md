@@ -2067,7 +2067,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D227). **Code written, unbuilt** (code-only mode, 2026-11-13, D1103): the page store's chunk files on
   disk under `Options::page_store_disk_bytes` / `--page-store-disk`, evicting the chunks read longest ago.
 - An edge server on an edge copy, refreshed as its manifest grows, with cache limits and eviction
-  (D227).
+  (D227). **Code written, unbuilt** (code-only mode, 2026-11-13, D1104): `eggdb serve --edge-of s3://...
+  [--edge-cache <size>]`, `Database::switch_to_copy`, and least-recently-used eviction of cached copies.
 - Placement rules per table, for tiers, edges and regions (D18, D227).
 - Data pinned to regions, and residency policies per row (D18, D53).
 - Offline-first sync over HTTP with authentication per user, as the client sync API apps use (D37,

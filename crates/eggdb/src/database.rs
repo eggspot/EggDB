@@ -370,6 +370,26 @@ impl Database {
         Ok(db)
     }
 
+    /// Moves a database opened read-only to `copy`, a newer copy of the same data such as the
+    /// next archived copy an edge server downloaded (D1104): later transactions read `copy`.
+    /// Fails with [`ErrorKind::SnapshotTooOld`](crate::ErrorKind::SnapshotTooOld) while a read
+    /// transaction is open; try again once readers finish.
+    pub fn switch_to_copy(&self, copy: impl AsRef<Path>, options: &Options) -> Result<()> {
+        if !self.read_only {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "only a database opened read-only moves to a newer copy",
+            ));
+        }
+        let file = OsFileSystem::new()
+            .open(copy.as_ref(), OpenMode::Read)
+            .map_err(|error| Error::storage(error.into()))?;
+        let opened = PageFile::open_in(DatabaseFile::Os(file), Access::ReadOnly).map_err(Error::storage)?;
+        let cache = PageCache::new(opened, &OsMemory::new(), CacheSize::Bytes(options.cache_bytes))
+            .map_err(Error::storage)?;
+        self.store.replace_cache(cache).map_err(Error::storage)
+    }
+
     /// Moves a database opened read-only from a page store to the store's newest manifest
     /// (D1101): a stateless compute node serving queries over shared storage calls it to see
     /// the writer's latest commits. Returns whether the manifest had moved. While a read

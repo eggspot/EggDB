@@ -455,6 +455,14 @@ impl Session<'_> {
             (None, None) => None,
             _ => return Err(usage("--multi-primary and --multi-primary-node go together".to_owned())),
         };
+        if options.edge_of.is_some() && (options.page_store.is_some() || options.restore_from.is_some() || options.cluster.is_some() || options.replica_of.is_some()) {
+            return Err(usage(
+                "--edge-of serves the archived copies of a bucket read-only; it goes without --page-store, --restore-from, --cluster and --replica-of".to_owned(),
+            ));
+        }
+        if options.edge_cache.is_some() && options.edge_of.is_none() {
+            return Err(usage("--edge-cache goes with --edge-of".to_owned()));
+        }
         if options.idle_exit_seconds.is_some() && options.restore_from.is_none() && options.page_store.is_none() {
             return Err(usage(
                 "--idle-exit stops a server whose state lives elsewhere: give --restore-from s3://..., which it archives into before stopping, or --page-store s3://...".to_owned(),
@@ -1019,7 +1027,7 @@ impl Session<'_> {
                 .map_err(|message| Failure::database(message, Exit::DatabaseError))?;
         }
         drop(password);
-        let read_only = self.request.read_only;
+        let read_only = self.request.read_only || options.edge_of.is_some();
         let access = if read_only {
             Access::ReadOnly
         } else {
@@ -2050,6 +2058,11 @@ impl Session<'_> {
                     exit_when_idle(&db, std::time::Duration::from_secs(seconds), archive_to, &self.request.file);
                 }
             });
+            let edge_follower = scope.spawn(|| {
+                if let Some(url) = &options.edge_of {
+                    super::archive::follow_edge(&db, url, db.path(), options.edge_cache, &follow_options, &stop_signals::requested);
+                }
+            });
             let page_store_follower = scope.spawn(|| {
                 if let Some(url) = options.page_store.as_deref().filter(|_| read_only) {
                     super::archive::follow_page_store(&db, url, &follow_options, &stop_signals::requested);
@@ -2181,6 +2194,7 @@ impl Session<'_> {
             let _ = multi_primary_puller.join();
             let _ = page_store_follower.join();
             let _ = idle_stopper.join();
+            let _ = edge_follower.join();
             let _ = shard_mover.join();
             let _ = database_lender.join();
             let _ = database_arrivals.join();

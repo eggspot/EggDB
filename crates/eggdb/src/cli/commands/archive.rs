@@ -71,6 +71,85 @@ pub(super) fn archive_open_database(db: &eggdb::Database, url: &str, file: &Path
     Ok(name)
 }
 
+const EDGE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn edge_cache_directory() -> PathBuf {
+    std::env::var_os("EGGDB_EDGE_CACHE").map_or_else(|| std::env::temp_dir().join("eggdb-edge"), PathBuf::from)
+}
+
+/// Removes cached edge copies other than `keep`, the copies used longest ago first, until the
+/// cache holds at most `limit` bytes (D1104); returns how many were removed.
+pub(super) fn evict_edge_copies(keep: &Path, limit: u64) -> usize {
+    let Ok(entries) = std::fs::read_dir(edge_cache_directory()) else {
+        return 0;
+    };
+    let mut copies: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "eggdb"))
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            let used = metadata.accessed().or_else(|_| metadata.modified()).ok()?;
+            Some((used, metadata.len(), entry.path()))
+        })
+        .collect();
+    let mut held: u64 = copies.iter().map(|(_, size, _)| size).sum();
+    copies.sort_by_key(|(used, _, _)| *used);
+    let mut removed = 0;
+    for (_, size, path) in copies {
+        if held <= limit {
+            break;
+        }
+        if path == keep {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            held = held.saturating_sub(size);
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Keeps a read-only edge server on the newest copy archived in the bucket at `url`, checking
+/// its manifest every 30 seconds until `stop`, and keeps the edge cache within `cache_limit`
+/// bytes when given (D1104).
+pub(super) fn follow_edge(db: &eggdb::Database, url: &str, serving: &Path, cache_limit: Option<u64>, options: &eggdb::Options, stop: &(dyn Fn() -> bool + Sync)) {
+    let mut current = serving.to_path_buf();
+    let mut waiting: Option<PathBuf> = None;
+    let mut last_check: Option<std::time::Instant> = None;
+    while !stop() {
+        std::thread::sleep(FOLLOW_EVERY);
+        if waiting.is_none() && last_check.is_some_and(|checked| checked.elapsed() < EDGE_CHECK_EVERY) {
+            continue;
+        }
+        if waiting.is_none() {
+            last_check = Some(std::time::Instant::now());
+            match edge_copy(url, None) {
+                Ok(newest) if newest != current => waiting = Some(newest),
+                Ok(_) => {}
+                Err(message) => eprintln!("eggdb serve: --edge-of {url}: {message}"),
+            }
+        }
+        let Some(newest) = waiting.clone() else {
+            continue;
+        };
+        match db.switch_to_copy(&newest, options) {
+            Ok(()) => {
+                current = newest;
+                waiting = None;
+                if let Some(limit) = cache_limit {
+                    evict_edge_copies(&current, limit);
+                }
+            }
+            Err(error) if error.kind() == eggdb::ErrorKind::SnapshotTooOld => {}
+            Err(error) => {
+                eprintln!("eggdb serve: --edge-of {url}: cannot serve {}: {error}", newest.display());
+                waiting = None;
+            }
+        }
+    }
+}
+
 const FOLLOW_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Keeps a read-only server over the page store at `url` on the writer's newest manifest,
@@ -164,8 +243,7 @@ pub(super) fn edge_copy(url: &str, at: Option<&str>) -> Result<PathBuf, String> 
             chosen.file
         ));
     }
-    let cache = std::env::var_os("EGGDB_EDGE_CACHE")
-        .map_or_else(|| std::env::temp_dir().join("eggdb-edge"), PathBuf::from);
+    let cache = edge_cache_directory();
     let copy = cache.join(format!("{}.eggdb", chosen.sha256));
     if file_sha256(&copy).is_ok_and(|actual| actual == chosen.sha256) {
         return Ok(copy);
