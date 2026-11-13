@@ -2007,8 +2007,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A published memory floor and size budgets per microcontroller profile (D41, D230). **Code written, unbuilt**
   (code-only mode, 2026-11-13, D1085): `scripts/footprint-cortex-m.sh`, the `cortex-m3 engine` budgets and the floor
   in `docs/embedded.md`.
-- A fixed-memory mode that never allocates beyond a set budget (D41). **Code written, unbuilt** (D1086): `eggdb serve --memory-limit <size>` and `Options::memory_limit` split one budget across the page cache, snapshots and connections, and `eggdb_platform::set_process_limit` caps EggDB's allocator at it.
-- Write-amplification and flash-wear budgets, and battery-aware background work (D41).
+- A fixed-memory mode that never allocates beyond a set budget (D41). **Code written, unbuilt** (code-only mode, 2026-11-13, D1086): `eggdb serve --memory-limit <size>` and `Options::memory_limit` split one budget across the page cache, snapshots and connections, and `eggdb_platform::set_process_limit` caps EggDB's allocator at it.
+- Write-amplification and flash-wear budgets, and battery-aware background work (D41). **Code written, unbuilt** (code-only mode, 2026-11-13, D1087): `WearStats`, `blocks_left`, the Cortex-M run's `flash_write_amplification_milli` budget, and `Database::set_power_source` (`eggdb serve` follows the system's power source; `eggdb_set_power_source` in the C API).
 - Correct behavior under iOS background limits and Android Doze (D41).
 - The browser build in a worker with OPFS synchronous access handles, a database shared between
   tabs and a real `poll_oneoff` sleep (D221).

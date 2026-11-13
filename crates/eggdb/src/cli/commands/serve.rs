@@ -1651,6 +1651,18 @@ impl Session<'_> {
                 }
             });
             scope.spawn(|| {
+                super::serve_jobs::follow_power_source(
+                    &|source| {
+                        served_databases.with_databases(|databases| {
+                            for (_, database) in databases {
+                                let _ = database.set_power_source(source);
+                            }
+                        })
+                    },
+                    &stop_signals::requested,
+                )
+            });
+            scope.spawn(|| {
                 if let Some(endpoint) = &options.otlp_endpoint {
                     super::serve_otlp::export_telemetry(
                         endpoint,

@@ -122,6 +122,7 @@ mod os_terminal_windows;
     )
 ))]
 mod os_wait_status;
+mod power;
 pub mod process;
 mod rng;
 pub mod secure_random;
@@ -144,6 +145,7 @@ pub mod window;
 
 pub use aligned::AlignedBuffer;
 pub use allocator::{EggAllocator, process_limit, refused_allocations, set_process_limit};
+pub use power::{LOW_BATTERY_PERCENT, PowerSource, on_battery, power_source, power_source_from_sysfs};
 pub use cache::{CACHE_LINE_PADDING, CachePadded};
 pub use clock::{Clock, SimClock, SystemClock};
 pub use cpus::{CpuId, CpuSet, Cpus};

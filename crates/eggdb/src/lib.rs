@@ -102,6 +102,7 @@ pub use tenant_space::TenantSpace;
 pub use shard_copy::{ShardChange, ShardPage, decode_shard_changes, encode_shard_changes, shard_changes, tenant_changes};
 pub use error::{Error, ErrorKind, Result};
 pub use options::{Durability, Options};
+pub use eggdb_platform::PowerSource;
 pub use scan::{KeyRange, Scan};
 pub use transaction::{ReadTransaction, ValueReader, WriteTransaction};
 

@@ -33,7 +33,7 @@ mod test_rng;
 pub use crc32c::{crc32c, crc32c_append};
 pub use error::FormatError;
 pub use flash::{Flash, FlashPageError, FlashPages};
-pub use wear::{WearError, WearLevelled};
+pub use wear::{WearError, WearLevelled, WearStats};
 pub use format::{
     Access, FORMAT_VERSION, Features, FileId, HEADER_SLOT_SIZE, HeaderChoice, MAGIC,
     MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK,

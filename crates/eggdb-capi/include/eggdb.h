@@ -45,6 +45,10 @@ extern "C" {
 #define EGGDB_DURABILITY_NORMAL 1
 #define EGGDB_DURABILITY_OFF 2
 
+#define EGGDB_POWER_MAINS 0
+#define EGGDB_POWER_BATTERY 1
+#define EGGDB_POWER_LOW_BATTERY 2
+
 #define EGGDB_SCAN_REVERSE 1
 #define EGGDB_SCAN_END_INCLUSIVE 2
 #define EGGDB_SCAN_PREFIX 4
@@ -133,6 +137,7 @@ int eggdb_backup(eggdb_db *db, const char *path, eggdb_backup_report *report);
 int eggdb_compact(eggdb_db *db, eggdb_compact_report *report);
 int eggdb_compact_file(const char *path, eggdb_compact_report *report);
 int eggdb_remove_expired(eggdb_db *db, uint64_t *removed);
+int eggdb_set_power_source(eggdb_db *db, uint32_t source);
 
 int eggdb_begin_read(eggdb_db *db, eggdb_txn **txn);
 int eggdb_begin_write(eggdb_db *db, eggdb_txn **txn);

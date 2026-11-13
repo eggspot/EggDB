@@ -1,6 +1,6 @@
 use crate::args;
 use crate::status::{EGGDB_ERR_IN_USE, Failure, guarded};
-use eggdb::{BackupReport, CompactReport, Database, Durability, Options};
+use eggdb::{BackupReport, CompactReport, Database, Durability, Options, PowerSource};
 use std::ffi::{c_char, c_int};
 use std::sync::Arc;
 
@@ -16,6 +16,13 @@ pub const EGGDB_DURABILITY_FULL: u32 = 0;
 pub const EGGDB_DURABILITY_NORMAL: u32 = 1;
 /// `eggdb_options.durability`: nothing waits for the disk; a power loss can corrupt the file.
 pub const EGGDB_DURABILITY_OFF: u32 = 2;
+
+/// `eggdb_set_power_source`: a charger or the mains.
+pub const EGGDB_POWER_MAINS: u32 = 0;
+/// `eggdb_set_power_source`: a battery that is not low.
+pub const EGGDB_POWER_BATTERY: u32 = 1;
+/// `eggdb_set_power_source`: a low battery, or the system's battery saver.
+pub const EGGDB_POWER_LOW_BATTERY: u32 = 2;
 
 const KNOWN_OPEN_FLAGS: u32 = EGGDB_OPEN_READ_ONLY | EGGDB_OPEN_NO_CREATE;
 
@@ -313,6 +320,33 @@ pub unsafe extern "C" fn eggdb_remove_expired(db: *mut EggdbDb, removed: *mut u6
         let count = db.database.remove_expired()?;
         // SAFETY: eggdb.h asks for NULL or writable memory for one uint64_t.
         unsafe { args::write_if_wanted(removed, count) };
+        Ok(())
+    })
+}
+
+/// Tells the database what the device runs on, `EGGDB_POWER_MAINS`, `EGGDB_POWER_BATTERY` or
+/// `EGGDB_POWER_LOW_BATTERY`, so it checkpoints less often on a battery (D1087). An app passes
+/// what its platform reports: Android's `BatteryManager` and power-save mode, iOS's
+/// `UIDevice` battery state and Low Power Mode.
+///
+/// # Safety
+/// `db` is a handle from [`eggdb_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn eggdb_set_power_source(db: *mut EggdbDb, source: u32) -> c_int {
+    guarded(|| {
+        // SAFETY: eggdb.h asks for a live handle from eggdb_open.
+        let db = unsafe { args::handle(db, "db") }?;
+        let source = match source {
+            EGGDB_POWER_MAINS => PowerSource::Mains,
+            EGGDB_POWER_BATTERY => PowerSource::Battery,
+            EGGDB_POWER_LOW_BATTERY => PowerSource::LowBattery,
+            other => {
+                return Err(Failure::invalid_argument(format!(
+                    "source is {other}; use EGGDB_POWER_MAINS, EGGDB_POWER_BATTERY or EGGDB_POWER_LOW_BATTERY"
+                )));
+            }
+        };
+        db.database.set_power_source(source)?;
         Ok(())
     })
 }

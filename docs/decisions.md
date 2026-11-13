@@ -1111,3 +1111,4 @@ its full title with its status.
 - [D1084](decisions/D1084.md) Code-only batch 732 (M17): a QEMU Cortex-M run in CI
 - [D1085](decisions/D1085.md) Code-only batch 733 (M17): a memory floor and size budgets per microcontroller profile
 - [D1086](decisions/D1086.md) Code-only batch 734 (M17): a fixed-memory mode with one limit split across the engine and capped in the allocator
+- [D1087](decisions/D1087.md) Code-only batch 735 (M17): write-amplification and flash-wear budgets, and battery-aware checkpoints

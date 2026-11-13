@@ -40,6 +40,28 @@ pub(super) fn run_scheduled_jobs(
     }
 }
 
+const POWER_CHECK_EVERY: Duration = Duration::from_secs(60);
+
+pub(super) fn follow_power_source(
+    apply: &(dyn Fn(eggdb::PowerSource) + Sync),
+    stop: &(dyn Fn() -> bool + Sync),
+) {
+    let mut applied = eggdb::PowerSource::Mains;
+    let mut waited = POWER_CHECK_EVERY;
+    while !stop() {
+        if waited >= POWER_CHECK_EVERY {
+            waited = Duration::ZERO;
+            let source = eggdb_platform::power_source().unwrap_or(eggdb::PowerSource::Mains);
+            if source != applied {
+                apply(source);
+                applied = source;
+            }
+        }
+        std::thread::sleep(CHECK_EVERY);
+        waited += CHECK_EVERY;
+    }
+}
+
 const DELIVER_EVERY: Duration = Duration::from_secs(1);
 const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(5);
 const WEBHOOK_CERTIFICATE_VARIABLE: &str = "EGGDB_CDC_CA_FILE";

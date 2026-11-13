@@ -3,7 +3,7 @@ use crate::expiry::Moment;
 use crate::options::Options;
 use crate::transaction::{ReadTransaction, WriteTransaction};
 use crate::writer_slot::WriterSlot;
-use eggdb_platform::{Clock, DatabaseFile, FileSystem, OpenMode, OsFileSystem, OsMemory};
+use eggdb_platform::{Clock, DatabaseFile, FileSystem, OpenMode, OsFileSystem, OsMemory, PowerSource};
 use eggdb_storage::{
     Access, BTree, CacheSize, CommitStamp, CopyDestination, CopyFailure, CreateOptions, Features,
     FileId, NO_PAGE, PageCache, PageFile, PageSize, StorageError, Store,
@@ -85,7 +85,13 @@ pub struct Database {
     primary: OnceLock<Arc<crate::replication::ReplicationPrimary>>,
     fence: std::sync::Mutex<Option<String>>,
     row_capture: OnceLock<fn(&[u8]) -> bool>,
+    auto_checkpoint_log_bytes: Option<u64>,
+    power_source: std::sync::Mutex<PowerSource>,
 }
+
+/// How much more log a commit leaves before its automatic checkpoint while the machine runs on
+/// a battery (D1087).
+const BATTERY_CHECKPOINT_STRETCH: u64 = 4;
 
 struct ClockHandle(Arc<dyn Clock>);
 
@@ -381,7 +387,49 @@ impl Database {
             primary: OnceLock::new(),
             fence: std::sync::Mutex::new(None),
             row_capture: OnceLock::new(),
+            auto_checkpoint_log_bytes: options.auto_checkpoint_log_bytes,
+            power_source: std::sync::Mutex::new(PowerSource::Mains),
         })
+    }
+
+    /// Tells the database what the machine runs on, so background work costs less battery
+    /// (D41, D1087). On [`PowerSource::Battery`] a commit leaves four times
+    /// [`Options::auto_checkpoint_log_bytes`] of log before its automatic checkpoint, so the
+    /// same pages are written to their places less often; on [`PowerSource::LowBattery`]
+    /// commits checkpoint only when the log would outgrow the segments it reuses, and
+    /// [`Database::checkpoint`] and closing still checkpoint at once. Nothing is less durable:
+    /// a commit is on the disk when it returns either way, and only the next open's replay is
+    /// longer. [`PowerSource::Mains`], the state after opening, restores the configured
+    /// checkpoints. `eggdb_platform::power_source` reads it from the system.
+    pub fn set_power_source(&self, source: PowerSource) -> Result<()> {
+        let auto_checkpoint = match source {
+            PowerSource::Mains => self.auto_checkpoint_log_bytes,
+            PowerSource::Battery => self
+                .auto_checkpoint_log_bytes
+                .map(|bytes| bytes.saturating_mul(BATTERY_CHECKPOINT_STRETCH)),
+            _ => None,
+        };
+        let mut current = self
+            .power_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.read_only {
+            *current = source;
+            return Ok(());
+        }
+        self.store
+            .set_auto_checkpoint_bytes(auto_checkpoint)
+            .map_err(Error::storage)?;
+        *current = source;
+        Ok(())
+    }
+
+    /// What [`Database::set_power_source`] last set; [`PowerSource::Mains`] after opening.
+    pub fn power_source(&self) -> PowerSource {
+        *self
+            .power_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Captures every commit's changes to the keys `filter` accepts, with their stored bytes

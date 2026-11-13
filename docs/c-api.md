@@ -198,6 +198,7 @@ collection name; one that does not exist fails with `EGGDB_ERR_COLLECTION_NOT_FO
 | `eggdb_increment(..., by, &count)` | adds `by` (negative subtracts) to a decimal counter; absent counts as 0; not a counter or out of `int64_t` fails with `EGGDB_ERR_NOT_AN_INTEGER` |
 | `eggdb_compare_and_set(..., expected, expected_len, new_value, new_value_len, &swapped)` | stores `new_value` (NULL: removes the key) only when the value is `expected` (NULL: absent) |
 | `eggdb_remove_expired(db, &removed)` | removes every expired key now; commits also remove up to 32 each |
+| `eggdb_set_power_source(db, source)` | `EGGDB_POWER_MAINS`, `EGGDB_POWER_BATTERY` or `EGGDB_POWER_LOW_BATTERY`: on a battery the database checkpoints less often, on a low one only when it must (D1087); pass what Android's `BatteryManager` and power-save mode or iOS's battery state and Low Power Mode report |
 
 ## SQL
 

@@ -554,6 +554,13 @@ fn keys_expire_and_counters_count() {
     // SAFETY: a live database handle and a place for the count.
     ok(unsafe { eggdb_capi::eggdb_remove_expired(db, &mut removed) });
     assert_eq!(removed, 0);
+    // SAFETY: a live database handle.
+    ok(unsafe { eggdb_capi::eggdb_set_power_source(db, eggdb_capi::EGGDB_POWER_LOW_BATTERY) });
+    // SAFETY: a live database handle.
+    ok(unsafe { eggdb_capi::eggdb_set_power_source(db, eggdb_capi::EGGDB_POWER_MAINS) });
+    // SAFETY: a live database handle.
+    let unknown_source = unsafe { eggdb_capi::eggdb_set_power_source(db, 7) };
+    assert_eq!(unknown_source, EGGDB_ERR_INVALID_ARGUMENT);
     close(db);
 }
 

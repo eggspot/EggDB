@@ -26,6 +26,29 @@ pub enum WearError<E> {
     Full,
 }
 
+/// What a wear-levelled region has written since it was formatted or mounted (D1087).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WearStats {
+    /// Blocks the caller wrote.
+    pub blocks_written: u64,
+    /// Data sectors programmed: one per block written, plus the blocks wear levelling moved.
+    pub sectors_programmed: u64,
+    /// Bytes of journal programmed: records, snapshots and headers.
+    pub journal_bytes: u64,
+    /// Sectors erased, journal slots included.
+    pub erases: u64,
+}
+
+impl WearStats {
+    /// Bytes programmed per byte the caller wrote, in thousandths: 1000 is none added. `None`
+    /// before the first block is written.
+    pub fn write_amplification_milli(&self, block_size: usize) -> Option<u64> {
+        let written = self.blocks_written.checked_mul(block_size as u64).filter(|bytes| *bytes > 0)?;
+        let programmed = self.sectors_programmed.saturating_mul(block_size as u64).saturating_add(self.journal_bytes);
+        Some(programmed.saturating_mul(1000) / written)
+    }
+}
+
 /// One journal record: a block mapped to a sector, a sector's erase count, or the region's
 /// logical size, each with its sequence and checksum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +115,7 @@ pub struct WearLevelled<F: Flash> {
     generation: u64,
     journal_at: u64,
     sequence: u32,
+    stats: WearStats,
 }
 
 impl<F: Flash> WearLevelled<F> {
@@ -153,6 +177,7 @@ impl<F: Flash> WearLevelled<F> {
             generation: 0,
             journal_at: 0,
             sequence: 0,
+            stats: WearStats::default(),
         }
     }
 
@@ -227,6 +252,7 @@ impl<F: Flash> WearLevelled<F> {
         let record = Record { kind, first, second, sequence: self.sequence };
         let offset = self.active_slot * self.slot_bytes() + self.journal_at;
         self.flash.program(offset, &record.encode()).map_err(WearError::Flash)?;
+        self.stats.journal_bytes += RECORD_BYTES as u64;
         self.journal_at += RECORD_BYTES as u64;
         self.apply(record);
         Ok(())
@@ -238,6 +264,7 @@ impl<F: Flash> WearLevelled<F> {
         for index in 0..self.slot_sectors {
             self.flash.erase(base + index * self.sector as u64).map_err(WearError::Flash)?;
         }
+        self.stats.erases += self.slot_sectors;
         let mut records = Vec::with_capacity(self.map.len() + self.erases.len() + 1);
         for (logical, physical) in self.map.iter().enumerate() {
             if *physical != UNMAPPED {
@@ -257,6 +284,7 @@ impl<F: Flash> WearLevelled<F> {
             self.flash.program(base + at, &record.encode()).map_err(WearError::Flash)?;
             at += RECORD_BYTES as u64;
         }
+        self.stats.journal_bytes += at;
         let mut header = [0xFFu8; HEADER_BYTES];
         header[..8].copy_from_slice(&JOURNAL_MAGIC);
         header[8..16].copy_from_slice(&(self.generation + 1).to_le_bytes());
@@ -326,9 +354,11 @@ impl<F: Flash> WearLevelled<F> {
         let target = self.least_worn_free(current).ok_or(WearError::Full)?;
         let offset = self.data_offset(target);
         self.flash.erase(offset).map_err(WearError::Flash)?;
+        self.stats.erases += 1;
         let count = self.erases[target as usize].saturating_add(1);
         self.append(KIND_ERASES, target, u64::from(count))?;
         self.flash.program(offset, data).map_err(WearError::Flash)?;
+        self.stats.sectors_programmed += 1;
         self.append(KIND_MAP, block, u64::from(target))
     }
 
@@ -339,7 +369,25 @@ impl<F: Flash> WearLevelled<F> {
             return Err(WearError::OutOfRange);
         }
         self.place(block, data)?;
+        self.stats.blocks_written += 1;
         self.level()
+    }
+
+    /// What the region has written since it was formatted or mounted.
+    pub fn stats(&self) -> WearStats {
+        self.stats
+    }
+
+    /// How many more blocks the caller can write before the data sectors reach
+    /// `endurance_cycles` erases each, at the erases per block written seen so far (one before
+    /// the first write): the flash-wear budget left (D1087).
+    pub fn blocks_left(&self, endurance_cycles: u32) -> u64 {
+        let erases_left: u64 = self.erases.iter().map(|count| u64::from(endurance_cycles.saturating_sub(*count))).sum();
+        let erases_per_block_milli = match self.stats.blocks_written {
+            0 => 1000,
+            written => (self.stats.erases.saturating_mul(1000) / written).max(1000),
+        };
+        erases_left.saturating_mul(1000) / erases_per_block_milli
     }
 
     fn level(&mut self) -> Result<(), WearError<F::Error>> {
@@ -494,6 +542,54 @@ mod tests {
         }
         let (low, high) = region.erase_spread();
         assert!(high - low <= STATIC_SPREAD + 2, "erases spread from {low} to {high}");
+    }
+
+    const SMALL_SECTOR_AMPLIFICATION_BUDGET_MILLI: u64 = 1400;
+    const HOT_BLOCK_AMPLIFICATION_BUDGET_MILLI: u64 = 1600;
+
+    #[test]
+    fn random_writes_stay_within_the_write_amplification_budget() {
+        let mut region = WearLevelled::format(chip(48), 4).unwrap();
+        let mut rng = TestRng::new(1087);
+        for round in 0..3_000u32 {
+            let target = rng.below(region.block_count() as usize) as u32;
+            region.write_block(target, &block(round as u8)).unwrap();
+        }
+        let stats = region.stats();
+        assert_eq!(stats.blocks_written, 3_000);
+        assert!(stats.sectors_programmed >= stats.blocks_written);
+        let amplification = stats.write_amplification_milli(region.block_size()).unwrap();
+        assert!(amplification <= SMALL_SECTOR_AMPLIFICATION_BUDGET_MILLI, "write amplification {amplification}");
+        let (low, high) = region.erase_spread();
+        assert!(high - low <= STATIC_SPREAD + 2, "erases spread from {low} to {high}");
+    }
+
+    #[test]
+    fn one_hot_block_among_cold_ones_stays_within_its_budget() {
+        let mut region = WearLevelled::format(chip(48), 4).unwrap();
+        for target in 0..10u32 {
+            region.write_block(target, &block(1)).unwrap();
+        }
+        for round in 0..4_000u32 {
+            region.write_block(10, &block(round as u8)).unwrap();
+        }
+        let amplification = region.stats().write_amplification_milli(region.block_size()).unwrap();
+        assert!(amplification <= HOT_BLOCK_AMPLIFICATION_BUDGET_MILLI, "write amplification {amplification}");
+    }
+
+    #[test]
+    fn the_wear_budget_left_shrinks_as_blocks_are_written() {
+        let mut region = WearLevelled::format(chip(48), 4).unwrap();
+        assert_eq!(region.stats().write_amplification_milli(region.block_size()), None);
+        let fresh = region.blocks_left(10_000);
+        assert_eq!(fresh, u64::from(region.data_sectors) * 10_000);
+        for round in 0..200u32 {
+            region.write_block(round % 5, &block(round as u8)).unwrap();
+        }
+        let worn = region.blocks_left(10_000);
+        assert!(worn < fresh);
+        assert!(worn > fresh / 2);
+        assert_eq!(region.blocks_left(0), 0);
     }
 
     #[test]

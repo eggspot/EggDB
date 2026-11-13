@@ -41,8 +41,9 @@ pub use copy::{
 };
 pub use database::{
     EGGDB_DURABILITY_FULL, EGGDB_DURABILITY_NORMAL, EGGDB_DURABILITY_OFF, EGGDB_OPEN_NO_CREATE,
-    EGGDB_OPEN_READ_ONLY, EggdbBackupReport, EggdbCompactReport, EggdbDb, EggdbOptions,
-    eggdb_backup, eggdb_close, eggdb_compact, eggdb_compact_file, eggdb_open, eggdb_remove_expired,
+    EGGDB_OPEN_READ_ONLY, EGGDB_POWER_BATTERY, EGGDB_POWER_LOW_BATTERY, EGGDB_POWER_MAINS,
+    EggdbBackupReport, EggdbCompactReport, EggdbDb, EggdbOptions, eggdb_backup, eggdb_close,
+    eggdb_compact, eggdb_compact_file, eggdb_open, eggdb_remove_expired, eggdb_set_power_source,
 };
 pub use scan::{
     EGGDB_SCAN_END_INCLUSIVE, EGGDB_SCAN_PREFIX, EGGDB_SCAN_REVERSE, EggdbEntry, EggdbScan,

@@ -8,8 +8,10 @@ and prints the microcontroller profile's footprint lines in benchmarks/footprint
 code_bytes (.text, .rodata and .data's image in flash, by llvm-size from rustup's llvm-tools),
 and the run's own report of heap_peak_bytes, frame_bytes, static_bytes and ram_floor_bytes (the
 heap it took, the page cache's frames and the engine's statics, the test's flash array and
-heap reserve left out). Each line is compared with its budget in benchmarks/footprint.txt and
-the script fails when one is over (D41, D230, D1085). Needs qemu-system-arm and the
+heap reserve left out), and flash_write_amplification_milli and flash_erased_sectors (bytes
+programmed into flash per byte committed, in thousandths, and sectors erased). Each line is
+compared with its budget in benchmarks/footprint.txt and the script fails when one is over (D41,
+D230, D1085, D1087). Needs qemu-system-arm and the
 thumbv7m-none-eabi target."
 
 [ $# -le 1 ] || { echo "$usage" >&2; exit 2; }

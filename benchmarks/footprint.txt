@@ -19,3 +19,5 @@ macos full start_ratio 2.0
 cortex-m3 engine code_bytes 524288
 cortex-m3 engine heap_peak_bytes 524288
 cortex-m3 engine ram_floor_bytes 786432
+cortex-m3 engine flash_write_amplification_milli 128000
+cortex-m3 engine flash_erased_sectors 512

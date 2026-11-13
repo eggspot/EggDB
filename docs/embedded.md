@@ -686,6 +686,33 @@ Together they are `ram_floor_bytes`; with the engine's code (`code_bytes`) they 
 `cortex-m3 engine` lines, checked in the weekly performance pass (D354), which publishes each measured
 value with the release notes.
 
+**Flash wear.** `WearLevelled::stats()` counts what the region has written since it was mounted: the
+blocks you wrote, the sectors programmed (wear levelling's moves included), the journal's bytes and the
+erases. `WearStats::write_amplification_milli(block_size)` is the bytes programmed per byte written, in
+thousandths, and `blocks_left(endurance_cycles)` is the flash-wear budget left: how many more blocks
+you can write, at the erases per block seen so far, before the data sectors reach the chip's rated
+cycles. The QEMU run reports the engine's own amplification, bytes programmed per byte of keys and
+values committed, as `flash_write_amplification_milli`, and `flash_erased_sectors`; their budgets are
+in the same `cortex-m3 engine` lines (D1087). Small commits cost the most, since each writes at least
+one whole page of log: batch writes into fewer commits where you can.
+
+## Battery-aware background work
+A database on a phone, a laptop or a battery-powered device can be told what it runs on (D1087):
+
+```rust
+db.set_power_source(eggdb::PowerSource::Battery)?;
+```
+
+On a battery a commit leaves four times `Options::auto_checkpoint_log_bytes` of log before its
+automatic checkpoint, so the same pages are written to their places less often; on a low battery
+(20% or less, or the system's battery saver) it checkpoints only when the log would outgrow the
+segments it reuses. Commits are just as durable either way; only the replay after a crash is longer.
+`PowerSource::Mains` restores the configured checkpoints. `eggdb_platform::power_source()` reads the
+state on Linux, Android (from `/sys/class/power_supply`) and Windows (`GetSystemPowerStatus`), and
+`eggdb serve` checks it every minute and applies it to every database it serves. On iOS and in apps
+that use the platform's own battery API, pass what it reports, through the C API's
+`eggdb_set_power_source`.
+
 ## Queues in process
 
 `eggdb::inbox::Inbox` sends to and consumes from the durable queues the AMQP, STOMP and SQS servers of `eggdb serve`

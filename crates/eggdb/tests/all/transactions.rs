@@ -461,3 +461,28 @@ fn a_memory_limit_gives_half_to_the_page_cache_unless_the_cache_is_chosen() {
     let stats = db.stats().unwrap();
     assert!(stats.cache_pages * stats.page_size <= 4 << 20);
 }
+
+#[test]
+fn a_low_battery_holds_automatic_checkpoints_until_the_mains_return() {
+    let file = TempPath::new("power-source");
+    let db = Database::open_with(
+        file.path(),
+        Options::new().auto_checkpoint_log_bytes(Some(64 << 10)),
+    )
+    .unwrap();
+    assert_eq!(db.power_source(), eggdb::PowerSource::Mains);
+    db.set_power_source(eggdb::PowerSource::LowBattery).unwrap();
+    assert_eq!(db.power_source(), eggdb::PowerSource::LowBattery);
+    for index in 0..40u32 {
+        db.write(|tx| tx.put(key(index), vec![7u8; 4096])).unwrap();
+    }
+    let held = db.stats().unwrap().log_bytes_since_checkpoint;
+    assert!(held > 64 << 10, "log since the last checkpoint: {held}");
+    db.set_power_source(eggdb::PowerSource::Mains).unwrap();
+    db.write(|tx| tx.put(key(40), vec![7u8; 4096])).unwrap();
+    assert!(db.stats().unwrap().log_bytes_since_checkpoint < held);
+    for index in 0..41u32 {
+        let value = db.read(|tx| tx.get(key(index))).unwrap();
+        assert_eq!(value.map(|value| value.len()), Some(4096), "key {index}");
+    }
+}
