@@ -38,6 +38,7 @@ dependencies = [
  "eggdb-dynamodb",
  "eggdb-esrest",
  "eggdb-flight",
+ "eggdb-format",
  "eggdb-gremlin",
  "eggdb-http",
  "eggdb-kafka",
