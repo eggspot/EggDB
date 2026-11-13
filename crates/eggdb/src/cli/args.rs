@@ -234,6 +234,20 @@ impl CommandName {
             OptionName::Kql | OptionName::Sparql => self == Self::Sql,
             OptionName::PageSize => matches!(self, Self::Create | Self::Import),
             OptionName::LockDays => self == Self::Backup,
+            OptionName::ArchiveChanges => matches!(
+                self,
+                Self::Serve
+                    | Self::Sql
+                    | Self::Shell
+                    | Self::Put
+                    | Self::Del
+                    | Self::Incr
+                    | Self::Decr
+                    | Self::Cas
+                    | Self::Expire
+                    | Self::Persist
+                    | Self::Import
+            ),
             OptionName::Compress => matches!(
                 self,
                 Self::Put
@@ -568,6 +582,7 @@ enum OptionName {
     SqlDump,
     WholeDump,
     LockDays,
+    ArchiveChanges,
     Table,
     Header,
     Delimiter,
@@ -605,6 +620,7 @@ impl OptionName {
             b"version" => Self::Version,
             b"page-size" => Self::PageSize,
             b"lock-days" => Self::LockDays,
+            b"archive-changes" => Self::ArchiveChanges,
             b"compress" => Self::Compress,
             b"create" => Self::Create,
             b"prefix" => Self::Prefix,
@@ -879,6 +895,7 @@ pub(crate) struct Request {
     pub(crate) swap: SwapOptions,
     pub(crate) copy: Option<PathBuf>,
     pub(crate) lock_days: Option<u32>,
+    pub(crate) archive_changes: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1392,6 +1409,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::KeyFile => {
                 request.encryption_key = Some(read_key_file(value).map_err(usage)?);
             }
+            OptionName::ArchiveChanges => request.archive_changes = Some(PathBuf::from(value)),
             OptionName::LockDays => {
                 request.lock_days = Some(
                     parse_whole_number(value.as_encoded_bytes())

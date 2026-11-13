@@ -77,6 +77,7 @@ pub struct Options {
     pub(crate) cache_numa_node: Option<u32>,
     pub(crate) value_compression: eggdb_storage::ValueCompression,
     pub(crate) encryption_key: Option<EncryptionKey>,
+    pub(crate) change_archive: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -140,6 +141,7 @@ impl Options {
             cache_numa_node: None,
             value_compression: eggdb_storage::ValueCompression::Off,
             encryption_key: None,
+            change_archive: None,
         }
     }
 
@@ -230,6 +232,17 @@ impl Options {
     /// yet. Keep the key safe: without it the data cannot be read.
     pub fn encryption_key(mut self, key: [u8; 32]) -> Self {
         self.encryption_key = Some(EncryptionKey(key));
+        self
+    }
+
+    /// Keeps a continuous archive of every commit in `directory` (D1019): each commit's
+    /// changed keys and their new values are appended and synced before the commit and
+    /// confirmed after it, so the archive and a snapshot taken with [`Database::backup_to`]
+    /// restore the database to any commit since ([`replay_changes`](crate::replay_changes)).
+    /// Commits made while the database was opened without this option show as a gap that no
+    /// replay crosses. A read-only open keeps nothing.
+    pub fn archive_changes_to(mut self, directory: impl Into<std::path::PathBuf>) -> Self {
+        self.change_archive = Some(directory.into());
         self
     }
 

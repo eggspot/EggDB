@@ -833,6 +833,9 @@ impl<'a> Session<'a> {
         if let Some(key) = &self.request.encryption_key {
             options = options.encryption_key(key.0);
         }
+        if let (Access::Write { .. }, Some(directory)) = (access, &self.request.archive_changes) {
+            options = options.archive_changes_to(directory.clone());
+        }
         options
     }
 

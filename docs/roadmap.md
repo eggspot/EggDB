@@ -1654,7 +1654,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M14 Backup, point-in-time recovery and replication
 - Continuous log shipping and replay to any commit (D24, D208). Check: the simulator test of
-  restoring to a stamp.
+  restoring to a stamp. A logical change archive (`--archive-changes`) replayed by `restore --at`: **code written,
+  unbuilt** (code-only mode, 2026-11-13, D1019). Left: the simulator test under crashes, archives in buckets, and
+  retention.
 - Incremental and parallel backups, encrypted, with retention (D24, D208).
 - Instant snapshots, and copy-on-write clones and branches of a whole database (D24, D28).
 - `eggdb dump`: one logical file of the whole database (schemas, rows, collections, roles,

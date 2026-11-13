@@ -80,6 +80,7 @@ pub struct Database {
     clock: ClockHandle,
     expiring_keys: AtomicBool,
     collection_drops: AtomicU8,
+    change_archive: Option<crate::change_archive::ChangeArchive>,
 }
 
 struct ClockHandle(Arc<dyn Clock>);
@@ -330,6 +331,13 @@ impl Database {
             .and_then(|()| store.set_auto_checkpoint_bytes(options.auto_checkpoint_log_bytes))
             .and_then(|()| store.set_snapshot_memory(CacheSize::Bytes(options.snapshot_memory())));
         configured.map_err(Error::storage)?;
+        let change_archive = match &options.change_archive {
+            Some(directory) if !options.read_only => {
+                let last_commit = store.last_commit().map_err(Error::storage)?;
+                Some(crate::change_archive::ChangeArchive::open(directory, last_commit)?)
+            }
+            _ => None,
+        };
         Ok(Self {
             store,
             tree: OnceLock::new(),
@@ -341,7 +349,12 @@ impl Database {
             clock: ClockHandle(clock),
             expiring_keys: AtomicBool::new(expiring_keys),
             collection_drops: AtomicU8::new(crate::collection::DROPS_UNKNOWN),
+            change_archive,
         })
+    }
+
+    pub(crate) fn change_archive(&self) -> Option<&crate::change_archive::ChangeArchive> {
+        self.change_archive.as_ref()
     }
 
     /// Begins a read transaction, which sees the last commit before it began and nothing

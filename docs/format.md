@@ -679,6 +679,32 @@ consumer count and per consumer in ascending name order its length-prefixed name
 active times (u64 each). Every pending entry's consumer must be listed; anything else, short
 or left over, is refused as damaged. A stream whose last group is destroyed goes back to kind 5.
 
+## Change archive (D1019)
+`Options::archive_changes_to` and `--archive-changes` keep, outside the database file, a
+directory of segment files named `changes-<16 hex digits>.eggcl`, numbered in order and started
+afresh at each open. A segment starts with the 8 bytes `EGGCHG01`; records follow, each:
+
+| Size | Field |
+|-----:|-------|
+| 8 | payload length, little-endian |
+| 4 | CRC-32C of the type byte and the payload, little-endian |
+| 1 | type |
+| n | payload |
+
+| Type | Record | Payload |
+|-----:|--------|---------|
+| 1 | changes | the number of keys (8), then per key its length (8), the key, 1 and the new stored value's length (8) and bytes, or 0 for a deleted key |
+| 2 | committed | the commit stamp (8) of the changes before it |
+| 3 | aborted | nothing: the changes before it were not committed |
+| 4 | base | the stamp (8) of the database's last commit when the archive began |
+| 5 | gap | the stamp (8) up to which commits were made without the archive |
+
+A commit appends its changes and syncs before it commits, and appends `committed` after. A
+reader stops a segment at the first record that is cut short or fails its checksum. Opening the
+database settles a `changes` record left without an answer: `committed` with the database's
+last stamp when the database is past the last stamp the archive knows, `aborted` otherwise.
+Stored values are kept exactly as the key space stores them, a time to live included.
+
 ## Compatibility
 - Every later release reads version-1 files.
 - A change that an older release would misread needs a feature flag (see "Feature flags").

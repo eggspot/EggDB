@@ -33,6 +33,7 @@ fn choose(entries: &[Archived], at: Option<&str>, shown: &str) -> Result<Archive
             file: entry.file.clone(),
             taken_at_ms: entry.taken_at_ms,
             sha256: entry.sha256.clone(),
+            stamp: entry.stamp,
         })
         .ok_or_else(|| format!("{shown} holds no archived copy taken at or before that time"))
 }
@@ -264,6 +265,7 @@ struct Archived {
     file: String,
     taken_at_ms: i64,
     sha256: String,
+    stamp: Option<u64>,
 }
 
 fn json_field<'l>(line: &'l str, name: &str) -> Option<&'l str> {
@@ -294,9 +296,46 @@ fn parse_manifest(text: &str) -> Vec<Archived> {
                 file: file.to_owned(),
                 taken_at_ms: json_field(line, "taken_at_ms")?.parse().ok()?,
                 sha256: json_field(line, "sha256")?.to_owned(),
+                stamp: json_field(line, "stamp").and_then(|stamp| stamp.parse().ok()),
             })
         })
         .collect()
+}
+
+/// The directory of the change archive kept beside the copies of `directory`.
+pub(super) const CHANGES: &str = "changes";
+
+/// Replays the change archive beside `directory`'s copies onto the restored copy at `path`,
+/// from the copy's stamp up to `at` (every archived commit without it). `None` when there is no
+/// change archive, or the copy's manifest line predates stamps.
+fn replay_into(path: &Path, directory: &Path, stamp: Option<u64>, at: Option<&str>) -> Result<Option<eggdb::ReplayReport>, String> {
+    let changes = directory.join(CHANGES);
+    let Some(stamp) = stamp.filter(|_| changes.is_dir()) else {
+        return Ok(None);
+    };
+    let up_to = match at {
+        Some(text) => {
+            let at_ms = parse_time(text).ok_or_else(|| format!("--at {text} is not a time"))?;
+            let micros = u64::try_from(at_ms).unwrap_or(0).saturating_mul(1000).saturating_add(999);
+            let last = eggdb::read_change_archive(&changes)
+                .map_err(|error| format!("cannot read the change archive: {error}"))?
+                .into_iter()
+                .filter_map(|event| match event {
+                    eggdb::ArchivedEvent::Commit(found, _) if found.unix_micros() <= micros => Some(found),
+                    _ => None,
+                })
+                .last();
+            Some(last.unwrap_or(eggdb::CommitStamp::from_bits(stamp)))
+        }
+        None => None,
+    };
+    let db = eggdb::Database::open(path).map_err(|error| format!("cannot open the restored copy: {error}"))?;
+    let report = eggdb::replay_changes(&db, &changes, eggdb::CommitStamp::from_bits(stamp), up_to)
+        .map_err(|error| format!("cannot replay the change archive: {error}"));
+    let closed = db.close().map_err(|error| format!("cannot close the restored copy: {error}"));
+    let report = report?;
+    closed?;
+    Ok(Some(report))
 }
 
 /// The archived copy in `directory` taken at or before `at` (the newest without it), after
@@ -386,7 +425,7 @@ impl Session<'_> {
         let db = self.open(Access::ReadOnly, None)?;
         let copied = db.backup_to(&target);
         drop(db);
-        copied.map_err(|error| {
+        let copied = copied.map_err(|error| {
             Failure::database(
                 format!("cannot archive {} into {shown}: {error}", self.file),
                 Exit::DatabaseError,
@@ -422,6 +461,7 @@ impl Session<'_> {
             .number("entries", verified.entries)
             .string("sha256", &sha256)
             .boolean("verified", true)
+            .number("stamp", copied.stamp.bits())
             .line();
         let mut manifest = std::fs::OpenOptions::new()
             .create(true)
@@ -531,19 +571,20 @@ impl Session<'_> {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let taken_at_ms = manifest(directory)
+        let (taken_at_ms, snapshot_stamp) = manifest(directory)
             .ok()
             .and_then(|entries| {
                 entries
                     .into_iter()
                     .find(|entry| entry.file == chosen_file)
-                    .map(|entry| entry.taken_at_ms)
+                    .map(|entry| (entry.taken_at_ms, entry.stamp))
             })
-            .unwrap_or(0);
+            .unwrap_or((0, None));
         let chosen = Archived {
             file: chosen_file,
             taken_at_ms,
             sha256: String::new(),
+            stamp: snapshot_stamp,
         };
         let target = self.request.file.clone();
         if std::fs::symlink_metadata(&target).is_ok() {
@@ -567,25 +608,39 @@ impl Session<'_> {
                     Exit::DatabaseError,
                 )
             })?;
+        let replayed = replay_into(&staging, directory, chosen.stamp, at);
+        let replayed = match replayed {
+            Ok(replayed) => replayed,
+            Err(message) => {
+                let _ = std::fs::remove_file(&staging);
+                return Err(Failure::database(message, Exit::DatabaseError));
+            }
+        };
         std::fs::rename(&staging, &target).map_err(|error| {
             Failure::database(
                 format!("cannot move the restored copy into place: {error}"),
                 Exit::DatabaseError,
             )
         })?;
+        let replayed_commits = replayed.map_or(0, |report| report.commits);
         match self.format {
             Format::Json => self.out.text(
                 &JsonObject::new()
                     .string("restored", &chosen.file)
                     .string("taken_at", &rfc3339(chosen.taken_at_ms))
                     .string("into", &self.file_display)
+                    .number("replayed_commits", replayed_commits)
                     .line(),
             ),
             _ => self.out.text(&format!(
-                "restored {} (taken {}) into {}\n",
+                "restored {} (taken {}) into {}{}\n",
                 chosen.file,
                 rfc3339(chosen.taken_at_ms),
-                self.file
+                self.file,
+                match replayed {
+                    Some(report) => format!(", then replayed {} archived commits", render::count(report.commits)),
+                    None => String::new(),
+                }
             )),
         }
         Ok(Exit::Done)

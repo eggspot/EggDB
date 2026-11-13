@@ -64,6 +64,7 @@
 //! - [`sql`]: SQL on the same file, in PostgreSQL's, MySQL's, SQLite's or Oracle's dialect, from
 //!   [`Database::sql_store`].
 
+mod change_archive;
 mod collection;
 mod collection_counts;
 mod concurrent;
@@ -73,6 +74,7 @@ mod expiry;
 pub mod inbox;
 pub mod keyspace;
 mod options;
+mod replay;
 mod scan;
 pub mod sql;
 mod transaction;
@@ -83,6 +85,8 @@ pub use concurrent::{ConcurrentTransaction, Isolation};
 pub use database::{BackupReport, CheckReport, CompactReport, Database, Stats};
 pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;
+pub use change_archive::{ArchivedChange, ArchivedEvent, read_change_archive};
+pub use replay::{ReplayReport, replay_changes};
 pub use eggdb_storage::ValueCompression;
 pub use error::{Error, ErrorKind, Result};
 pub use options::{Durability, Options};

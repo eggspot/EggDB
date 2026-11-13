@@ -263,6 +263,7 @@ pub struct WriteTransaction<'db> {
     sweeps_on_commit: bool,
     journal: Option<Vec<StoredChange>>,
     counts: KeptCounts,
+    archived_keys: Option<Vec<Vec<u8>>>,
     turn: WriterTurn<'db>,
 }
 
@@ -284,6 +285,7 @@ impl<'db> WriteTransaction<'db> {
             sweeps_on_commit: true,
             journal: None,
             counts: KeptCounts::default(),
+            archived_keys: database.change_archive().map(|_| Vec::new()),
             turn,
         })
     }
@@ -383,6 +385,7 @@ impl<'db> WriteTransaction<'db> {
             .put_from_reader(&tree, key, len, source)
             .map_err(Error::storage)?;
         self.note_change(key, previous);
+        self.note_archived(key);
         if let Some((number, key_bytes)) = kept {
             self.counts.change(number, key_bytes, before, Some(len));
         }
@@ -480,11 +483,32 @@ impl<'db> WriteTransaction<'db> {
         };
         self.inner.put(&tree, key, value).map_err(Error::storage)?;
         self.note_change(key, previous);
+        self.note_archived(key);
         if let Some((number, key_bytes)) = kept {
             self.counts
                 .change(number, key_bytes, before, Some(value.len() as u64));
         }
         self.note_count_record(key, Some(value))
+    }
+
+    fn note_archived(&mut self, key: &[u8]) {
+        if let Some(keys) = self.archived_keys.as_mut() {
+            keys.push(key.to_vec());
+        }
+    }
+
+    fn archived_changes(&self) -> Result<Option<Vec<crate::change_archive::ArchivedChange>>> {
+        let Some(keys) = &self.archived_keys else {
+            return Ok(None);
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut changes = Vec::new();
+        for key in keys {
+            if seen.insert(key.as_slice()) {
+                changes.push((key.clone(), self.get_raw(key)?));
+            }
+        }
+        Ok(Some(changes))
     }
 
     fn previous_for_journal(&self, key: &[u8]) -> Result<Option<Option<Vec<u8>>>> {
@@ -613,6 +637,7 @@ impl<'db> WriteTransaction<'db> {
             .map_err(Error::storage)?;
         if inserted {
             self.note_change(key, Some(None));
+            self.note_archived(key);
             if let Some((number, key_bytes)) = kept {
                 self.counts
                     .change(number, key_bytes, None, Some(value.len() as u64));
@@ -642,6 +667,7 @@ impl<'db> WriteTransaction<'db> {
         let deleted = self.inner.delete(&tree, key).map_err(Error::storage)?;
         if deleted {
             self.note_change(key, previous);
+            self.note_archived(key);
             if let Some((number, key_bytes)) = kept {
                 self.counts.change(number, key_bytes, before, None);
             }
@@ -680,6 +706,10 @@ impl<'db> WriteTransaction<'db> {
                 ..Features::default()
             });
         }
+        let archived = self.archived_changes()?.filter(|changes| !changes.is_empty());
+        if let (Some(changes), Some(archive)) = (&archived, self.database.change_archive()) {
+            archive.pending(changes)?;
+        }
         let Self {
             database,
             inner,
@@ -688,7 +718,18 @@ impl<'db> WriteTransaction<'db> {
             turn,
             ..
         } = self;
-        let stamp = inner.commit().map_err(Error::storage)?;
+        let committed = inner.commit().map_err(Error::storage);
+        if let (Some(_), Some(archive)) = (&archived, database.change_archive()) {
+            match &committed {
+                Ok(stamp) => {
+                    let _ = archive.committed(*stamp);
+                }
+                Err(_) => {
+                    let _ = archive.aborted();
+                }
+            }
+        }
+        let stamp = committed?;
         if let Some(tree) = tree.filter(|_| created_tree) {
             database.remember_tree(tree);
         }
