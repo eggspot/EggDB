@@ -944,6 +944,68 @@ jobs:
           overwrite: true
           if-no-files-found: warn
 
+  tsdb-compare:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      influxdb:
+        image: influxdb:2.7
+        env:
+          DOCKER_INFLUXDB_INIT_MODE: setup
+          DOCKER_INFLUXDB_INIT_USERNAME: compare
+          DOCKER_INFLUXDB_INIT_PASSWORD: compare-password
+          DOCKER_INFLUXDB_INIT_ORG: eggdb
+          DOCKER_INFLUXDB_INIT_BUCKET: compare
+          DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: compare-token
+        ports:
+          - 8086:8086
+    env:
+      COMPARE_MANIFEST: crates/eggdb-tsdb-compare/Cargo.toml
+      EGGDB_PASSWORD: ci-tsdb-compare
+      EGGDB_OBSERVABILITY_ADDRESS: 127.0.0.1:18086
+      INFLUXDB_ADDRESS: 127.0.0.1:8086
+      INFLUXDB_TOKEN: compare-token
+      INFLUXDB_ORG: eggdb
+      INFLUXDB_BUCKET: compare
+      PROMETHEUS_ADDRESS: 127.0.0.1:9090
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+            crates/eggdb-tsdb-compare/target
+          key: cargo-v2-tsdb-compare-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb-tsdb-compare/Cargo.lock') }}
+          restore-keys: cargo-v2-tsdb-compare-${{ runner.os }}-
+      - name: Format and lint
+        run: |
+          cargo fmt --manifest-path "$COMPARE_MANIFEST" --check
+          cargo clippy --manifest-path "$COMPARE_MANIFEST" --release --locked --all-targets -- -D warnings
+      - name: EggDB against InfluxDB and Prometheus (D7, D220, D1066)
+        run: |
+          docker run -d --name prometheus -p 9090:9090 prom/prometheus:v2.53.0 --config.file=/etc/prometheus/prometheus.yml --web.enable-remote-write-receiver
+          cargo build --release -p eggdb
+          target/release/eggdb serve "$RUNNER_TEMP/tsdb-compare.eggdb" --create --listen 127.0.0.1:55438 --observability-listen "$EGGDB_OBSERVABILITY_ADDRESS" &
+          for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:9090/-/ready > /dev/null 2>&1 && curl -fsS http://127.0.0.1:8086/health > /dev/null 2>&1 && break; sleep 1; done
+          mkdir -p compare-results
+          cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- --results compare-results/eggdb-tsdb-compare.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Keep the metrics comparison results of this change
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tsdb-compare-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: compare-results/
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: warn
+
   installers:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -1438,6 +1500,48 @@ jobs:
             ${{ runner.temp }}/oracle-apps/*.out
             ${{ runner.temp }}/oracle-apps/serve.err
             ${{ runner.temp }}/oracle-apps/output.diff
+          retention-days: 7
+          if-no-files-found: ignore
+
+  metrics-senders:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-metrics-senders-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-metrics-senders-${{ runner.os }}-
+      - name: Get Telegraf 1.30 and Prometheus 2.53.0 (test senders only, never shipped)
+        run: |
+          docker pull --quiet telegraf:1.30
+          docker pull --quiet prom/prometheus:v2.53.0
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Send from Telegraf and Prometheus into eggdb serve --observability-listen (D220, D1066)
+        run: |
+          mkdir -p "$RUNNER_TEMP/metrics-senders"
+          scripts/metrics-senders/check.sh target/debug/eggdb "$RUNNER_TEMP/metrics-senders"
+      - name: Keep the server log and configurations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: metrics-senders-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/metrics-senders/*.err
+            ${{ runner.temp }}/metrics-senders/*.conf
+            ${{ runner.temp }}/metrics-senders/*.yml
           retention-days: 7
           if-no-files-found: ignore
 
@@ -2004,7 +2108,7 @@ jobs:
           PY
 
   check:
-    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, opensearch-compare, mongo-compare, ldbc-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
+    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, opensearch-compare, mongo-compare, ldbc-compare, installers, egg-allocator, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

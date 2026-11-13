@@ -1090,3 +1090,4 @@ its full title with its status.
 - [D1063](decisions/D1063.md) Code-only batch 711 (M16): a benchmark against Cassandra and ScyllaDB
 - [D1064](decisions/D1064.md) Code-only batch 712 (M16): more of Flux: join package, standard packages, query functions, windows in SQL
 - [D1065](decisions/D1065.md) Code-only batch 713 (M16): rsyslog and syslog-ng in CI
+- [D1066](decisions/D1066.md) Code-only batch 714 (M16): Telegraf and Prometheus in CI, and benchmarks against InfluxDB and Prometheus
