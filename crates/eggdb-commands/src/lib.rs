@@ -591,6 +591,9 @@ pub enum ConfirmCheck {
     /// The call deletes a key of the key-value store, which cannot be brought back: every
     /// `del` (D328), and `expire` with a `ttl` of 0 and `cas` with `delete` (D346).
     KeyDelete,
+    /// The SPARQL update deletes quads or graphs: `DELETE DATA`, `DELETE WHERE`, a modify with
+    /// `DELETE`, `CLEAR`, `DROP` or `MOVE` (D1014).
+    QuadDelete,
 }
 
 impl ConfirmCheck {
@@ -599,6 +602,7 @@ impl ConfirmCheck {
         match self {
             Self::DestructiveStatement => "destructive_statement",
             Self::KeyDelete => "key_delete",
+            Self::QuadDelete => "quad_delete",
         }
     }
 
@@ -611,6 +615,9 @@ impl ConfirmCheck {
             }
             Self::KeyDelete => {
                 "the call deletes a key, whose value cannot be brought back through the agent"
+            }
+            Self::QuadDelete => {
+                "the SPARQL update deletes quads or graphs: DELETE, CLEAR, DROP or MOVE"
             }
         }
     }

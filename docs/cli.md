@@ -1004,6 +1004,21 @@ of embedding distance and full-text rank, 5 by default, at most 100), and `delet
 Agents never see each other's memories. The same three are MCP tools of `eggdb mcp`: `memory_get` for every
 agent, `memory_add` and `memory_delete` with `--allow-write` (D1005).
 
+## RDF and SPARQL: `eggdb rdf`
+
+```
+eggdb rdf get <file> <sparql>
+eggdb rdf run <file> <sparql>
+```
+
+The file's RDF graphs (the collection `rdf0`, the same store `eggdb serve --sparql-listen` serves and `eggdb sql
+--sparql` reads): `get` runs one SPARQL 1.1 query (`SELECT`, `ASK`, `CONSTRUCT` or `DESCRIBE`) on a read-only open
+and prints SPARQL results TSV, or the SPARQL 1.1 JSON results with `--json` (graphs as N-Triples); `run` runs one
+update request in one write transaction and prints the quads it inserted and deleted. Relative IRIs resolve
+against `http://eggdb.local/`. The same two are MCP tools of `eggdb mcp`: `rdf_get` for every agent, and `rdf_run`
+with `--allow-write`, where an update that deletes (`DELETE`, `CLEAR`, `DROP`, `MOVE`) also needs `confirm: true`
+(D1014).
+
 ## `eggdb shell`
 
 ```

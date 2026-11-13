@@ -48,6 +48,7 @@ pub(crate) enum CommandName {
     Table,
     Row,
     Memory,
+    Rdf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,13 @@ pub(crate) enum MemoryVerb {
     Add,
     Get,
     Delete,
+}
+
+/// What `eggdb rdf` does: run a SPARQL query (`get`) or a SPARQL update (`run`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RdfVerb {
+    Get,
+    Run,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +93,7 @@ impl TableAction {
 
 impl CommandName {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 30] = [
+    pub(crate) const ALL: [Self; 31] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -110,6 +118,7 @@ impl CommandName {
         Self::Table,
         Self::Row,
         Self::Memory,
+        Self::Rdf,
         Self::Serve,
         Self::Shell,
         Self::Restore,
@@ -156,6 +165,7 @@ impl CommandName {
             b"table" => Self::Table,
             b"row" => Self::Row,
             b"memory" => Self::Memory,
+            b"rdf" => Self::Rdf,
             _ => return None,
         })
     }
@@ -193,11 +203,12 @@ impl CommandName {
             Self::Table => "table",
             Self::Row => "row",
             Self::Memory => "memory",
+            Self::Rdf => "rdf",
         }
     }
 
     pub(crate) fn is_noun(self) -> bool {
-        matches!(self, Self::Collection | Self::Table | Self::Row | Self::Memory)
+        matches!(self, Self::Collection | Self::Table | Self::Row | Self::Memory | Self::Rdf)
     }
 
     pub(crate) fn takes_format_option(self) -> bool {
@@ -859,6 +870,7 @@ pub(crate) struct Request {
     pub(crate) collection_action: Option<CollectionAction>,
     pub(crate) table_action: Option<TableAction>,
     pub(crate) memory: Option<(MemoryVerb, String, String)>,
+    pub(crate) rdf: Option<(RdfVerb, String)>,
     pub(crate) table: Option<OsString>,
     pub(crate) schema: Option<String>,
     pub(crate) after: Option<String>,
@@ -1284,6 +1296,7 @@ fn noun_needs_a_verb(noun: CommandName) -> Failure {
         CommandName::Table => TABLE_NEEDS_A_VERB,
         CommandName::Row => ROW_NEEDS_A_VERB,
         CommandName::Memory => MEMORY_NEEDS_A_VERB,
+        CommandName::Rdf => RDF_NEEDS_A_VERB,
         _ => COLLECTION_NEEDS_A_VERB,
     };
     Failure::usage(message, Some(noun))
@@ -2060,6 +2073,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if command == CommandName::Memory {
         return memory_request(request, tokens, arguments);
     }
+    if command == CommandName::Rdf {
+        return rdf_request(request, arguments);
+    }
     if request.swap.if_absent && request.swap.delete {
         return Err(usage(
             "--if-absent with --delete would change nothing: an absent key cannot be deleted"
@@ -2084,7 +2100,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Collection
         | CommandName::Table
         | CommandName::Row
-        | CommandName::Memory => (1, 1),
+        | CommandName::Memory
+        | CommandName::Rdf => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -2440,6 +2457,27 @@ const READ_ONLY_CANNOT_CREATE: &str =
 const TABLE_NEEDS_A_VERB: &str = "table needs list, show or sample";
 const ROW_NEEDS_A_VERB: &str = "row needs list";
 const MEMORY_NEEDS_A_VERB: &str = "memory needs add, get or delete";
+const RDF_NEEDS_A_VERB: &str = "rdf needs get or run";
+
+fn rdf_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
+    let command = CommandName::Rdf;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    let verb = match arguments.first().map(|verb| verb.as_encoded_bytes()) {
+        Some(b"get") => RdfVerb::Get,
+        Some(b"run") => RdfVerb::Run,
+        _ => return Err(usage(RDF_NEEDS_A_VERB.to_owned())),
+    };
+    if arguments.len() < 3 {
+        return Err(usage("eggdb rdf needs a file and a SPARQL query or update".to_owned()));
+    }
+    if arguments.len() > 3 {
+        return Err(too_many_arguments(&arguments[3..], Some(command)));
+    }
+    let sparql = arguments[2].to_str().map(str::to_owned).ok_or_else(|| usage("the SPARQL text is UTF-8".to_owned()))?;
+    request.file = PathBuf::from(arguments[1]);
+    request.rdf = Some((verb, sparql));
+    Ok(request)
+}
 
 fn memory_request(
     mut request: Request,

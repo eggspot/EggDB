@@ -1038,3 +1038,4 @@ its full title with its status.
 - [D1011](decisions/D1011.md) Code-only batch 659 (M13): Apache TinkerPop Gremlin server with GraphSON 3.0, scripts and bytecode
 - [D1012](decisions/D1012.md) Code-only batch 660 (M13): learned graph embeddings with node2vec
 - [D1013](decisions/D1013.md) Code-only batch 661 (M13): the W3C SPARQL test suite run weekly
+- [D1014](decisions/D1014.md) Code-only batch 662 (M13): RDF in the MCP tools with eggdb rdf get and run

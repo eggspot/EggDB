@@ -16,6 +16,7 @@ use std::time::Duration;
 
 const DEFAULT_TIME_LIMIT_SECONDS: u64 = 5;
 const DEFAULT_CALL_GAP_MS: u64 = 100;
+const SPARQL_BASE: &str = "http://eggdb.local/";
 
 struct FileOpener {
     path: PathBuf,
@@ -69,6 +70,31 @@ impl DatabaseOpener for FileOpener {
         store
             .close()
             .map_err(|error| OpenRefusal::Failed(error.to_string()))
+    }
+
+    fn sparql(&self, text: &str, write: bool) -> Option<Result<String, OpenRefusal>> {
+        let db = match self.open(!write) {
+            Ok(db) => db,
+            Err(error) => return Some(Err(self.refusal(&error))),
+        };
+        let keyspace = super::serve_resp::DatabaseKeyspace {
+            db: &db,
+            prefix: super::serve_resp::RDF_COLLECTIONS,
+        };
+        let outcome = if write {
+            eggdb_rdf::update(&keyspace, 0, text, SPARQL_BASE)
+                .map(|summary| format!("{{\"inserted\":{},\"deleted\":{}}}", summary.inserted, summary.deleted))
+        } else {
+            eggdb_rdf::query(&keyspace, 0, text, SPARQL_BASE)
+                .map(|answer| eggdb_rdf::write_results(&answer, eggdb_rdf::ResultFormat::Json).1)
+        };
+        drop(keyspace);
+        let closed = db.close();
+        Some(match (outcome, closed) {
+            (Ok(answer), Ok(())) => Ok(answer),
+            (Err(error), _) => Err(OpenRefusal::Failed(error.to_string())),
+            (Ok(_), Err(error)) => Err(OpenRefusal::Failed(error.to_string())),
+        })
     }
 }
 

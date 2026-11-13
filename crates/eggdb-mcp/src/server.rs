@@ -47,6 +47,15 @@ pub trait DatabaseOpener {
 
     /// Closes the database after a call.
     fn close(&self, store: Self::Store) -> Result<(), OpenRefusal>;
+
+    /// Runs one SPARQL 1.1 request on the database's RDF store, opening the database for this
+    /// call alone: a query (`write` false) returns its SPARQL 1.1 JSON results, an update
+    /// (`write` true) the JSON object `{"inserted": n, "deleted": m}`. `None` when this opener
+    /// keeps no RDF store, the default.
+    fn sparql(&self, text: &str, write: bool) -> Option<Result<String, OpenRefusal>> {
+        let _ = (text, write);
+        None
+    }
 }
 
 /// Why the database could not be opened for a call.
@@ -632,6 +641,9 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         if matches!(tool, Tool::MemoryAdd | Tool::MemoryDelete) && tool.definition().offered(self.grants()) {
             return self.memory_write_call(id, tool, &arguments, &arguments_text);
         }
+        if tool == Tool::RdfRun && tool.definition().offered(self.grants()) {
+            return self.rdf_write_call(id, &arguments, &arguments_text);
+        }
         let call_id = self.next_call_id();
         let started = now_rfc3339();
         let (outcome, duration) =
@@ -706,6 +718,21 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         }
         let request = tools::built_write_request(&sql);
         let (outcome, _) = self.timed(tool.name(), |call| tools::write_sql(&request, None, call));
+        Some(self.finish_write(&pending, outcome, None))
+    }
+
+    fn rdf_write_call(&mut self, id: &str, arguments: &Arguments<'_>, arguments_text: &str) -> Option<String> {
+        let pending = self.pending_write(id, Tool::RdfRun, arguments_text);
+        let update = match tools::rdf_update(arguments) {
+            Ok(update) => update,
+            Err(error) => {
+                return Some(self.finish_write(&pending, unwritten(Err(error)), None));
+            }
+        };
+        if let Err(answer) = self.record_write_start(&pending) {
+            return Some(answer);
+        }
+        let (outcome, _) = self.timed(Tool::RdfRun.name(), |call| tools::rdf_run(update, call));
         Some(self.finish_write(&pending, outcome, None))
     }
 

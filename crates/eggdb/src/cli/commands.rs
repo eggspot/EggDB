@@ -31,6 +31,7 @@ mod foreign;
 mod model_endpoints;
 mod mcp;
 mod ndjson_io;
+mod rdf;
 mod xlsx_io;
 mod dbf_io;
 mod mainframe_io;
@@ -209,6 +210,7 @@ fn execute_on(
         CommandName::Table => session.table_command(),
         CommandName::Row => session.row_list(),
         CommandName::Memory => session.memory_command(),
+        CommandName::Rdf => session.rdf_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();

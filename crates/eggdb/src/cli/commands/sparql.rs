@@ -76,7 +76,7 @@ pub(super) fn allow_load_from_environment() {
 }
 const QUERY_FORMS: [&str; 4] = ["select", "ask", "construct", "describe"];
 
-fn is_query(text: &str) -> bool {
+pub(super) fn is_query(text: &str) -> bool {
     let mut words = text.split_whitespace().peekable();
     while let Some(word) = words.next() {
         let lowered = word.to_ascii_lowercase();

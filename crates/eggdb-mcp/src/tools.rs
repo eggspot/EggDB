@@ -54,10 +54,12 @@ pub(crate) enum Tool {
     MemoryAdd,
     MemoryGet,
     MemoryDelete,
+    RdfGet,
+    RdfRun,
 }
 
 impl Tool {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 20] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -76,6 +78,8 @@ impl Tool {
         Self::MemoryAdd,
         Self::MemoryGet,
         Self::MemoryDelete,
+        Self::RdfGet,
+        Self::RdfRun,
     ];
 
     pub(crate) fn definition(self) -> &'static ToolDefinition {
@@ -784,8 +788,125 @@ pub(crate) fn run<O: DatabaseOpener>(
             Err(key_writes_refused(call))
         }
         Tool::MemoryGet => memory_get(arguments, call),
-        Tool::MemoryAdd | Tool::MemoryDelete => Err(writes_not_allowed()),
+        Tool::MemoryAdd | Tool::MemoryDelete | Tool::RdfRun => Err(writes_not_allowed()),
+        Tool::RdfGet => rdf_get(arguments, call),
     }
+}
+
+const SPARQL_QUERY_FORMS: [&str; 4] = ["select", "ask", "construct", "describe"];
+const SPARQL_DELETING: [&str; 4] = ["delete", "clear", "drop", "move"];
+
+fn sparql_words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_' || character == ':' || character == '<' || character == '>'))
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn sparql_form(text: &str) -> Option<String> {
+    let mut words = sparql_words(text);
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "prefix" => {
+                words.next();
+                words.next();
+            }
+            "base" => {
+                words.next();
+            }
+            _ => return Some(word),
+        }
+    }
+    None
+}
+
+fn sparql_failure(refusal: OpenRefusal) -> ToolError {
+    match refusal {
+        OpenRefusal::Failed(message) => ToolError::new("sparql_error", format!("SPARQL: {message}. Nothing was changed.")),
+        OpenRefusal::Busy => ToolError::new("database_busy", "Another process has the database open for writing.").with_fix("Try again in a moment."),
+        OpenRefusal::Missing => ToolError::new("not_found", "The database file is not there."),
+        OpenRefusal::Damaged(message) => ToolError::new("damaged", format!("The database is damaged: {message}.")),
+        OpenRefusal::NotWritable(message) => ToolError::new("not_writable", format!("The database cannot be changed: {message}.")),
+    }
+}
+
+fn rdf_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
+    arguments.allow_tool(Tool::RdfGet)?;
+    let text = arguments.required_string("sparql")?;
+    if text.len() > MAX_SQL_BYTES {
+        return Err(ToolError::invalid("sparql is longer than 1 MiB"));
+    }
+    if !sparql_form(text).is_some_and(|form| SPARQL_QUERY_FORMS.iter().any(|known| form.starts_with(known))) {
+        return Err(ToolError::new("invalid_arguments", "rdf_get runs SPARQL queries: SELECT, ASK, CONSTRUCT or DESCRIBE. Nothing was run.")
+            .with_fix("Send updates with rdf_run."));
+    }
+    let answer = call
+        .opener
+        .sparql(text, false)
+        .ok_or_else(|| ToolError::new("not_supported", "This server keeps no RDF store."))?
+        .map_err(sparql_failure)?;
+    Ok(rdf_success(&answer))
+}
+
+fn rdf_success(answer: &str) -> ToolSuccess {
+    let truncated = answer.len() > results::MAX_RESULT_BYTES;
+    let mut out = JsonOut::new();
+    out.begin_object();
+    out.key("notice").string(NOTICE);
+    if answer.trim_start().starts_with('{') && !truncated {
+        out.key("results").encoded(answer.trim());
+    } else {
+        let mut end = answer.len().min(results::MAX_RESULT_BYTES);
+        while !answer.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.key("graph").string(&answer[..end]);
+    }
+    out.key("truncated").boolean(truncated);
+    out.end_object();
+    ToolSuccess { structured: out.finish(), rows: None, truncated }
+}
+
+/// An update `rdf_run` may run: its text, after the confirmation an update that deletes needs.
+pub(crate) struct RdfUpdate<'a> {
+    text: &'a str,
+}
+
+pub(crate) fn rdf_update<'a>(arguments: &Arguments<'a>) -> Result<RdfUpdate<'a>, ToolError> {
+    arguments.allow_tool(Tool::RdfRun)?;
+    let text = arguments.required_string("sparql")?;
+    if text.len() > MAX_SQL_BYTES {
+        return Err(ToolError::invalid("sparql is longer than 1 MiB"));
+    }
+    if sparql_form(text).is_some_and(|form| SPARQL_QUERY_FORMS.iter().any(|known| form.starts_with(known))) {
+        return Err(ToolError::new("invalid_arguments", "rdf_run runs SPARQL updates. Nothing was run.").with_fix("Send queries with rdf_get."));
+    }
+    let deletes = sparql_words(text).any(|word| SPARQL_DELETING.contains(&word.as_str()));
+    if deletes && !arguments.boolean("confirm")? {
+        return Err(ToolError::new(
+            "needs_confirmation",
+            "The update deletes quads or graphs (DELETE, CLEAR, DROP or MOVE). Nothing was run.",
+        )
+        .with_fix("Ask your user; with their agreement, send the same update with confirm: true."));
+    }
+    Ok(RdfUpdate { text })
+}
+
+pub(crate) fn rdf_run<O: DatabaseOpener>(update: RdfUpdate<'_>, call: &Call<'_, O>) -> WriteOutcome {
+    let result = match call.opener.sparql(update.text, true) {
+        None => Err(ToolError::new("not_supported", "This server keeps no RDF store.")),
+        Some(Err(refusal)) => Err(sparql_failure(refusal)),
+        Some(Ok(summary)) => {
+            let mut out = JsonOut::new();
+            out.begin_object();
+            out.key("notice").string(NOTICE);
+            out.key("results").encoded(summary.trim());
+            out.key("committed").boolean(true);
+            out.end_object();
+            Ok(ToolSuccess { structured: out.finish(), rows: None, truncated: false })
+        }
+    };
+    let committed = result.is_ok();
+    WriteOutcome { result, committed, warning: None }
 }
 
 fn sql_text(text: &str) -> String {
@@ -2250,7 +2371,9 @@ mod tests {
                 | Tool::Persist
                 | Tool::MemoryAdd
                 | Tool::MemoryGet
-                | Tool::MemoryDelete => not_shipped(),
+                | Tool::MemoryDelete
+                | Tool::RdfGet
+                | Tool::RdfRun => not_shipped(),
             }
         }
 
@@ -2288,7 +2411,9 @@ mod tests {
                 | Tool::Persist
                 | Tool::MemoryAdd
                 | Tool::MemoryGet
-                | Tool::MemoryDelete => not_shipped(),
+                | Tool::MemoryDelete
+                | Tool::RdfGet
+                | Tool::RdfRun => not_shipped(),
             }
         }
 
@@ -2334,7 +2459,9 @@ mod tests {
                 | Tool::Persist
                 | Tool::MemoryAdd
                 | Tool::MemoryGet
-                | Tool::MemoryDelete => not_shipped(),
+                | Tool::MemoryDelete
+                | Tool::RdfGet
+                | Tool::RdfRun => not_shipped(),
             }
         }
 
@@ -2469,7 +2596,9 @@ mod tests {
                 | Tool::Persist
                 | Tool::MemoryAdd
                 | Tool::MemoryGet
-                | Tool::MemoryDelete => not_shipped(),
+                | Tool::MemoryDelete
+                | Tool::RdfGet
+                | Tool::RdfRun => not_shipped(),
             }
             out.end_object();
             if !required.is_empty() {
