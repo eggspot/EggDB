@@ -731,7 +731,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-14, D1158). Server-side TLS 1.3 resumption with tickets: **code written, unbuilt**
   (code-only mode, 2026-11-14, D1159); EggDB's own client offering and storing tickets: **code written,
   unbuilt** (code-only mode, 2026-11-14, D1159).
-- HTTP/2, gRPC and QUIC as shared crates of our own (D34).
+- HTTP/2, gRPC and QUIC as shared crates of our own (D34). HTTP/2 and gRPC are `eggdb-http2`; QUIC's wire layer (`eggdb-quic`): **code written,
+  unbuilt** (code-only mode, 2026-11-14, D1160). Left: QUIC's TLS mode, connections, streams, recovery, server and HTTP/3.
 - Elasticsearch search and scroll hits sent as a stream, like the REST API's rows (D325). Search:
   **code written, unbuilt** (code-only mode, 2026-11-11, D463); scroll pages are whole responses of
   `size` hits (D467).

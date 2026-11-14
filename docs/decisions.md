@@ -1184,3 +1184,4 @@ its full title with its status.
 - [D1157](decisions/D1157.md) Code-only batch 806 (M6a): one shared listener crate for the protocol servers
 - [D1158](decisions/D1158.md) Code-only batch 807 (M6a): AES on the processor's AES instructions (AES-NI, Armv8)
 - [D1159](decisions/D1159.md) Code-only batch 808 (M6a): TLS 1.3 session resumption with tickets on the server
+- [D1160](decisions/D1160.md) Code-only batch 810 (M6a): QUIC's wire layer: varints, frames, packet headers, packet numbers and packet protection
