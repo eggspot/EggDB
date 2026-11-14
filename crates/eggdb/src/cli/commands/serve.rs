@@ -703,6 +703,27 @@ impl Session<'_> {
             )?),
             None => None,
         };
+        let http3_socket = match options.http3_listen {
+            None => None,
+            Some(address) => {
+                let Some(tls) = &tls else {
+                    return Err(usage(format!(
+                        "--http3-listen {address}: HTTP/3 always runs over TLS; give --tls-certificate and --tls-key, or --tls-self-signed"
+                    )));
+                };
+                if options.rest_listen.is_none() {
+                    return Err(usage(format!(
+                        "--http3-listen {address} serves the REST API over HTTP/3: give --rest-listen as well"
+                    )));
+                }
+                let socket = OsNetwork::new().bind_datagram(address).map_err(|error| {
+                    Failure::database(format!("cannot listen for HTTP/3 on UDP {address}: {error}"), Exit::DatabaseError)
+                })?;
+                let mut config = (*tls.relayed).clone();
+                config.application_protocols = vec![eggdb_quic::http3::ALPN.to_vec()];
+                Some((socket, config))
+            }
+        };
         let rest_listener = match options.rest_listen {
             Some(address) => Some(tls_relays.listener(
                 address,
@@ -1497,6 +1518,15 @@ impl Session<'_> {
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_api::MAX_REQUEST_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref())
                         .decoding_content_encoding(),
+                ),
+                None => Ok(()),
+            });
+            let _http3_server = scope.spawn(|| match &http3_socket {
+                Some((socket, config)) => eggdb_quic::server::serve_http3(
+                    socket,
+                    config,
+                    &|request| rest_endpoint.reply(request).into_response(),
+                    &stop_signals::requested,
                 ),
                 None => Ok(()),
             });

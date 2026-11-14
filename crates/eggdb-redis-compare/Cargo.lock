@@ -48,6 +48,7 @@ dependencies = [
  "eggdb-pgwire",
  "eggdb-platform",
  "eggdb-queues",
+ "eggdb-quic",
  "eggdb-rdf",
  "eggdb-replication",
  "eggdb-resp",
@@ -466,6 +467,17 @@ name = "eggdb-queues"
 version = "0.5.0"
 dependencies = [
  "eggdb-keyspace",
+]
+
+[[package]]
+name = "eggdb-quic"
+version = "0.5.0"
+dependencies = [
+ "eggdb-crypto",
+ "eggdb-http",
+ "eggdb-http2",
+ "eggdb-platform",
+ "eggdb-tls",
 ]
 
 [[package]]

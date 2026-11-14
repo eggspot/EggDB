@@ -62,6 +62,7 @@ eggdb-dav = { path = "../eggdb-dav" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }
 eggdb-kql = { path = "../eggdb-kql" }
 eggdb-queues = { path = "../eggdb-queues" }
+eggdb-quic = { path = "../eggdb-quic" }
 eggdb-parquet = { path = "../eggdb-parquet" }
 eggdb-content = { path = "../eggdb-content" }
 eggdb-arrow = { path = "../eggdb-arrow" }

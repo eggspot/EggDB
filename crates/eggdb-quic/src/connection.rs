@@ -24,6 +24,8 @@ const MOST_CRYPTO_GAP_BYTES: u64 = 64 * 1024;
 const STREAM_WINDOW_BYTES: u64 = 1 << 20;
 const CONNECTION_WINDOW_BYTES: u64 = 16 << 20;
 const MOST_STREAMS: u64 = 100;
+const MOST_UNIDIRECTIONAL_STREAMS: u64 = 3;
+const UNIDIRECTIONAL_WINDOW_BYTES: u64 = 64 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ACK_DELAY: Duration = Duration::from_millis(25);
 const MINIMUM_PAYLOAD_BYTES: usize = 4;
@@ -131,6 +133,8 @@ pub struct ServerConnection<'c> {
     streams: BTreeMap<u64, Stream>,
     streams_opened: u64,
     stream_limit: u64,
+    unidirectional_opened: u64,
+    server_unidirectional_opened: u64,
     connection_receive_limit: u64,
     connection_received: u64,
     connection_read: u64,
@@ -198,6 +202,8 @@ impl<'c> ServerConnection<'c> {
             initial_max_stream_data_bidi_remote: STREAM_WINDOW_BYTES,
             initial_max_stream_data_bidi_local: STREAM_WINDOW_BYTES,
             initial_max_streams_bidi: MOST_STREAMS,
+            initial_max_streams_uni: MOST_UNIDIRECTIONAL_STREAMS,
+            initial_max_stream_data_uni: UNIDIRECTIONAL_WINDOW_BYTES,
             max_ack_delay_milliseconds: MAX_ACK_DELAY.as_millis() as u64,
             disable_active_migration: true,
             initial_source_connection_id: Some(local_connection_id.clone()),
@@ -219,6 +225,8 @@ impl<'c> ServerConnection<'c> {
             streams: BTreeMap::new(),
             streams_opened: 0,
             stream_limit: MOST_STREAMS,
+            unidirectional_opened: 0,
+            server_unidirectional_opened: 0,
             connection_receive_limit: CONNECTION_WINDOW_BYTES,
             connection_received: 0,
             connection_read: 0,
@@ -537,6 +545,11 @@ impl<'c> ServerConnection<'c> {
                 match TransportParameters::decode(&peer_transport_parameters, false) {
                     Ok(parameters) if parameters.initial_source_connection_id.as_deref() == Some(&self.peer_connection_id[..]) => {
                         self.connection_send_limit = parameters.initial_max_data;
+                        for (stream_id, stream) in &mut self.streams {
+                            if stream_id & 0x03 == 0 {
+                                stream.send_limit = stream.send_limit.max(parameters.initial_max_stream_data_bidi_local);
+                            }
+                        }
                         self.peer_parameters = Some(parameters);
                     }
                     _ => return self.close(transport_error::TRANSPORT_PARAMETER, "the client's transport parameters are not valid"),
@@ -550,27 +563,39 @@ impl<'c> ServerConnection<'c> {
     }
 
     fn on_stream(&mut self, stream_id: u64, offset: u64, data: Vec<u8>, fin: bool) {
-        if stream_id & 0x03 != 0 {
-            return self.close(transport_error::STREAM_STATE, "only client-opened bidirectional streams are served");
-        }
-        let send_limit = self.peer_parameters.as_ref().map_or(0, |parameters| parameters.initial_max_stream_data_bidi_local);
+        let unidirectional = match stream_id & 0x03 {
+            0x00 => false,
+            0x02 => true,
+            _ => return self.close(transport_error::STREAM_STATE, "data on a stream only this server sends on"),
+        };
         if !self.streams.contains_key(&stream_id) {
             let sequence = stream_id / 4;
-            if sequence >= self.stream_limit {
+            let (limit, opened_so_far, window, send_limit) = if unidirectional {
+                (MOST_UNIDIRECTIONAL_STREAMS, self.unidirectional_opened, UNIDIRECTIONAL_WINDOW_BYTES, 0)
+            } else {
+                let send_limit =
+                    self.peer_parameters.as_ref().map_or(0, |parameters| parameters.initial_max_stream_data_bidi_local);
+                (self.stream_limit, self.streams_opened, STREAM_WINDOW_BYTES, send_limit)
+            };
+            if sequence >= limit {
                 return self.close(transport_error::STREAM_LIMIT, "more streams than allowed");
             }
-            for opened in self.streams_opened..=sequence {
+            for opened in opened_so_far..=sequence {
                 self.streams.insert(
-                    opened * 4,
+                    opened * 4 + (stream_id & 0x03),
                     Stream {
-                        receive_limit: STREAM_WINDOW_BYTES,
-                        advertised_limit: STREAM_WINDOW_BYTES,
+                        receive_limit: window,
+                        advertised_limit: window,
                         send_limit,
                         ..Stream::default()
                     },
                 );
             }
-            self.streams_opened = self.streams_opened.max(sequence + 1);
+            if unidirectional {
+                self.unidirectional_opened = self.unidirectional_opened.max(sequence + 1);
+            } else {
+                self.streams_opened = self.streams_opened.max(sequence + 1);
+            }
         }
         let Some(stream) = self.streams.get_mut(&stream_id) else {
             return;
@@ -651,6 +676,26 @@ impl<'c> ServerConnection<'c> {
         stream.to_send.extend(data);
         stream.fin_queued = fin;
         true
+    }
+
+    /// Opens a stream only this server sends on (RFC 9000 section 2.1: IDs 3, 7, 11 and so on)
+    /// within the client's limit of unidirectional streams, or `None` when the limit is reached
+    /// or the handshake has not completed.
+    pub fn open_unidirectional_stream(&mut self) -> Option<u64> {
+        let parameters = self.peer_parameters.as_ref()?;
+        if self.server_unidirectional_opened >= parameters.initial_max_streams_uni {
+            return None;
+        }
+        let stream_id = self.server_unidirectional_opened * 4 + 3;
+        self.server_unidirectional_opened += 1;
+        self.streams.insert(
+            stream_id,
+            Stream {
+                send_limit: parameters.initial_max_stream_data_uni,
+                ..Stream::default()
+            },
+        );
+        Some(stream_id)
     }
 
     /// Closes the connection with an application error code.

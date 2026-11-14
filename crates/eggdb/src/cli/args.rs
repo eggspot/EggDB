@@ -338,6 +338,7 @@ impl CommandName {
             | OptionName::ObservabilityListen
             | OptionName::RestoreFrom
             | OptionName::RestListen
+            | OptionName::Http3Listen
             | OptionName::ClickhouseListen
             | OptionName::TrinoListen
             | OptionName::FlightListen
@@ -602,6 +603,7 @@ enum OptionName {
     ObservabilityListen,
     RestoreFrom,
     RestListen,
+    Http3Listen,
     ClickhouseListen,
     TrinoListen,
     FlightListen,
@@ -806,6 +808,7 @@ impl OptionName {
             b"observability-listen" => Self::ObservabilityListen,
             b"restore-from" => Self::RestoreFrom,
             b"rest-listen" => Self::RestListen,
+            b"http3-listen" => Self::Http3Listen,
             b"clickhouse-listen" => Self::ClickhouseListen,
             b"trino-listen" => Self::TrinoListen,
             b"flight-listen" => Self::FlightListen,
@@ -1216,6 +1219,7 @@ pub(crate) struct ServeOptions {
     pub(crate) fleet_class: Option<String>,
     pub(crate) restore_from: Option<String>,
     pub(crate) rest_listen: Option<SocketAddr>,
+    pub(crate) http3_listen: Option<SocketAddr>,
     pub(crate) clickhouse_listen: Option<SocketAddr>,
     pub(crate) trino_listen: Option<SocketAddr>,
     pub(crate) flight_listen: Option<SocketAddr>,
@@ -1919,6 +1923,10 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             OptionName::RestListen => {
                 request.serve.rest_listen =
                     Some(parse_listen(&option.spelled, value, 3000).map_err(usage)?);
+            }
+            OptionName::Http3Listen => {
+                request.serve.http3_listen =
+                    Some(parse_listen(&option.spelled, value, 443).map_err(usage)?);
             }
             OptionName::ClickhouseListen => {
                 request.serve.clickhouse_listen =

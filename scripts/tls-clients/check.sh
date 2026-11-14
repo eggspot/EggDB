@@ -15,7 +15,9 @@ with each protocol's own client over TLS:
 Then it serves the RESP, REST and MQTT listeners on a non-loopback address, where serve ends TLS in
 front of each protocol (D1155), and connects with redis-cli --tls, curl over HTTPS and an
 openssl s_client handshake, all checking the chain against the authority, and resumes a TLS 1.3
-session from the server's ticket with openssl s_client -sess_out and -sess_in (D1159). Then it serves with
+session from the server's ticket with openssl s_client -sess_out and -sess_in (D1159). Where aioquic
+is installed for HTTP3_PYTHON (default python3) it also sends a GET over HTTP/3 to --http3-listen,
+checking the chain against the authority (D1163); REQUIRE_HTTP3=1 makes its absence a failure. Then it serves with
 --tls-self-signed and checks psql with sslmode=require. Fails on the first
 client that cannot connect over TLS or prints the wrong answer.
 
@@ -35,6 +37,8 @@ redis_cli=${REDIS_CLI:-redis-cli}
 RELAY_RESP_PORT=${RELAY_RESP_PORT:-16390}
 RELAY_ES_PORT=${RELAY_ES_PORT:-19290}
 RELAY_MQTT_PORT=${RELAY_MQTT_PORT:-18890}
+HTTP3_PORT=${HTTP3_PORT:-14433}
+http3_python=${HTTP3_PYTHON:-python3}
 password='tls-check-password'
 server_pid=
 
@@ -110,7 +114,8 @@ done
 stop_server
 
 start_server --tls-certificate "$work/server.pem" --tls-key "$work/server-pkcs8.key" \
-  --resp-listen "0.0.0.0:$RELAY_RESP_PORT" --es-listen "0.0.0.0:$RELAY_ES_PORT" --mqtt-listen "0.0.0.0:$RELAY_MQTT_PORT"
+  --resp-listen "0.0.0.0:$RELAY_RESP_PORT" --es-listen "0.0.0.0:$RELAY_ES_PORT" --mqtt-listen "0.0.0.0:$RELAY_MQTT_PORT" \
+  --rest-listen 127.0.0.1:0 --http3-listen "127.0.0.1:$HTTP3_PORT"
 for _ in $(seq 1 50); do
   (exec 3<> "/dev/tcp/127.0.0.1/$RELAY_MQTT_PORT") 2> /dev/null && break
   sleep 0.1
@@ -130,6 +135,13 @@ openssl s_client -connect "127.0.0.1:$RELAY_RESP_PORT" -servername localhost -CA
   || fail "the resumed TLS 1.3 handshake failed: $(tail -n 5 "$work/resumed-session.out")"
 grep -q '^Reused, TLSv1.3' "$work/resumed-session.out" \
   || fail "the second handshake did not resume the session: $(grep -E '^(New|Reused)' "$work/resumed-session.out")"
+if "$http3_python" -c 'import aioquic' 2> /dev/null; then
+  "$http3_python" "$(dirname "$0")/http3_get.py" 127.0.0.1 "$HTTP3_PORT" localhost "$work/ca.pem" / \
+    > "$work/http3.out" 2> "$work/http3.err" || fail "the HTTP/3 request failed: $(tail -n 5 "$work/http3.err")"
+  case "$(cut -d' ' -f1 "$work/http3.out")" in 2?? | 401) ;; *) fail "HTTP/3 answered $(cat "$work/http3.out")" ;; esac
+elif [ -n "${REQUIRE_HTTP3:-}" ]; then
+  fail "aioquic is not installed for $http3_python, so HTTP/3 was not checked"
+fi
 openssl s_client -connect "127.0.0.1:$RELAY_MQTT_PORT" -servername localhost -CAfile "$work/ca.pem" \
   -verify_return_error < /dev/null > "$work/mqtt-tls.out" 2>&1 || fail "the MQTT listener's TLS handshake failed: $(tail -n 5 "$work/mqtt-tls.out")"
 stop_server

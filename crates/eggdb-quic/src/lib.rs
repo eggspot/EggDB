@@ -9,7 +9,9 @@
 //! - [`transport_parameters`]: the transport parameters of RFC 9000 section 18;
 //! - [`recovery`]: RFC 9002's RTT estimate, loss thresholds and NewReno congestion window;
 //! - [`connection`]: a server connection without I/O that runs the handshake, acknowledges,
-//!   retransmits and carries client-opened streams with flow control.
+//!   retransmits and carries client-opened streams with flow control;
+//! - [`qpack`], [`http3`] and [`server`]: HTTP/3 on a UDP socket, answered by the same handlers
+//!   as EggDB's HTTP/1.1 listeners.
 //!
 //! The TLS 1.3 handshake QUIC carries is `eggdb_tls::quic`, which takes and gives CRYPTO data per
 //! encryption level.
@@ -19,9 +21,12 @@
 
 pub mod connection;
 pub mod frame;
+pub mod http3;
 pub mod packet;
 pub mod protection;
+pub mod qpack;
 pub mod recovery;
+pub mod server;
 pub mod transport_parameters;
 pub mod varint;
 
