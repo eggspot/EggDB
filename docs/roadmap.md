@@ -521,7 +521,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A published branch-coverage target for the core, rising every release toward SQLite's (D41). **Code written, unbuilt**
   (code-only mode, 2026-11-14, D1133): `scripts/coverage.sh`, the weekly `Coverage` workflow and `docs/coverage.md`.
 - Published descriptions of the CI runners the benchmarks use, a public results page, conformance
-  and benchmark dashboards, and the farm's matrix of every driver and ORM version (D32, D252).
+  and benchmark dashboards, and the farm's matrix of every driver and ORM version (D32, D252). **Code written,
+  unbuilt** (code-only mode, 2026-11-14, D1134); the page goes live once GitHub Pages is turned on for the repository.
 - Joules per query per workload and idle wake-ups, reported and then gated (D44, D252).
 
 ### M5 SQL engine, SQLite, C API and embedded drivers

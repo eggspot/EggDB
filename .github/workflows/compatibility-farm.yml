@@ -55,3 +55,72 @@ jobs:
           name: compatibility-matrix-${{ github.run_number }}
           path: ${{ runner.temp }}/matrix/compatibility.md
           retention-days: 90
+
+  drivers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { driver: psycopg2, version: "2.9.9" }
+          - { driver: psycopg2, version: "2.9.10" }
+          - { driver: psycopg, version: "3.1.20" }
+          - { driver: psycopg, version: "3.2.3" }
+          - { driver: sqlalchemy, version: "1.4.54" }
+          - { driver: sqlalchemy, version: "2.0.36" }
+          - { driver: node-postgres, version: "8.11.5" }
+          - { driver: node-postgres, version: "8.13.1" }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-compatibility-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-compatibility-${{ runner.os }}-
+      - name: ${{ matrix.driver }} ${{ matrix.version }} against eggdb serve (D1134)
+        run: |
+          cargo build -p eggdb
+          mkdir -p "$RUNNER_TEMP/rows"
+          scripts/farm-driver.sh target/debug/eggdb "${{ matrix.driver }}" "${{ matrix.version }}" "$RUNNER_TEMP/rows/${{ matrix.driver }}-${{ matrix.version }}.md"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: driver-${{ matrix.driver }}-${{ matrix.version }}
+          path: ${{ runner.temp }}/rows/
+          retention-days: 30
+
+  drivers-matrix:
+    needs: drivers
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: driver-*
+          path: rows
+          merge-multiple: true
+      - name: Write the driver and ORM version matrix
+        run: |
+          mkdir -p matrix
+          { echo "| Driver or ORM version | Result |"; echo "|------|--------|"; cat rows/*.md 2> /dev/null | sort; } > matrix/drivers.md
+          cat matrix/drivers.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: drivers-matrix-${{ github.run_number }}
+          path: matrix/drivers.md
+          retention-days: 90

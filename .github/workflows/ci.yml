@@ -1182,6 +1182,11 @@ jobs:
         run: |
           mkdir -p bench-results
           cargo run --release -p eggdb-bench -- --skip footprint --results bench-results/eggdb-bench.txt
+      - name: Describe the runner the benchmarks ran on (D1134)
+        if: always()
+        run: |
+          mkdir -p bench-results
+          scripts/runner-description.sh bench-results/runner.md >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the benchmark results of this change
         if: always()
         uses: actions/upload-artifact@v7
@@ -1227,6 +1232,11 @@ jobs:
         run: |
           mkdir -p compare-results
           cargo run --manifest-path "$COMPARE_MANIFEST" --release --locked -- --results compare-results/eggdb-sqlite-compare.txt
+      - name: Describe the runner the comparison ran on (D1134)
+        if: always()
+        run: |
+          mkdir -p compare-results
+          scripts/runner-description.sh compare-results/runner.md >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the SQLite comparison results of this change
         if: always()
         uses: actions/upload-artifact@v7

@@ -1158,3 +1158,4 @@ its full title with its status.
 - [D1131](decisions/D1131.md) Code-only batch 780 (M4): SQLite's ATTACH and DETACH over schemas, with attached SQLite and EggDB files read in
 - [D1132](decisions/D1132.md) Code-only batch 781 (M4): SQL's tables read through a collection named sql
 - [D1133](decisions/D1133.md) Code-only batch 782 (M4): a published branch-coverage target for the core with a weekly coverage run
+- [D1134](decisions/D1134.md) Code-only batch 783 (M4): runner descriptions, a public results page with benchmark and conformance dashboards, and the farm's driver version matrix

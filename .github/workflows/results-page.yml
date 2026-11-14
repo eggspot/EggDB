@@ -1,0 +1,59 @@
+name: Results page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - benchmarks/**
+      - docs/compatibility.md
+      - docs/sql-conformance.md
+      - scripts/results-page.sh
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: results-page
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Fetch the latest farm and benchmark results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/latest"
+          for workflow in compatibility-farm.yml ci.yml; do
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId' || true)
+            [ -n "$run" ] || continue
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/runs/$workflow" || true
+          done
+          find "$RUNNER_TEMP/runs" -maxdepth 3 -name '*.md' -exec cp {} "$RUNNER_TEMP/latest/" \; 2> /dev/null || true
+      - name: Build the page
+        run: scripts/results-page.sh "$RUNNER_TEMP/site" "$RUNNER_TEMP/latest"
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
