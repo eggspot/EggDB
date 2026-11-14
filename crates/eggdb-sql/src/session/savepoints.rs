@@ -10,8 +10,55 @@ use std::time::Duration;
 
 const MOST_SAVEPOINTS: usize = 4096;
 const UNDO_ENTRY_OVERHEAD: usize = 64;
+const WHOLE_UNDO_LOG_BYTES: usize = crate::memory::WORK_MEMORY_LIMIT;
 
-pub(super) type Undo = Vec<UndoEntry>;
+#[derive(Debug, Default)]
+pub(super) struct Undo {
+    entries: Vec<UndoEntry>,
+    bytes: usize,
+}
+
+impl Undo {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn push(&mut self, entry: UndoEntry) {
+        self.bytes = self.bytes.saturating_add(entry.bytes());
+        self.entries.push(entry);
+    }
+
+    pub(super) fn pop(&mut self) -> Option<UndoEntry> {
+        let entry = self.entries.pop()?;
+        self.bytes = self.bytes.saturating_sub(entry.bytes());
+        Some(entry)
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+
+    pub(super) fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Extend<UndoEntry> for Undo {
+    fn extend<I: IntoIterator<Item = UndoEntry>>(&mut self, entries: I) {
+        for entry in entries {
+            self.push(entry);
+        }
+    }
+}
+
+impl std::ops::Deref for Undo {
+    type Target = [UndoEntry];
+
+    fn deref(&self) -> &[UndoEntry] {
+        &self.entries
+    }
+}
 
 #[derive(Debug)]
 pub(super) enum UndoEntry {
@@ -26,6 +73,11 @@ pub(super) enum UndoEntry {
 }
 
 impl UndoEntry {
+    fn bytes(&self) -> usize {
+        let (Self::Statement { key, previous } | Self::Host { key, previous }) = self;
+        entry_bytes(key, previous.as_deref())
+    }
+
     fn statement(key: &[u8], previous: Option<Vec<u8>>) -> Self {
         Self::Statement {
             key: key.to_vec(),
@@ -117,10 +169,12 @@ impl<'w> UndoWrite<'w> {
     }
 
     fn hold(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
-        let bytes = key
-            .len()
-            .saturating_add(previous.map_or(0, <[u8]>::len))
-            .saturating_add(UNDO_ENTRY_OVERHEAD);
+        let bytes = entry_bytes(key, previous);
+        if self.kept_for == UndoKeptFor::RollbackToSavepoint
+            && self.log.bytes().saturating_add(bytes) > WHOLE_UNDO_LOG_BYTES
+        {
+            return Err(whole_undo_log_too_large());
+        }
         self.memory.charge(bytes).map_err(|error| {
             if error.state() == SqlState::OUT_OF_MEMORY {
                 undo_log_too_large(self.most_bytes, self.kept_for)
@@ -129,6 +183,23 @@ impl<'w> UndoWrite<'w> {
             }
         })
     }
+}
+
+fn entry_bytes(key: &[u8], previous: Option<&[u8]>) -> usize {
+    key.len()
+        .saturating_add(previous.map_or(0, <[u8]>::len))
+        .saturating_add(UNDO_ENTRY_OVERHEAD)
+}
+
+fn whole_undo_log_too_large() -> SqlError {
+    SqlError::new(
+        SqlState::OUT_OF_MEMORY,
+        format!(
+            "the transaction's savepoints would keep more than {} MiB of earlier values to undo",
+            WHOLE_UNDO_LOG_BYTES >> 20
+        ),
+    )
+    .with_hint("Release the savepoints you no longer need (RELEASE SAVEPOINT), or commit in smaller transactions.")
 }
 
 fn undo_log_too_large(most_bytes: usize, kept_for: UndoKeptFor) -> SqlError {

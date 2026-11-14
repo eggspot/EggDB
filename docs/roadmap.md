@@ -483,7 +483,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The savepoint undo log bounded as a whole against the session's memory budget, or spilled to
   disk: each statement's before-images stop at 1 GiB with `53200` (D317), but the log keeps every
   statement's and key-value write's entries until `RELEASE`, `ROLLBACK TO` or `COMMIT` (D266,
-  D307, D319).
+  D307, D319). Bounded as a whole: **code written, unbuilt**
+  (code-only mode, 2026-11-14, D1130); spilling it to disk is left.
 
 ### M4 Embedded key-value and the single file
 - A benchmark against SQLite's `:memory:` in the compare job (D175). **Code written, unbuilt** (code-only mode,
