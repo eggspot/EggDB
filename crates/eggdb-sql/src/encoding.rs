@@ -2016,6 +2016,10 @@ const CITEXT_TAG: u8 = 27;
 const HSTORE_TAG: u8 = 28;
 const VECTOR_TAG: u8 = 29;
 const GEOMETRY_TAG: u8 = 30;
+const TSVECTOR_TAG: u8 = 31;
+const TSQUERY_TAG: u8 = 32;
+const JSONPATH_TAG: u8 = 33;
+const REFCURSOR_TAG: u8 = 34;
 const HSTORE_NULL_VALUE: u8 = 0;
 const HSTORE_TEXT_VALUE: u8 = 1;
 const RANGE_EMPTY: u8 = 1;
@@ -2104,7 +2108,11 @@ fn put_nested(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Citext(_)
             | DefinedValue::Hstore(_)
             | DefinedValue::Vector(_)
-            | DefinedValue::Geometry(_) => encode_row_value(out, value),
+            | DefinedValue::Geometry(_)
+            | DefinedValue::TsVector(_)
+            | DefinedValue::TsQuery(_)
+            | DefinedValue::JsonPath(_)
+            | DefinedValue::RefCursor(_) => encode_row_value(out, value),
         },
         other => encode_row_value(out, other),
     }
@@ -2170,6 +2178,22 @@ fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
                 for value in values {
                     out.extend_from_slice(&value.to_bits().to_le_bytes());
                 }
+            }
+            DefinedValue::TsVector(text) => {
+                out.push(TSVECTOR_TAG);
+                put_bytes(out, text.as_bytes());
+            }
+            DefinedValue::TsQuery(text) => {
+                out.push(TSQUERY_TAG);
+                put_bytes(out, text.as_bytes());
+            }
+            DefinedValue::JsonPath(text) => {
+                out.push(JSONPATH_TAG);
+                put_bytes(out, text.as_bytes());
+            }
+            DefinedValue::RefCursor(text) => {
+                out.push(REFCURSOR_TAG);
+                put_bytes(out, text.as_bytes());
             }
         },
         Value::Null => out.push(0),
@@ -2345,7 +2369,10 @@ pub(crate) fn decode_row_into(
                 }
             }
             CITEXT_TAG if wanted => crate::citext::value(reader.text()?),
-            7 | 13 | 14 | 18 | 20 | 21 | CITEXT_TAG => {
+            TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG if wanted => {
+                stored_text_value(tag, reader.text()?).ok_or_else(|| reader.damaged())?
+            }
+            7 | 13 | 14 | 18 | 20 | 21 | CITEXT_TAG | TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG => {
                 reader.skip_text()?;
                 Value::Null
             }
@@ -2471,12 +2498,27 @@ pub(crate) fn decode_row_into(
     Ok(())
 }
 
+fn stored_text_value(tag: u8, text: String) -> Option<Value> {
+    let value = match tag {
+        TSVECTOR_TAG => DefinedValue::TsVector(text),
+        TSQUERY_TAG => DefinedValue::TsQuery(text),
+        JSONPATH_TAG => DefinedValue::JsonPath(text),
+        REFCURSOR_TAG => DefinedValue::RefCursor(text),
+        _ => return None,
+    };
+    Some(Value::Defined(Box::new(value)))
+}
+
 fn value_tag(sql_type: SqlType) -> u8 {
     match sql_type {
         SqlType::Defined(defined) if defined == DefinedType::CITEXT => CITEXT_TAG,
         SqlType::Defined(defined) if defined == DefinedType::HSTORE => HSTORE_TAG,
         SqlType::Defined(defined) if defined == DefinedType::VECTOR => VECTOR_TAG,
         SqlType::Defined(defined) if defined == DefinedType::GEOMETRY => GEOMETRY_TAG,
+        SqlType::Defined(defined) if defined == DefinedType::TSVECTOR => TSVECTOR_TAG,
+        SqlType::Defined(defined) if defined == DefinedType::TSQUERY => TSQUERY_TAG,
+        SqlType::Defined(defined) if defined == DefinedType::JSONPATH => JSONPATH_TAG,
+        SqlType::Defined(defined) if defined == DefinedType::REFCURSOR => REFCURSOR_TAG,
         SqlType::Defined(DefinedType {
             kind: DefinedKind::Enum,
             ..
@@ -3135,6 +3177,10 @@ impl<'b> Reader<'b> {
             }
             CITEXT_TAG => crate::citext::value(self.text()?),
             HSTORE_TAG => self.hstore()?,
+            TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG => {
+                let text = self.text()?;
+                stored_text_value(tag, text).ok_or_else(|| self.damaged())?
+            }
             _ => return Err(self.damaged()),
         })
     }

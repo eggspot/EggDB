@@ -390,6 +390,9 @@ pub(crate) fn convert(value: Value, kind: CatalogType, conversion: Conversion) -
             let text = match value {
                 Value::Text(text) => text,
                 Value::Bpchar(text) => crate::types::without_trailing_spaces(&text).to_owned(),
+                Value::Defined(defined) if matches!(defined.as_ref(), crate::types::DefinedValue::RefCursor(_)) => {
+                    defined.to_text()
+                }
                 other if conversion == Conversion::Explicit && kind != CatalogType::NodeTree => {
                     other.to_text().unwrap_or_default()
                 }

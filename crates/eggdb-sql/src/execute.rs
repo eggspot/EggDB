@@ -95,7 +95,9 @@ pub(crate) fn column_storage(
         SqlType::Array(element) if !element.is_storable() => {
             Err(crate::arrays::unsupported_element(element.sql_type()).at(position))
         }
-        SqlType::Catalog(crate::pg_catalog::CatalogType::RefCursor) => Ok((SqlType::Text, None)),
+        SqlType::Catalog(crate::pg_catalog::CatalogType::RefCursor) => {
+            Ok((SqlType::Defined(crate::types::DefinedType::REFCURSOR), None))
+        }
         other => Ok((other, None)),
     }
 }

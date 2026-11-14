@@ -1,4 +1,5 @@
-//! PostgreSQL's `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289): each
+//! PostgreSQL's `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289), and
+//! `refcursor` table columns (D301): each
 //! value is checked when it is made and kept in its canonical text form, so it prints, compares,
 //! stores and travels over the wire as PostgreSQL's would, and functions taking text still read it.
 
@@ -9,6 +10,7 @@ use eggdb_search::{TsQuery, TsVector};
 pub(crate) const TSVECTOR_OID: u32 = 3614;
 pub(crate) const TSQUERY_OID: u32 = 3615;
 pub(crate) const JSONPATH_OID: u32 = 4072;
+pub(crate) const REFCURSOR_OID: u32 = 1790;
 
 fn invalid(type_name: &str, text: &str) -> SqlError {
     SqlError::new(
@@ -63,6 +65,8 @@ pub(crate) fn parse(text: &str, defined: DefinedType) -> Option<SqlResult<Value>
         tsquery_text(text).map(DefinedValue::TsQuery)
     } else if defined == DefinedType::JSONPATH {
         jsonpath_text(text).map(DefinedValue::JsonPath)
+    } else if defined == DefinedType::REFCURSOR {
+        Ok(DefinedValue::RefCursor(text.to_owned()))
     } else {
         return None;
     };
@@ -71,7 +75,10 @@ pub(crate) fn parse(text: &str, defined: DefinedType) -> Option<SqlResult<Value>
 
 /// Whether `defined` is one of these three types.
 pub(crate) fn is_text_type(defined: DefinedType) -> bool {
-    defined == DefinedType::TSVECTOR || defined == DefinedType::TSQUERY || defined == DefinedType::JSONPATH
+    defined == DefinedType::TSVECTOR
+        || defined == DefinedType::TSQUERY
+        || defined == DefinedType::JSONPATH
+        || defined == DefinedType::REFCURSOR
 }
 
 pub(crate) fn tsvector_value(text: String) -> Value {
@@ -129,6 +136,13 @@ mod tests {
         assert_eq!(
             answer(&mut session, "SELECT '{\"b\": [1, 2]}'::jsonb @? p FROM docs WHERE id = 2"),
             "?column?\nt\nSELECT 1"
+        );        answer(
+            &mut session,
+            "CREATE TABLE cursors (id integer PRIMARY KEY, c refcursor); INSERT INTO cursors VALUES (1, 'portal_1')",
+        );
+        assert_eq!(
+            answer(&mut session, "SELECT c, pg_typeof(c) FROM cursors"),
+            "c|pg_typeof\nportal_1|refcursor\nSELECT 1"
         );
     }
 }

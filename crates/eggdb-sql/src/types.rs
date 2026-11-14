@@ -155,6 +155,12 @@ impl DefinedType {
         oid: crate::text_types::JSONPATH_OID,
     };
 
+    /// The type of `refcursor` table columns: a cursor's name kept as a value of its own type.
+    pub const REFCURSOR: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::text_types::REFCURSOR_OID,
+    };
+
     pub(crate) fn builtin_base_named(name: &str) -> Option<Self> {
         match name {
             "tsvector" => Some(Self::TSVECTOR),
@@ -174,6 +180,7 @@ impl DefinedType {
             crate::text_types::TSVECTOR_OID => Some("tsvector"),
             crate::text_types::TSQUERY_OID => Some("tsquery"),
             crate::text_types::JSONPATH_OID => Some("jsonpath"),
+            crate::text_types::REFCURSOR_OID => Some("refcursor"),
             crate::hstore::HSTORE_OID => Some("hstore"),
             crate::vector_type::VECTOR_OID => Some("vector"),
             crate::geometry_type::GEOMETRY_OID => Some("geometry"),
@@ -219,6 +226,8 @@ pub enum DefinedValue {
     TsQuery(String),
     /// A `jsonpath` value, as written.
     JsonPath(String),
+    /// A cursor's name read from a `refcursor` column.
+    RefCursor(String),
 }
 
 impl DefinedValue {
@@ -238,6 +247,7 @@ impl DefinedValue {
             Self::TsVector(_) => SqlType::Defined(DefinedType::TSVECTOR),
             Self::TsQuery(_) => SqlType::Defined(DefinedType::TSQUERY),
             Self::JsonPath(_) => SqlType::Defined(DefinedType::JSONPATH),
+            Self::RefCursor(_) => SqlType::Defined(DefinedType::REFCURSOR),
         }
     }
 
@@ -251,7 +261,9 @@ impl DefinedValue {
             Self::Hstore(hstore) => crate::hstore::to_text(hstore),
             Self::Vector(values) => crate::vector_type::to_text(values),
             Self::Geometry(ewkb) => crate::geometry_type::to_text(ewkb),
-            Self::TsVector(text) | Self::TsQuery(text) | Self::JsonPath(text) => text.clone(),
+            Self::TsVector(text) | Self::TsQuery(text) | Self::JsonPath(text) | Self::RefCursor(text) => {
+                text.clone()
+            }
         }
     }
 }
@@ -1488,7 +1500,8 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (_, DefinedValue::Hstore(_)) => Ordering::Greater,
         (DefinedValue::TsVector(a), DefinedValue::TsVector(b))
         | (DefinedValue::TsQuery(a), DefinedValue::TsQuery(b))
-        | (DefinedValue::JsonPath(a), DefinedValue::JsonPath(b)) => a.as_bytes().cmp(b.as_bytes()),
+        | (DefinedValue::JsonPath(a), DefinedValue::JsonPath(b))
+        | (DefinedValue::RefCursor(a), DefinedValue::RefCursor(b)) => a.as_bytes().cmp(b.as_bytes()),
         (DefinedValue::Vector(_), _) => Ordering::Less,
         (_, DefinedValue::Vector(_)) => Ordering::Greater,
         (DefinedValue::Geometry(_), _) => Ordering::Less,
@@ -1497,6 +1510,8 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (_, DefinedValue::TsVector(_)) => Ordering::Greater,
         (DefinedValue::TsQuery(_), _) => Ordering::Less,
         (_, DefinedValue::TsQuery(_)) => Ordering::Greater,
+        (DefinedValue::JsonPath(_), _) => Ordering::Less,
+        (_, DefinedValue::JsonPath(_)) => Ordering::Greater,
     }
 }
 
@@ -1530,11 +1545,15 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
                 out.extend_from_slice(&(ewkb.len() as u64).to_le_bytes());
                 out.extend_from_slice(ewkb);
             }
-            DefinedValue::TsVector(text) | DefinedValue::TsQuery(text) | DefinedValue::JsonPath(text) => {
+            DefinedValue::TsVector(text)
+            | DefinedValue::TsQuery(text)
+            | DefinedValue::JsonPath(text)
+            | DefinedValue::RefCursor(text) => {
                 out.push(match defined.as_ref() {
                     DefinedValue::TsVector(_) => 22,
                     DefinedValue::TsQuery(_) => 23,
-                    _ => 24,
+                    DefinedValue::JsonPath(_) => 24,
+                    _ => 25,
                 });
                 out.extend_from_slice(&(text.len() as u64).to_le_bytes());
                 out.extend_from_slice(text.as_bytes());

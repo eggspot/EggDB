@@ -752,7 +752,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289). **Code written, unbuilt** (code-only mode, 2026-11-14,
   D1165); their binary wire formats are left.
 - `refcursor` and `refcursor[]` table columns kept as their own types, a file format change with
-  its security review; `refcursor[]` values are built (D35, D301).
+  its security review; `refcursor[]` values are built (D35, D301). `refcursor` columns: **code written, unbuilt** (code-only
+  mode, 2026-11-14, D1165); `refcursor[]` columns keep `text[]` storage.
 - `regprocedure`, transition tables in row-level triggers, and `pg_sequences.last_value` for
   identity columns (D158, D264, sql.md). `regprocedure`: **code written, unbuilt** (code-only
   mode, 2026-11-10, D390); `pg_sequences.last_value` for identity columns: **code written,

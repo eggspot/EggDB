@@ -68,7 +68,8 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
             crate::types::DefinedValue::Geometry(ewkb) => crate::geometry_type::held_bytes(ewkb),
             crate::types::DefinedValue::TsVector(text)
             | crate::types::DefinedValue::TsQuery(text)
-            | crate::types::DefinedValue::JsonPath(text) => text.len(),
+            | crate::types::DefinedValue::JsonPath(text)
+            | crate::types::DefinedValue::RefCursor(text) => text.len(),
         },
         _ => 0,
     }
