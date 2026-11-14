@@ -41,6 +41,76 @@ serve_idle_bytes() {
   fi
 }
 
+now_nanoseconds() {
+  python3 -c 'import time; print(time.time_ns())'
+}
+
+serve_first_line_milliseconds() {
+  local output="$work/first-line.out"
+  local started
+  started=$(now_nanoseconds)
+  EGGDB_PASSWORD=footprint "$work/eggdb" serve "$work/first.db" --create --listen 127.0.0.1:0 > "$output" 2>&1 &
+  local pid=$!
+  local waited=0
+  until [ -s "$output" ] || [ "$waited" -ge "$((ready_timeout_tenths * 10))" ]; do
+    sleep 0.01
+    waited=$((waited + 1))
+  done
+  local finished
+  finished=$(now_nanoseconds)
+  kill "$pid" 2> /dev/null || true
+  wait "$pid" 2> /dev/null || true
+  if [ -s "$output" ]; then
+    echo $(((finished - started) / 1000000))
+  fi
+}
+
+switches_of() {
+  awk '/^voluntary_ctxt_switches|^nonvoluntary_ctxt_switches/ { total += $2 } END { print total + 0 }' "/proc/$1/status"
+}
+
+serve_idle_wakeups_per_minute() {
+  [ -r /proc/self/status ] || return 0
+  local output="$work/wakeups.out"
+  EGGDB_PASSWORD=footprint "$work/eggdb" serve "$work/wakeups.db" --create --listen 127.0.0.1:0 > "$output" 2>&1 &
+  local pid=$!
+  sleep "$idle_settle_seconds"
+  local before after
+  before=$(switches_of "$pid")
+  sleep 20
+  after=$(switches_of "$pid")
+  kill "$pid" 2> /dev/null || true
+  wait "$pid" 2> /dev/null || true
+  echo $(((after - before) * 3))
+}
+
+energy_counter=/sys/class/powercap/intel-rapl:0/energy_uj
+
+millijoules_per_thousand() {
+  [ -r "$energy_counter" ] || return 0
+  local script=$1 queries=$2
+  local before after
+  before=$(cat "$energy_counter")
+  "$work/eggdb" sql "$work/energy.db" --create < "$script" > /dev/null
+  after=$(cat "$energy_counter")
+  [ "$after" -ge "$before" ] || return 0
+  echo $(((after - before) / queries))
+}
+
+energy_workloads() {
+  [ -r "$energy_counter" ] || return 0
+  local inserts="$work/inserts.sql" selects="$work/selects.sql" count=20000
+  {
+    echo "CREATE TABLE IF NOT EXISTS kv (id integer PRIMARY KEY, v text);"
+    echo "BEGIN;"
+    for id in $(seq 1 "$count"); do echo "INSERT INTO kv VALUES ($id, 'value $id');"; done
+    echo "COMMIT;"
+  } > "$inserts"
+  for id in $(seq 1 "$count"); do echo "SELECT v FROM kv WHERE id = $id;"; done > "$selects"
+  lines+=("$system full insert_millijoules_per_1000 $(millijoules_per_thousand "$inserts" "$count")")
+  lines+=("$system full point_select_millijoules_per_1000 $(millijoules_per_thousand "$selects" "$count")")
+}
+
 bench_value() {
   awk -v benchmark="$1" -v metric="$2" '$2 == benchmark && $3 == metric { print $4 }' "$work/bench.txt"
 }
@@ -52,6 +122,11 @@ if [ -f target/wasm32-wasip1/release/eggdb_wasm.wasm ]; then
   lines+=("any embedded wasm_module_bytes $(measure_bytes target/wasm32-wasip1/release/eggdb_wasm.wasm)")
 fi
 lines+=("$system full serve_idle_resident_bytes $(serve_idle_bytes)")
+lines+=("$system full serve_first_line_milliseconds $(serve_first_line_milliseconds)")
+if [ -r /proc/self/status ]; then
+  lines+=("$system full serve_idle_wakeups_per_minute $(serve_idle_wakeups_per_minute)")
+fi
+energy_workloads
 
 cargo run --release -p eggdb-bench -- --only footprint --results "$work/bench.txt" > "$work/bench.log" 2>&1 || true
 if [ ! -s "$work/bench.txt" ]; then

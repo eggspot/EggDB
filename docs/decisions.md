@@ -1159,3 +1159,4 @@ its full title with its status.
 - [D1132](decisions/D1132.md) Code-only batch 781 (M4): SQL's tables read through a collection named sql
 - [D1133](decisions/D1133.md) Code-only batch 782 (M4): a published branch-coverage target for the core with a weekly coverage run
 - [D1134](decisions/D1134.md) Code-only batch 783 (M4): runner descriptions, a public results page with benchmark and conformance dashboards, and the farm's driver version matrix
+- [D1135](decisions/D1135.md) Code-only batch 784 (M4): joules per query, idle wake-ups and serve's time to its first line in the footprint pass
