@@ -126,13 +126,17 @@ def _library_path():
 
 
 _library = None
+_library_file = None
+_native = None
+_native_checked = False
 
 
 def _api():
-    global _library
+    global _library, _library_file
     if _library is not None:
         return _library
-    library = ctypes.CDLL(_library_path())
+    _library_file = _library_path()
+    library = ctypes.CDLL(_library_file)
     prototypes = {
         "eggdb_last_error": (c_char_p, []),
         "eggdb_last_sqlstate": (c_char_p, []),
@@ -193,10 +197,41 @@ def _api():
     return library
 
 
+def _native_part():
+    """The C extension `eggdb._native` loaded on the same C library, or None when it is not built.
+
+    `EGGDB_PYTHON_NATIVE=0` turns it off; `EGGDB_PYTHON_NATIVE=1` makes a missing one an error."""
+    global _native, _native_checked
+    if _native_checked:
+        return _native
+    _api()
+    _native_checked = True
+    wanted = os.environ.get("EGGDB_PYTHON_NATIVE", "")
+    if wanted == "0":
+        return None
+    try:
+        from . import _native as native
+    except ImportError:
+        if wanted == "1":
+            raise
+        return None
+    native.load(_library_file, _native_error)
+    _native = native
+    return native
+
+
+def _native_error(status, message, sqlstate):
+    return _error_for(status, message, sqlstate or None)
+
+
 def _raise_last(status):
     api = _api()
     message = (api.eggdb_last_error() or b"").decode("utf-8", "replace")
     sqlstate = (api.eggdb_last_sqlstate() or b"").decode("ascii", "replace") or None
+    raise _error_for(status, message, sqlstate)
+
+
+def _error_for(status, message, sqlstate):
     kind = DatabaseError
     if sqlstate and sqlstate.startswith("23"):
         kind = IntegrityError
@@ -208,7 +243,7 @@ def _raise_last(status):
         kind = NotSupportedError
     elif status != 103:
         kind = OperationalError
-    raise kind(message or f"EggDB status {status}", sqlstate)
+    return kind(message or f"EggDB status {status}", sqlstate)
 
 
 def _parameter_text(value, dialect):
@@ -344,6 +379,9 @@ class Connection:
         sql, parameters = _placeholders(sql, self._dialect, list(parameters))
         texts = [_parameter_text(value, self._dialect) for value in parameters]
         encoded = [None if text is None else text.encode("utf-8") for text in texts]
+        native = _native_part()
+        if native is not None:
+            return native.execute(self._session.value, sql.encode("utf-8"), encoded)
         array = (_Parameter * max(len(encoded), 1))()
         for index, text in enumerate(encoded):
             array[index] = _Parameter(text, 0 if text is None else len(text))
@@ -385,6 +423,10 @@ class Connection:
         """Runs `COPY ... FROM STDIN` with `data`: bytes, str, or an iterable of bytes or str pieces
         cut anywhere. Returns the number of rows loaded."""
         self._begin_if_needed()
+        native = _native_part()
+        if native is not None:
+            pieces = [data] if isinstance(data, (bytes, bytearray, memoryview, str)) else data
+            return _copied_rows(native.copy_in(self._live_session().value, sql.encode("utf-8"), pieces))
         api = _api()
         copy = c_void_p()
         _checked(api.eggdb_sql_copy_in_begin(self._live_session(), sql.encode("utf-8"), byref(copy)))
@@ -401,6 +443,12 @@ class Connection:
     def copy_to(self, sql):
         """Runs `COPY ... TO STDOUT` and yields its data in pieces of bytes as they are read."""
         self._begin_if_needed()
+        native = _native_part()
+        if native is not None:
+            pieces = []
+            native.copy_out(self._live_session().value, sql.encode("utf-8"), pieces.append)
+            yield from pieces
+            return
         api = _api()
         copy = c_void_p()
         _checked(api.eggdb_sql_copy_out_begin(self._live_session(), sql.encode("utf-8"), byref(copy)))
@@ -497,12 +545,8 @@ class Cursor:
         """Runs one statement for each set of parameters, prepared once."""
         self.connection._begin_if_needed()
         statement = self.connection.prepare(sql)
-        total = 0
         try:
-            for parameters in sequence:
-                gathered = statement.execute(parameters)
-                if gathered:
-                    total += max(_affected(gathered[-1][0]), 0)
+            total = statement.executemany(sequence)
         finally:
             statement.close()
         self.description = None
@@ -568,6 +612,14 @@ class Statement:
     def __init__(self, connection, sql):
         api = _api()
         text = _numbered(sql, connection._dialect).encode("utf-8")
+        self.connection = connection
+        self._native = None
+        native = _native_part()
+        if native is not None:
+            self._native = native.Statement(connection._live_session().value, text)
+            self._handle = None
+            self.parameter_count = self._native.parameter_count
+            return
         handle = c_void_p()
         _checked(api.eggdb_sql_prepare(connection._live_session(), text, len(text), byref(handle)))
         self.connection = connection
@@ -592,8 +644,15 @@ class Statement:
         for index, value in enumerate(values, start=1):
             _checked(_bind(api, handle, index, value, self.connection._dialect))
 
+    def _open_native(self):
+        if self._native is None:
+            raise InterfaceError("the statement is closed")
+        return self._native
+
     def execute(self, parameters=()):
         """Runs the statement with `parameters` and returns its results as (tag, column names, rows)."""
+        if self._native is not None or self._handle is None:
+            return self._open_native().execute(list(parameters))
         self._bind_all(parameters)
         results = POINTER(_Result)()
         count = c_size_t()
@@ -602,6 +661,8 @@ class Statement:
 
     def columns(self):
         """The names of the columns the statement returns, when they are known."""
+        if self._native is not None or self._handle is None:
+            return self._open_native().columns()
         api = _api()
         count = c_size_t()
         _checked(api.eggdb_stmt_column_count(self._live(), byref(count)))
@@ -614,6 +675,14 @@ class Statement:
 
     def rows(self, parameters=()):
         """Runs the statement with `parameters` and yields its rows one at a time."""
+        if self._native is not None or self._handle is None:
+            native = self._open_native()
+            try:
+                yield from native.start(list(parameters))
+            finally:
+                if self._native is not None:
+                    native.reset()
+            return
         self._bind_all(parameters)
         api = _api()
         handle = self._handle
@@ -631,8 +700,55 @@ class Statement:
             if self._handle is not None:
                 api.eggdb_stmt_reset(self._handle)
 
+    def executemany(self, rows):
+        """Runs the statement once per row of parameters and returns the number of rows changed;
+        with the C extension the whole loop runs in C."""
+        if self._native is not None or self._handle is None:
+            return self._open_native().executemany(rows)
+        total = 0
+        for parameters in rows:
+            gathered = self.execute(parameters)
+            if gathered:
+                total += max(_affected(gathered[-1][0]), 0)
+        return total
+
+    def execute_columns(self, columns):
+        """Runs the statement once per row of parameter columns, one column per placeholder: each a
+        one-dimensional buffer of numbers (`array.array`, a NumPy array, a `memoryview`) or a
+        sequence. Returns the number of rows changed. With the C extension the buffers are read in
+        place, without a Python object per value."""
+        if self._native is not None or self._handle is None:
+            return self._open_native().execute_columns(list(columns))
+        columns = [memoryview(column).tolist() if not isinstance(column, (list, tuple)) else column for column in columns]
+        return self.executemany(zip(*columns))
+
+    def fetch_columns(self, parameters=()):
+        """Runs the statement and returns its result by column name: an `array.array('q')` or
+        `array.array('d')` for a column that holds only integers or only reals, a list otherwise."""
+        if self._native is not None or self._handle is None:
+            return self._open_native().fetch_columns(list(parameters))
+        import array
+
+        names = self.columns()
+        values = [[] for _ in names]
+        for row in self.rows(parameters):
+            for column, value in enumerate(row):
+                values[column].append(value)
+        out = {}
+        for name, column in zip(names, values):
+            if column and all(type(value) is int for value in column):
+                out[name] = array.array("q", column)
+            elif column and all(type(value) is float for value in column):
+                out[name] = array.array("d", column)
+            else:
+                out[name] = column
+        return out
+
     def close(self):
         """Frees the statement."""
+        if self._native is not None:
+            self._native.close()
+            self._native = None
         if self._handle is not None:
             _api().eggdb_stmt_finalize(self._handle)
             self._handle = None

@@ -62,6 +62,24 @@ class DbApiTest(unittest.TestCase):
             self.assertEqual(list(select.rows((3,))), [("n3",)])
         connection.close()
 
+    def test_columns_of_parameters_and_results_move_as_buffers(self):
+        import array
+
+        connection = eggdb.connect(":memory:")
+        connection.execute("CREATE TABLE m (id INTEGER PRIMARY KEY, reading REAL, label TEXT)")
+        with connection.prepare("INSERT INTO m VALUES (?, ?, ?)") as insert:
+            changed = insert.execute_columns(
+                [array.array("q", [1, 2, 3]), array.array("d", [0.5, 1.5, 2.5]), ["a", None, "c"]]
+            )
+            self.assertEqual(changed, 3)
+            self.assertEqual(insert.executemany([(4, 3.5, "d"), (5, 4.5, "e")]), 2)
+        with connection.prepare("SELECT id, reading, label FROM m ORDER BY id") as select:
+            columns = select.fetch_columns()
+        self.assertEqual(columns["id"], array.array("q", [1, 2, 3, 4, 5]))
+        self.assertEqual(columns["reading"], array.array("d", [0.5, 1.5, 2.5, 3.5, 4.5]))
+        self.assertEqual(columns["label"], ["a", None, "c", "d", "e"])
+        connection.close()
+
     def test_copy_loads_and_reads_rows_in_pieces(self):
         connection = eggdb.connect(":memory:", dialect="postgresql")
         connection.execute("CREATE TABLE t (id integer, name text)")

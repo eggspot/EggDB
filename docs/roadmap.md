@@ -704,7 +704,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - JDBC's `DatabaseMetaData`, and a JNI binding for Java before 22 (D16, D182). `DatabaseMetaData`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D791). Left: the JNI binding. The JNI binding: **code written, unbuilt** (code-only mode,
   2026-11-14, D1153).
-- The Python driver through the CPython C API with buffer-protocol batches (D16, D17).
+- The Python driver through the CPython C API with buffer-protocol batches (D16, D17). **Code written, unbuilt**
+  (code-only mode, 2026-11-14, D1154): `eggdb._native`.
 - SQL*Plus commands in `eggdb shell`, and `DESCRIBE`, `VARIABLE`/`PRINT`, `SPOOL` and `COLUMN`
   formatting (D150). `DESCRIBE`, `PROMPT` and `SPOOL`: **code written, unbuilt** (code-only mode,
   2026-11-11, D544); `VARIABLE`/`PRINT` with `EXEC :x := …`: **code written, unbuilt** (code-only mode,

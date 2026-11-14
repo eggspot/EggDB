@@ -7,7 +7,7 @@ Compiles crates/eggdb-capi/tests/c/api_check.c against include/eggdb.h and the s
 with the system C compiler (CC, default cc; warnings are errors), checks that the header also
 compiles as C++ (CXX, default c++), and runs the program. Then runs
 examples/python/eggdb_ctypes.py and the Python driver's tests with PYTHON (default python3)
-against the same library, the Node.js, Go, C++, Ruby, PHP and Dart drivers' checks where their tools are installed, and
+against the same library, once through ctypes and once through its C extension (eggdb._native), the Node.js, Go, C++, Ruby, PHP and Dart drivers' checks where their tools are installed, and
 the .NET and Java drivers' check programs where dotnet and a Java 22 or newer javac are installed. The
 JDBC driver is compiled for Java 17 but for its foreign-function classes, and its check runs twice:
 through Java's foreign function API and through its JNI binding (drivers/java/jni).
@@ -41,8 +41,22 @@ if [ "${NO_C_COMPILER:-}" != 1 ]; then
 fi
 
 "${PYTHON:-python3}" "$root/examples/python/eggdb_ctypes.py" --library "$library"
-EGGDB_LIBRARY="$library" PYTHONPATH="$root/drivers/python" \
+EGGDB_LIBRARY="$library" PYTHONPATH="$root/drivers/python" EGGDB_PYTHON_NATIVE=0 \
   "${PYTHON:-python3}" -m unittest discover -s "$root/drivers/python/tests"
+python_include=$("${PYTHON:-python3}" -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+python_suffix=$("${PYTHON:-python3}" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')
+if [ "${NO_C_COMPILER:-}" != 1 ] && [ -f "$python_include/Python.h" ]; then
+  mkdir -p "$work/python"
+  cp -R "$root/drivers/python/eggdb" "$work/python/"
+  case "$(uname -s)" in
+    Darwin) python_link=(-bundle -undefined dynamic_lookup) ;;
+    *) python_link=(-shared -fPIC -ldl) ;;
+  esac
+  "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror "${python_link[@]}" -I "$python_include" -I "$include" \
+    "$root/drivers/python/eggdb/_native.c" -o "$work/python/eggdb/_native$python_suffix"
+  EGGDB_LIBRARY="$library" PYTHONPATH="$work/python" EGGDB_PYTHON_NATIVE=1 \
+    "${PYTHON:-python3}" -m unittest discover -s "$root/drivers/python/tests"
+fi
 if command -v dotnet >/dev/null 2>&1; then
   env -u VERSION dotnet build "$root/drivers/dotnet/EggDB.Data.Check" -o "$work/dotnet" > "$work/dotnet-build.log" 2>&1 \
     || { cat "$work/dotnet-build.log" >&2; exit 1; }
