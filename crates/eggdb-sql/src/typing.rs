@@ -373,7 +373,7 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if let Some(sql_type) = crate::arrays::function_type(name, arguments, scope) {
         return sql_type;
     }
-    if crate::hstore_functions::is_populate(name) {
+    if crate::hstore_functions::is_populate(name) || crate::sql_json::SCALAR_POPULATE.contains(&name) {
         return arguments
             .first()
             .and_then(|argument| static_type(argument, scope));

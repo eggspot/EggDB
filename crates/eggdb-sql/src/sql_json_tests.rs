@@ -804,3 +804,26 @@ fn oracle_shares_json_value_json_query_json_exists_and_json_table() {
         ["1|p", "2|NULL"]
     );
 }
+
+#[test]
+fn json_populate_record_in_a_select_list_is_one_composite_value() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TYPE pt AS (x int, y int)").expect("type");
+    run(&mut session, "CREATE TABLE t (a int)").expect("table");
+    assert_eq!(
+        rows(&mut session, r#"SELECT json_populate_record(null::pt, '{"x": 3, "y": 4, "z": 5}')"#),
+        ["(3,4)"]
+    );
+    assert_eq!(
+        rows(&mut session, r#"SELECT (jsonb_populate_record(null::pt, '{"y": 7}')).y"#),
+        ["7"]
+    );
+    assert_eq!(
+        rows(&mut session, r#"SELECT json_populate_record(ROW(1, 2)::pt, '{"y": 9}')"#),
+        ["(1,9)"]
+    );
+    let refused = run(&mut session, r#"SELECT json_populate_record(null::t, '{"a": 1}')"#)
+        .expect_err("a table's row type in a select list");
+    assert_eq!(refused.state().code(), "0A000");
+}

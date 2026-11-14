@@ -422,15 +422,15 @@ fn not_a_row_type() -> SqlError {
     )
 }
 
-struct RecordShape {
-    type_oid: u32,
-    names: Vec<String>,
-    types: Vec<Option<SqlType>>,
-    fields: Vec<Value>,
-    anonymous: bool,
+pub(crate) struct RecordShape {
+    pub(crate) type_oid: u32,
+    pub(crate) names: Vec<String>,
+    pub(crate) types: Vec<Option<SqlType>>,
+    pub(crate) fields: Vec<Value>,
+    pub(crate) anonymous: bool,
 }
 
-fn record_shape(record_type: Option<SqlType>, record: Value) -> SqlResult<RecordShape> {
+pub(crate) fn record_shape(record_type: Option<SqlType>, record: Value) -> SqlResult<RecordShape> {
     let declared = record_type
         .and_then(SqlType::defined)
         .filter(|defined| defined.kind == DefinedKind::Composite);

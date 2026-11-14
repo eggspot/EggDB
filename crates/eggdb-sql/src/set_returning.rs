@@ -753,20 +753,24 @@ fn value_types(values: &[Value], declared: &[Option<SqlType>]) -> Vec<Option<Sql
         .collect()
 }
 
+fn returns_a_set_in_expressions(name: &str) -> bool {
+    named(name).is_some() && !crate::sql_json::SCALAR_POPULATE.contains(&name)
+}
+
 pub(crate) fn mentions_set_returning(expr: &Expr) -> bool {
-    matches!(&expr.kind, ExprKind::Function { name, .. } if named(name).is_some())
+    matches!(&expr.kind, ExprKind::Function { name, .. } if returns_a_set_in_expressions(name))
         || children(expr).into_iter().any(mentions_set_returning)
 }
 
 fn first_set_returning(expr: &Expr) -> Option<&Expr> {
-    if matches!(&expr.kind, ExprKind::Function { name, .. } if named(name).is_some()) {
+    if matches!(&expr.kind, ExprKind::Function { name, .. } if returns_a_set_in_expressions(name)) {
         return Some(expr);
     }
     children(expr).into_iter().find_map(first_set_returning)
 }
 
 fn is_top_level_call(expr: &Expr) -> bool {
-    matches!(&expr.kind, ExprKind::Function { name, .. } if named(name).is_some())
+    matches!(&expr.kind, ExprKind::Function { name, .. } if returns_a_set_in_expressions(name))
 }
 
 fn selected_call(expr: &Expr) -> Option<(&Expr, Option<&str>)> {

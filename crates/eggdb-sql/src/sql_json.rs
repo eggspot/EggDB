@@ -26,6 +26,58 @@ pub(crate) const POPULATE: [&str; 4] = [
     "jsonb_populate_recordset",
 ];
 
+/// The populate functions that return one row, which an expression or a select list takes as
+/// one composite value.
+pub(crate) const SCALAR_POPULATE: [&str; 2] = ["json_populate_record", "jsonb_populate_record"];
+
+/// `json(b)_populate_record(base, document)` in an expression or a select list: the base row
+/// (a composite type's or a record's) with each field the document's object names filled from
+/// it, as one composite value.
+pub(crate) fn populate_scalar(
+    evaluator: &Evaluator<'_>,
+    name: &str,
+    arguments: &[Expr],
+) -> SqlResult<Value> {
+    let [base, document] = arguments else {
+        return Err(row_type_required(name));
+    };
+    if matches!(&base.kind, ExprKind::Function { name: marker, .. } if marker == ROW_TYPE) {
+        return Err(SqlError::not_supported(format!(
+            "{name} on a table's row type is supported in FROM only; select from it, or use a composite type"
+        ))
+        .at(base.position));
+    }
+    let record_type = crate::typing::static_type(base, evaluator.scope);
+    let record = evaluator.eval(base, record_type)?;
+    let document = evaluator.eval(document, None)?;
+    let mut shape = crate::hstore_functions::record_shape(record_type, record)?;
+    let names_kept = |shape: crate::hstore_functions::RecordShape| {
+        let names = if shape.anonymous { shape.names } else { Vec::new() };
+        crate::records::record_value(shape.type_oid, shape.fields, names)
+    };
+    let text = match &document {
+        Value::Null => return Ok(names_kept(shape)),
+        Value::Json(text) | Value::Jsonb(text) | Value::Text(text) => text.as_str(),
+        other => {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                format!("function {name}(record, {}) does not exist", other.type_name()),
+            ));
+        }
+    };
+    let binary = name.starts_with("jsonb");
+    let parsed = json::parse(text, binary)?;
+    let Json::Object(members) = &parsed.value else {
+        return Err(not_an_object(name, &parsed.value));
+    };
+    for ((field_name, sql_type), field) in shape.names.iter().zip(&shape.types).zip(shape.fields.iter_mut()) {
+        if let Some((_, node)) = members.iter().rev().find(|(key, _)| key == field_name) {
+            *field = crate::json_to_record::field(text, node, *sql_type, binary)?;
+        }
+    }
+    Ok(names_kept(shape))
+}
+
 /// The column name PostgreSQL gives a select-list item that calls one of the SQL/JSON functions.
 pub(crate) fn column_name(name: &str) -> Option<&'static str> {
     match name {

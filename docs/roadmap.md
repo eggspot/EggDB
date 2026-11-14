@@ -155,7 +155,9 @@ Every protocol milestone also covers that database's tools (D12) and its backups
 an application's whole toolchain and its data move over together.
 
 Tracks that run alongside the milestones: `PLAN DEFAULT`: **code written,
-  unbuilt** (code-only mode, 2026-11-14, D1166).
+  unbuilt** (code-only mode, 2026-11-14, D1166). `json_populate_record` in a select list (composite types): **code written,
+  unbuilt** (code-only mode, 2026-11-14, D1167). Left: a table's row type outside FROM, the column alias list and
+  named `PLAN`s.
 - **The client (D15).** It starts now, not at M5:
   - our own Rust GUI toolkit, for the desktop and the browser from one codebase;
   - Claude Fable's design in `docs/ux/`;

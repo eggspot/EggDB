@@ -1191,3 +1191,4 @@ its full title with its status.
 - [D1164](decisions/D1164.md) Code-only batch 814 (M6a): large HTTP request bodies handed to the handler as they arrive, first for S3 PutObject
 - [D1165](decisions/D1165.md) Code-only batch 815 (M6a): tsvector, tsquery and jsonpath as types of their own
 - [D1166](decisions/D1166.md) Code-only batch 817 (M6a): JSON_TABLE's PLAN DEFAULT (OUTER | INNER, UNION | CROSS)
+- [D1167](decisions/D1167.md) Code-only batch 818 (M6a): json(b)_populate_record in a select list and in expressions

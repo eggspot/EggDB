@@ -1434,6 +1434,9 @@ impl Evaluator<'_> {
             "array_all" => return crate::arrays::quantified(self, arguments, true),
             "collate" => return crate::string_functions::collated(self, arguments),
             "pg_typeof" => return self.pg_typeof(arguments),
+            name if crate::sql_json::SCALAR_POPULATE.contains(&name) => {
+                return crate::sql_json::populate_scalar(self, name, arguments);
+            }
             name if crate::hstore_functions::is_populate(name) => {
                 return crate::hstore_functions::populate_record(self, name, arguments);
             }
