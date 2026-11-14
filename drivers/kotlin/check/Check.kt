@@ -32,12 +32,24 @@ fun main() {
             check(row == listOf(Value.Text("egg 42"), Value.Real(21.0))) { row }
             check(select.execute(Value.Integer(1)).single().rows.single()[0] == Value.Text("brown 🥚"))
         }
+        val heavy = db.rows("SELECT id FROM eggs WHERE weight > ? ORDER BY id", 50.0).map { it[0] }.toList()
+        check(heavy == listOf(Value.Integer(1), Value.Integer(101), Value.Integer(102))) { heavy }
+        db.prepare("SELECT name FROM eggs WHERE id < ? ORDER BY id").use { select ->
+            check(select.columns() == listOf("name")) { select.columns() }
+            check(select.rows(3L).count() == 2)
+            check(select.rows(4L).first() == listOf(Value.Text("brown 🥚")))
+        }
         db.beginTransaction()
         db.execute("DELETE FROM eggs")
         db.rollback()
         check(db.execute("SELECT count(*) FROM eggs").single().rows[0][0] == Value.Integer(102))
     }
     file.delete()
+    EggDB(":memory:", "postgresql").use { db ->
+        db.execute("CREATE TABLE t (id integer, name text)")
+        check(db.copyFrom("COPY t FROM STDIN", listOf("1\tad".toByteArray(), "a\n2\tgrace\n".toByteArray())) == 2L)
+        check(String(db.copyTo("COPY t TO STDOUT")) == "1\tada\n2\tgrace\n")
+    }
     val store = File.createTempFile("eggdb-kotlin-kv", ".eggdb").apply { delete() }
     KeyValue(store.path).use { kv ->
         kv.write { txn ->

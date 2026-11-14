@@ -111,33 +111,59 @@ public final class Database {
             var results: UnsafePointer<eggdb_result>?
             var count = 0
             try check(eggdb_sql_execute_with_parameters(session, numbered(sql), &bound, bound.count, &results, &count))
-            for index in 0..<count {
-                let result = results![index]
-                var columns: [String] = []
-                for column in 0..<result.column_count {
-                    columns.append(String(cString: result.column_names[column]!))
-                }
-                var rows: [[Value]] = []
-                for row in 0..<result.row_count {
-                    var cells: [Value] = []
-                    for column in 0..<result.column_count {
-                        let cell = result.values[row * result.column_count + column]
-                        switch Int32(cell.kind) {
-                        case EGGDB_INTEGER: cells.append(.integer(cell.integer))
-                        case EGGDB_REAL: cells.append(.real(cell.real))
-                        case EGGDB_TEXT:
-                            let bytes = UnsafeBufferPointer(start: cell.data, count: cell.len)
-                            cells.append(.text(String(decoding: bytes, as: UTF8.self)))
-                        case EGGDB_BLOB: cells.append(.blob(Array(UnsafeBufferPointer(start: cell.data, count: cell.len))))
-                        default: cells.append(.null)
-                        }
-                    }
-                    rows.append(cells)
-                }
-                gathered.append(Result(tag: String(cString: result.tag), columns: columns, rows: rows))
-            }
+            gathered = gatheredResults(results, count)
         }
         return gathered
+    }
+
+    private func openSession() throws -> OpaquePointer {
+        guard let session else { throw EggDBError(status: EGGDB_ERR_INVALID_ARGUMENT, sqlState: nil, message: "the database is closed") }
+        return session
+    }
+
+    @discardableResult
+    public func copyFrom(_ sql: String, pieces: [[UInt8]]) throws -> Int {
+        var copy: OpaquePointer?
+        try check(eggdb_sql_copy_in_begin(try openSession(), sql, &copy))
+        defer { eggdb_copy_free(copy) }
+        for piece in pieces where !piece.isEmpty {
+            try piece.withUnsafeBufferPointer { buffer in
+                try check(eggdb_copy_put(copy, buffer.baseAddress, buffer.count))
+            }
+        }
+        return copiedRows(try endCopy(copy))
+    }
+
+    @discardableResult
+    public func copyFrom(_ sql: String, text: String) throws -> Int {
+        try copyFrom(sql, pieces: [Array(text.utf8)])
+    }
+
+    public func copyTo(_ sql: String, onPiece: ([UInt8]) throws -> Void) throws {
+        var copy: OpaquePointer?
+        try check(eggdb_sql_copy_out_begin(try openSession(), sql, &copy))
+        defer { eggdb_copy_free(copy) }
+        while true {
+            var data: UnsafePointer<UInt8>?
+            var length = 0
+            try check(eggdb_copy_read(copy, &data, &length))
+            if length == 0 { break }
+            try onPiece(Array(UnsafeBufferPointer(start: data, count: length)))
+        }
+        _ = try endCopy(copy)
+    }
+
+    public func copyTo(_ sql: String) throws -> [UInt8] {
+        var out: [UInt8] = []
+        try copyTo(sql) { out.append(contentsOf: $0) }
+        return out
+    }
+
+    private func endCopy(_ copy: OpaquePointer?) throws -> [Result] {
+        var results: UnsafePointer<eggdb_result>?
+        var count = 0
+        try check(eggdb_copy_end(copy, &results, &count))
+        return gatheredResults(results, count)
     }
 
     public func prepare(_ sql: String) throws -> Statement {
@@ -175,6 +201,45 @@ public final class Database {
             throw error
         }
     }
+}
+
+private func converted(_ cell: eggdb_value) -> Value {
+    switch Int32(cell.kind) {
+    case EGGDB_INTEGER: return .integer(cell.integer)
+    case EGGDB_REAL: return .real(cell.real)
+    case EGGDB_TEXT: return .text(String(decoding: UnsafeBufferPointer(start: cell.data, count: cell.len), as: UTF8.self))
+    case EGGDB_BLOB: return .blob(Array(UnsafeBufferPointer(start: cell.data, count: cell.len)))
+    default: return .null
+    }
+}
+
+private func gatheredResults(_ results: UnsafePointer<eggdb_result>?, _ count: Int) -> [Result] {
+    var gathered: [Result] = []
+    for index in 0..<count {
+        let result = results![index]
+        var columns: [String] = []
+        for column in 0..<result.column_count {
+            columns.append(String(cString: result.column_names[column]!))
+        }
+        var rows: [[Value]] = []
+        for row in 0..<result.row_count {
+            var cells: [Value] = []
+            for column in 0..<result.column_count {
+                cells.append(converted(result.values[row * result.column_count + column]))
+            }
+            rows.append(cells)
+        }
+        gathered.append(Result(tag: String(cString: result.tag), columns: columns, rows: rows))
+    }
+    return gathered
+}
+
+private func copiedRows(_ results: [Result]) -> Int {
+    for result in results.reversed() {
+        let words = result.tag.split(separator: " ")
+        if words.count == 2 && words[0] == "COPY" { return Int(words[1]) ?? -1 }
+    }
+    return -1
 }
 
 public final class Statement {
@@ -237,31 +302,35 @@ public final class Statement {
     }
 
     public func query(_ values: [Value] = []) throws -> [[Value]] {
-        let statement = try live()
-        try bind(values)
-        try check(eggdb_stmt_reset(statement))
         var rows: [[Value]] = []
+        try forEachRow(values) { rows.append($0) }
+        return rows
+    }
+
+    public func forEachRow(_ values: [Value] = [], _ body: ([Value]) throws -> Void) throws {
+        let statement = try live()
+        try check(eggdb_stmt_reset(statement))
+        try bind(values)
+        defer { eggdb_stmt_reset(statement) }
         var hasRow: Int32 = 0
         while true {
             try check(eggdb_stmt_step(statement, &hasRow))
             if hasRow == 0 { break }
-            var values: UnsafePointer<eggdb_value>?
+            var cells: UnsafePointer<eggdb_value>?
             var count = 0
-            try check(eggdb_stmt_row(statement, &values, &count))
-            var row: [Value] = []
-            for column in 0..<count {
-                let cell = values![column]
-                switch Int32(cell.kind) {
-                case EGGDB_INTEGER: row.append(.integer(cell.integer))
-                case EGGDB_REAL: row.append(.real(cell.real))
-                case EGGDB_TEXT:
-                    row.append(.text(String(decoding: UnsafeBufferPointer(start: cell.data, count: cell.len), as: UTF8.self)))
-                case EGGDB_BLOB: row.append(.blob(Array(UnsafeBufferPointer(start: cell.data, count: cell.len))))
-                default: row.append(.null)
-                }
-            }
-            rows.append(row)
+            try check(eggdb_stmt_row(statement, &cells, &count))
+            try body((0..<count).map { converted(cells![$0]) })
         }
-        return rows
+    }
+
+    public func columns() throws -> [String] {
+        let statement = try live()
+        var count = 0
+        try check(eggdb_stmt_column_count(statement, &count))
+        return try (0..<count).map { column in
+            var name: UnsafePointer<CChar>?
+            try check(eggdb_stmt_column_name(statement, column, &name))
+            return name.map { String(cString: $0) } ?? ""
+        }
     }
 }

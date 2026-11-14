@@ -261,6 +261,196 @@ JNIEXPORT jobjectArray JNICALL Java_app_eggspot_eggdb_Statement_nativeRun(JNIEnv
     return flatten(env, results, count);
 }
 
+static void throw_message(JNIEnv *env, const char *message);
+
+JNIEXPORT void JNICALL Java_app_eggspot_eggdb_Statement_nativeStart(JNIEnv *env, jclass type, jlong prepared, jintArray kinds, jlongArray integers, jdoubleArray reals, jobjectArray bytes) {
+    (void)type;
+    eggdb_stmt *stmt = (eggdb_stmt *)(intptr_t)prepared;
+    jsize width = (*env)->GetArrayLength(env, kinds);
+    jint *kind = (*env)->GetIntArrayElements(env, kinds, NULL);
+    jlong *integer = (*env)->GetLongArrayElements(env, integers, NULL);
+    jdouble *real = (*env)->GetDoubleArrayElements(env, reals, NULL);
+    int status = EGGDB_OK;
+    if (kind == NULL || integer == NULL || real == NULL) {
+        status = EGGDB_ERR_OUT_OF_MEMORY;
+    }
+    if (status == EGGDB_OK) {
+        status = eggdb_stmt_reset(stmt);
+    }
+    if (status == EGGDB_OK) {
+        status = eggdb_stmt_clear_bindings(stmt);
+    }
+    for (jsize column = 0; column < width && status == EGGDB_OK; column++) {
+        jbyteArray value = (jbyteArray)(*env)->GetObjectArrayElement(env, bytes, column);
+        status = bind_value(env, stmt, (size_t)column + 1, kind[column], integer[column], real[column], value);
+        if (value != NULL) {
+            (*env)->DeleteLocalRef(env, value);
+        }
+    }
+    if (kind != NULL) (*env)->ReleaseIntArrayElements(env, kinds, kind, JNI_ABORT);
+    if (integer != NULL) (*env)->ReleaseLongArrayElements(env, integers, integer, JNI_ABORT);
+    if (real != NULL) (*env)->ReleaseDoubleArrayElements(env, reals, real, JNI_ABORT);
+    if (status != EGGDB_OK) {
+        throw_failure(env, "the parameters could not be bound");
+    }
+}
+
+JNIEXPORT jobjectArray JNICALL Java_app_eggspot_eggdb_Statement_nativeColumns(JNIEnv *env, jclass type, jlong prepared) {
+    (void)type;
+    eggdb_stmt *stmt = (eggdb_stmt *)(intptr_t)prepared;
+    size_t count = 0;
+    if (eggdb_stmt_column_count(stmt, &count) != EGGDB_OK) {
+        throw_failure(env, "the columns could not be read");
+        return NULL;
+    }
+    jobjectArray out = (*env)->NewObjectArray(env, (jsize)count, (*env)->FindClass(env, "[B"), NULL);
+    jsize at = 0;
+    for (size_t column = 0; out != NULL && column < count; column++) {
+        const char *name = NULL;
+        if (eggdb_stmt_column_name(stmt, column, &name) != EGGDB_OK) {
+            throw_failure(env, "the columns could not be read");
+            return NULL;
+        }
+        if (put(env, out, &at, byte_array(env, name, strlen(name))) != 0) {
+            return NULL;
+        }
+    }
+    return out;
+}
+
+JNIEXPORT jobjectArray JNICALL Java_app_eggspot_eggdb_Statement_nativeStep(JNIEnv *env, jclass type, jlong prepared) {
+    (void)type;
+    eggdb_stmt *stmt = (eggdb_stmt *)(intptr_t)prepared;
+    int has_row = 0;
+    if (eggdb_stmt_step(stmt, &has_row) != EGGDB_OK) {
+        throw_failure(env, "the statement failed");
+        return NULL;
+    }
+    if (!has_row) {
+        return NULL;
+    }
+    const eggdb_value *values = NULL;
+    size_t count = 0;
+    if (eggdb_stmt_row(stmt, &values, &count) != EGGDB_OK) {
+        throw_failure(env, "the row could not be read");
+        return NULL;
+    }
+    jobjectArray out = (*env)->NewObjectArray(env, (jsize)count, (*env)->FindClass(env, "[B"), NULL);
+    jsize at = 0;
+    for (size_t column = 0; out != NULL && column < count; column++) {
+        if (put(env, out, &at, cell(env, &values[column])) != 0) {
+            return NULL;
+        }
+    }
+    return out;
+}
+
+JNIEXPORT void JNICALL Java_app_eggspot_eggdb_Statement_nativeReset(JNIEnv *env, jclass type, jlong prepared) {
+    (void)env;
+    (void)type;
+    eggdb_stmt_reset((eggdb_stmt *)(intptr_t)prepared);
+}
+
+static jobjectArray finish_copy(JNIEnv *env, eggdb_copy *copy) {
+    const eggdb_result *results = NULL;
+    size_t count = 0;
+    int status = eggdb_copy_end(copy, &results, &count);
+    if (status != EGGDB_OK) {
+        throw_failure(env, "the COPY failed");
+        eggdb_copy_free(copy);
+        return NULL;
+    }
+    jobjectArray out = flatten(env, results, count);
+    eggdb_copy_free(copy);
+    return out;
+}
+
+JNIEXPORT jobjectArray JNICALL Java_app_eggspot_eggdb_EggDB_nativeCopyIn(JNIEnv *env, jclass type, jlong opened, jbyteArray sql, jobjectArray pieces) {
+    (void)type;
+    eggdb_jni_handle *handle = (eggdb_jni_handle *)(intptr_t)opened;
+    char *text = terminated(env, sql);
+    if (handle == NULL || text == NULL) {
+        free(text);
+        throw_message(env, handle == NULL ? "the database is closed" : "the SQL holds a NUL character");
+        return NULL;
+    }
+    eggdb_copy *copy = NULL;
+    int status = eggdb_sql_copy_in_begin(handle->sql, text, &copy);
+    free(text);
+    if (status != EGGDB_OK) {
+        throw_failure(env, "the COPY could not start");
+        return NULL;
+    }
+    jsize count = (*env)->GetArrayLength(env, pieces);
+    for (jsize index = 0; index < count && status == EGGDB_OK; index++) {
+        jbyteArray piece = (jbyteArray)(*env)->GetObjectArrayElement(env, pieces, index);
+        if (piece == NULL) {
+            continue;
+        }
+        jsize length = (*env)->GetArrayLength(env, piece);
+        jbyte *data = (*env)->GetByteArrayElements(env, piece, NULL);
+        status = data == NULL ? EGGDB_ERR_OUT_OF_MEMORY : eggdb_copy_put(copy, (const uint8_t *)data, (size_t)length);
+        if (data != NULL) {
+            (*env)->ReleaseByteArrayElements(env, piece, data, JNI_ABORT);
+        }
+        (*env)->DeleteLocalRef(env, piece);
+    }
+    if (status != EGGDB_OK) {
+        throw_failure(env, "the COPY data could not be sent");
+        eggdb_copy_free(copy);
+        return NULL;
+    }
+    return finish_copy(env, copy);
+}
+
+JNIEXPORT jobjectArray JNICALL Java_app_eggspot_eggdb_EggDB_nativeCopyOut(JNIEnv *env, jclass type, jlong opened, jbyteArray sql, jobject sink) {
+    (void)type;
+    eggdb_jni_handle *handle = (eggdb_jni_handle *)(intptr_t)opened;
+    char *text = terminated(env, sql);
+    if (handle == NULL || text == NULL) {
+        free(text);
+        throw_message(env, handle == NULL ? "the database is closed" : "the SQL holds a NUL character");
+        return NULL;
+    }
+    jclass sink_type = (*env)->GetObjectClass(env, sink);
+    jmethodID accept = (*env)->GetMethodID(env, sink_type, "accept", "(Ljava/lang/Object;)V");
+    if (accept == NULL) {
+        free(text);
+        return NULL;
+    }
+    eggdb_copy *copy = NULL;
+    int status = eggdb_sql_copy_out_begin(handle->sql, text, &copy);
+    free(text);
+    if (status != EGGDB_OK) {
+        throw_failure(env, "the COPY could not start");
+        return NULL;
+    }
+    for (;;) {
+        const uint8_t *data = NULL;
+        size_t length = 0;
+        if (eggdb_copy_read(copy, &data, &length) != EGGDB_OK) {
+            throw_failure(env, "the COPY data could not be read");
+            eggdb_copy_free(copy);
+            return NULL;
+        }
+        if (length == 0) {
+            break;
+        }
+        jbyteArray piece = byte_array(env, data, length);
+        if (piece == NULL) {
+            eggdb_copy_free(copy);
+            return NULL;
+        }
+        (*env)->CallVoidMethod(env, sink, accept, piece);
+        (*env)->DeleteLocalRef(env, piece);
+        if ((*env)->ExceptionCheck(env)) {
+            eggdb_copy_free(copy);
+            return NULL;
+        }
+    }
+    return finish_copy(env, copy);
+}
+
 JNIEXPORT void JNICALL Java_app_eggspot_eggdb_Statement_nativeFinalize(JNIEnv *env, jclass type, jlong prepared) {
     (void)env;
     (void)type;

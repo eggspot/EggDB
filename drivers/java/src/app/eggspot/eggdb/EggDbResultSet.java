@@ -35,6 +35,7 @@ public final class EggDbResultSet implements ResultSet {
     private final List<String> columns;
     private final List<Object[]> rows;
     private int row = -1;
+    private final SteppedRows stepped;
     private boolean closed;
     private boolean wasNull;
 
@@ -42,6 +43,33 @@ public final class EggDbResultSet implements ResultSet {
         this.statement = statement;
         this.columns = columns;
         this.rows = rows;
+        this.stepped = null;
+    }
+
+    EggDbResultSet(EggDbStatement statement, List<String> columns, SteppedRows stepped) {
+        this.statement = statement;
+        this.columns = columns;
+        this.rows = List.of();
+        this.stepped = stepped;
+    }
+
+    private boolean present(int index) throws SQLException {
+        if (index < 0) {
+            return false;
+        }
+        return stepped != null ? stepped.has(index) : index < rows.size();
+    }
+
+    private boolean presentQuietly(int index) {
+        try {
+            return present(index);
+        } catch (SQLException error) {
+            return false;
+        }
+    }
+
+    private Object[] rowAt(int index) {
+        return stepped != null ? stepped.get(index) : rows.get(index);
     }
 
     private static SQLFeatureNotSupportedException unsupported(String what) {
@@ -50,19 +78,22 @@ public final class EggDbResultSet implements ResultSet {
 
     void closeQuietly() {
         closed = true;
+        if (stepped != null) {
+            stepped.close();
+        }
     }
 
     private Object value(int columnIndex) throws SQLException {
         if (closed) {
             throw new SQLException("the result set is closed", "HY010");
         }
-        if (row < 0 || row >= rows.size()) {
+        if (!present(row)) {
             throw new SQLException("the result set is not on a row", "24000");
         }
         if (columnIndex < 1 || columnIndex > columns.size()) {
             throw new SQLException("no column " + columnIndex, "07009");
         }
-        Object value = rows.get(row)[columnIndex - 1];
+        Object value = rowAt(row)[columnIndex - 1];
         wasNull = value == null;
         return value;
     }
@@ -87,7 +118,7 @@ public final class EggDbResultSet implements ResultSet {
     }
 
     List<Object[]> rows() {
-        return rows;
+        return stepped != null ? stepped.window() : rows;
     }
 
     @Override
@@ -95,16 +126,19 @@ public final class EggDbResultSet implements ResultSet {
         if (closed) {
             throw new SQLException("the result set is closed", "HY010");
         }
-        if (row < rows.size()) {
+        if (row < 0 || present(row)) {
             row++;
         }
-        return row < rows.size();
+        return present(row);
     }
 
     @Override
     public void close() throws SQLException {
         if (!closed) {
             closed = true;
+            if (stepped != null) {
+                stepped.close();
+            }
             statement.resultSetClosed(this);
         }
     }
@@ -365,27 +399,27 @@ public final class EggDbResultSet implements ResultSet {
 
     @Override
     public boolean isBeforeFirst() {
-        return row < 0 && !rows.isEmpty();
+        return row < 0 && presentQuietly(0);
     }
 
     @Override
     public boolean isAfterLast() {
-        return row >= rows.size() && !rows.isEmpty();
+        return row > 0 && !presentQuietly(row);
     }
 
     @Override
     public boolean isFirst() {
-        return row == 0 && !rows.isEmpty();
+        return row == 0 && presentQuietly(0);
     }
 
     @Override
     public boolean isLast() {
-        return row == rows.size() - 1 && !rows.isEmpty();
+        return presentQuietly(row) && !presentQuietly(row + 1);
     }
 
     @Override
     public int getRow() {
-        return row >= 0 && row < rows.size() ? row + 1 : 0;
+        return presentQuietly(row) ? row + 1 : 0;
     }
 
     @Override

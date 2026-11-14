@@ -1175,3 +1175,4 @@ its full title with its status.
 - [D1148](decisions/D1148.md) Code-only batch 797 (M5): the Python, Go and C++ drivers on prepared statements, stepping and COPY
 - [D1149](decisions/D1149.md) Code-only batch 798 (M5): the Node.js, Ruby and PHP drivers on prepared statements, stepping and COPY
 - [D1150](decisions/D1150.md) Code-only batch 799 (M5): the Dart and .NET drivers on prepared statements, stepping and COPY
+- [D1151](decisions/D1151.md) Code-only batch 800 (M5): the Java, Kotlin, Android and Swift drivers on prepared statements, stepping and COPY

@@ -71,6 +71,19 @@ final class EggDBTests: XCTestCase {
         XCTAssertThrowsError(try insert.execute([]))
     }
 
+    func testSteppedRowsAndCopy() throws {
+        let db = try Database(path: ":memory:", dialect: "postgresql")
+        try db.execute("CREATE TABLE t (id integer, name text)")
+        XCTAssertEqual(try db.copyFrom("COPY t FROM STDIN", pieces: [Array("1\tad".utf8), Array("a\n2\tgrace\n3\tedsger\n".utf8)]), 3)
+        let select = try db.prepare("SELECT name FROM t WHERE id > ? ORDER BY id")
+        XCTAssertEqual(try select.columns(), ["name"])
+        var names: [Value] = []
+        try select.forEachRow([.integer(1)]) { names.append($0[0]) }
+        XCTAssertEqual(names, [.text("grace"), .text("edsger")])
+        select.finalize()
+        XCTAssertEqual(String(decoding: try db.copyTo("COPY (SELECT id FROM t ORDER BY id) TO STDOUT"), as: UTF8.self), "1\n2\n3\n")
+    }
+
     #if canImport(SQLite3)
     func testPreparedStatementsAgainstSQLitesLibrary() throws {
         let rows = 5_000

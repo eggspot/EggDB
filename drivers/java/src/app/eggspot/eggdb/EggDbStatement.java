@@ -39,6 +39,8 @@ public final class EggDbStatement implements PreparedStatement {
     private int maxRows;
     private boolean closed;
     private boolean closeOnCompletion;
+    private NativeStatement nativeStatement;
+    private boolean textOnly;
 
     EggDbStatement(EggDbConnection connection, String preparedSql) {
         this.connection = connection;
@@ -60,6 +62,59 @@ public final class EggDbStatement implements PreparedStatement {
             throw new SQLException("this statement was not prepared; pass the SQL to execute", "HY010");
         }
         return preparedSql;
+    }
+
+    private NativeStatement nativePrepared() throws SQLException {
+        if (nativeStatement == null && !textOnly) {
+            try {
+                nativeStatement = connection.session().prepare(prepared());
+            } catch (SQLException notPreparable) {
+                textOnly = true;
+            }
+        }
+        return nativeStatement;
+    }
+
+    private boolean runPrepared(List<Object> values) throws SQLException {
+        checkOpen();
+        closeResultSet();
+        connection.beginForStatement();
+        NativeStatement statement = nativePrepared();
+        if (statement == null) {
+            results = connection.run(prepared(), values);
+        } else {
+            statement.bind(values);
+            results = statement.execute();
+        }
+        current = 0;
+        return currentReturnsRows();
+    }
+
+    private ResultSet queryPrepared() throws SQLException {
+        checkOpen();
+        closeResultSet();
+        connection.beginForStatement();
+        NativeStatement statement = nativePrepared();
+        if (statement != null) {
+            statement.bind(parameters);
+            List<String> columns = statement.columns();
+            if (!columns.isEmpty()) {
+                results = List.of();
+                current = 0;
+                resultSet = new EggDbResultSet(this, columns, new SteppedRows(statement, maxRows));
+                return resultSet;
+            }
+        }
+        return query(prepared(), parameters);
+    }
+
+    private int updatePrepared(List<Object> values) throws SQLException {
+        runPrepared(values);
+        int total = 0;
+        for (NativeSession.StatementResult result : results) {
+            total += result.changedRows();
+        }
+        return total;
     }
 
     private boolean run(String sql, List<Object> values) throws SQLException {
@@ -138,23 +193,27 @@ public final class EggDbStatement implements PreparedStatement {
 
     @Override
     public ResultSet executeQuery() throws SQLException {
-        return query(prepared(), parameters);
+        return queryPrepared();
     }
 
     @Override
     public int executeUpdate() throws SQLException {
-        return update(prepared(), parameters);
+        return updatePrepared(parameters);
     }
 
     @Override
     public boolean execute() throws SQLException {
-        return run(prepared(), parameters);
+        return runPrepared(parameters);
     }
 
     @Override
     public void close() {
         closeResultSet();
         closed = true;
+        if (nativeStatement != null) {
+            nativeStatement.close();
+            nativeStatement = null;
+        }
     }
 
     @Override
@@ -165,6 +224,9 @@ public final class EggDbStatement implements PreparedStatement {
     @Override
     public ResultSet getResultSet() throws SQLException {
         checkOpen();
+        if (resultSet != null) {
+            return resultSet;
+        }
         if (!currentReturnsRows()) {
             return null;
         }
@@ -228,7 +290,7 @@ public final class EggDbStatement implements PreparedStatement {
                 counts[at++] = update(sql, List.of());
             }
             for (List<Object> values : batch) {
-                counts[at++] = update(prepared(), values);
+                counts[at++] = updatePrepared(values);
             }
         } finally {
             clearBatch();

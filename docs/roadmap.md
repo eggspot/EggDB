@@ -696,7 +696,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Asynchronous C API calls, completed by one callback per batch (D17, D293).
 - Every language driver using the new C API calls (prepared handles, stepping, `COPY`) (D293). Python, Go and C++:
   **code written, unbuilt** (code-only mode, 2026-11-14, D1148). Node.js, Ruby and PHP: **code written, unbuilt** (code-only mode,
-  2026-11-14, D1149). Dart and .NET: **code written, unbuilt** (code-only mode, 2026-11-14, D1150).
+  2026-11-14, D1149). Dart and .NET: **code written, unbuilt** (code-only mode, 2026-11-14, D1150). Java, Kotlin,
+  Android and Swift, completing every driver: **code written, unbuilt** (code-only mode, 2026-11-14, D1151).
 - Each driver benchmarked in embedded mode against SQLite's binding in its language, as D17 lists
   them (D17, D182). Check: gated in CI.
 - JDBC's `DatabaseMetaData`, and a JNI binding for Java before 22 (D16, D182). `DatabaseMetaData`: **code written,

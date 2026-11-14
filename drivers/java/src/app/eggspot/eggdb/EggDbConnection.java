@@ -43,6 +43,27 @@ public final class EggDbConnection implements Connection {
         return session.execute(sql, parameters);
     }
 
+    void beginForStatement() throws SQLException {
+        checkOpen();
+        beginIfNeeded();
+    }
+
+    /**
+     * Runs a {@code COPY ... FROM STDIN} with the data read from {@code source}, sent in pieces as it is read.
+     *
+     * @return the number of rows loaded
+     */
+    public long copyFrom(String copyCommand, java.io.InputStream source) throws SQLException {
+        beginForStatement();
+        return session.copyIn(copyCommand, source);
+    }
+
+    /** Runs a {@code COPY ... TO STDOUT} and writes its data to {@code sink} as it is read. */
+    public void copyTo(String copyCommand, java.io.OutputStream sink) throws SQLException {
+        beginForStatement();
+        session.copyOut(copyCommand, sink);
+    }
+
     private void beginIfNeeded() throws SQLException {
         if (!autoCommit && !inTransaction) {
             session.execute("BEGIN", List.of());

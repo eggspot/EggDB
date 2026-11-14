@@ -53,6 +53,36 @@ class EggDB(path: String, val dialect: String = "sqlite") : AutoCloseable {
         return Statement(nativePrepare(handle, sql.toByteArray(UTF_8)))
     }
 
+    /** Runs one query with [parameters] and yields its rows one at a time, stepping through them. */
+    fun rows(sql: String, vararg parameters: Any?): Sequence<List<Value>> = sequence {
+        prepare(sql).use { statement -> yieldAll(statement.rows(*parameters)) }
+    }
+
+    /**
+     * Runs a `COPY ... FROM STDIN` with [pieces] as its data, cut anywhere, and returns the
+     * number of rows loaded.
+     */
+    fun copyFrom(sql: String, pieces: List<ByteArray>): Long {
+        check(handle != 0L) { "the database is closed" }
+        return copiedRows(unflatten(nativeCopyIn(handle, sql.toByteArray(UTF_8), pieces.toTypedArray())))
+    }
+
+    /** Runs a `COPY ... FROM STDIN` with [data] as its UTF-8 input and returns the number of rows loaded. */
+    fun copyFrom(sql: String, data: String): Long = copyFrom(sql, listOf(data.toByteArray(UTF_8)))
+
+    /** Runs a `COPY ... TO STDOUT` and hands each piece of its data to [onPiece] as it is read. */
+    fun copyTo(sql: String, onPiece: (ByteArray) -> Unit) {
+        check(handle != 0L) { "the database is closed" }
+        nativeCopyOut(handle, sql.toByteArray(UTF_8), java.util.function.Consumer<Any> { onPiece(it as ByteArray) })
+    }
+
+    /** Runs a `COPY ... TO STDOUT` and returns all of its data. */
+    fun copyTo(sql: String): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        copyTo(sql) { out.write(it) }
+        return out.toByteArray()
+    }
+
     /** Begins a transaction; [commit] or [rollback] ends it. */
     fun beginTransaction() {
         execute("BEGIN")
@@ -104,7 +134,21 @@ class EggDB(path: String, val dialect: String = "sqlite") : AutoCloseable {
 
         @JvmStatic
         private external fun nativePrepare(handle: Long, sql: ByteArray): Long
+
+        @JvmStatic
+        private external fun nativeCopyIn(handle: Long, sql: ByteArray, pieces: Array<ByteArray>): Array<ByteArray?>
+
+        @JvmStatic
+        private external fun nativeCopyOut(handle: Long, sql: ByteArray, sink: java.util.function.Consumer<Any>): Array<ByteArray?>
     }
+}
+
+private fun copiedRows(results: List<Result>): Long {
+    for (result in results.asReversed()) {
+        val words = result.tag.split(' ')
+        if (words.size == 2 && words[0] == "COPY") return words[1].toLongOrNull() ?: -1
+    }
+    return -1
 }
 
 internal fun unflatten(flat: Array<ByteArray?>): List<Result> {
@@ -149,29 +193,72 @@ class Statement internal constructor(private var handle: Long) : AutoCloseable {
         check(handle != 0L) { "the statement is closed" }
         val width = rows.firstOrNull()?.size ?: 0
         require(rows.all { it.size == width }) { "every row needs the same number of parameters" }
-        val cells = rows.size * width
-        val kinds = IntArray(cells)
-        val integers = LongArray(cells)
-        val reals = DoubleArray(cells)
-        val bytes = arrayOfNulls<ByteArray>(cells)
-        var at = 0
-        for (row in rows) {
-            for (parameter in row) {
-                when (val value = if (parameter is Value) parameter.unwrapped() else parameter) {
-                    null -> kinds[at] = NULL_KIND
-                    is Long -> { kinds[at] = INTEGER_KIND; integers[at] = value }
-                    is Int -> { kinds[at] = INTEGER_KIND; integers[at] = value.toLong() }
-                    is Boolean -> { kinds[at] = INTEGER_KIND; integers[at] = if (value) 1 else 0 }
-                    is Double -> { kinds[at] = REAL_KIND; reals[at] = value }
-                    is Float -> { kinds[at] = REAL_KIND; reals[at] = value.toDouble() }
-                    is String -> { kinds[at] = TEXT_KIND; bytes[at] = value.toByteArray(UTF_8) }
-                    is ByteArray -> { kinds[at] = BLOB_KIND; bytes[at] = value }
-                    else -> throw IllegalArgumentException("a ${value::class.simpleName} cannot be a parameter")
+        val encoded = Encoded(rows)
+        return unflatten(nativeRun(handle, rows.size, encoded.kinds, encoded.integers, encoded.reals, encoded.bytes))
+    }
+
+    /** The names of the columns the statement returns, when they are known before it runs. */
+    fun columns(): List<String> {
+        check(handle != 0L) { "the statement is closed" }
+        return nativeColumns(handle).map { String(it!!, UTF_8) }
+    }
+
+    /**
+     * Runs the statement with [parameters] and yields its rows one at a time: each step crosses
+     * into the database for one row, so a large result never has to fit in memory.
+     */
+    fun rows(vararg parameters: Any?): Sequence<List<Value>> = sequence {
+        check(handle != 0L) { "the statement is closed" }
+        val encoded = Encoded(listOf(parameters.asList()))
+        nativeStart(handle, encoded.kinds, encoded.integers, encoded.reals, encoded.bytes)
+        try {
+            while (true) {
+                val row = nativeStep(handle) ?: break
+                yield(row.map { decode(it) })
+            }
+        } finally {
+            if (handle != 0L) nativeReset(handle)
+        }
+    }
+
+    private class Encoded(rows: List<List<Any?>>) {
+        val kinds: IntArray
+        val integers: LongArray
+        val reals: DoubleArray
+        val bytes: Array<ByteArray?>
+
+        init {
+            val cells = rows.sumOf { it.size }
+            kinds = IntArray(cells)
+            integers = LongArray(cells)
+            reals = DoubleArray(cells)
+            bytes = arrayOfNulls(cells)
+            var at = 0
+            for (row in rows) {
+                for (parameter in row) {
+                    when (val value = if (parameter is Value) parameter.unwrapped() else parameter) {
+                        null -> kinds[at] = NULL_KIND
+                        is Long -> { kinds[at] = INTEGER_KIND; integers[at] = value }
+                        is Int -> { kinds[at] = INTEGER_KIND; integers[at] = value.toLong() }
+                        is Boolean -> { kinds[at] = INTEGER_KIND; integers[at] = if (value) 1 else 0 }
+                        is Double -> { kinds[at] = REAL_KIND; reals[at] = value }
+                        is Float -> { kinds[at] = REAL_KIND; reals[at] = value.toDouble() }
+                        is String -> { kinds[at] = TEXT_KIND; bytes[at] = value.toByteArray(UTF_8) }
+                        is ByteArray -> { kinds[at] = BLOB_KIND; bytes[at] = value }
+                        else -> throw IllegalArgumentException("a ${value::class.simpleName} cannot be a parameter")
+                    }
+                    at++
                 }
-                at++
             }
         }
-        return unflatten(nativeRun(handle, rows.size, kinds, integers, reals, bytes))
+
+        private fun Value.unwrapped(): Any? = when (this) {
+            Value.Null -> null
+            is Value.Integer -> value
+            is Value.Real -> value
+            is Value.Text -> value
+            is Value.Blob -> value
+        }
     }
 
     override fun close() {
@@ -179,14 +266,6 @@ class Statement internal constructor(private var handle: Long) : AutoCloseable {
             nativeFinalize(handle)
             handle = 0L
         }
-    }
-
-    private fun Value.unwrapped(): Any? = when (this) {
-        Value.Null -> null
-        is Value.Integer -> value
-        is Value.Real -> value
-        is Value.Text -> value
-        is Value.Blob -> value
     }
 
     companion object {
@@ -201,5 +280,17 @@ class Statement internal constructor(private var handle: Long) : AutoCloseable {
 
         @JvmStatic
         private external fun nativeFinalize(handle: Long)
+
+        @JvmStatic
+        private external fun nativeStart(handle: Long, kinds: IntArray, integers: LongArray, reals: DoubleArray, bytes: Array<ByteArray?>)
+
+        @JvmStatic
+        private external fun nativeColumns(handle: Long): Array<ByteArray?>
+
+        @JvmStatic
+        private external fun nativeStep(handle: Long): Array<ByteArray?>?
+
+        @JvmStatic
+        private external fun nativeReset(handle: Long)
     }
 }

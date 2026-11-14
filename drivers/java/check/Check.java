@@ -77,10 +77,38 @@ public final class Check {
             }
         }
         checkKeyValue(directory.resolve("kv.db"));
+        checkCopyAndStepping();
         Files.deleteIfExists(directory.resolve("app.db"));
         Files.deleteIfExists(directory.resolve("kv.db"));
         Files.deleteIfExists(directory);
         System.out.println("java driver check: passed");
+    }
+
+    private static void checkCopyAndStepping() throws SQLException {
+        try (Connection connection = DriverManager.getConnection("jdbc:eggdb::memory:?dialect=postgresql")) {
+            try (Statement create = connection.createStatement()) {
+                create.executeUpdate("CREATE TABLE t (id integer, name text)");
+            }
+            app.eggspot.eggdb.EggDbConnection eggdb = connection.unwrap(app.eggspot.eggdb.EggDbConnection.class);
+            long loaded = eggdb.copyFrom("COPY t FROM STDIN",
+                    new java.io.ByteArrayInputStream("1\tada\n2\tgrace\n3\tedsger\n".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            check(loaded == 3, "COPY loads three rows");
+            try (PreparedStatement select = connection.prepareStatement("SELECT name FROM t WHERE id > ? ORDER BY id")) {
+                select.setLong(1, 1);
+                List<String> names = new ArrayList<>();
+                try (ResultSet rows = select.executeQuery()) {
+                    check(rows.isBeforeFirst(), "the stepped result set has rows");
+                    while (rows.next()) {
+                        names.add(rows.getString(1));
+                    }
+                    check(rows.isAfterLast(), "the stepped result set ends");
+                }
+                check(names.equals(List.of("grace", "edsger")), "stepped rows: " + names);
+            }
+            java.io.ByteArrayOutputStream copied = new java.io.ByteArrayOutputStream();
+            eggdb.copyTo("COPY (SELECT id FROM t ORDER BY id) TO STDOUT", copied);
+            check(copied.toString(java.nio.charset.StandardCharsets.UTF_8).equals("1\n2\n3\n"), "COPY reads the rows back");
+        }
     }
 
     private static void checkKeyValue(Path file) throws SQLException {

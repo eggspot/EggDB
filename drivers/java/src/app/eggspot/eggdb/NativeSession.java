@@ -16,7 +16,7 @@ final class NativeSession implements AutoCloseable {
     private static final int REAL = 2;
     private static final int BLOB = 4;
     private static final int OPEN_READ_ONLY = 1;
-    private static final long VALUE_BYTES = 40;
+    static final long VALUE_BYTES = 40;
     private static final long PARAMETER_BYTES = 16;
     private static final long RESULT_BYTES = 40;
 
@@ -29,6 +29,12 @@ final class NativeSession implements AutoCloseable {
         static final MethodHandle EXECUTE;
         static final MethodHandle LAST_ERROR;
         static final MethodHandle LAST_SQLSTATE;
+        static final MethodHandle COPY_IN_BEGIN;
+        static final MethodHandle COPY_OUT_BEGIN;
+        static final MethodHandle COPY_PUT;
+        static final MethodHandle COPY_READ;
+        static final MethodHandle COPY_END;
+        static final MethodHandle COPY_FREE;
 
         static {
             ValueLayout pointer = ValueLayout.ADDRESS;
@@ -42,6 +48,12 @@ final class NativeSession implements AutoCloseable {
                     FunctionDescriptor.of(status, pointer, pointer, pointer, ValueLayout.JAVA_LONG, pointer, pointer));
             LAST_ERROR = NativeLibrary.handle("eggdb_last_error", FunctionDescriptor.of(pointer));
             LAST_SQLSTATE = NativeLibrary.handle("eggdb_last_sqlstate", FunctionDescriptor.of(pointer));
+            COPY_IN_BEGIN = NativeLibrary.handle("eggdb_sql_copy_in_begin", FunctionDescriptor.of(status, pointer, pointer, pointer));
+            COPY_OUT_BEGIN = NativeLibrary.handle("eggdb_sql_copy_out_begin", FunctionDescriptor.of(status, pointer, pointer, pointer));
+            COPY_PUT = NativeLibrary.handle("eggdb_copy_put", FunctionDescriptor.of(status, pointer, pointer, ValueLayout.JAVA_LONG));
+            COPY_READ = NativeLibrary.handle("eggdb_copy_read", FunctionDescriptor.of(status, pointer, pointer, pointer));
+            COPY_END = NativeLibrary.handle("eggdb_copy_end", FunctionDescriptor.of(status, pointer, pointer, pointer));
+            COPY_FREE = NativeLibrary.handle("eggdb_copy_free", FunctionDescriptor.ofVoid(pointer));
         }
     }
 
@@ -172,7 +184,7 @@ final class NativeSession implements AutoCloseable {
         }
     }
 
-    private static List<StatementResult> gathered(MemorySegment first, long count) {
+    static List<StatementResult> gathered(MemorySegment first, long count) {
         List<StatementResult> gathered = new ArrayList<>();
         MemorySegment results = first.reinterpret(RESULT_BYTES * count);
         for (long index = 0; index < count; index++) {
@@ -199,7 +211,7 @@ final class NativeSession implements AutoCloseable {
         return gathered;
     }
 
-    private static Object converted(MemorySegment values, long at) {
+    static Object converted(MemorySegment values, long at) {
         int kind = values.get(ValueLayout.JAVA_INT, at);
         if (kind == NULL) {
             return null;
@@ -215,8 +227,106 @@ final class NativeSession implements AutoCloseable {
         return kind == BLOB ? bytes : new String(bytes, StandardCharsets.UTF_8);
     }
 
-    private static String text(MemorySegment pointer) {
+    static String text(MemorySegment pointer) {
         return pointer.equals(MemorySegment.NULL) ? "" : pointer.reinterpret(Long.MAX_VALUE).getString(0);
+    }
+
+    static SQLException callFailed(Throwable error) {
+        return new SQLException("EggDB's C library could not be called: " + error, "58000", error);
+    }
+
+    private MemorySegment openSession() throws SQLException {
+        if (session == null) {
+            throw new SQLException("the connection is closed", "08003");
+        }
+        return session;
+    }
+
+    private final java.util.Set<NativeStatement> statements = new java.util.HashSet<>();
+
+    NativeStatement prepare(String sql) throws SQLException {
+        NativeStatement statement = new NativeStatement(openSession(), Parameters.bound(sql, dialect, List.of()).sql(), dialect,
+                statements::remove);
+        statements.add(statement);
+        return statement;
+    }
+
+    long copyIn(String sql, java.io.InputStream source) throws SQLException {
+        MemorySegment open = openSession();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ValueLayout.ADDRESS);
+            check((int) Api.COPY_IN_BEGIN.invokeExact(open, arena.allocateFrom(sql), out));
+            MemorySegment copy = out.get(ValueLayout.ADDRESS, 0);
+            try {
+                byte[] buffer = new byte[64 * 1024];
+                MemorySegment piece = arena.allocate(buffer.length);
+                int read;
+                while ((read = source.read(buffer)) > 0) {
+                    MemorySegment.copy(buffer, 0, piece, ValueLayout.JAVA_BYTE, 0, read);
+                    check((int) Api.COPY_PUT.invokeExact(copy, piece, (long) read));
+                }
+                return copiedRows(endCopy(arena, copy));
+            } finally {
+                Api.COPY_FREE.invokeExact(copy);
+            }
+        } catch (SQLException error) {
+            throw error;
+        } catch (java.io.IOException error) {
+            throw new SQLException("reading the COPY data failed: " + error.getMessage(), "58030", error);
+        } catch (Throwable error) {
+            throw callFailed(error);
+        }
+    }
+
+    void copyOut(String sql, java.io.OutputStream sink) throws SQLException {
+        MemorySegment open = openSession();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ValueLayout.ADDRESS);
+            check((int) Api.COPY_OUT_BEGIN.invokeExact(open, arena.allocateFrom(sql), out));
+            MemorySegment copy = out.get(ValueLayout.ADDRESS, 0);
+            try {
+                MemorySegment data = arena.allocate(ValueLayout.ADDRESS);
+                MemorySegment length = arena.allocate(ValueLayout.JAVA_LONG);
+                while (true) {
+                    check((int) Api.COPY_READ.invokeExact(copy, data, length));
+                    long size = length.get(ValueLayout.JAVA_LONG, 0);
+                    if (size == 0) {
+                        break;
+                    }
+                    sink.write(data.get(ValueLayout.ADDRESS, 0).reinterpret(size).toArray(ValueLayout.JAVA_BYTE));
+                }
+                endCopy(arena, copy);
+            } finally {
+                Api.COPY_FREE.invokeExact(copy);
+            }
+        } catch (SQLException error) {
+            throw error;
+        } catch (java.io.IOException error) {
+            throw new SQLException("writing the COPY data failed: " + error.getMessage(), "58030", error);
+        } catch (Throwable error) {
+            throw callFailed(error);
+        }
+    }
+
+    private static List<StatementResult> endCopy(Arena arena, MemorySegment copy) throws Throwable {
+        MemorySegment results = arena.allocate(ValueLayout.ADDRESS);
+        MemorySegment count = arena.allocate(ValueLayout.JAVA_LONG);
+        check((int) Api.COPY_END.invokeExact(copy, results, count));
+        return gathered(results.get(ValueLayout.ADDRESS, 0), count.get(ValueLayout.JAVA_LONG, 0));
+    }
+
+    private static long copiedRows(List<StatementResult> results) {
+        for (int index = results.size() - 1; index >= 0; index--) {
+            String[] words = results.get(index).tag().split(" ");
+            if (words.length == 2 && words[0].equals("COPY")) {
+                try {
+                    return Long.parseLong(words[1]);
+                } catch (NumberFormatException notCounted) {
+                    return -1;
+                }
+            }
+        }
+        return -1;
     }
 
     static SQLException lastError(int status) {
@@ -234,6 +344,9 @@ final class NativeSession implements AutoCloseable {
     public void close() {
         if (session == null) {
             return;
+        }
+        for (NativeStatement statement : List.copyOf(statements)) {
+            statement.close();
         }
         try {
             int sessionClosed = (int) Api.SQL_CLOSE.invokeExact(session);
