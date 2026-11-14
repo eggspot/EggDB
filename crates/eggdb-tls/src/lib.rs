@@ -38,6 +38,7 @@ pub mod negotiation;
 pub mod oid;
 pub mod pem;
 pub mod private_key;
+pub mod quic;
 pub mod record;
 pub mod resumption;
 mod record_layer;

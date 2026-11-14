@@ -5,7 +5,11 @@
 //! - [`frame`]: every frame of RFC 9000 section 19, parsed and written;
 //! - [`packet`]: long and short packet headers, version negotiation, and packet number encoding;
 //! - [`protection`]: the initial secrets, packet protection with the AEAD of the TLS 1.3 cipher
-//!   suite, and header protection with AES or ChaCha20 (RFC 9001 section 5).
+//!   suite, and header protection with AES or ChaCha20 (RFC 9001 section 5);
+//! - [`transport_parameters`]: the transport parameters of RFC 9000 section 18.
+//!
+//! The TLS 1.3 handshake QUIC carries is `eggdb_tls::quic`, which takes and gives CRYPTO data per
+//! encryption level.
 //!
 //! Every length a peer sends is checked against what is left: hostile input gets an error value,
 //! never a panic (D9).
@@ -13,6 +17,7 @@
 pub mod frame;
 pub mod packet;
 pub mod protection;
+pub mod transport_parameters;
 pub mod varint;
 
 /// The version number of QUIC version 1.

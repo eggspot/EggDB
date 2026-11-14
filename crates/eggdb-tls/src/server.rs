@@ -81,7 +81,7 @@ pub(crate) fn choose_suite(offered: &[u16], tls13: bool, fips_only: bool) -> Opt
         .find(|suite| offered.contains(&suite.id()))
 }
 
-fn preferred_share(hello: &ClientHello, fips_only: bool) -> Result<Option<KeyShareEntry>, TlsError> {
+pub(crate) fn preferred_share(hello: &ClientHello, fips_only: bool) -> Result<Option<KeyShareEntry>, TlsError> {
     let shares = hello.key_shares()?;
     Ok(tls13_groups(fips_only)
         .iter()
