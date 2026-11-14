@@ -2337,8 +2337,67 @@ jobs:
           print("pyarrow read the Arrow stream:", table.schema)
           PY
 
+  gui-tools:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Start pgAdmin 4 (PostgreSQL License) and CloudBeaver (Apache-2.0) from their official images (test tools only, never shipped)
+        run: |
+          docker run -d --name pgadmin --network host \
+            -e PGADMIN_DEFAULT_EMAIL=ci@eggdb.dev -e PGADMIN_DEFAULT_PASSWORD=gui-tools-admin \
+            -e PGADMIN_LISTEN_ADDRESS=127.0.0.1 -e PGADMIN_LISTEN_PORT=5050 \
+            -e PGADMIN_CONFIG_WTF_CSRF_ENABLED=False -e PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION=False \
+            -e PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False dpage/pgadmin4:8.12
+          docker run -d --name cloudbeaver --network host \
+            -e CB_SERVER_NAME=EggDB-CI -e CB_SERVER_URL=http://127.0.0.1:8978 \
+            -e CB_ADMIN_NAME=cbadmin -e CB_ADMIN_PASSWORD=GuiTools1admin dbeaver/cloudbeaver:24.2.0
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.nuget/packages
+            target
+          key: cargo-v2-gui-tools-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'crates/eggdb/tests/clients/dotnet/SmoCheck/SmoCheck.csproj') }}
+          restore-keys: cargo-v2-gui-tools-${{ runner.os }}-
+      - name: Build eggdb
+        run: cargo build -p eggdb
+      - name: Run pgAdmin 4, DBeaver through CloudBeaver, and SSMS's SMO (MIT; restored from NuGet, never shipped) against eggdb serve
+        env:
+          PGADMIN_URL: http://127.0.0.1:5050
+          PGADMIN_EMAIL: ci@eggdb.dev
+          PGADMIN_PASSWORD: gui-tools-admin
+          CLOUDBEAVER_URL: http://127.0.0.1:8978
+          CLOUDBEAVER_ADMIN: cbadmin
+          CLOUDBEAVER_PASSWORD: GuiTools1admin
+        run: scripts/gui-tools/check.sh target/debug/eggdb "$RUNNER_TEMP/gui-tools"
+      - name: Keep the outputs, the tools' logs and the server log
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/gui-tools"
+          docker logs pgadmin > "$RUNNER_TEMP/gui-tools/pgadmin.log" 2>&1 || true
+          docker logs cloudbeaver > "$RUNNER_TEMP/gui-tools/cloudbeaver.log" 2>&1 || true
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gui-tools-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/gui-tools/*.out
+            ${{ runner.temp }}/gui-tools/*.log
+            ${{ runner.temp }}/gui-tools/serve.err
+          retention-days: 7
+          if-no-files-found: ignore
+
   check:
-    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, cortex-m, opensearch-compare, mongo-compare, ldbc-compare, tpcc-compare, driver-bench, installers, system-allocator, release-compat, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, android, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
+    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, cortex-m, opensearch-compare, mongo-compare, ldbc-compare, tpcc-compare, driver-bench, installers, system-allocator, release-compat, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, gui-tools, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, android, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

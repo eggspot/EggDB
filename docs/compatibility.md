@@ -15,14 +15,14 @@ catalog query and protocol message the tool is known to send, but no CI job runs
 | SQLAlchemy dialect compliance suite | 2.0.36 | PostgreSQL | supported, by pass count | `sqlalchemy-suite` job: at least the count in `scripts/sqlalchemy-suite/minimum-passes.txt` must pass, and it may only rise; its setup creates the `test_schema` and `test_schema_2` schemas SQLAlchemy's own test instructions ask for, and the `citext` and `hstore` extensions, which EggDB has built in; the whole suite runs, past SQLAlchemy's own stop after 250 failures (D163, D259, D308) |
 | Npgsql | 8.0 | PostgreSQL | supported | `pg-apps` job: type loading, batches, cancel (D135) |
 | pg8000 | 1.31 | PostgreSQL | supported | smoke test (D104) |
-| pgAdmin 4 | 8 | PostgreSQL | expected to work | its dashboard and object-browser catalog reads answered: `pg_stat_activity`, `pg_stat_database`, `pg_locks`, `pg_extension`, the privilege functions, and the rest of `pg_catalog` (part 3.19, `pg_catalog/tests.rs`) |
-| DBeaver | 24 | PostgreSQL, MySQL, TDS | expected to work | through pgjdbc, mssql-jdbc and the MySQL metadata answered (part 3.20) |
+| pgAdmin 4 | 8.12 | PostgreSQL | supported (code written, unbuilt) | `gui-tools` job: pgAdmin's own server-mode container signs in, registers EggDB, walks the object browser to columns, reads the properties and SQL tabs, views, sequences, functions and dashboards, and runs the query tool (D1172); its catalog reads also in `pg_catalog/tests.rs` (part 3.19) |
+| DBeaver | 24 | PostgreSQL, MySQL, TDS | supported for PostgreSQL (code written, unbuilt), expected to work for MySQL and TDS | `gui-tools` job: CloudBeaver 24.2, DBeaver's web edition with the same PostgreSQL plugin, connects over pgjdbc, walks the navigator and runs the SQL editor (D1172); MySQL and TDS through the metadata answered (part 3.20) |
 | mysql client, PyMySQL | 8.0, 1.1 | MySQL | supported | smoke test, `tls-clients` (D106) |
 | go-sqlcmd | 1.10 | TDS | supported | smoke test, `tls-clients` with `-N true` and `-N strict` (D122) |
 | Microsoft.Data.SqlClient | 5.2 | TDS | supported | `tds-apps` job: RPC, metadata, bulk copy, batch logic (D132, D133, D136, D137) |
 | EF Core (SQL Server) | 8.0 | TDS | supported | `tds-apps` job (D138) |
 | mssql-jdbc | 12 | TDS | supported | `tds-apps` job (D132, D133) |
-| SSMS | 20 | TDS | expected to work | Object Explorer's metadata queries answered by `sys.*` and the catalog procedures (part 3.21) |
+| SSMS | 20 | TDS | supported through SMO (code written, unbuilt) | `gui-tools` job: SQL Server Management Objects 172 (MIT), which Object Explorer and Generate Scripts are built on, lists databases, schemas, tables with columns, indexes, foreign keys and checks, procedures and views, and scripts the tables (D1172); SSMS itself stays out of CI, its licence forbids it (D163) |
 | pg_dump (plain format) | 16, 17 | restore | supported | `pg-restore` job (D118) |
 | SSMS Generate Scripts, sqlpackage | 20, 162 | restore | supported | `restore_sqlserver` tests (D125) |
 | Oracle HR sample, SQL Developer, SQLcl CSV | 23ai | restore | supported | `oracle-apps` job and `restore_oracle` tests (D127) |
