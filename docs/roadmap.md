@@ -531,9 +531,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M5 SQL engine, SQLite, C API and embedded drivers
 - Column statistics (`pg_stats`, histograms, correlation) gathered by `ANALYZE` (D40, D178). **Code written,
   unbuilt** (code-only mode, 2026-11-12, D786). Left: extended statistics (`CREATE STATISTICS`), array element
-  statistics, and the cost-based optimizer using the histograms for ranges.
+  statistics, and the cost-based optimizer using the histograms for ranges. Histograms and most common values in the
+  estimates that order joins: **code written, unbuilt** (code-only mode, 2026-11-14, D1136).
 - A cost-based optimizer that orders joins by cost (D40, D178). Check: TPC-H's joins, and the
-  Linux join at 1.0 times SQLite's (D100).
+  Linux join at 1.0 times SQLite's (D100). Inner joins ordered by estimated size: **code written, unbuilt** (code-only mode, 2026-11-14,
+  D1136); left: outer joins and a full cost model over join methods.
 - Adaptive re-planning during execution (D40).
 - Point `SELECT`s as fast as SQLite's everywhere (item 19e, D99). Check: the compare job.
 - SQL joins by key at 1.0 times SQLite's on Linux: measured by CI's Linux `compare` job after

@@ -2001,6 +2001,9 @@ fn prepare_select(
     if select.filter.is_some() {
         crate::foreign_pushdown::push_filters_into_foreign_read(select);
     }
+    if select.from.as_ref().is_some_and(|from| !from.joins.is_empty()) && ctes.is_none() {
+        crate::join_order::order_inner_joins(env.reader, select)?;
+    }
     let most_generated_rows = rows_a_lone_function_needs(select);
     if let Some(from) = &mut select.from {
         for index in 0..=from.joins.len() {

@@ -1283,3 +1283,26 @@ fn for_update_skip_locked_hands_each_session_its_own_queue_rows() {
         "id\n1\nSELECT 1"
     );
 }
+
+#[test]
+fn analyzed_inner_joins_run_smallest_filtered_table_first_with_the_same_rows() {
+    let store = MemoryStore::new();
+    let mut session = Session::with_dialect(&store, Dialect::PostgreSql);
+    last(&mut session, "CREATE TABLE customers (id integer PRIMARY KEY, region text)");
+    last(&mut session, "CREATE TABLE orders (id integer PRIMARY KEY, customer integer, total integer)");
+    last(&mut session, "INSERT INTO customers SELECT g, CASE WHEN g % 50 = 0 THEN 'north' ELSE 'south' END FROM generate_series(1, 500) AS g");
+    last(&mut session, "INSERT INTO orders SELECT g, g % 500 + 1, g % 7 FROM generate_series(1, 5000) AS g");
+    last(&mut session, "ANALYZE");
+    let query = "SELECT count(*), sum(o.total) FROM orders o JOIN customers c ON o.customer = c.id WHERE c.region = 'north'";
+    let ordered = last(&mut session, query);
+    let written = last(
+        &mut session,
+        "SELECT count(*), sum(o.total) FROM orders o, customers c WHERE o.customer = c.id AND c.region || '' = 'north'",
+    );
+    assert_eq!(ordered, written);
+    assert!(ordered.starts_with("count\tsum\n100\t") || ordered.contains("100"), "{ordered}");
+    let plan = last(&mut session, &format!("EXPLAIN {query}"));
+    let customers_at = plan.find("customers").unwrap_or(usize::MAX);
+    let orders_at = plan.find("orders").unwrap_or(0);
+    assert!(customers_at < orders_at, "{plan}");
+}

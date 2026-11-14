@@ -211,6 +211,7 @@ pub mod reports;
 mod restore;
 mod result_row_cap;
 mod retention;
+mod join_order;
 mod roles;
 mod row_locks;
 mod routine_settings;
