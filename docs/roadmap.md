@@ -858,10 +858,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   psql with `sslcert` in the `tls-clients` job. **Code written, unbuilt** (code-only mode, 2026-11-12, D803): TLS 1.3 only. `serve --tls-client-ca`
   in place of `EGGDB_TLS_CLIENT_CA`: **code written, unbuilt** (code-only mode, 2026-11-13, D978); TLS 1.2's
   CertificateRequest and the `tls-clients` check: **code written, unbuilt** (code-only mode, 2026-11-15, D1185).
-- LDAP search-and-bind, StartTLS and LDAPS (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D802).
-  Left: a directory in CI.
-- PostgreSQL 18's `OAUTHBEARER` mechanism (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D801).
-  Left: libpq's device flow checked against EggDB in CI.
+- LDAP search-and-bind, StartTLS and LDAPS (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D802);
+  a directory in CI: **code written, unbuilt** (code-only mode, 2026-11-15, D1186).
+- PostgreSQL 18's `OAUTHBEARER` mechanism (D185). **Code written, unbuilt** (code-only mode, 2026-11-12, D801);
+  libpq's device flow checked against EggDB in CI: **code written, unbuilt** (code-only mode, 2026-11-15, D1186).
 - SAML, API keys and multi-factor sign-in for interactive tools (D22). API keys (`CREATE EXTENSION eggdb_api_keys`, the `apikey` rule): **code written,
   unbuilt** (code-only mode, 2026-11-12, D820). Left: SAML and multi-factor sign-in.
 - External authentication rules on the MySQL and TDS listeners, and rules by address or database
