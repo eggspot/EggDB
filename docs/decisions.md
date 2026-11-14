@@ -1195,3 +1195,4 @@ its full title with its status.
 - [D1168](decisions/D1168.md) Code-only batch 819 (M6a): pg_cast lists PostgreSQL's built-in casts
 - [D1169](decisions/D1169.md) Code-only batch 820 (M6a): Tables, their indexes and identity sequences keep their OIDs across renames
 - [D1170](decisions/D1170.md) Code-only batch 821 (M6a): User tables answer tableoid, ctid, xmin and PostgreSQL's other system columns
+- [D1171](decisions/D1171.md) Code-only batch 823 (M6a): Composite types get their pg_class row and tables their row type

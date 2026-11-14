@@ -1486,3 +1486,32 @@ fn update_and_delete_use_xmin_as_a_concurrency_token_as_npgsql_does() {
     );
     assert_eq!(rows_of(&deleted), ["t"]);
 }
+
+#[test]
+fn composite_types_and_tables_link_their_pg_type_and_pg_class_rows() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(&mut session, "CREATE TYPE address AS (street text, zip integer)");
+    last(&mut session, "CREATE TABLE customers (id integer, home address)");
+    let composite = last(
+        &mut session,
+        "SELECT c.relkind, c.relnatts, c.reltype = t.oid FROM pg_type t JOIN pg_class c ON c.oid = t.typrelid WHERE t.typname = 'address'",
+    );
+    assert_eq!(rows_of(&composite), ["c|2|t"]);
+    let fields = last(
+        &mut session,
+        "SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_type t JOIN pg_attribute a ON a.attrelid = t.typrelid WHERE t.typname = 'address' ORDER BY a.attnum",
+    );
+    assert_eq!(rows_of(&fields), ["street|text", "zip|integer"]);
+    let row_type = last(
+        &mut session,
+        "SELECT t.typtype, t.typrelid = 'customers'::regclass FROM pg_class c JOIN pg_type t ON t.oid = c.reltype WHERE c.relname = 'customers'",
+    );
+    assert_eq!(rows_of(&row_type), ["c|t"]);
+    let free_standing = last(
+        &mut session,
+        "SELECT t.typname FROM pg_type t LEFT JOIN pg_class c ON c.oid = t.typrelid WHERE t.typtype = 'c' AND c.relkind = 'c'",
+    );
+    assert_eq!(rows_of(&free_standing), ["address"]);
+    assert!(last(&mut session, "SELECT count(DISTINCT oid) = count(*) FROM pg_type").contains('t'));
+}

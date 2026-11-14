@@ -22,7 +22,7 @@ pub(crate) const MAX_LABEL_BYTES: usize = 63;
 pub(crate) const MAX_ATTRIBUTES: usize = crate::encoding::MAX_COLUMNS;
 pub(crate) const MAX_DOMAIN_CHECKS: usize = crate::encoding::MAX_CONSTRAINTS;
 const MAX_DOMAIN_DEPTH: usize = 32;
-const FIRST_USER_TYPE_OID: u32 = 16_384;
+pub(crate) const FIRST_USER_TYPE_OID: u32 = 16_384;
 const LAST_USER_TYPE_OID: u32 = i32::MAX as u32;
 const SCAN_BATCH: usize = 1024;
 

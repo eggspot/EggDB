@@ -372,6 +372,13 @@ pub(crate) enum RelationSource {
     Catalog(CatalogRelation),
 }
 
+pub(crate) struct CompositeClass {
+    pub(crate) class_oid: u32,
+    pub(crate) type_oid: u32,
+    pub(crate) namespace: u32,
+    pub(crate) name: String,
+}
+
 pub(crate) struct RelationEntry {
     pub(crate) oid: u32,
     pub(crate) namespace: u32,
@@ -485,6 +492,45 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
     pub(crate) access: crate::roles::AccessRecords,
+    pub(crate) composite_classes: Vec<CompositeClass>,
+    pub(crate) row_types: HashMap<usize, u32>,
+}
+
+fn composite_class_request(type_oid: u32) -> OidRequest {
+    OidRequest {
+        kind: b'c',
+        owner: STABLE_OWNER.to_owned(),
+        name: format!("composite type {type_oid}"),
+    }
+}
+
+const ROW_TYPE_SEED: u32 = 0x811c_9dc5;
+
+fn row_type_oids(
+    relations: &[RelationEntry],
+    user_types: &crate::user_types::Registry,
+) -> HashMap<usize, u32> {
+    let first = crate::user_types::FIRST_USER_TYPE_OID;
+    let span = u64::from(i32::MAX as u32 - first) + 1;
+    let mut taken: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut row_types = HashMap::new();
+    for (at, entry) in relations.iter().enumerate() {
+        if !matches!(entry.source, RelationSource::Table(_) | RelationSource::View(_)) {
+            continue;
+        }
+        let hash = b"row type\xFF"
+            .iter()
+            .chain(entry.oid.to_be_bytes().iter())
+            .fold(ROW_TYPE_SEED, |hash, &byte| {
+                (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+            });
+        let mut oid = first + (u64::from(hash) % span) as u32;
+        while user_types.of_oid(oid).is_some() || !taken.insert(oid) {
+            oid = if oid >= i32::MAX as u32 { first } else { oid + 1 };
+        }
+        row_types.insert(at, oid);
+    }
+    row_types
 }
 
 fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
@@ -730,13 +776,15 @@ impl CatalogSnapshot {
         }
         let implicit = implicit_identity_sequences(reader, &pending);
         pending.extend(implicit);
-        let assigned = oids::assign(
-            Space::Relation,
-            &pending
-                .iter()
-                .map(relation_request)
-                .collect::<Vec<_>>(),
-        );
+        let composites: Vec<&crate::user_types::UserType> = user_types
+            .types()
+            .iter()
+            .filter(|found| matches!(found.body, crate::user_types::TypeBody::Composite(_)))
+            .collect();
+        let mut requests: Vec<OidRequest> = pending.iter().map(relation_request).collect();
+        requests.extend(composites.iter().map(|found| composite_class_request(found.oid)));
+        let mut assigned = oids::assign(Space::Relation, &requests);
+        let composite_oids = assigned.split_off(pending.len());
         let namespace_of = |schema: &str| {
             schemas
                 .iter()
@@ -768,6 +816,17 @@ impl CatalogSnapshot {
                 source: RelationSource::Catalog(relation),
             });
         }
+        let composite_classes: Vec<CompositeClass> = composites
+            .iter()
+            .zip(composite_oids)
+            .map(|(found, class_oid)| CompositeClass {
+                class_oid,
+                type_oid: found.oid,
+                namespace: namespace_of(crate::schemas::schema_of(&found.name)),
+                name: crate::schemas::base_name(&found.name).to_owned(),
+            })
+            .collect();
+        let row_types = row_type_oids(&relations, &user_types);
         let materialized_views = materialized_view_keys(reader, &relations)?;
         let mysql_events = internal_rows(reader, &relations, "mysql_events")?;
         let event_triggers = internal_rows(reader, &relations, "pg_event_triggers")?;
@@ -805,6 +864,8 @@ impl CatalogSnapshot {
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,
             access: crate::roles::AccessRecords::load(reader)?,
+            composite_classes,
+            row_types,
         };
         snapshot.index_relations();
         snapshot.add_constraints_and_defaults();

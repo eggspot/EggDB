@@ -1,6 +1,7 @@
 use super::oids::{self, BuiltinType};
 use super::snapshot::{
-    CatalogSnapshot, ConstraintSource, IndexSource, RelationKind, RelationSource, RoutineEntry,
+    CatalogSnapshot, CompositeClass, ConstraintSource, IndexSource, RelationEntry, RelationKind,
+    RelationSource, RoutineEntry,
 };
 use super::{CatalogRelation, deparse, routines};
 use crate::arrays::{ArrayElement, ArrayValue};
@@ -501,7 +502,7 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("oid", oid(entry.oid))
                 .set("relname", text(&entry.name))
                 .set("relnamespace", oid(entry.namespace))
-                .set("reltype", oid(0))
+                .set("reltype", oid(snapshot.row_types.get(&at).copied().unwrap_or(0)))
                 .set("reloftype", oid(0))
                 .set("relowner", oid(oids::SESSION_USER))
                 .set("relam", oid(am))
@@ -539,7 +540,61 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .done(),
         );
     }
+    rows.extend(
+        snapshot
+            .composite_classes
+            .iter()
+            .map(|class| composite_class_row(snapshot, class)),
+    );
     rows
+}
+
+fn composite_attributes<'s>(
+    snapshot: &'s CatalogSnapshot,
+    type_oid: u32,
+) -> &'s [crate::user_types::Attribute] {
+    match snapshot.user_types.of_oid(type_oid).map(|found| &found.body) {
+        Some(crate::user_types::TypeBody::Composite(attributes)) => attributes,
+        _ => &[],
+    }
+}
+
+fn composite_class_row(snapshot: &CatalogSnapshot, class: &CompositeClass) -> Vec<Value> {
+    let natts = composite_attributes(snapshot, class.type_oid).len();
+    Row::new(CatalogRelation::Class)
+        .set("oid", oid(class.class_oid))
+        .set("relname", text(&class.name))
+        .set("relnamespace", oid(class.namespace))
+        .set("reltype", oid(class.type_oid))
+        .set("reloftype", oid(0))
+        .set("relowner", oid(oids::SESSION_USER))
+        .set("relam", oid(0))
+        .set("relfilenode", oid(0))
+        .set("reltablespace", oid(0))
+        .set("relpages", int(0))
+        .set("reltuples", Value::Real(-1.0))
+        .set("relallvisible", int(0))
+        .set("reltoastrelid", oid(0))
+        .set("relhasindex", flag(false))
+        .set("relisshared", flag(false))
+        .set("relpersistence", text("p"))
+        .set("relkind", text("c"))
+        .set("relnatts", small(natts as i64))
+        .set("relchecks", small(0))
+        .set("relhasrules", flag(false))
+        .set("relhastriggers", flag(false))
+        .set("relhassubclass", flag(false))
+        .set("relrowsecurity", flag(false))
+        .set("relforcerowsecurity", flag(false))
+        .set("relispopulated", flag(true))
+        .set("relreplident", text("n"))
+        .set("relispartition", flag(false))
+        .set("relpartbound", Value::Null)
+        .set("relrewrite", oid(0))
+        .set("relfrozenxid", oid(0))
+        .set("relminmxid", oid(0))
+        .set("relacl", Value::Null)
+        .done()
 }
 
 fn table_acl(snapshot: &CatalogSnapshot, internal: &str) -> Value {
@@ -724,6 +779,24 @@ fn attribute_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             }
         }
     }
+    for class in &snapshot.composite_classes {
+        for (at, attribute) in composite_attributes(snapshot, class.type_oid)
+            .iter()
+            .enumerate()
+        {
+            rows.push(attribute_row(AttributeRow {
+                relation: class.class_oid,
+                name: &attribute.name,
+                number: at + 1,
+                sql_type: attribute.sql_type,
+                not_null: false,
+                has_default: false,
+                identity: "",
+                generated: "",
+                acl: Value::Null,
+            }));
+        }
+    }
     rows
 }
 
@@ -767,7 +840,14 @@ fn user_type_row(snapshot: &CatalogSnapshot, found: &crate::user_types::UserType
         .set("typispreferred", flag(false))
         .set("typisdefined", flag(true))
         .set("typdelim", text(","))
-        .set("typrelid", oid(0))
+        .set(
+            "typrelid",
+            oid(snapshot
+                .composite_classes
+                .iter()
+                .find(|class| class.type_oid == found.oid)
+                .map_or(0, |class| class.class_oid)),
+        )
         .set("typelem", oid(0))
         .set("typarray", oid(0))
         .set("typalign", Value::Text(align.to_string()))
@@ -868,7 +948,57 @@ fn type_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             .iter()
             .map(|found| user_type_row(snapshot, found)),
     );
+    let mut row_types: Vec<(usize, u32)> = snapshot
+        .row_types
+        .iter()
+        .map(|(&at, &type_oid)| (at, type_oid))
+        .collect();
+    row_types.sort_unstable_by_key(|&(_, type_oid)| type_oid);
+    rows.extend(row_types.into_iter().filter_map(|(at, type_oid)| {
+        snapshot
+            .relations
+            .get(at)
+            .map(|entry| row_type_row(entry, type_oid))
+    }));
     rows
+}
+
+fn row_type_row(entry: &RelationEntry, type_oid: u32) -> Vec<Value> {
+    let mut row = Row::new(CatalogRelation::Type)
+        .set("oid", oid(type_oid))
+        .set("typname", text(&entry.name))
+        .set("typnamespace", oid(entry.namespace))
+        .set("typowner", oid(oids::SESSION_USER))
+        .set("typlen", small(-1))
+        .set("typbyval", flag(false))
+        .set("typtype", text("c"))
+        .set("typcategory", text("C"))
+        .set("typispreferred", flag(false))
+        .set("typisdefined", flag(true))
+        .set("typdelim", text(","))
+        .set("typrelid", oid(entry.oid))
+        .set("typelem", oid(0))
+        .set("typarray", oid(0))
+        .set("typalign", text("d"))
+        .set("typstorage", text("x"))
+        .set("typnotnull", flag(false))
+        .set("typbasetype", oid(0))
+        .set("typtypmod", int(-1))
+        .set("typndims", int(0))
+        .set("typcollation", oid(0));
+    for name in [
+        "typsubscript",
+        "typinput",
+        "typoutput",
+        "typreceive",
+        "typsend",
+        "typmodin",
+        "typmodout",
+        "typanalyze",
+    ] {
+        row = row.set(name, regproc_none());
+    }
+    row.done()
 }
 
 fn builtin_type_rows() -> Vec<Vec<Value>> {
