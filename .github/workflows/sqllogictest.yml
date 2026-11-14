@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       minimum:
-        description: "The pass rate below which the run fails, in percent"
+        description: "The pass rate below which the run fails, in percent; empty for the one in benchmarks/conformance.txt"
         required: false
-        default: "0"
+        default: ""
 
 concurrency:
   group: sqllogictest
@@ -19,7 +19,7 @@ permissions:
 
 env:
   CARGO_INCREMENTAL: 0
-  SQLLOGICTEST_MINIMUM: ${{ inputs.minimum || vars.SQLLOGICTEST_MINIMUM || '0' }}
+  SQLLOGICTEST_MINIMUM: ${{ inputs.minimum || vars.SQLLOGICTEST_MINIMUM || '' }}
 
 jobs:
   sqllogictest:
@@ -51,7 +51,8 @@ jobs:
         run: |
           cargo build --release -p eggdb-sqllogictest
           set -o pipefail
-          target/release/eggdb-sqllogictest "$RUNNER_TEMP/sqllogictest/test" --minimum "$SQLLOGICTEST_MINIMUM" | tee "$RUNNER_TEMP/sqllogictest-rates.txt"
+          minimum="${SQLLOGICTEST_MINIMUM:-$(awk '$1 == "sqllogictest" && $2 == "minimum_pass_percent" { print $3 }' benchmarks/conformance.txt)}"
+          target/release/eggdb-sqllogictest "$RUNNER_TEMP/sqllogictest/test" --minimum "${minimum:-0}" | tee "$RUNNER_TEMP/sqllogictest-rates.txt"
       - name: Summarise the rate
         if: always()
         run: |

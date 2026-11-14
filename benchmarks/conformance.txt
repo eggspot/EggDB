@@ -1,0 +1,1 @@
+sqllogictest minimum_pass_percent 0

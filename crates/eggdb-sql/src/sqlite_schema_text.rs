@@ -255,6 +255,7 @@ pub(crate) fn forget_index(
 pub(crate) struct AlteredTexts {
     table: Option<String>,
     indexes: Vec<(String, String)>,
+    old_name: String,
 }
 
 fn public_table(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Option<TableSchema>> {
@@ -267,7 +268,10 @@ impl AlteredTexts {
         table: &str,
         dialect: Dialect,
     ) -> SqlResult<Self> {
-        let mut taken = Self::default();
+        let mut taken = Self {
+            old_name: base_name(table).to_owned(),
+            ..Self::default()
+        };
         if dialect == Dialect::Sqlite
             && let Some(schema) = public_table(&*writer, table)?
         {
@@ -299,6 +303,17 @@ impl AlteredTexts {
         table: &str,
         actions: &[AlterAction],
     ) -> SqlResult<()> {
+        for action in actions {
+            match action {
+                AlterAction::RenameTable(_) => {
+                    renamed_in_views(writer, &self.old_name, None, base_name(table))?;
+                }
+                AlterAction::RenameColumn { from, to } => {
+                    renamed_in_views(writer, base_name(table), Some(&from.text), &to.text)?;
+                }
+                _ => {}
+            }
+        }
         if self.table.is_none() && self.indexes.is_empty() {
             return Ok(());
         }
@@ -402,6 +417,54 @@ fn renamed_index_text(text: &str, new_table: &str) -> Option<String> {
     let on = tokens.iter().position(|token| is_word(token, "on"))?;
     let table = tokens.get(on + 1).filter(|token| is_name(token))?;
     replaced(text, table.start, table.end, &quoted(new_table))
+}
+
+/// Rewrites the kept SQLite text of every view that names `table` after `ALTER TABLE ... RENAME`
+/// (D1144): with `column` `None`, the table's own name becomes `to`; with a column, that
+/// column's name becomes `to` wherever the view names it. SQLite rewrites the text it keeps the
+/// same way, so `sqlite_schema` shows the names that now exist.
+fn renamed_in_views(
+    writer: &mut dyn KeyValueWrite,
+    table: &str,
+    column: Option<&str>,
+    to: &str,
+) -> SqlResult<()> {
+    let prefix = text_key("");
+    let mut records: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    writer.scan(&prefix, &crate::encoding::prefix_end(&prefix), crate::store::ScanDirection::Forward, &mut |key, value| {
+        if !key[prefix.len()..].contains(&PART_SEPARATOR) {
+            records.push((key.to_vec(), value.to_vec()));
+        }
+        Ok(true)
+    })?;
+    for (key, value) in records {
+        let relation = String::from_utf8_lossy(&key[prefix.len()..]).into_owned();
+        let Some(view) = read_view(&*writer, &relation)? else {
+            continue;
+        };
+        let Ok((_, original)) = decode(&value) else {
+            continue;
+        };
+        let Ok(tokens) = tokenize_in(original, Dialect::Sqlite) else {
+            continue;
+        };
+        if !tokens.iter().any(|token| names_column(token, table)) {
+            continue;
+        }
+        let wanted = column.unwrap_or(table);
+        let spans: Vec<(usize, usize)> = tokens
+            .iter()
+            .filter(|token| names_column(token, wanted))
+            .map(|token| (token.start, token.end))
+            .collect();
+        if spans.is_empty() {
+            continue;
+        }
+        if let Some(edited) = with_edits(original, spans, &quoted(to)) {
+            remember(writer, &key, &crate::session::sqlite_view_text(&view), &edited)?;
+        }
+    }
+    Ok(())
 }
 
 fn identifier_text<'t>(token: &'t Token<'_>) -> Option<&'t str> {
