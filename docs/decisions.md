@@ -1166,3 +1166,4 @@ its full title with its status.
 - [D1139](decisions/D1139.md) Code-only batch 788 (M5): set-returning functions bounded by a parameter or fixed-expression LIMIT
 - [D1140](decisions/D1140.md) Code-only batch 789 (M5): TPC-C's five transactions measured against PostgreSQL and MySQL
 - [D1141](decisions/D1141.md) Code-only batch 790 (M5): data-modifying WITH queries that resolve conflicts, with WITH names inside ON CONFLICT
+- [D1142](decisions/D1142.md) Code-only batch 791 (M5): a correlated row IN subquery looked up by key

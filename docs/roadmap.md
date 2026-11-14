@@ -594,7 +594,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL Server's `SELECT ... INTO` transferring the identity property (needs an identity counter
   outside the primary key, a file format change) and keeping `NOT NULL` through inner joins and
   of non-null expressions (D342).
-- A correlated `(a, b) IN (SELECT ...)` looked up by key instead of scanned (D323).
+- A correlated `(a, b) IN (SELECT ...)` looked up by key instead of scanned (D323). **Code written, unbuilt** (code-only mode,
+  2026-11-14, D1142).
 - A data-modifying `WITH` query that resolves conflicts (sql.md); `CREATE RECURSIVE VIEW` is
   built (D299). **Code written, unbuilt** (code-only mode, 2026-11-14, D1141).
 - Multidimensional arrays and array slices (D19, D288). Slices of one-dimensional arrays (`a[lo:hi]`, `a[:hi]`, `a[lo:]`):

@@ -456,12 +456,26 @@ enum KeyedRows {
 enum LookupShape {
     Existence,
     Members,
+    RowMembers(usize),
     Aggregate,
 }
 
 fn lookup_shape(test: &SubqueryTest) -> Option<LookupShape> {
-    if row_operand(test).is_some() {
-        return None;
+    if let Some(fields) = row_operand(test) {
+        return match test {
+            SubqueryTest::In { .. }
+            | SubqueryTest::Compare {
+                operator: BinaryOperator::Equal,
+                all: false,
+                ..
+            }
+            | SubqueryTest::Compare {
+                operator: BinaryOperator::NotEqual,
+                all: true,
+                ..
+            } => Some(LookupShape::RowMembers(fields.len())),
+            _ => None,
+        };
     }
     match test {
         SubqueryTest::Exists => Some(LookupShape::Existence),
@@ -554,11 +568,28 @@ fn single_item(select: &Select, shape: LookupShape) -> Option<&Expr> {
         && select.order_by.is_empty()
         && !crate::set_returning::select_needs_expansion(select);
     let fits = match shape {
-        LookupShape::Existence => false,
+        LookupShape::Existence | LookupShape::RowMembers(_) => false,
         LookupShape::Members => true,
         LookupShape::Aggregate => !select.removes_duplicates() && columns_only_in_aggregates(expr),
     };
     (plain && fits).then_some(expr)
+}
+
+fn plain_row_items(select: &Select, width: usize) -> Option<Vec<&Expr>> {
+    if select.items.len() != width
+        || !select.order_by.is_empty()
+        || crate::set_returning::select_needs_expansion(select)
+    {
+        return None;
+    }
+    select
+        .items
+        .iter()
+        .map(|item| match item {
+            SelectItem::Expr { expr, .. } if !mentions_outer(expr) && !mentions_subquery(expr) => Some(expr),
+            _ => None,
+        })
+        .collect()
 }
 
 fn existence(rows: usize) -> SqlResult<Arc<SubqueryRows>> {
@@ -592,14 +623,18 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
         return None;
     };
     let limits_kept = match shape {
-        LookupShape::Members => query.limit.is_none() && select.limit.is_none(),
+        LookupShape::Members | LookupShape::RowMembers(_) => query.limit.is_none() && select.limit.is_none(),
         LookupShape::Existence | LookupShape::Aggregate => {
             at_least_one_row(query.limit.as_ref()) && at_least_one_row(select.limit.as_ref())
         }
     };
     let item = match shape {
-        LookupShape::Existence => None,
+        LookupShape::Existence | LookupShape::RowMembers(_) => None,
         LookupShape::Members | LookupShape::Aggregate => Some(single_item(select, shape)?),
+    };
+    let row_items = match shape {
+        LookupShape::RowMembers(width) => Some(plain_row_items(select, width)?),
+        _ => None,
     };
     if !limits_kept
         || !query.with.is_empty()
@@ -680,7 +715,7 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
                 SelectItem::Wildcard { .. } => None,
             })
             .collect(),
-        LookupShape::Existence | LookupShape::Members => Vec::new(),
+        LookupShape::Existence | LookupShape::Members | LookupShape::RowMembers(_) => Vec::new(),
     };
     let empty_group = match (shape, item) {
         (LookupShape::Aggregate, Some(item)) => Some(Query::of_select(
@@ -712,6 +747,12 @@ fn key_query(query: &Query, shape: LookupShape) -> Option<KeyQueries> {
     if let Some(item) = item {
         items.push(SelectItem::Expr {
             expr: item.clone(),
+            alias: None,
+        });
+    }
+    for expr in row_items.into_iter().flatten() {
+        items.push(SelectItem::Expr {
+            expr: expr.clone(),
             alias: None,
         });
     }
@@ -802,6 +843,10 @@ fn lookup_over_every_inner_row(
                 let value = row.into_iter().nth(width).unwrap_or(Value::Null);
                 grouped.entry(key).or_default().push(value);
             }
+            LookupShape::RowMembers(_) => {
+                let fields: Vec<Value> = row.into_iter().skip(width).collect();
+                grouped.entry(key).or_default().push(crate::records::anonymous(fields));
+            }
         }
     }
     let empty = keys.is_empty() && grouped.is_empty();
@@ -817,7 +862,8 @@ fn lookup_over_every_inner_row(
             },
             existence(0)?,
         ),
-        LookupShape::Members | LookupShape::Aggregate => {
+        LookupShape::Members | LookupShape::Aggregate | LookupShape::RowMembers(_) => {
+            let sql_type = if matches!(shape, LookupShape::RowMembers(_)) { None } else { sql_type };
             let mut groups = HashMap::with_capacity(grouped.len());
             for (key, values) in grouped {
                 groups.insert(key, group_rows(sql_type, values)?);

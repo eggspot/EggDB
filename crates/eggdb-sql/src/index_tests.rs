@@ -1306,3 +1306,30 @@ fn analyzed_inner_joins_run_smallest_filtered_table_first_with_the_same_rows() {
     let orders_at = plan.find("orders").unwrap_or(0);
     assert!(customers_at < orders_at, "{plan}");
 }
+
+#[test]
+fn a_correlated_row_in_subquery_matches_by_key_with_the_same_answers() {
+    let store = MemoryStore::new();
+    let mut session = Session::with_dialect(&store, Dialect::PostgreSql);
+    last(&mut session, "CREATE TABLE shipments (id integer PRIMARY KEY, region text, sku text, day integer)");
+    last(&mut session, "CREATE TABLE returns (region text, sku text, day integer)");
+    last(
+        &mut session,
+        "INSERT INTO shipments VALUES (1, 'n', 'a', 1), (2, 'n', 'b', 1), (3, 's', 'a', 2), (4, 's', 'b', 2), (5, 'n', 'a', 3)",
+    );
+    last(&mut session, "INSERT INTO returns VALUES ('n', 'a', 1), ('s', 'b', 2), ('n', 'a', 9)");
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT id FROM shipments s WHERE (s.sku, s.day) IN (SELECT r.sku, r.day FROM returns r WHERE r.region = s.region) ORDER BY id",
+        ),
+        "id\n1\n4\nSELECT 2"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT id FROM shipments s WHERE (s.sku, s.day) NOT IN (SELECT r.sku, r.day FROM returns r WHERE r.region = s.region) ORDER BY id",
+        ),
+        "id\n2\n3\n5\nSELECT 3"
+    );
+}
