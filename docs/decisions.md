@@ -1156,3 +1156,4 @@ its full title with its status.
 - [D1129](decisions/D1129.md) Code-only batch 778 (M3): savepoints undo key-value writes made through a session's writer
 - [D1130](decisions/D1130.md) Code-only batch 779 (M3): the savepoint undo log bounded as a whole
 - [D1131](decisions/D1131.md) Code-only batch 780 (M4): SQLite's ATTACH and DETACH over schemas, with attached SQLite and EggDB files read in
+- [D1132](decisions/D1132.md) Code-only batch 781 (M4): SQL's tables read through a collection named sql

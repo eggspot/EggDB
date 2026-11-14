@@ -745,3 +745,23 @@ fn a_long_drop_reports_its_progress_up_to_the_kept_count() {
     );
     assert!(!called);
 }
+
+#[test]
+fn sql_tables_are_read_through_the_sql_collection_and_written_only_by_sql() {
+    use eggdb::sql::Dialect;
+    let file = common::TempPath::new("sql-collection");
+    let db = eggdb::Database::open(file.path()).unwrap();
+    assert!(!db.begin_read().unwrap().collection_names().unwrap().contains(&"sql".to_owned()));
+    db.sql_store()
+        .session(Dialect::PostgreSql)
+        .execute("CREATE TABLE t (id integer PRIMARY KEY)", &mut |_| {})
+        .unwrap();
+    let read = db.begin_read().unwrap();
+    assert!(read.collection_names().unwrap().contains(&eggdb::SQL_COLLECTION.to_owned()));
+    assert!(read.collection("sql").unwrap().scan(..).count() > 0);
+    drop(read);
+    let mut tx = db.begin_write().unwrap();
+    assert_eq!(tx.collection("sql").err().map(|error| error.kind()), Some(eggdb::ErrorKind::ReservedKey));
+    assert_eq!(tx.create_collection("sql").unwrap_err().kind(), eggdb::ErrorKind::ReservedKey);
+    tx.rollback().unwrap();
+}

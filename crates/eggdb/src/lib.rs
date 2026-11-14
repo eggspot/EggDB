@@ -90,7 +90,7 @@ pub mod sql;
 mod transaction;
 mod writer_slot;
 
-pub use collection::{Collection, CollectionStats, DropProgress, ReadCollection, WriteCollection};
+pub use collection::{Collection, CollectionStats, DropProgress, ReadCollection, SQL_COLLECTION, WriteCollection};
 pub use concurrent::{ConcurrentTransaction, Isolation, PreparedTransaction};
 pub use database::{BackupReport, CheckReport, CloneReport, CompactReport, Database, DifferentialReport, Stats};
 pub use eggdb_platform::{Clock, SimClock};

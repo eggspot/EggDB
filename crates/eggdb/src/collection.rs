@@ -41,6 +41,25 @@ pub(crate) fn refuse_reserved(key: &[u8]) -> Result<()> {
     ))
 }
 
+/// The collection SQL's catalog and tables are read through (D1132): a view of
+/// the keys under [`eggdb_sql::RESERVED_KEY_PREFIX`], written only by SQL.
+pub const SQL_COLLECTION: &str = "sql";
+
+fn sql_collection_written_by_sql() -> Error {
+    Error::new(
+        ErrorKind::ReservedKey,
+        "the \"sql\" collection holds SQL's catalog and tables and is changed only through SQL; read it, or run SQL",
+    )
+}
+
+fn with_sql_collection(mut names: Vec<String>, has_sql: bool) -> Vec<String> {
+    if has_sql && !names.iter().any(|name| name == SQL_COLLECTION) {
+        let at = names.partition_point(|name| name.as_str() < SQL_COLLECTION);
+        names.insert(at, SQL_COLLECTION.to_owned());
+    }
+    names
+}
+
 pub(crate) fn check_collection_name(name: &str) -> Result<()> {
     let problem = if name.is_empty() {
         "is empty"
@@ -727,6 +746,15 @@ impl ReadTransaction<'_> {
     /// and with [`ErrorKind::InvalidCollectionName`] for a name no collection can have.
     pub fn collection(&self, name: &str) -> Result<ReadCollection<'_>> {
         check_collection_name(name)?;
+        if name == SQL_COLLECTION && self.get_raw(&name_key(name))?.is_none() {
+            return Ok(ReadCollection {
+                reader: self.reader(),
+                tree: self.tree(),
+                base: eggdb_sql::RESERVED_KEY_PREFIX.to_vec(),
+                name: name.into(),
+                expiry_now: None,
+            });
+        }
         let number = collection_number(self.get_raw(&name_key(name))?, name)?;
         Ok(ReadCollection {
             reader: self.reader(),
@@ -737,14 +765,19 @@ impl ReadTransaction<'_> {
         })
     }
 
-    /// The names of the database's collections, in byte order.
+    /// The names of the database's collections, in byte order: the ones created, and `sql`
+    /// once SQL has stored anything (D1132).
     pub fn collection_names(&self) -> Result<Vec<String>> {
-        names_in(Scan::within_prefix(
+        let names = names_in(Scan::within_prefix(
             self.reader(),
             self.tree(),
             &names_prefix(),
             b"",
-        ))
+        ))?;
+        let has_sql = Scan::within_prefix(self.reader(), self.tree(), eggdb_sql::RESERVED_KEY_PREFIX, b"")
+            .next_key_and_value_len()?
+            .is_some();
+        Ok(with_sql_collection(names, has_sql))
     }
 }
 
@@ -776,6 +809,9 @@ impl<'db> WriteTransaction<'db> {
     /// ```
     pub fn collection(&mut self, name: &str) -> Result<WriteCollection<'_, 'db>> {
         check_collection_name(name)?;
+        if name == SQL_COLLECTION && self.get_raw(&name_key(name))?.is_none() {
+            return Err(sql_collection_written_by_sql());
+        }
         let number = collection_number(self.get_raw(&name_key(name))?, name)?;
         Ok(WriteCollection {
             transaction: self,
@@ -787,12 +823,16 @@ impl<'db> WriteTransaction<'db> {
     /// The names of the database's collections, this transaction's changes included, in byte
     /// order.
     pub fn collection_names(&self) -> Result<Vec<String>> {
-        names_in(Scan::within_prefix(
+        let names = names_in(Scan::within_prefix(
             self.reader(),
             self.tree(),
             &names_prefix(),
             b"",
-        ))
+        ))?;
+        let has_sql = Scan::within_prefix(self.reader(), self.tree(), eggdb_sql::RESERVED_KEY_PREFIX, b"")
+            .next_key_and_value_len()?
+            .is_some();
+        Ok(with_sql_collection(names, has_sql))
     }
 
     /// Creates an empty collection named `name`, and returns whether it created it: `false`
@@ -801,6 +841,9 @@ impl<'db> WriteTransaction<'db> {
     pub fn create_collection(&mut self, name: &str) -> Result<bool> {
         check_collection_name(name)?;
         let key = name_key(name);
+        if name == SQL_COLLECTION && self.get_raw(&key)?.is_none() {
+            return Err(sql_collection_written_by_sql());
+        }
         if let Some(existing) = self.get_raw(&key)? {
             read_record(&existing, &format!("the collection \"{name}\""))?;
             return Ok(false);
@@ -830,6 +873,11 @@ impl<'db> WriteTransaction<'db> {
     /// [`ErrorKind::InvalidCollectionName`] for a name no collection can have. It changes only
     /// the collection's name record, so it takes the same time for a collection of any size.
     pub fn rename_collection(&mut self, name: &str, new_name: &str) -> Result<()> {
+        if new_name == SQL_COLLECTION
+            || (name == SQL_COLLECTION && self.get_raw(&name_key(name))?.is_none())
+        {
+            return Err(sql_collection_written_by_sql());
+        }
         check_collection_name(name)?;
         check_collection_name(new_name)?;
         let key = name_key(name);
@@ -863,6 +911,9 @@ impl<'db> WriteTransaction<'db> {
 
     fn drop_collection_step(&mut self, name: &str) -> Result<Option<FirstDropStep>> {
         check_collection_name(name)?;
+        if name == SQL_COLLECTION && self.get_raw(&name_key(name))?.is_none() {
+            return Err(sql_collection_written_by_sql());
+        }
         let key = name_key(name);
         let Some(existing) = self.get_raw(&key)? else {
             return Ok(None);
