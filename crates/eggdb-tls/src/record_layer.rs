@@ -79,6 +79,10 @@ impl<S: Read + Write> RecordLayer<S> {
         self.write = protection;
     }
 
+    pub(crate) fn has_incoming(&self) -> bool {
+        !self.incoming.is_empty()
+    }
+
     fn fill_incoming(&mut self, wanted: usize) -> Result<bool, TlsError> {
         let mut chunk = [0u8; 4096];
         while self.incoming.len() < wanted {

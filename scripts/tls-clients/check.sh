@@ -12,11 +12,15 @@ with each protocol's own client over TLS:
 - go-sqlcmd with encryption mandatory (-N true, trusting the server's certificate with -C) and
   strict (-N strict, TDS 8.0, which ignores -C and checks the chain against the authority given
   through SSL_CERT_FILE).
-Then it serves with --tls-self-signed and checks psql with sslmode=require. Fails on the first
+Then it serves the RESP, REST and MQTT listeners on a non-loopback address, where serve ends TLS in
+front of each protocol (D1155), and connects with redis-cli --tls, curl over HTTPS and an
+openssl s_client handshake, all checking the chain against the authority. Then it serves with
+--tls-self-signed and checks psql with sslmode=require. Fails on the first
 client that cannot connect over TLS or prints the wrong answer.
 
 PSQL names the psql command (default psql), MYSQL the mysql client (default mysql) and SQLCMD
-go-sqlcmd (default sqlcmd). Certificates and logs stay in the work directory."
+go-sqlcmd (default sqlcmd), REDIS_CLI redis-cli (default redis-cli); RELAY_RESP_PORT, RELAY_ES_PORT and
+RELAY_MQTT_PORT choose the relayed listeners' ports. Certificates and logs stay in the work directory."
 
 [ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
 eggdb=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -26,6 +30,10 @@ work=$(cd "$work" && pwd)
 read -r -a psql_words <<< "${PSQL:-psql}"
 mysql=${MYSQL:-mysql}
 sqlcmd=${SQLCMD:-sqlcmd}
+redis_cli=${REDIS_CLI:-redis-cli}
+RELAY_RESP_PORT=${RELAY_RESP_PORT:-16390}
+RELAY_ES_PORT=${RELAY_ES_PORT:-19290}
+RELAY_MQTT_PORT=${RELAY_MQTT_PORT:-18890}
 password='tls-check-password'
 server_pid=
 
@@ -100,8 +108,24 @@ for encryption in true strict; do
 done
 stop_server
 
+start_server --tls-certificate "$work/server.pem" --tls-key "$work/server-pkcs8.key" \
+  --resp-listen "0.0.0.0:$RELAY_RESP_PORT" --es-listen "0.0.0.0:$RELAY_ES_PORT" --mqtt-listen "0.0.0.0:$RELAY_MQTT_PORT"
+for _ in $(seq 1 50); do
+  (exec 3<> "/dev/tcp/127.0.0.1/$RELAY_MQTT_PORT") 2> /dev/null && break
+  sleep 0.1
+done
+REDISCLI_AUTH=$password "$redis_cli" -h localhost -p "$RELAY_RESP_PORT" --tls --cacert "$work/ca.pem" PING \
+  > "$work/redis.out" 2> "$work/redis.err" || fail "redis-cli over TLS failed: $(cat "$work/redis.err")"
+grep -qx 'PONG' "$work/redis.out" || fail "redis-cli over TLS printed $(cat "$work/redis.out")"
+es_status=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/ca.pem" "https://localhost:$RELAY_ES_PORT/") \
+  || fail "curl could not reach the REST API over TLS"
+case "$es_status" in 2?? | 401) ;; *) fail "the REST API over TLS answered HTTP $es_status" ;; esac
+openssl s_client -connect "127.0.0.1:$RELAY_MQTT_PORT" -servername localhost -CAfile "$work/ca.pem" \
+  -verify_return_error < /dev/null > "$work/mqtt-tls.out" 2>&1 || fail "the MQTT listener's TLS handshake failed: $(tail -n 5 "$work/mqtt-tls.out")"
+stop_server
+
 start_server --tls-self-signed --tls-min-version 1.3
 psql_tls "host=127.0.0.1 port=$pg_port user=eggdb dbname=tls sslmode=require"
 stop_server
 
-echo "tls-clients check passed: psql (verify-full, direct TLS, self-signed), mysql (VERIFY_CA), sqlcmd (-N true, -N strict)"
+echo "tls-clients check passed: psql (verify-full, direct TLS, self-signed), mysql (VERIFY_CA), sqlcmd (-N true, -N strict), redis-cli --tls, HTTPS REST, MQTT over TLS"

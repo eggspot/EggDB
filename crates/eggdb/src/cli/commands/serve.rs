@@ -151,7 +151,12 @@ impl Session<'_> {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             DEFAULT_PORT,
         ));
-        let listen_hosts: Vec<IpAddr> = [Some(address), options.mysql_listen, options.tds_listen]
+        let listen_hosts: Vec<IpAddr> = [
+            Some(address),
+            options.mysql_listen,
+            options.tds_listen,
+            options.mcp_listen, options.resp_listen, options.es_listen, options.mongo_listen, options.bolt_listen, options.gremlin_listen, options.amqp_listen, options.mqtt_listen, options.sqs_listen, options.s3_listen, options.dynamodb_listen, options.observability_listen, options.trino_listen, options.flight_listen, options.smtp_listen, options.imap_listen, options.jmap_listen, options.dav_listen, options.sparql_listen, options.clickhouse_listen, options.rest_listen, options.cql_listen, options.stomp_listen, options.nats_listen,
+        ]
             .into_iter()
             .flatten()
             .map(|listen| listen.ip())
@@ -202,6 +207,7 @@ impl Session<'_> {
             })?),
             None => None,
         };
+        let mut tls_relays = super::serve_tls_relay::TlsRelays::new();
         let mcp_listener = match (options.mcp_listen, &options.mcp_token_file) {
             (None, None) if !options.mcp_tables.is_empty() => {
                 return Err(usage(
@@ -215,35 +221,18 @@ impl Session<'_> {
                 ));
             }
             (Some(address), Some(token_file)) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--mcp-listen {address}: the MCP endpoint has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
                 let tokens = super::serve_mcp::read_tokens(token_file).map_err(usage)?;
-                let listener = std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for MCP on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?;
+                let listener = tls_relays.listener(address, "--mcp-listen", "MCP", tls.as_ref())?;
                 Some((listener, tokens))
             }
         };
         let resp_listener = match options.resp_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--resp-listen {address}: the RESP listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for RESP on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--resp-listen",
+                "RESP",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let memcached_listener = match options.memcached_listen {
@@ -305,68 +294,40 @@ impl Session<'_> {
             None => None,
         };
         let es_listener = match options.es_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--es-listen {address}: the REST API has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for the REST API on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--es-listen",
+                "the REST API",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let es_password = eggdb_crypto::sha256(password.as_bytes());
         let mongo_listener = match options.mongo_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--mongo-listen {address}: the MongoDB-compatible listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for MongoDB clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--mongo-listen",
+                "MongoDB clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let bolt_listener = match options.bolt_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--bolt-listen {address}: the Bolt listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for Bolt on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--bolt-listen",
+                "Bolt",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let gremlin_listener = match options.gremlin_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--gremlin-listen {address}: the Gremlin listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for Gremlin clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--gremlin-listen",
+                "Gremlin clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let replication_listener = match options.replication_listen {
@@ -537,85 +498,50 @@ impl Session<'_> {
             credentials: Some((user.clone(), eggdb_crypto::sha256(password.as_bytes()))),
         };
         let amqp_listener = match options.amqp_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--amqp-listen {address}: the AMQP listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for AMQP clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--amqp-listen",
+                "AMQP clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let mqtt_listener = match options.mqtt_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--mqtt-listen {address}: the MQTT listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for MQTT clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--mqtt-listen",
+                "MQTT clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let sqs_listener = match options.sqs_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--sqs-listen {address}: the SQS-compatible endpoint has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for SQS clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--sqs-listen",
+                "SQS clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let sqs_secret = sqs_listener.as_ref().map(|_| password.clone());
         let s3_listener = match options.s3_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--s3-listen {address}: the S3-compatible endpoint has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for S3 clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--s3-listen",
+                "S3 clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let s3_secret = s3_listener.as_ref().map(|_| password.clone());
         let dynamodb_listener = match options.dynamodb_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--dynamodb-listen {address}: the DynamoDB-compatible endpoint has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for DynamoDB clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--dynamodb-listen",
+                "DynamoDB clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let dynamodb_secret = dynamodb_listener.as_ref().map(|_| password.clone());
@@ -675,52 +601,31 @@ impl Session<'_> {
             None => None,
         };
         let observability_listener = match options.observability_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--observability-listen {address}: the metrics endpoint has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for metrics clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--observability-listen",
+                "metrics clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let server_password_sha256 = eggdb_crypto::sha256(password.as_bytes());
         let trino_listener = match options.trino_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--trino-listen {address}: the Trino protocol has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for the Trino protocol on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--trino-listen",
+                "the Trino protocol",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let flight_listener = match options.flight_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--flight-listen {address}: Arrow Flight SQL has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for Arrow Flight SQL on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--flight-listen",
+                "Arrow Flight SQL",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let smtp_listener = match options.smtp_listen {
@@ -730,17 +635,12 @@ impl Session<'_> {
                         "--smtp-listen {address}: a read-only server cannot store the mail it receives"
                     )));
                 }
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--smtp-listen {address}: the SMTP receiver has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for SMTP on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
+                Some(tls_relays.listener(
+                    address,
+                    "--smtp-listen",
+                    "SMTP",
+                    tls.as_ref(),
+                )?)
             }
             None => None,
         };
@@ -751,17 +651,12 @@ impl Session<'_> {
                         "--imap-listen {address}: IMAP changes flags and mailboxes, which a read-only server cannot"
                     )));
                 }
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--imap-listen {address}: the IMAP server has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for IMAP on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
+                Some(tls_relays.listener(
+                    address,
+                    "--imap-listen",
+                    "IMAP",
+                    tls.as_ref(),
+                )?)
             }
             None => None,
         };
@@ -772,98 +667,58 @@ impl Session<'_> {
                         "--jmap-listen {address}: JMAP changes mailboxes and keywords, which a read-only server cannot"
                     )));
                 }
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--jmap-listen {address}: the JMAP endpoint has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for JMAP on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
+                Some(tls_relays.listener(
+                    address,
+                    "--jmap-listen",
+                    "JMAP",
+                    tls.as_ref(),
+                )?)
             }
             None => None,
         };
         let dav_listener = match options.dav_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--dav-listen {address}: the WebDAV server has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for WebDAV on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--dav-listen",
+                "WebDAV",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let sparql_listener = match options.sparql_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--sparql-listen {address}: the SPARQL endpoint has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for SPARQL on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--sparql-listen",
+                "SPARQL",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let clickhouse_listener = match options.clickhouse_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--clickhouse-listen {address}: the ClickHouse HTTP interface has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for the ClickHouse HTTP interface on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--clickhouse-listen",
+                "the ClickHouse HTTP interface",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let rest_listener = match options.rest_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--rest-listen {address}: the REST API has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for the REST API on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--rest-listen",
+                "the REST API",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let cql_listener = match options.cql_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--cql-listen {address}: the CQL listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for CQL clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--cql-listen",
+                "CQL clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let mut cql_config = eggdb_cql::ServerConfig {
@@ -874,19 +729,12 @@ impl Session<'_> {
             memory_budget: Arc::clone(&memory_budget),
         };
         let stomp_listener = match options.stomp_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--stomp-listen {address}: the STOMP listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for STOMP clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--stomp-listen",
+                "STOMP clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let stomp_config = eggdb_stomp::ServerConfig {
@@ -896,19 +744,12 @@ impl Session<'_> {
             memory_budget: Arc::clone(&memory_budget),
         };
         let nats_listener = match options.nats_listen {
-            Some(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(usage(format!(
-                        "--nats-listen {address}: the NATS listener has no TLS yet, so it listens only on a loopback address"
-                    )));
-                }
-                Some(std::net::TcpListener::bind(address).map_err(|error| {
-                    Failure::database(
-                        format!("cannot listen for NATS clients on {address}: {error}"),
-                        Exit::DatabaseError,
-                    )
-                })?)
-            }
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--nats-listen",
+                "NATS clients",
+                tls.as_ref(),
+            )?),
             None => None,
         };
         let syslog_sockets = match options.syslog_listen {
@@ -2281,6 +2122,9 @@ impl Session<'_> {
                 ),
                 _ => Ok(()),
             });
+            if let Some(tls) = &tls {
+                tls_relays.run(scope, &tls.relayed, &stop_signals::requested);
+            }
             let resp_server = scope.spawn(|| match &resp_listener {
                 Some(listener) => eggdb_resp::serve(
                     resp_keyspace,

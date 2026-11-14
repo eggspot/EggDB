@@ -34,6 +34,7 @@ pub(super) struct TlsSetup {
     pub(super) postgresql: Arc<ServerConfig>,
     pub(super) mysql: Arc<ServerConfig>,
     pub(super) tds: Arc<ServerConfig>,
+    pub(super) relayed: Arc<ServerConfig>,
 }
 
 impl TlsSetup {
@@ -278,5 +279,6 @@ pub(super) fn tls_setup(
         postgresql: with_protocol(Some(POSTGRESQL_ALPN)),
         mysql: with_protocol(None),
         tds: with_protocol(Some(TDS_8_ALPN)),
+        relayed: with_protocol(None),
     }))
 }

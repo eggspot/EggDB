@@ -61,6 +61,7 @@ mod serve_replication;
 mod serve_resp;
 mod serve_standby;
 mod serve_tls;
+mod serve_tls_relay;
 mod shell;
 mod shell_block;
 mod shell_copy;

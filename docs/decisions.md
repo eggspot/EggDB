@@ -1179,3 +1179,4 @@ its full title with its status.
 - [D1152](decisions/D1152.md) Code-only batch 801 (M5): every driver benchmarked in embedded mode against SQLite's binding in its language, gated in CI
 - [D1153](decisions/D1153.md) Code-only batch 802 (M5): a JNI binding for the JDBC driver on Java before 22
 - [D1154](decisions/D1154.md) Code-only batch 803 (M5): the Python driver through the CPython C API with buffer-protocol batches
+- [D1155](decisions/D1155.md) Code-only batch 804 (M6a): TLS on every other listener, ended in front of each protocol server

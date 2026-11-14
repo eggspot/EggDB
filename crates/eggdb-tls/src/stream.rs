@@ -89,6 +89,12 @@ impl<S: Read + Write> TlsStream<S> {
         }
     }
 
+    /// Whether a read can return data without the underlying stream receiving more: decrypted
+    /// application data not yet read, or bytes of a record already taken from the stream.
+    pub fn has_buffered_input(&self) -> bool {
+        self.received_offset < self.received.len() || self.layer.has_incoming()
+    }
+
     /// What the handshake agreed on.
     pub fn info(&self) -> &SessionInfo {
         &self.info

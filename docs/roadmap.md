@@ -715,7 +715,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 
 ### M6a Server and the PostgreSQL protocol
 - TLS on every listener beyond PostgreSQL, MySQL and TDS, so each may leave loopback once its own
-  authentication (under its milestone) is in (D22, D161). Check: `tls-clients` per protocol.
+  authentication (under its milestone) is in (D22, D161). Check: `tls-clients` per protocol. **Code written, unbuilt** (code-only mode,
+  2026-11-14, D1155): a TLS relay in front of each listener; memcached, Kafka Connect, etcd, ZooKeeper and Kafka stay on
+  loopback until their authentication.
 - Replies measured before they are built (RESP's `EXEC`, single large values, a Bolt record, an
   HTTP response body), a Bolt result's rows waiting for `PULL` and the queues' stored messages
   counted, and AMQP deliveries that never fit refused instead of offered again each round; every

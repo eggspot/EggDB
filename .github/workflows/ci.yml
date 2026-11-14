@@ -1793,6 +1793,7 @@ jobs:
         run: |
           docker pull --quiet postgres:17
           command -v mysql || { sudo apt-get update && sudo apt-get install -y mysql-client; }
+          command -v redis-cli || { sudo apt-get update && sudo apt-get install -y redis-tools; }
           mkdir -p "$RUNNER_TEMP/go-sqlcmd"
           cd "$RUNNER_TEMP/go-sqlcmd"
           curl --retry 3 -fsSL -o sqlcmd-linux-amd64.tar.bz2 https://github.com/microsoft/go-sqlcmd/releases/download/v1.10.0/sqlcmd-linux-amd64.tar.bz2
@@ -1803,7 +1804,7 @@ jobs:
           echo "SQLCMD=$tool" >> "$GITHUB_ENV"
       - name: Build eggdb
         run: cargo build -p eggdb
-      - name: Connect psql, mysql and sqlcmd to eggdb serve over TLS
+      - name: Connect psql, mysql, sqlcmd, redis-cli, curl and openssl to eggdb serve over TLS (D1155)
         run: |
           mkdir -p "$RUNNER_TEMP/tls-clients"
           PSQL="docker run --rm -i --network host -v $RUNNER_TEMP/tls-clients:$RUNNER_TEMP/tls-clients -e PGPASSWORD postgres:17 psql" \
