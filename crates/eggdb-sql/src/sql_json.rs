@@ -33,6 +33,31 @@ pub(crate) const SCALAR_POPULATE: [&str; 2] = ["json_populate_record", "jsonb_po
 /// `json(b)_populate_record(base, document)` in an expression or a select list: the base row
 /// (a composite type's or a record's) with each field the document's object names filled from
 /// it, as one composite value.
+/// The empty row of a table's row type, from the `*row_type*` marker the name resolver filled
+/// with the table's column names and typed NULLs.
+fn table_row_shape(arguments: &[Expr]) -> Option<crate::hstore_functions::RecordShape> {
+    let columns = arguments.get(1..).filter(|columns| !columns.is_empty() && columns.len() % 2 == 0)?;
+    let mut names = Vec::new();
+    let mut types = Vec::new();
+    for pair in columns.chunks(2) {
+        let ExprKind::Literal(crate::ast::Literal::String(name)) = &pair[0].kind else {
+            return None;
+        };
+        let ExprKind::Constant { sql_type, .. } = &pair[1].kind else {
+            return None;
+        };
+        names.push(name.clone());
+        types.push(Some(*sql_type));
+    }
+    Some(crate::hstore_functions::RecordShape {
+        type_oid: crate::records::RECORD_OID,
+        fields: vec![Value::Null; names.len()],
+        names,
+        types,
+        anonymous: true,
+    })
+}
+
 pub(crate) fn populate_scalar(
     evaluator: &Evaluator<'_>,
     name: &str,
@@ -41,16 +66,22 @@ pub(crate) fn populate_scalar(
     let [base, document] = arguments else {
         return Err(row_type_required(name));
     };
-    if matches!(&base.kind, ExprKind::Function { name: marker, .. } if marker == ROW_TYPE) {
-        return Err(SqlError::not_supported(format!(
-            "{name} on a table's row type is supported in FROM only; select from it, or use a composite type"
-        ))
-        .at(base.position));
-    }
-    let record_type = crate::typing::static_type(base, evaluator.scope);
-    let record = evaluator.eval(base, record_type)?;
+    let mut shape = match &base.kind {
+        ExprKind::Function { name: marker, arguments } if marker == ROW_TYPE => {
+            table_row_shape(arguments).ok_or_else(|| {
+                SqlError::not_supported(format!(
+                    "{name} on a table's row type whose columns this statement could not read"
+                ))
+                .at(base.position)
+            })?
+        }
+        _ => {
+            let record_type = crate::typing::static_type(base, evaluator.scope);
+            let record = evaluator.eval(base, record_type)?;
+            crate::hstore_functions::record_shape(record_type, record)?
+        }
+    };
     let document = evaluator.eval(document, None)?;
-    let mut shape = crate::hstore_functions::record_shape(record_type, record)?;
     let names_kept = |shape: crate::hstore_functions::RecordShape| {
         let names = if shape.anonymous { shape.names } else { Vec::new() };
         crate::records::record_value(shape.type_oid, shape.fields, names)
@@ -1079,7 +1110,9 @@ pub(crate) fn undefined_row_type(name: &Name) -> SqlError {
 }
 
 /// Fills in a `json(b)_populate_record(set)` call's row type: the marker becomes `NULL` and
-/// each column of the row type a typed placeholder.
+/// each column of the row type a typed placeholder. A column alias list renames the output
+/// columns in order; the row type's own names, which the document's keys match, then follow
+/// the placeholders as text arguments.
 pub(crate) fn fill_row_type(
     generated: &mut GeneratedTable,
     row_type: Vec<(String, Option<SqlType>)>,
@@ -1087,14 +1120,21 @@ pub(crate) fn fill_row_type(
     let GeneratedTable::Function(function) = generated else {
         return Ok(());
     };
-    if !function.column_names.is_empty() {
-        return Err(
-            SqlError::not_supported(format!("a column alias list on {}()", function.name))
-                .at(function.position),
-        );
-    }
     if row_type.is_empty() {
         return Err(row_type_required(&function.name).at(function.position));
+    }
+    let aliases = std::mem::take(&mut function.column_names);
+    if aliases.len() > row_type.len() {
+        return Err(SqlError::new(
+            SqlState::SYNTAX_ERROR,
+            format!(
+                "a column alias list on {}() names {} columns, but its row type has {}",
+                function.name,
+                aliases.len(),
+                row_type.len()
+            ),
+        )
+        .at(function.position));
     }
     let position = function.position;
     if let Some(first) = function.arguments.first_mut()
@@ -1102,12 +1142,17 @@ pub(crate) fn fill_row_type(
     {
         *first = literal(Literal::Null, position);
     }
-    for (name, sql_type) in row_type {
-        function.arguments.push(typed_null(sql_type, position));
+    for (at, (name, sql_type)) in row_type.iter().enumerate() {
+        function.arguments.push(typed_null(*sql_type, position));
         function.column_names.push(Name {
-            text: name,
+            text: aliases.get(at).map_or_else(|| name.clone(), |alias| alias.text.clone()),
             position,
         });
+    }
+    if !aliases.is_empty() {
+        for (name, _) in row_type {
+            function.arguments.push(literal(Literal::String(name), position));
+        }
     }
     Ok(())
 }
@@ -1149,7 +1194,15 @@ fn populate_rows(
     if names.is_empty() {
         return Err(row_type_required(name));
     }
-    let declared: Vec<(&str, Option<SqlType>)> = names
+    let keys: Vec<String> = if values.len() == POPULATE_FIXED_ARGUMENTS + 2 * names.len() {
+        values[POPULATE_FIXED_ARGUMENTS + names.len()..]
+            .iter()
+            .map(|key| key.to_text().unwrap_or_default())
+            .collect()
+    } else {
+        names.to_vec()
+    };
+    let declared: Vec<(&str, Option<SqlType>)> = keys
         .iter()
         .map(String::as_str)
         .zip(types.iter().skip(POPULATE_FIXED_ARGUMENTS).copied())

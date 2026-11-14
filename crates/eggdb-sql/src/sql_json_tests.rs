@@ -810,7 +810,7 @@ fn json_populate_record_in_a_select_list_is_one_composite_value() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
     run(&mut session, "CREATE TYPE pt AS (x int, y int)").expect("type");
-    run(&mut session, "CREATE TABLE t (a int)").expect("table");
+    run(&mut session, "CREATE TABLE t (a int, b text)").expect("table");
     assert_eq!(
         rows(&mut session, r#"SELECT json_populate_record(null::pt, '{"x": 3, "y": 4, "z": 5}')"#),
         ["(3,4)"]
@@ -823,7 +823,39 @@ fn json_populate_record_in_a_select_list_is_one_composite_value() {
         rows(&mut session, r#"SELECT json_populate_record(ROW(1, 2)::pt, '{"y": 9}')"#),
         ["(1,9)"]
     );
-    let refused = run(&mut session, r#"SELECT json_populate_record(null::t, '{"a": 1}')"#)
-        .expect_err("a table's row type in a select list");
-    assert_eq!(refused.state().code(), "0A000");
+    assert_eq!(
+        rows(&mut session, r#"SELECT json_populate_record(null::t, '{"a": 1, "b": "egg"}')"#),
+        ["(1,egg)"]
+    );
+    assert_eq!(
+        rows(&mut session, r#"SELECT (json_populate_record(null::t, '{"b": "shell"}')).b"#),
+        ["shell"]
+    );
+}
+
+#[test]
+fn json_populate_record_in_from_takes_a_column_alias_list() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE TYPE pt AS (x int, y int)").expect("type");
+    assert_eq!(
+        rows(
+            &mut session,
+            r#"SELECT r.across, r.y FROM json_populate_record(null::pt, '{"x": 3, "y": 4}') AS r(across)"#
+        ),
+        ["3|4"]
+    );
+    assert_eq!(
+        rows(
+            &mut session,
+            r#"SELECT q.a + q.b FROM jsonb_populate_recordset(null::pt, '[{"x": 1, "y": 2}, {"x": 5}]') AS q(a, b) ORDER BY 1"#
+        ),
+        ["3", "NULL"]
+    );
+    let refused = run(
+        &mut session,
+        r#"SELECT * FROM json_populate_record(null::pt, '{}') AS r(a, b, c)"#,
+    )
+    .expect_err("too many aliases");
+    assert_eq!(refused.state().code(), "42601");
 }

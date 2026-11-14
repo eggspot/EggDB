@@ -701,6 +701,12 @@ impl<'a> Resolver<'a> {
     }
 
     fn walk_expr_inner(&mut self, expr: &mut Expr, ctes: &mut Vec<String>) -> SqlResult<()> {
+        if let ExprKind::Function { name, arguments } = &mut expr.kind
+            && crate::sql_json::SCALAR_POPULATE.contains(&name.as_str())
+            && let Some(base) = arguments.first_mut()
+        {
+            self.fill_row_type_marker(base)?;
+        }
         match &mut expr.kind {
             ExprKind::Column { qualifier, name } => {
                 self.columns.check_column(qualifier.as_deref(), name)
@@ -727,6 +733,48 @@ impl<'a> Resolver<'a> {
                 Ok(())
             }
         }
+    }
+
+    fn fill_row_type_marker(&mut self, base: &mut Expr) -> SqlResult<()> {
+        let ExprKind::Function { name, arguments } = &mut base.kind else {
+            return Ok(());
+        };
+        if name.as_str() != crate::sql_json::ROW_TYPE || arguments.len() != 1 {
+            return Ok(());
+        }
+        let ExprKind::Literal(crate::ast::Literal::String(table)) = &arguments[0].kind else {
+            return Ok(());
+        };
+        let position = arguments[0].position;
+        let resolved = self.resolve_name(table)?;
+        let columns: Vec<(String, crate::types::SqlType)> = match self.tables.relation(self.reader, &resolved)? {
+            Some(Relation::Table(definition)) => definition
+                .columns
+                .iter()
+                .filter(|column| !crate::temp_tables::is_hidden_column(&column.name))
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+            Some(Relation::View(view)) => view
+                .columns
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type.unwrap_or(crate::types::SqlType::Text)))
+                .collect(),
+            None => return Ok(()),
+        };
+        for (column, sql_type) in columns {
+            arguments.push(Expr {
+                kind: ExprKind::Literal(crate::ast::Literal::String(column)),
+                position,
+            });
+            arguments.push(Expr {
+                kind: ExprKind::Constant {
+                    sql_type,
+                    value: crate::types::Value::Null,
+                },
+                position,
+            });
+        }
+        Ok(())
     }
 
     fn record(&mut self, name: &str) {

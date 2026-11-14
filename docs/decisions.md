@@ -1204,3 +1204,4 @@ its full title with its status.
 - [D1177](decisions/D1177.md) Code-only batch 829 (M6a): A gRPC API generated from the schema (--grpc-listen)
 - [D1178](decisions/D1178.md) Code-only batch 830 (M6a): WebSocket transports for subscriptions and live queries, re-run only after a commit
 - [D1179](decisions/D1179.md) Code-only batch 831 (M6a): Objects transformed on the way out (resize, crop, convert, WebAssembly functions)
+- [D1180](decisions/D1180.md) Code-only batch 832 (M6a): json_populate_record on a table's row type in expressions and with a column alias list

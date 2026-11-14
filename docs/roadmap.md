@@ -767,7 +767,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-11, D466).
 - SQL/JSON: `json_populate_record` in a select list and with a column alias list, a table's own
   row type as its base row, and `JSON_TABLE`'s `PLAN` clause; a non-NULL base row is built (D289,
-  D302).
+  D302). `PLAN DEFAULT`: **code written, unbuilt** (code-only mode, 2026-11-14, D1166); in a select list and with a
+  non-NULL base row: **code written, unbuilt** (code-only mode, 2026-11-14, D1167); a table's row type in expressions
+  and the column alias list: **code written, unbuilt** (code-only mode, 2026-11-15, D1180); the named `PLAN` is decided
+  against while no dialect EggDB serves has it (D1180).
 - `IS JSON` on a `json` value holding `\u0000`; PostgreSQL's `JSON_SERIALIZE`, `JSON_SCALAR`,
   `JSON()`, `IS JSON` and `.decimal()` are built (D302). **Code written, unbuilt** (code-only mode,
   2026-11-11, D552).
