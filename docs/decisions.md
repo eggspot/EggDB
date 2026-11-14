@@ -1177,3 +1177,4 @@ its full title with its status.
 - [D1150](decisions/D1150.md) Code-only batch 799 (M5): the Dart and .NET drivers on prepared statements, stepping and COPY
 - [D1151](decisions/D1151.md) Code-only batch 800 (M5): the Java, Kotlin, Android and Swift drivers on prepared statements, stepping and COPY
 - [D1152](decisions/D1152.md) Code-only batch 801 (M5): every driver benchmarked in embedded mode against SQLite's binding in its language, gated in CI
+- [D1153](decisions/D1153.md) Code-only batch 802 (M5): a JNI binding for the JDBC driver on Java before 22

@@ -8,7 +8,9 @@ with the system C compiler (CC, default cc; warnings are errors), checks that th
 compiles as C++ (CXX, default c++), and runs the program. Then runs
 examples/python/eggdb_ctypes.py and the Python driver's tests with PYTHON (default python3)
 against the same library, the Node.js, Go, C++, Ruby, PHP and Dart drivers' checks where their tools are installed, and
-the .NET and Java drivers' check programs where dotnet and a Java 22 or newer javac are installed.
+the .NET and Java drivers' check programs where dotnet and a Java 22 or newer javac are installed. The
+JDBC driver is compiled for Java 17 but for its foreign-function classes, and its check runs twice:
+through Java's foreign function API and through its JNI binding (drivers/java/jni).
 NO_C_COMPILER=1 leaves out the C and C++ steps, for Windows runners without one."
 
 [ $# -eq 2 ] || { echo "$usage" >&2; exit 2; }
@@ -81,8 +83,26 @@ if command -v dart >/dev/null 2>&1; then
   EGGDB_LIBRARY="$library" dart run "$root/drivers/dart/test/check.dart"
 fi
 if command -v javac >/dev/null 2>&1 && javac --release 22 -version >/dev/null 2>&1; then
-  find "$root/drivers/java/src" "$root/drivers/java/check" -name '*.java' -exec javac --release 22 -d "$work/java" {} +
+  java_sources="$root/drivers/java/src/app/eggspot/eggdb"
+  foreign_sources=(FfmCalls NativeLibrary KeyValueApi EggDbTransaction EggDbKeyValue)
+  mkdir -p "$work/java"
+  find "$java_sources" -name '*.java' $(printf "! -name %s.java " "${foreign_sources[@]}") \
+    -exec javac --release 17 -d "$work/java" {} +
+  javac --release 22 -cp "$work/java" -d "$work/java" $(printf "$java_sources/%s.java " "${foreign_sources[@]}")
+  javac --release 22 -cp "$work/java" -d "$work/java" "$root/drivers/java/check/Check.java"
   cp -R "$root/drivers/java/src/META-INF" "$work/java/"
   java --enable-native-access=ALL-UNNAMED -Deggdb.library="$library" -cp "$work/java" Check
+  java_home="${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")}"
+  case "$(uname -s)" in
+    Darwin) jni_platform=darwin; jni_library="$work/libeggdb_jdbc.dylib"; jni_link=(-dynamiclib) ;;
+    *) jni_platform=linux; jni_library="$work/libeggdb_jdbc.so"; jni_link=(-shared -fPIC) ;;
+  esac
+  if [ "${NO_C_COMPILER:-}" != 1 ] && [ -f "$java_home/include/jni.h" ]; then
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror "${jni_link[@]}" -I "$java_home/include" -I "$java_home/include/$jni_platform" \
+      -I "$include" "$root/drivers/java/jni/eggdb_jdbc.c" -L "$library_dir" -leggdb_capi -Wl,-rpath,"$library_dir" \
+      -o "$jni_library"
+    java --enable-native-access=ALL-UNNAMED -Deggdb.library="$library" -Deggdb.binding=jni -Deggdb.jni="$jni_library" \
+      -cp "$work/java" Check
+  fi
 fi
 echo "c-api check: passed"

@@ -59,7 +59,7 @@ final class KeyValueApi {
 
     static void check(int status) throws SQLException {
         if (status != 0) {
-            throw NativeSession.lastError(status);
+            throw FfmCalls.lastError(status);
         }
     }
 
