@@ -253,8 +253,8 @@ impl JoinedSource {
         }
     }
 
-    fn selection(&self, from: &FromClause, filter: Option<&Expr>, position: usize) -> Select {
-        let mut items = Vec::with_capacity(self.width());
+    fn selection(&self, from: &FromClause, filter: Option<&Expr>, position: usize, extra: &[Expr]) -> Select {
+        let mut items = Vec::with_capacity(self.width() + extra.len());
         for item in &self.items {
             if !item.stored {
                 items.push(SelectItem::Wildcard {
@@ -276,6 +276,12 @@ impl JoinedSource {
                 });
             }
         }
+        for expr in extra {
+            items.push(SelectItem::Expr {
+                expr: expr.clone(),
+                alias: None,
+            });
+        }
         every_column_select(from.clone(), items, filter.cloned())
     }
 
@@ -287,7 +293,19 @@ impl JoinedSource {
         position: usize,
         memory: &mut WorkMemory,
     ) -> SqlResult<Vec<Vec<Value>>> {
-        self.rows_over(reader, tables, &self.from, filter, position, memory)
+        self.rows_over(reader, tables, &self.from, filter, position, &[], memory)
+    }
+
+    fn joined_rows_computing(
+        &self,
+        reader: &dyn KeyValueRead,
+        tables: &mut TableCache,
+        filter: Option<&Expr>,
+        position: usize,
+        extra: &[Expr],
+        memory: &mut WorkMemory,
+    ) -> SqlResult<Vec<Vec<Value>>> {
+        self.rows_over(reader, tables, &self.from, filter, position, extra, memory)
     }
 
     fn rows_where_present(
@@ -309,10 +327,11 @@ impl JoinedSource {
         let Some(from) = without_null_extension(&self.from, at) else {
             return Ok(None);
         };
-        self.rows_over(reader, tables, &from, filter, position, memory)
+        self.rows_over(reader, tables, &from, filter, position, &[], memory)
             .map(Some)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rows_over(
         &self,
         reader: &dyn KeyValueRead,
@@ -320,11 +339,12 @@ impl JoinedSource {
         from: &FromClause,
         filter: Option<&Expr>,
         position: usize,
+        extra: &[Expr],
         memory: &mut WorkMemory,
     ) -> SqlResult<Vec<Vec<Value>>> {
-        let selection = self.selection(from, filter, position);
+        let selection = self.selection(from, filter, position, extra);
         let selected = execute::select(reader, tables, &selection, false)?;
-        let width = self.width();
+        let width = self.width() + extra.len();
         for row in &selected.rows {
             if row.len() != width {
                 return Err(width_mismatch());
@@ -527,7 +547,27 @@ pub(crate) fn update(
             InsertValue::Expr(expr) => Some(expr),
             InsertValue::Default => None,
         });
-    refuse_subqueries(assignment_exprs.clone(), "SET clause")?;
+    let computed_in_query: Vec<usize> = update
+        .assignments
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, value))| matches!(value, InsertValue::Expr(expr) if crate::subquery::mentions_subquery(expr)))
+        .map(|(index, _)| index)
+        .collect();
+    if !computed_in_query.is_empty()
+        && targets
+            .iter()
+            .any(|&at| source.items[at].definition.primary_key.is_empty())
+    {
+        refuse_subqueries(assignment_exprs.clone(), "SET clause")?;
+    }
+    let extra: Vec<Expr> = computed_in_query
+        .iter()
+        .filter_map(|&index| match &update.assignments[index].1 {
+            InsertValue::Expr(expr) => Some(expr.clone()),
+            InsertValue::Default => None,
+        })
+        .collect();
     refuse_subqueries(returning_exprs(&update.returning), "RETURNING clause")?;
     if let Some(filter) = &update.filter {
         reject_aggregates(filter, "WHERE")?;
@@ -536,17 +576,21 @@ pub(crate) fn update(
     let scope = Scope::Many(&sources);
     for expr in assignment_exprs {
         reject_aggregates(expr, "UPDATE")?;
-        check_columns(expr, scope)?;
+        if !crate::subquery::mentions_subquery(expr) {
+            check_columns(expr, scope)?;
+        }
     }
     execute::returned_columns(&update.returning, scope)?;
     let mut memory = WorkMemory::new();
-    let joined_rows = source.joined_rows(
+    let joined_rows = source.joined_rows_computing(
         &*writer,
         tables,
         update.filter.as_ref(),
         position,
+        &extra,
         &mut memory,
     )?;
+    let width = source.width();
     let mut matches = Vec::with_capacity(targets.len());
     let mut present_rows = Vec::with_capacity(targets.len());
     for &at in &targets {
@@ -596,8 +640,22 @@ pub(crate) fn update(
                 correlation: None,
             };
             let mut new_row = old_row.clone();
-            for ((_, value), &column) in assignments.iter().zip(&columns) {
-                new_row[column] = execute::assigned_value(&evaluator, value, table, column, rule)?;
+            for (((_, value), &column), &assignment) in assignments.iter().zip(&columns).zip(&written) {
+                let computed = computed_in_query
+                    .iter()
+                    .position(|&index| index == assignment)
+                    .and_then(|slot| rows[joined_row].get(width + slot));
+                let value = match computed {
+                    Some(computed) => InsertValue::Expr(Expr {
+                        kind: ExprKind::Constant {
+                            sql_type: computed.sql_type(),
+                            value: computed.clone(),
+                        },
+                        position,
+                    }),
+                    None => value.clone(),
+                };
+                new_row[column] = execute::assigned_value(&evaluator, &value, table, column, rule)?;
             }
             memory.charge_row(&new_row)?;
             planned.push(PlannedUpdate {

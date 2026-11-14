@@ -629,3 +629,25 @@ fn sqlite_delete_using_is_a_syntax_error() {
     assert_eq!(error.state().code(), "42601");
     assert!(error.message().contains("USING"), "{error}");
 }
+
+#[test]
+fn a_joined_update_sets_a_column_from_a_subquery_per_joined_row() {
+    let store = crate::memory_store::MemoryStore::new();
+    let mut session = crate::Session::with_dialect(&store, crate::Dialect::PostgreSql);
+    for sql in [
+        "CREATE TABLE orders (id integer PRIMARY KEY, customer integer, total integer)",
+        "CREATE TABLE customers (id integer PRIMARY KEY, tier text)",
+        "CREATE TABLE discounts (tier text, percent integer)",
+        "INSERT INTO orders VALUES (1, 10, 100), (2, 20, 200)",
+        "INSERT INTO customers VALUES (10, 'gold'), (20, 'basic')",
+        "INSERT INTO discounts VALUES ('gold', 10), ('basic', 0)",
+        "UPDATE orders o SET total = o.total - o.total * (SELECT d.percent FROM discounts d WHERE d.tier = c.tier) / 100 FROM customers c WHERE c.id = o.customer",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let mut rows = Vec::new();
+    session
+        .execute("SELECT total FROM orders ORDER BY id", &mut |result| rows.extend(result.rows))
+        .unwrap();
+    assert_eq!(rows, vec![vec![crate::Value::Integer(90)], vec![crate::Value::Integer(200)]]);
+}

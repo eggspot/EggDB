@@ -1167,3 +1167,4 @@ its full title with its status.
 - [D1140](decisions/D1140.md) Code-only batch 789 (M5): TPC-C's five transactions measured against PostgreSQL and MySQL
 - [D1141](decisions/D1141.md) Code-only batch 790 (M5): data-modifying WITH queries that resolve conflicts, with WITH names inside ON CONFLICT
 - [D1142](decisions/D1142.md) Code-only batch 791 (M5): a correlated row IN subquery looked up by key
+- [D1143](decisions/D1143.md) Code-only batch 792 (M5): subqueries in the SET of a joined UPDATE

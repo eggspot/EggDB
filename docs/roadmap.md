@@ -585,7 +585,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Joined `UPDATE` and `DELETE` with subqueries in `SET` and `RETURNING`, a view, a partitioned
   table or a table with row-level security as the target, `EXPLAIN` of them, SQLite's refusal
   of `FROM` tables in `RETURNING`, and `OUTPUT deleted.` of a joined Transact-SQL `UPDATE`
-  (D297).
+  (D297). Subqueries in `SET`: **code written, unbuilt** (code-only mode, 2026-11-14, D1143).
 - PostgreSQL's `EXECUTE` of the extended protocol's named prepared statements (they and SQL
   `PREPARE` are kept apart), `USING`, `WITH (...)` and `TABLESPACE` in a plain `CREATE TABLE`, and
   `EXPLAIN TABLE t` (D342). `WITH (...)`, `USING` and `TABLESPACE` in a plain `CREATE TABLE`:
