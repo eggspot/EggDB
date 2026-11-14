@@ -59,6 +59,8 @@ pub enum AuthMethod {
     },
     /// A TLS client certificate, checked by the TLS layer, whose common name is the user.
     Certificate,
+    /// A Kerberos ticket sent through GSS-API, checked against the service's keytab (D1184).
+    Gss(crate::kerberos::KerberosConfig),
     /// An API key of the role, sent as the password and checked against the hashes
     /// `CREATE EXTENSION eggdb_api_keys` keeps.
     ApiKey,
@@ -68,7 +70,7 @@ pub enum AuthMethod {
 
 impl AuthMethod {
     /// The method's name as a rule file writes it: `scram-sha-256`, `ldap`, `jwt`, `oauth`,
-    /// `cert`, `apikey` or `reject`.
+    /// `cert`, `gss`, `apikey` or `reject`.
     pub fn name(&self) -> &'static str {
         match self {
             Self::ScramSha256 => "scram-sha-256",
@@ -76,6 +78,7 @@ impl AuthMethod {
             Self::Jwt { .. } => "jwt",
             Self::OAuthBearer { .. } => "oauth",
             Self::Certificate => "cert",
+            Self::Gss(_) => "gss",
             Self::ApiKey => "apikey",
             Self::Reject => "reject",
         }
@@ -321,6 +324,28 @@ impl AuthRules {
                     })
                 }
                 "cert" => AuthMethod::Certificate,
+                "gss" => {
+                    let path = required(&found, "keytab", line)?;
+                    let bytes = std::fs::read(path).map_err(|error| RulesError {
+                        line,
+                        message: format!("cannot read {path}: {error}"),
+                    })?;
+                    let keys = crate::kerberos::parse_keytab(&bytes).map_err(|error| RulesError {
+                        line,
+                        message: format!("{path}: {error}"),
+                    })?;
+                    if keys.is_empty() {
+                        return Err(RulesError {
+                            line,
+                            message: format!("{path} holds no aes256-cts-hmac-sha1-96 or aes128-cts-hmac-sha1-96 key"),
+                        });
+                    }
+                    AuthMethod::Gss(crate::kerberos::KerberosConfig::new(
+                        keys,
+                        found.get("krb_realm").map(|realm| (*realm).to_owned()),
+                        found.get("include_realm").copied() == Some("1"),
+                    ))
+                }
                 "jwt" | "oauth" => {
                     let path = required(&found, "jwks", line)?;
                     let document = read_key_set(Path::new(path)).map_err(|error| RulesError {
@@ -356,7 +381,7 @@ impl AuthRules {
                     return Err(RulesError {
                         line,
                         message: format!(
-                            "unknown method {other}; use scram-sha-256, ldap, jwt, oauth, cert, apikey or reject"
+                            "unknown method {other}; use scram-sha-256, ldap, jwt, oauth, cert, gss, apikey or reject"
                         ),
                     });
                 }

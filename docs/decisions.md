@@ -1208,3 +1208,4 @@ its full title with its status.
 - [D1181](decisions/D1181.md) Code-only batch 833 (M6a): gRPC server reflection, over streamed calls in eggdb-http2
 - [D1182](decisions/D1182.md) Code-only batch 834 (M6a): Realtime channels in Supabase's style, from the engine's change capture
 - [D1183](decisions/D1183.md) Code-only batch 835 (M6a): Live queries woken by commits
+- [D1184](decisions/D1184.md) Code-only batch 836 (M6b): Kerberos logins through GSSAPI, in our own clean room

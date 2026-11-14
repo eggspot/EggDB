@@ -520,7 +520,13 @@ enum AuthenticationOutcome {
 }
 
 fn read_sasl_message(wire: &mut Wire<'_>) -> Option<Vec<u8>> {
-    match wire.read_message(crate::connection::MAX_AUTHENTICATION_MESSAGE_BYTES) {
+    read_authentication_response(wire, crate::connection::MAX_AUTHENTICATION_MESSAGE_BYTES)
+}
+
+const MAX_GSS_TOKEN_BYTES: usize = 64 * 1024;
+
+fn read_authentication_response(wire: &mut Wire<'_>, limit: usize) -> Option<Vec<u8>> {
+    match wire.read_message(limit) {
         Ok((b'p', body)) => Some(body),
         Ok((tag, _)) => {
             fatal(
@@ -619,6 +625,9 @@ fn authenticate_externally<S: KeyValueStore>(
         wire.outbox.authentication_ok();
         return AuthenticationOutcome::Authenticated;
     }
+    if let eggdb_auth::AuthMethod::Gss(config) = method {
+        return authenticate_gss(wire, shared, user, config, store);
+    }
     if method.sends_secret_in_clear() && wire.tls().is_none() && !wire.is_local() {
         fatal(
             wire,
@@ -679,6 +688,7 @@ fn authenticate_externally<S: KeyValueStore>(
         eggdb_auth::AuthMethod::ScramSha256
         | eggdb_auth::AuthMethod::Reject
         | eggdb_auth::AuthMethod::Certificate
+        | eggdb_auth::AuthMethod::Gss(_)
         | eggdb_auth::AuthMethod::OAuthBearer { .. } => Err("no external method".to_owned()),
     };
     if let Err(why) = checked {
@@ -691,6 +701,51 @@ fn authenticate_externally<S: KeyValueStore>(
             user,
             "no stored role with LOGIN has this name",
         );
+    }
+    wire.outbox.authentication_ok();
+    AuthenticationOutcome::Authenticated
+}
+
+fn authenticate_gss<S: KeyValueStore>(
+    wire: &mut Wire<'_>,
+    shared: &Shared<'_>,
+    user: &str,
+    config: &eggdb_auth::kerberos::KerberosConfig,
+    store: &S,
+) -> AuthenticationOutcome {
+    wire.outbox.authentication_gss();
+    if wire.flush().is_err() {
+        return AuthenticationOutcome::Refused;
+    }
+    let Some(token) = read_authentication_response(wire, MAX_GSS_TOKEN_BYTES) else {
+        return AuthenticationOutcome::Refused;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+    let mut random_failed = false;
+    let mut random = |bytes: &mut [u8]| {
+        random_failed |= eggdb_platform::secure_random::fill(bytes).is_err();
+    };
+    let accepted = match config.accept(&token, now, &mut random) {
+        Ok(accepted) if !random_failed => accepted,
+        Ok(_) => return refuse_login(wire, shared, user, "the system's random source failed"),
+        Err(error) => return refuse_login(wire, shared, user, &error.to_string()),
+    };
+    let named = config.user_of(&accepted);
+    if named != user {
+        return refuse_login(
+            wire,
+            shared,
+            user,
+            &format!("the Kerberos principal {} logs in as \"{}\", not as this user", printable(&accepted.principal()), printable(&named)),
+        );
+    }
+    if !may_log_in(store, user) {
+        return refuse_login(wire, shared, user, "no stored role with LOGIN has this name");
+    }
+    if let Some(reply) = &accepted.reply {
+        wire.outbox.authentication_gss_continue(reply);
     }
     wire.outbox.authentication_ok();
     AuthenticationOutcome::Authenticated

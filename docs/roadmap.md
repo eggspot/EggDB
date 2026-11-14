@@ -852,7 +852,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D460).
 
 ### M6b The rest of security
-- Kerberos/GSSAPI logins (D22, D185).
+- Kerberos/GSSAPI logins (D22, D185). **Code written, unbuilt** (code-only mode, 2026-11-15, D1184): `gss` rules,
+  `eggdb_auth::kerberos`, CI's `kerberos` job.
 - TLS client certificates, requested and verified by the TLS layer (D22, D161, D185). Check:
   psql with `sslcert` in the `tls-clients` job. **Code written, unbuilt** (code-only mode, 2026-11-12, D803): TLS 1.3 only. `serve --tls-client-ca`
   in place of `EGGDB_TLS_CLIENT_CA`: **code written, unbuilt** (code-only mode, 2026-11-13, D978). Left: TLS 1.2's

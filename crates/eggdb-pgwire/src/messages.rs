@@ -693,6 +693,19 @@ impl Outbox {
         self.message(b'R', |body| body.extend_from_slice(&3i32.to_be_bytes()));
     }
 
+    /// `AuthenticationGSS`: the client starts a GSS-API exchange.
+    pub fn authentication_gss(&mut self) {
+        self.message(b'R', |body| body.extend_from_slice(&7i32.to_be_bytes()));
+    }
+
+    /// `AuthenticationGSSContinue` with the server's GSS-API token.
+    pub fn authentication_gss_continue(&mut self, token: &[u8]) {
+        self.message(b'R', |body| {
+            body.extend_from_slice(&8i32.to_be_bytes());
+            body.extend_from_slice(token);
+        });
+    }
+
     /// `AuthenticationOk`.
     pub fn authentication_ok(&mut self) {
         self.message(b'R', |body| body.extend_from_slice(&0i32.to_be_bytes()));
