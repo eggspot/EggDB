@@ -19,6 +19,8 @@ pub struct DatabaseSwitch {
     max_result_rows: Option<u64>,
     cancel: crate::cancel::CancelSignal,
     oracle_nls: Arc<crate::oracle_nls::NlsParameters>,
+    temporary: crate::temporary::TemporaryObjects,
+    locks: Vec<Arc<crate::advisory_locks::AdvisoryLocks>>,
 }
 
 impl std::fmt::Debug for DatabaseSwitch {
@@ -97,10 +99,10 @@ fn refused_while_held(database: &str, held: &[String], dialect: Dialect) -> SqlE
         ),
     )
     .with_detail(
-        "Temporary tables and session locks live in the session a switch closes, so they would be dropped and released without a word.",
+        "Temporary tables and session locks move with the switch, but a temporary view and a temporary table of this database's own types or domains name objects the other database does not have.",
     )
     .with_hint(format!(
-        "Drop the temporary tables and release the session locks first, or open another connection to \"{database}\"."
+        "Drop them first, or open another connection to \"{database}\"."
     ));
     match dialect {
         Dialect::SqlServer => error.with_sqlserver_code(40508),
@@ -123,6 +125,15 @@ impl DatabaseSwitch {
         session.max_result_rows = self.max_result_rows;
         session.cancel = self.cancel;
         session.oracle_nls = self.oracle_nls;
+        session.temporary = self.temporary;
+        let database = store.store_id();
+        for locks in self.locks {
+            if locks.database() == database {
+                session.advisory_locks = locks;
+            } else {
+                session.carried_locks.push(locks);
+            }
+        }
         if session.dialect == Dialect::Oracle {
             let _ = session.refresh_oracle_user_schema();
         }
@@ -135,10 +146,12 @@ impl Session<'_> {
     /// store is `store`. Only the server's own user moves between databases: a session that
     /// logged in as a stored role was authenticated by its own database's roles, and another
     /// database's role of the same name is a different role, so the switch fails with `42501`
-    /// (MySQL's `1044`, SQL Server's `916`) for it. A session holding a temporary table or a
-    /// session-level lock (an advisory lock, or an application lock of `@LockOwner = 'Session'`)
-    /// does not move either: the switch fails with `0A000` (SQL Server's `40508`, MySQL's
-    /// `1235`), naming what it holds, since closing the session would drop and release them.
+    /// (MySQL's `1044`, SQL Server's `916`) for it. Temporary tables move with the client, as
+    /// SQL Server and MySQL keep them across `USE`, and session-level locks (advisory locks,
+    /// application locks of `@LockOwner = 'Session'`) stay held on the database they were taken
+    /// in until released there or until the client disconnects. A temporary view, or a temporary
+    /// table of this database's own types or domains, names objects the other database lacks, so
+    /// the switch then fails with `0A000` (SQL Server's `40508`, MySQL's `1235`), naming them.
     /// The caller closes this session and builds the new one with
     /// [`DatabaseSwitch::into_session`].
     pub fn switch_to<S: KeyValueStore>(
@@ -163,7 +176,22 @@ impl Session<'_> {
             max_result_rows: self.max_result_rows,
             cancel: self.cancel.clone(),
             oracle_nls: Arc::clone(&self.oracle_nls),
+            temporary: self.temporary.carried(),
+            locks: self.carried_lock_owners(),
         })
+    }
+
+    fn carried_lock_owners(&self) -> Vec<Arc<crate::advisory_locks::AdvisoryLocks>> {
+        let mut owners: Vec<Arc<crate::advisory_locks::AdvisoryLocks>> = self
+            .carried_locks
+            .iter()
+            .filter(|locks| locks.holds_session_locks())
+            .cloned()
+            .collect();
+        if self.advisory_locks.holds_session_locks() {
+            owners.push(Arc::clone(&self.advisory_locks));
+        }
+        owners
     }
 
     /// The served database a `USE` of the last statements switched this session's client to,
@@ -179,12 +207,15 @@ impl Session<'_> {
             .temporary
             .relations()
             .into_iter()
-            .map(|relation| {
-                let kind = if relation.is_view { "view" } else { "table" };
-                format!("temporary {kind} {}", relation.name)
-            })
+            .filter(|relation| relation.is_view)
+            .map(|relation| format!("temporary view {}", relation.name))
             .collect();
-        held.extend(self.advisory_locks.session_lock_names());
+        held.extend(
+            self.temporary
+                .tables_of_database_types()
+                .into_iter()
+                .map(|name| format!("temporary table {name} of this database's types")),
+        );
         held
     }
 
@@ -223,9 +254,9 @@ impl Session<'_> {
     /// [taken](Session::take_database_switch) by the server; inside a transaction it fails
     /// with `25001`, and for a session logged in as a stored role with `42501`: a stored role
     /// is trusted only in the database that authenticated it, so it connects to another one
-    /// directly. While the session holds a temporary table or a session-level lock it fails
-    /// with `0A000` (SQL Server's `40508`, MySQL's `1235`), naming them, as
-    /// [`Session::switch_to`] does.
+    /// directly. Temporary tables and session-level locks go along; a temporary view or a
+    /// temporary table of this database's own types fails it with `0A000` (SQL Server's
+    /// `40508`, MySQL's `1235`), naming them, as [`Session::switch_to`] does.
     pub fn use_database(&mut self, name: &str) -> SqlResult<Option<String>> {
         if name.eq_ignore_ascii_case(&self.settings.database) {
             return Ok(Some(self.settings.database.clone()));

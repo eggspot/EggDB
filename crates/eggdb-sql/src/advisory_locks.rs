@@ -347,6 +347,14 @@ impl AdvisoryLocks {
         }
     }
 
+    pub(crate) fn database(&self) -> usize {
+        self.database
+    }
+
+    pub(crate) fn holds_session_locks(&self) -> bool {
+        !self.session_lock_names().is_empty()
+    }
+
     pub(crate) fn release_transaction_locks(&self) {
         release(self.database, self.owner, |hold| hold.transaction_count = 0);
     }

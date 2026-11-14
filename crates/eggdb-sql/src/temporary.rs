@@ -145,6 +145,38 @@ impl TemporaryObjects {
         !self.entries.is_empty()
     }
 
+    /// A copy of the committed temporary objects, for the session that replaces this one when
+    /// its client switches to another database.
+    pub(crate) fn carried(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            undo: Vec::new(),
+            bytes: self.bytes,
+        }
+    }
+
+    /// The temporary tables whose columns use a type or domain of this database, which another
+    /// database does not have.
+    pub(crate) fn tables_of_database_types(&self) -> Vec<String> {
+        let prefix = table_key("");
+        self.entries
+            .range(prefix.clone()..prefix_end(&prefix))
+            .filter(|(_, value)| !is_view_record(value))
+            .filter_map(|(key, value)| {
+                let name = std::str::from_utf8(key.get(prefix.len()..)?).ok()?;
+                let table = TableDefinition::decode(name, value).ok()?;
+                let own_types = !table.domains.is_empty()
+                    || table.columns.iter().any(|column| {
+                        column.sql_type.defined().is_some_and(|defined| {
+                            defined.kind != crate::types::DefinedKind::Base
+                                && crate::ranges::builtin(defined.oid).is_none()
+                        })
+                    });
+                own_types.then(|| crate::schemas::base_name(name).to_owned())
+            })
+            .collect()
+    }
+
     pub(crate) fn relations(&self) -> Vec<TemporaryRelation> {
         let prefix = table_key("");
         self.entries

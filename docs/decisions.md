@@ -1198,3 +1198,4 @@ its full title with its status.
 - [D1171](decisions/D1171.md) Code-only batch 823 (M6a): Composite types get their pg_class row and tables their row type
 - [D1172](decisions/D1172.md) Code-only batch 824 (M6a): pgAdmin, DBeaver and SSMS checked in CI through pgAdmin's server mode, CloudBeaver and SMO
 - [D1173](decisions/D1173.md) Code-only batch 825 (M6a): Identity and serial sequences answer nextval and setval, any number of identities with any options, bound frame offsets
+- [D1174](decisions/D1174.md) Code-only batch 826 (M6a): Temporary tables move with USE, and session locks stay held where they were taken

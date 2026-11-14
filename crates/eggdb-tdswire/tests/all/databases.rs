@@ -1,7 +1,7 @@
 //! Databases created while the server runs (D270) over TDS: `CREATE DATABASE` and
 //! `DROP DATABASE`, `sys.databases`, a login naming a new database, and `USE` moving a
-//! connection between databases with the database ENVCHANGE, refused (`40508`) while the
-//! connection holds a `#temp` table or a session-owned application lock (D294).
+//! connection between databases with the database ENVCHANGE, taking its `#temp` tables along and
+//! keeping its session-owned application locks held where they were taken (D294, D1174).
 
 use crate::common;
 
@@ -126,43 +126,36 @@ fn the_servers_own_login_keeps_its_rights_after_use() {
 }
 
 #[test]
-fn use_is_refused_while_a_temp_table_or_a_session_lock_would_be_left_behind() {
+fn temp_tables_move_with_use_and_session_locks_stay_held_where_they_were_taken() {
     let directory = MemoryDirectory::with(&[DATABASE]);
     let server = TestServer::start_directory(directory.clone());
     let mut client = Client::login(server.address);
     assert!(errors(&client.batch("CREATE DATABASE audit")).is_empty());
-    assert!(errors(&client.batch("CREATE TABLE #work (id INT)")).is_empty());
-    let refused = client.batch("USE audit");
-    let refusal = errors(&refused);
-    assert_eq!(
-        refusal.first().map(|error| error.0),
-        Some(40508),
-        "{refused:?}"
-    );
-    assert!(
-        refusal[0].2.contains("temporary table #work"),
-        "{refusal:?}"
-    );
-    assert!(!changed_to(&refused, "audit"), "{refused:?}");
-    assert!(errors(&client.batch("INSERT INTO #work VALUES (1)")).is_empty());
-    assert!(errors(&client.batch("DROP TABLE #work")).is_empty());
+    assert!(errors(&client.batch("CREATE TABLE #work (id INT); INSERT INTO #work VALUES (1)")).is_empty());
     let locked = client.batch(
         "EXEC sp_getapplock @Resource = 'nightly', @LockMode = 'Exclusive', @LockOwner = 'Session'",
     );
     assert!(errors(&locked).is_empty(), "{locked:?}");
-    let refused = client.batch("USE audit");
-    assert!(
-        errors(&refused)
-            .first()
-            .is_some_and(|error| error.2.contains("application lock 'nightly'")),
-        "{refused:?}"
+    let used = client.batch("USE audit");
+    assert!(changed_to(&used, "audit"), "{used:?}");
+    assert_eq!(
+        rows(&client.batch("SELECT id FROM #work")),
+        vec![vec![Some("1".to_owned())]]
     );
+    let mut other = Client::login(server.address);
+    let attempt = "DECLARE @r INT; EXEC @r = sp_getapplock @Resource = 'nightly', @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0; SELECT @r";
+    assert_eq!(rows(&other.batch(attempt)), vec![vec![Some("-1".to_owned())]]);
+    let back = client.batch(&format!("USE {DATABASE}"));
+    assert!(changed_to(&back, DATABASE), "{back:?}");
     assert!(
         errors(
             &client.batch("EXEC sp_releaseapplock @Resource = 'nightly', @LockOwner = 'Session'")
         )
         .is_empty()
     );
-    let used = client.batch("USE audit");
-    assert!(changed_to(&used, "audit"), "{used:?}");
+    assert_eq!(rows(&other.batch(attempt)), vec![vec![Some("0".to_owned())]]);
+    assert_eq!(
+        rows(&client.batch("SELECT count(*) FROM #work")),
+        vec![vec![Some("1".to_owned())]]
+    );
 }
