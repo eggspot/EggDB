@@ -300,6 +300,23 @@ pub struct Limits<'b> {
     /// The certificate and key every connection is secured with before its first request
     /// (HTTPS); plain HTTP when `None`, the default.
     pub tls: Option<&'b eggdb_tls::ServerConfig>,
+    /// The handler that takes the requests it chooses with their bodies still on the
+    /// connection, read piece by piece as it goes; `None`, the default, reads every body whole.
+    pub body_streamer: Option<&'b dyn BodyStreamer>,
+}
+
+/// A handler for requests whose bodies are too large to hold whole, such as an object upload:
+/// it is handed the body as it arrives instead of after it has all been read.
+pub trait BodyStreamer: Sync + fmt::Debug {
+    /// Whether this request, its head read and its body not, is answered by
+    /// [`BodyStreamer::answer`].
+    fn takes(&self, head: &Request) -> bool;
+
+    /// Answers `head` reading its body from `body` (its framing removed). The listener's
+    /// `max_body_bytes` does not apply: the streamer bounds the body itself, as it never holds
+    /// it whole. What the answer leaves unread is read and dropped when it is short; a longer
+    /// rest closes the connection after the answer.
+    fn answer(&self, head: &Request, body: &mut dyn io::Read) -> Response;
 }
 
 fn no_request(_: &Request) -> bool {
@@ -323,6 +340,15 @@ impl<'b> Limits<'b> {
             decode_content_encoding: no_request,
             rate_limit: None,
             tls: None,
+            body_streamer: None,
+        }
+    }
+
+    /// These limits, handing the requests `streamer` takes to it with their bodies unread.
+    pub fn with_body_streamer(self, streamer: &'b dyn BodyStreamer) -> Self {
+        Self {
+            body_streamer: Some(streamer),
+            ..self
         }
     }
 

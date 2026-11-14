@@ -267,10 +267,28 @@ fn scope(credential: &str) -> Result<Scope<'_>, SigV4Error> {
     })
 }
 
-fn payload_hash(request: &SignedRequest<'_>) -> Result<String, SigV4Error> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PayloadCheck {
+    Body,
+    Stated,
+}
+
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn payload_hash(request: &SignedRequest<'_>, check: PayloadCheck) -> Result<String, SigV4Error> {
     match header(request, "x-amz-content-sha256") {
         Some(UNSIGNED_PAYLOAD) => Ok(UNSIGNED_PAYLOAD.to_owned()),
         Some(stated) if stated.starts_with("STREAMING-") => Err(SigV4Error::UnsupportedPayload),
+        Some(stated) if check == PayloadCheck::Stated => {
+            if is_sha256_hex(stated) {
+                Ok(stated.to_ascii_lowercase())
+            } else {
+                Err(SigV4Error::Malformed)
+            }
+        }
+        None if check == PayloadCheck::Stated => Err(SigV4Error::UnsupportedPayload),
         Some(stated) => {
             let actual = hex(&eggdb_crypto::sha256(request.body));
             if !stated.eq_ignore_ascii_case(&actual) {
@@ -297,6 +315,29 @@ pub fn verify(
     access_key: &str,
     secret: &str,
     now: i64,
+) -> Result<(), SigV4Error> {
+    verify_with(request, access_key, secret, now, PayloadCheck::Body)
+}
+
+/// Checks the signature of a request whose body has not been read yet, trusting the
+/// `x-amz-content-sha256` it states (a SHA-256 in hex, or `UNSIGNED-PAYLOAD`): the caller checks
+/// a stated SHA-256 against the body as it reads it. A request stating no payload hash is
+/// [`SigV4Error::UnsupportedPayload`], since its signature covers a body not read yet.
+pub fn verify_stated_payload(
+    request: &SignedRequest<'_>,
+    access_key: &str,
+    secret: &str,
+    now: i64,
+) -> Result<(), SigV4Error> {
+    verify_with(request, access_key, secret, now, PayloadCheck::Stated)
+}
+
+fn verify_with(
+    request: &SignedRequest<'_>,
+    access_key: &str,
+    secret: &str,
+    now: i64,
+    check: PayloadCheck,
 ) -> Result<(), SigV4Error> {
     let pairs = query_pairs(request.query)?;
     if let Some(authorization) = header(request, "authorization") {
@@ -343,7 +384,7 @@ pub fn verify(
             request,
             &canonical_query(&pairs, None),
             signed_headers,
-            &payload_hash(request)?,
+            &payload_hash(request, check)?,
         )?;
         let expected = signature(
             secret,
@@ -434,7 +475,7 @@ pub fn authorization(
         request,
         &canonical_query(&query_pairs(request.query)?, None),
         &signed,
-        &payload_hash(request)?,
+        &payload_hash(request, PayloadCheck::Body)?,
     )?;
     let signature = signature(secret, date, region, service, amz_date, &scope, &canonical);
     Ok(format!(

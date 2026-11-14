@@ -74,55 +74,126 @@ const SINES: [u32; 64] = [
     0xeb86_d391,
 ];
 
+const INITIAL_STATE: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+const BLOCK_BYTES: usize = 64;
+
+fn compress(state: &mut [u32; 4], block: &[u8; BLOCK_BYTES]) {
+    let mut words = [0u32; 16];
+    for (word, bytes) in words.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_le_bytes(*bytes);
+    }
+    let [mut a, mut b, mut c, mut d] = *state;
+    for at in 0..64 {
+        let (mixed, index) = match at / 16 {
+            0 => ((b & c) | (!b & d), at),
+            1 => ((d & b) | (!d & c), (5 * at + 1) % 16),
+            2 => (b ^ c ^ d, (3 * at + 5) % 16),
+            _ => (c ^ (b | !d), (7 * at) % 16),
+        };
+        let rotated = a
+            .wrapping_add(mixed)
+            .wrapping_add(SINES[at])
+            .wrapping_add(words[index])
+            .rotate_left(SHIFTS[at]);
+        a = d;
+        d = c;
+        c = b;
+        b = b.wrapping_add(rotated);
+    }
+    for (word, added) in state.iter_mut().zip([a, b, c, d]) {
+        *word = word.wrapping_add(added);
+    }
+}
+
+/// MD5 over data given in pieces, for protocol checksums of bodies too large to hold whole,
+/// such as an S3 object's ETag computed as the object arrives.
+#[derive(Debug, Clone)]
+pub struct Md5 {
+    state: [u32; 4],
+    pending: Vec<u8>,
+    length: u64,
+}
+
+impl Default for Md5 {
+    fn default() -> Self {
+        Self {
+            state: INITIAL_STATE,
+            pending: Vec::with_capacity(BLOCK_BYTES),
+            length: 0,
+        }
+    }
+}
+
+impl Md5 {
+    /// A digest of nothing yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds `bytes`.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.length = self.length.wrapping_add(bytes.len() as u64);
+        let mut rest = bytes;
+        if !self.pending.is_empty() {
+            let wanted = (BLOCK_BYTES - self.pending.len()).min(rest.len());
+            self.pending.extend_from_slice(&rest[..wanted]);
+            rest = &rest[wanted..];
+            if self.pending.len() < BLOCK_BYTES {
+                return;
+            }
+            let mut block = [0u8; BLOCK_BYTES];
+            block.copy_from_slice(&self.pending);
+            compress(&mut self.state, &block);
+            self.pending.clear();
+        }
+        let (blocks, tail) = rest.as_chunks::<BLOCK_BYTES>();
+        for block in blocks {
+            compress(&mut self.state, block);
+        }
+        self.pending.extend_from_slice(tail);
+    }
+
+    /// The digest of everything added.
+    pub fn finish(mut self) -> [u8; 16] {
+        let bit_length = self.length.wrapping_mul(8);
+        let mut tail = std::mem::take(&mut self.pending);
+        tail.push(0x80);
+        while tail.len() % BLOCK_BYTES != 56 {
+            tail.push(0);
+        }
+        tail.extend_from_slice(&bit_length.to_le_bytes());
+        for block in tail.as_chunks::<BLOCK_BYTES>().0 {
+            compress(&mut self.state, block);
+        }
+        let mut digest = [0u8; 16];
+        for (bytes, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
+            bytes.copy_from_slice(&word.to_le_bytes());
+        }
+        digest
+    }
+}
+
 /// The MD5 digest of `bytes`, for protocol checksums only.
 pub fn md5_checksum(bytes: &[u8]) -> [u8; 16] {
-    let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
-    let mut message = bytes.to_vec();
-    let bit_length = u64::try_from(bytes.len())
-        .unwrap_or(u64::MAX)
-        .wrapping_mul(8);
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&bit_length.to_le_bytes());
-    for block in message.as_chunks::<64>().0 {
-        let mut words = [0u32; 16];
-        for (word, bytes) in words.iter_mut().zip(block.as_chunks::<4>().0) {
-            *word = u32::from_le_bytes(*bytes);
-        }
-        let [mut a, mut b, mut c, mut d] = state;
-        for at in 0..64 {
-            let (mixed, index) = match at / 16 {
-                0 => ((b & c) | (!b & d), at),
-                1 => ((d & b) | (!d & c), (5 * at + 1) % 16),
-                2 => (b ^ c ^ d, (3 * at + 5) % 16),
-                _ => (c ^ (b | !d), (7 * at) % 16),
-            };
-            let rotated = a
-                .wrapping_add(mixed)
-                .wrapping_add(SINES[at])
-                .wrapping_add(words[index])
-                .rotate_left(SHIFTS[at]);
-            a = d;
-            d = c;
-            c = b;
-            b = b.wrapping_add(rotated);
-        }
-        for (word, added) in state.iter_mut().zip([a, b, c, d]) {
-            *word = word.wrapping_add(added);
-        }
-    }
-    let mut digest = [0u8; 16];
-    for (bytes, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
-        bytes.copy_from_slice(&word.to_le_bytes());
-    }
-    digest
+    let mut digest = Md5::new();
+    digest.update(bytes);
+    digest.finish()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::md5_checksum;
+    use super::{Md5, md5_checksum};
+
+    #[test]
+    fn digesting_in_pieces_matches_digesting_whole() {
+        let data: Vec<u8> = (0..1000u32).map(|value| value as u8).collect();
+        for cut in [0, 1, 63, 64, 65, 500, 999] {
+            let mut digest = Md5::new();
+            digest.update(&data[..cut]);
+            digest.update(&data[cut..]);
+            assert_eq!(digest.finish(), md5_checksum(&data), "cut at {cut}");
+        }
+    }
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()

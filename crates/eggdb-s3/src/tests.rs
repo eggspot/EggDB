@@ -27,6 +27,22 @@ fn call(
     body: &[u8],
     secret: &str,
 ) -> Response {
+    signed_call(endpoint, method, target, headers, body, secret, None)
+}
+
+fn call_streamed(endpoint: &Endpoint<'_>, target: &str, headers: &[(&str, &str)], body: &[u8]) -> Response {
+    signed_call(endpoint, "PUT", target, headers, body, "secret", Some(body))
+}
+
+fn signed_call(
+    endpoint: &Endpoint<'_>,
+    method: &str,
+    target: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    secret: &str,
+    streamed_body: Option<&[u8]>,
+) -> Response {
     let (path, query) = target
         .split_once('?')
         .map_or((target, None), |(path, query)| {
@@ -69,7 +85,23 @@ fn call(
     );
     let value = authorization(&signed, &signed_names, "eggdb", secret, "us-east-1", "s3").unwrap();
     request.headers.push(("authorization".to_owned(), value));
+    if let Some(streamed) = streamed_body {
+        request.body.clear();
+        return endpoint.answer_stream_for_test(&request, streamed);
+    }
     endpoint.answer(&request)
+}
+
+trait StreamedForTest {
+    fn answer_stream_for_test(&self, head: &Request, body: &[u8]) -> Response;
+}
+
+impl StreamedForTest for Endpoint<'_> {
+    fn answer_stream_for_test(&self, head: &Request, body: &[u8]) -> Response {
+        use eggdb_http::BodyStreamer;
+        assert!(self.takes(head), "the streamer takes {} {}", head.method, head.path);
+        self.answer(head, &mut std::io::Cursor::new(body.to_vec()))
+    }
 }
 
 fn header<'r>(response: &'r Response, name: &str) -> Option<&'r str> {
@@ -434,4 +466,30 @@ fn a_request_past_the_memory_budget_is_answered_slow_down() {
     assert_eq!(response.status, 503);
     let text = String::from_utf8(response.body).unwrap();
     assert!(text.contains("<Code>SlowDown</Code>"), "{text}");
+}
+
+#[test]
+fn a_large_object_streamed_as_it_arrives_reads_back_whole_and_bad_digests_leave_nothing() {
+    let keyspace = MemoryKeyspace::default();
+    let endpoint = Endpoint::new(&keyspace, "eggdb", "secret");
+    assert_eq!(call(&endpoint, "PUT", "/big", &[], b"", "secret").status, 200);
+    let body: Vec<u8> = (0..(3 << 20) + 17).map(|at: u32| (at % 251) as u8).collect();
+    let length = body.len().to_string();
+    let put = call_streamed(&endpoint, "/big/object.bin", &[("content-length", length.as_str())], &body);
+    assert_eq!(put.status, 200, "{}", text(&put));
+    let expected_etag = format!("\"{}\"", hex(&eggdb_crypto::md5_checksum(&body)));
+    assert_eq!(header(&put, "etag"), Some(expected_etag.as_str()));
+    let got = call(&endpoint, "GET", "/big/object.bin", &[], b"", "secret");
+    assert_eq!(got.status, 200);
+    assert_eq!(got.body, body);
+    let wrong_md5 = eggdb_crypto::base64_encode(&[0u8; 16]);
+    let refused = call_streamed(
+        &endpoint,
+        "/big/other.bin",
+        &[("content-length", length.as_str()), ("content-md5", wrong_md5.as_str())],
+        &body,
+    );
+    assert_eq!(refused.status, 400);
+    assert!(text(&refused).contains("BadDigest"));
+    assert_eq!(call(&endpoint, "GET", "/big/other.bin", &[], b"", "secret").status, 404);
 }

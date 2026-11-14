@@ -535,3 +535,53 @@ fn hostile_requests_return_errors_and_never_panic() {
         assert_eq!(budget.used_bytes(), 0);
     }
 }
+
+#[derive(Debug)]
+struct CountingStreamer;
+
+impl BodyStreamer for CountingStreamer {
+    fn takes(&self, head: &Request) -> bool {
+        head.path == "/upload"
+    }
+
+    fn answer(&self, head: &Request, body: &mut dyn Read) -> Response {
+        let mut total = 0usize;
+        let mut sum = 0u64;
+        let mut piece = [0u8; 4096];
+        loop {
+            match body.read(&mut piece) {
+                Ok(0) => break,
+                Ok(count) => {
+                    total += count;
+                    sum += piece[..count].iter().map(|byte| u64::from(*byte)).sum::<u64>();
+                }
+                Err(error) => return Response::text(400, &error.to_string()),
+            }
+        }
+        Response::ok("text/plain", format!("{} {total} {sum} {}", head.method, head.body.len()))
+    }
+}
+
+#[test]
+fn a_streamed_body_reaches_its_handler_in_pieces_and_the_connection_goes_on() {
+    let budget = MemoryBudget::new(1 << 20);
+    let streamer = CountingStreamer;
+    let limits = Limits::new(1024, &budget).with_body_streamer(&streamer);
+    with_server(&limits, |address| {
+        let (mut stream, mut reader) = connect(address);
+        let body = vec![3u8; 300_000];
+        let mut request = format!("POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        request.extend_from_slice(&body);
+        stream.write_all(&request).unwrap();
+        let answer = read_answer(&mut reader, false);
+        assert_eq!(answer.status(), 200);
+        assert_eq!(answer.text(), "POST 300000 900000 0");
+        let mut chunked = b"PUT /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        chunked.extend_from_slice(b"3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n");
+        stream.write_all(&chunked).unwrap();
+        let answer = read_answer(&mut reader, false);
+        assert_eq!(answer.text(), "PUT 5 495 0");
+        stream.write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi").unwrap();
+        assert_eq!(read_answer(&mut reader, false).text(), "POST /echo hi");
+    });
+}

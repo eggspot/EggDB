@@ -1188,3 +1188,4 @@ its full title with its status.
 - [D1161](decisions/D1161.md) Code-only batch 811 (M6a): QUIC's TLS 1.3 handshake without a record layer, and transport parameters
 - [D1162](decisions/D1162.md) Code-only batch 812 (M6a): a QUIC server connection without I/O, with RFC 9002 loss detection and NewReno
 - [D1163](decisions/D1163.md) Code-only batch 813 (M6a): QUIC's UDP server, HTTP/3 with QPACK, and serve --http3-listen
+- [D1164](decisions/D1164.md) Code-only batch 814 (M6a): large HTTP request bodies handed to the handler as they arrive, first for S3 PutObject

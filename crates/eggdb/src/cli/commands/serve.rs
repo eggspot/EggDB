@@ -1966,7 +1966,8 @@ impl Session<'_> {
                     &|request| endpoint.reply(request),
                     &stop_signals::requested,
                     &eggdb_http::Limits::new(eggdb_s3::MAX_REQUEST_BYTES, &memory_budget).with_rate_limit(rate_limiter.as_ref())
-                        .answering_over_budget_with(eggdb_s3::over_memory_budget),
+                        .answering_over_budget_with(eggdb_s3::over_memory_budget)
+                        .with_body_streamer(endpoint),
                 ),
                 _ => Ok(()),
             });

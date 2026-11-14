@@ -178,6 +178,24 @@ fn store_failure(error: &StoreError, resource: &str) -> Response {
             "The list of parts was not in ascending order.",
             resource,
         ),
+        StoreError::BadDigest => failure(
+            400,
+            "BadDigest",
+            "The Content-MD5 you specified did not match what we received.",
+            resource,
+        ),
+        StoreError::PayloadMismatch => failure(
+            400,
+            "XAmzContentSHA256Mismatch",
+            "The provided 'x-amz-content-sha256' header does not match what was computed.",
+            resource,
+        ),
+        StoreError::IncompleteBody => failure(
+            400,
+            "IncompleteBody",
+            "You did not provide the number of bytes specified by the Content-Length HTTP header.",
+            resource,
+        ),
         StoreError::Storage(message) => failure(500, "InternalError", message, resource),
     }
 }
@@ -275,6 +293,104 @@ fn parse_range(header: &str, size: u64) -> Option<(u64, u64)> {
         (start, end)
     };
     (start < end && start < size).then_some((start, end))
+}
+
+const STREAMED_BODY_BYTES: usize = 1 << 20;
+
+fn object_target(path: &str) -> Option<(String, String, String)> {
+    let decoded = eggdb_http::percent_decoded(path)?;
+    let trimmed = decoded.trim_start_matches('/');
+    let (bucket, key) = trimmed.split_once('/')?;
+    (valid_bucket(bucket) && valid_key(key)).then(|| (bucket.to_owned(), key.to_owned(), decoded.clone()))
+}
+
+fn hex_digest<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (byte, pair) in out.iter_mut().zip(text.as_bytes().chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(out)
+}
+
+impl eggdb_http::BodyStreamer for Endpoint<'_> {
+    fn takes(&self, head: &Request) -> bool {
+        let large = match head.header("content-length").and_then(|length| length.trim().parse::<usize>().ok()) {
+            Some(length) => length >= STREAMED_BODY_BYTES,
+            None => head.header("transfer-encoding").is_some(),
+        };
+        head.method == "PUT"
+            && large
+            && head.query.as_deref().is_none_or(|query| query.split('&').all(|pair| pair.starts_with("X-Amz-") || pair.is_empty()))
+            && head.header("x-amz-copy-source").is_none()
+            && object_target(&head.path).is_some()
+    }
+
+    fn answer(&self, head: &Request, body: &mut dyn std::io::Read) -> Response {
+        let signed = SignedRequest {
+            method: &head.method,
+            path: &head.path,
+            query: head.query.as_deref(),
+            headers: &head.headers,
+            body: &[],
+        };
+        let now = i64::try_from(now_ms() / 1000).unwrap_or(i64::MAX);
+        let verified = if eggdb_auth::sigv2::is_query_signed(&signed) {
+            eggdb_auth::sigv2::verify_query(&signed, &self.access_key, &self.secret, now)
+        } else {
+            sigv4::verify_stated_payload(&signed, &self.access_key, &self.secret, now)
+        };
+        if let Err(error) = verified {
+            let (status, code) = match error {
+                SigV4Error::UnknownAccessKey => (403, "InvalidAccessKeyId"),
+                SigV4Error::TimeSkewed => (403, "RequestTimeTooSkewed"),
+                SigV4Error::UnsupportedPayload => (501, "NotImplemented"),
+                SigV4Error::Malformed => (400, "AuthorizationHeaderMalformed"),
+                SigV4Error::SignatureMismatch => (403, "SignatureDoesNotMatch"),
+                SigV4Error::PayloadMismatch => (400, "XAmzContentSHA256Mismatch"),
+                SigV4Error::Missing | SigV4Error::Expired => (403, "AccessDenied"),
+            };
+            return failure(status, code, &error.to_string(), &head.path);
+        }
+        let Some((bucket, key, resource)) = object_target(&head.path) else {
+            return failure(400, "InvalidURI", "Couldn't parse the specified URI.", &head.path);
+        };
+        let expected_md5 = match head.header("content-md5") {
+            Some(stated) => match eggdb_crypto::base64_decode(stated.as_bytes()).ok().and_then(|bytes| <[u8; 16]>::try_from(bytes).ok()) {
+                Some(digest) => Some(digest),
+                None => return failure(400, "InvalidDigest", "The Content-MD5 you specified was invalid.", &resource),
+            },
+            None => None,
+        };
+        let expected_sha256 = head.header("x-amz-content-sha256").and_then(hex_digest::<32>);
+        let content_type = head.header("content-type").unwrap_or(DEFAULT_CONTENT_TYPE).to_owned();
+        let metadata = head
+            .headers
+            .iter()
+            .filter_map(|(name, value)| Some((name.strip_prefix("x-amz-meta-")?.to_owned(), value.clone())))
+            .collect();
+        let staging = format!("{}-{}", now_ms(), self.uploads.fetch_add(1, Ordering::Relaxed));
+        match self.store.put_object_streamed(
+            &bucket,
+            &key,
+            body,
+            &content_type,
+            metadata,
+            now_ms(),
+            &staging,
+            expected_md5,
+            expected_sha256,
+        ) {
+            Ok(info) => {
+                let mut response = empty(200);
+                response.headers.push(("ETag".to_owned(), etag(&info)));
+                response
+            }
+            Err(error) => store_failure(&error, &resource),
+        }
+    }
 }
 
 impl<'k> Endpoint<'k> {

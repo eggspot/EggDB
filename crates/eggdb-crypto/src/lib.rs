@@ -73,7 +73,7 @@ pub use gcm::AesGcm;
 pub use hash::{HashFunction, MAX_HASH_BLOCK_BYTES, MAX_HASH_DIGEST_BYTES};
 pub use hkdf::{HkdfError, hkdf_expand, hkdf_extract};
 pub use hmac::{Hmac, HmacSha256, hmac, hmac_sha256};
-pub use md5::md5_checksum;
+pub use md5::{Md5, md5_checksum};
 pub use mlkem::{
     MLKEM_KEY_GENERATION_SEED_BYTES, MLKEM_SHARED_SECRET_BYTES, MLKEM768_CIPHERTEXT_BYTES,
     MLKEM768_DECAPSULATION_KEY_BYTES, MLKEM768_ENCAPSULATION_KEY_BYTES, MlKemInvalidKey,

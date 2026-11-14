@@ -343,6 +343,8 @@ fn linger(source: &mut ConnectionStream<'_>, writer: &Socket) {
     }
 }
 
+const LEFTOVER_BODY_BYTES: usize = 64 * 1024;
+
 pub(crate) fn serve_connection<'h>(
     stream: TcpStream,
     client: std::net::IpAddr,
@@ -387,21 +389,28 @@ pub(crate) fn serve_connection<'h>(
             let mut send_continue = || {
                 let _ = writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
             };
-            reader
-                .next_request(limits.max_body_bytes, &mut held, &mut send_continue)
-                .and_then(|(mut request, version)| {
-                    if (limits.decode_content_encoding)(&request) {
-                        decode_request_body(
-                            &mut request,
-                            limits.max_body_bytes,
-                            &mut held,
-                            limits.memory_budget,
-                        )?;
-                    }
-                    Ok((request, version))
-                })
+            reader.next_head().and_then(|(request, version, framing)| {
+                let streamed = framing.has_body()
+                    && limits.body_streamer.is_some_and(|streamer| streamer.takes(&request))
+                    && !(limits.decode_content_encoding)(&request);
+                if streamed {
+                    return Ok((request, version, Some(framing)));
+                }
+                let mut request = reader.read_body(
+                    request,
+                    version,
+                    framing,
+                    limits.max_body_bytes,
+                    &mut held,
+                    &mut send_continue,
+                )?;
+                if (limits.decode_content_encoding)(&request) {
+                    decode_request_body(&mut request, limits.max_body_bytes, &mut held, limits.memory_budget)?;
+                }
+                Ok((request, version, None))
+            })
         };
-        let (request, version) = match read {
+        let (request, version, streamed_framing) = match read {
             Ok(read) => read,
             Err(error) => {
                 if let Some(response) = refusal(&error, limits) {
@@ -417,13 +426,26 @@ pub(crate) fn serve_connection<'h>(
                 return;
             }
         };
-        let keep = version.wants_persistence(&request)
+        let mut keep = version.wants_persistence(&request)
             && served < max_requests
             && active.load(Ordering::Acquire) < crate::KEEP_ALIVE_BELOW_CONNECTIONS
             && !stop();
         let head_only = request.method == "HEAD";
-        let reply = match limits.rate_limit.map(|limiter| limiter.admit(client)) {
-            Some(Err(wait)) => Reply::Whole(crate::too_many_requests_response(wait)),
+        let admitted = limits.rate_limit.map(|limiter| limiter.admit(client));
+        let reply = match (admitted, streamed_framing, limits.body_streamer) {
+            (Some(Err(wait)), streamed, _) => {
+                keep &= streamed.is_none();
+                Reply::Whole(crate::too_many_requests_response(wait))
+            }
+            (_, Some(framing), Some(streamer)) => {
+                if reader.wants_continue(&request, version, framing) {
+                    let _ = writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+                }
+                let mut body = reader.body_stream(framing, usize::MAX);
+                let response = streamer.answer(&request, &mut body);
+                keep &= body.finish(LEFTOVER_BODY_BYTES);
+                Reply::Whole(response)
+            }
             _ => {
                 let room = limits
                     .memory_budget

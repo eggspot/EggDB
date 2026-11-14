@@ -743,7 +743,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-11, D462).
 - Prometheus query results sent as a stream (D325). **Code written, unbuilt** (code-only mode,
   2026-11-11, D464).
-- Large HTTP request bodies handed to the handler as they arrive (D325).
+- Large HTTP request bodies handed to the handler as they arrive (D325). **Code written, unbuilt** (code-only mode, 2026-11-14,
+  D1164): `eggdb_http::BodyStreamer`, used by S3 `PutObject`.
 - PostgreSQL's function call protocol (D103). **Code written, unbuilt** (code-only mode, 2026-11-11,
   D461).
 - PostgreSQL's network address, geometric, bit string, `money`, `xml` and multirange types (D19). `xml` read as

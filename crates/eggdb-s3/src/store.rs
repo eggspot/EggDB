@@ -6,6 +6,7 @@ const DATA: u8 = b'd';
 const UPLOAD: u8 = b'u';
 const PART: u8 = b'p';
 const PART_DATA: u8 = b'q';
+const STAGED: u8 = b's';
 const CHUNK: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,9 @@ pub(crate) enum StoreError {
     InvalidPart(u32),
     InvalidPartOrder,
     TooLarge,
+    BadDigest,
+    PayloadMismatch,
+    IncompleteBody,
     Storage(String),
 }
 
@@ -170,6 +174,10 @@ fn chunk_key(prefix: &[u8], index: u64) -> Vec<u8> {
     let mut key = prefix.to_vec();
     key.extend_from_slice(&index.to_be_bytes());
     key
+}
+
+fn staged_prefix(staging: &str) -> Vec<u8> {
+    joined(STAGED, &[staging.as_bytes(), b""])
 }
 
 fn upload_key(upload: &str) -> Vec<u8> {
@@ -364,6 +372,121 @@ impl<'k> Store<'k> {
             Ok(())
         })?;
         Ok(info)
+    }
+
+    /// Stores the object whose body `body` gives as it arrives: each 256 KiB piece is written
+    /// to a staging prefix of its own (`staging`, unique per upload) in a short transaction of
+    /// its own, its MD5 and SHA-256 computed on the way; the object then replaces any earlier
+    /// one in one transaction that moves the pieces under the object. A body that ends early,
+    /// passes 1 GiB, or whose digests differ from `expected_md5` or `expected_sha256` leaves
+    /// nothing behind.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn put_object_streamed(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: &mut dyn std::io::Read,
+        content_type: &str,
+        metadata: Vec<(String, String)>,
+        now_ms: u64,
+        staging: &str,
+        expected_md5: Option<[u8; 16]>,
+        expected_sha256: Option<[u8; 32]>,
+    ) -> Result<ObjectInfo> {
+        let staged = staged_prefix(staging);
+        let outcome = self.stage_body(bucket, body, &staged, expected_md5, expected_sha256);
+        let (size, md5, pieces) = match outcome {
+            Ok(staged_body) => staged_body,
+            Err(error) => {
+                let _ = self.write(|keys| delete_prefix(keys, &staged));
+                return Err(error);
+            }
+        };
+        let info = ObjectInfo {
+            size,
+            md5,
+            parts: 0,
+            modified_ms: now_ms,
+            content_type: content_type.to_owned(),
+            metadata,
+        };
+        let moved = self.write(|keys| {
+            if keys.get(&bucket_key(bucket)).map_err(storage)?.is_none() {
+                return Err(StoreError::NoSuchBucket);
+            }
+            let prefix = data_prefix(bucket, key);
+            delete_prefix(keys, &prefix)?;
+            for index in 0..pieces {
+                let from = chunk_key(&staged, index);
+                let piece = keys.get(&from).map_err(storage)?.ok_or(StoreError::IncompleteBody)?;
+                keys.put(&chunk_key(&prefix, index), &piece).map_err(storage)?;
+                keys.delete(&from).map_err(storage)?;
+            }
+            keys.put(&object_key(bucket, key), &info.encode()).map_err(storage)
+        });
+        if let Err(error) = moved {
+            let _ = self.write(|keys| delete_prefix(keys, &staged));
+            return Err(error);
+        }
+        Ok(info)
+    }
+
+    fn stage_body(
+        &self,
+        bucket: &str,
+        body: &mut dyn std::io::Read,
+        staged: &[u8],
+        expected_md5: Option<[u8; 16]>,
+        expected_sha256: Option<[u8; 32]>,
+    ) -> Result<(u64, [u8; 16], u64)> {
+        if !self.bucket_exists(bucket)? {
+            return Err(StoreError::NoSuchBucket);
+        }
+        let mut md5 = eggdb_crypto::Md5::new();
+        let mut sha256 = eggdb_crypto::Sha256::new();
+        let mut piece = vec![0u8; CHUNK];
+        let mut size = 0u64;
+        let mut pieces = 0u64;
+        loop {
+            let mut filled = 0;
+            while filled < CHUNK {
+                match body.read(&mut piece[filled..]) {
+                    Ok(0) => break,
+                    Ok(count) => filled += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => return Err(StoreError::TooLarge),
+                    Err(_) => return Err(StoreError::IncompleteBody),
+                }
+            }
+            if filled == 0 {
+                break;
+            }
+            size += filled as u64;
+            if size > MOST_OBJECT_BYTES {
+                return Err(StoreError::TooLarge);
+            }
+            md5.update(&piece[..filled]);
+            sha256.update(&piece[..filled]);
+            let staged_key = chunk_key(staged, pieces);
+            let bytes = &piece[..filled];
+            self.write(|keys| keys.put(&staged_key, bytes).map_err(storage))?;
+            pieces += 1;
+            if filled < CHUNK {
+                break;
+            }
+        }
+        let md5 = md5.finish();
+        if expected_md5.is_some_and(|expected| expected != md5) {
+            return Err(StoreError::BadDigest);
+        }
+        if expected_sha256.is_some_and(|expected| expected != sha256.finish()) {
+            return Err(StoreError::PayloadMismatch);
+        }
+        Ok((size, md5, pieces))
+    }
+
+    fn bucket_exists(&self, bucket: &str) -> Result<bool> {
+        self.read(|keys| Ok(keys.get(&bucket_key(bucket)).map_err(storage)?.is_some()))
     }
 
     /// The object's description and its stored record, which [`Store::read_object_piece`]

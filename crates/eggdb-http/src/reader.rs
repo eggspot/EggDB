@@ -59,10 +59,17 @@ impl Version {
     }
 }
 
-enum Framing {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Framing {
     Empty,
     Length(usize),
     Chunked,
+}
+
+impl Framing {
+    pub(crate) fn has_body(self) -> bool {
+        !matches!(self, Self::Empty | Self::Length(0))
+    }
 }
 
 pub(crate) struct RequestReader<S> {
@@ -235,16 +242,43 @@ impl<S: RequestSource> RequestReader<S> {
         }
     }
 
+    pub(crate) fn next_head(&mut self) -> Result<(Request, Version, Framing), HttpError> {
+        let head = self.read_head()?;
+        let (request, version) = parse_head(&head)?;
+        check_host(&request, version)?;
+        let framing = framing(&request, version)?;
+        Ok((request, version, framing))
+    }
+
+    pub(crate) fn wants_continue(&self, request: &Request, version: Version, framing: Framing) -> bool {
+        framing.has_body()
+            && version == Version::Http11
+            && self.buffered.is_empty()
+            && request
+                .header("expect")
+                .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"))
+    }
+
     pub(crate) fn next_request(
         &mut self,
         max_body_bytes: usize,
         held: &mut Reservation<'_>,
         on_continue: &mut dyn FnMut(),
     ) -> Result<(Request, Version), HttpError> {
-        let head = self.read_head()?;
-        let (mut request, version) = parse_head(&head)?;
-        check_host(&request, version)?;
-        let framing = framing(&request, version)?;
+        let (request, version, framing) = self.next_head()?;
+        let request = self.read_body(request, version, framing, max_body_bytes, held, on_continue)?;
+        Ok((request, version))
+    }
+
+    pub(crate) fn read_body(
+        &mut self,
+        mut request: Request,
+        version: Version,
+        framing: Framing,
+        max_body_bytes: usize,
+        held: &mut Reservation<'_>,
+        on_continue: &mut dyn FnMut(),
+    ) -> Result<Request, HttpError> {
         let declared = match framing {
             Framing::Empty => 0,
             Framing::Length(length) => length,
@@ -256,14 +290,7 @@ impl<S: RequestSource> RequestReader<S> {
         if !held.hold_if_large(declared) {
             return Err(HttpError::OverMemoryBudget);
         }
-        let expects_body = !matches!(framing, Framing::Empty | Framing::Length(0));
-        if expects_body
-            && version == Version::Http11
-            && self.buffered.is_empty()
-            && request
-                .header("expect")
-                .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"))
-        {
+        if self.wants_continue(&request, version, framing) {
             on_continue();
         }
         request.body = match framing {
@@ -275,7 +302,168 @@ impl<S: RequestSource> RequestReader<S> {
             }
             Framing::Chunked => self.read_chunked_body(max_body_bytes, held)?,
         };
-        Ok((request, version))
+        Ok(request)
+    }
+
+    fn read_some(&mut self, out: &mut [u8]) -> Result<usize, HttpError> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if !self.buffered.is_empty() {
+            let count = out.len().min(self.buffered.len());
+            out[..count].copy_from_slice(&self.buffered[..count]);
+            self.buffered.drain(..count);
+            return Ok(count);
+        }
+        let count = self.source.read(out).map_err(|_| HttpError::Closed)?;
+        if count == 0 {
+            return Err(HttpError::Closed);
+        }
+        Ok(count)
+    }
+
+    pub(crate) fn body_stream(&mut self, framing: Framing, max_body_bytes: usize) -> BodyStream<'_, S> {
+        let state = match framing {
+            Framing::Empty | Framing::Length(0) => BodyState::Done,
+            Framing::Length(length) => BodyState::Length(length),
+            Framing::Chunked => BodyState::ChunkLine,
+        };
+        BodyStream {
+            reader: self,
+            state,
+            read: 0,
+            max_body_bytes,
+        }
+    }
+}
+
+enum BodyState {
+    Length(usize),
+    ChunkLine,
+    Chunk(usize),
+    Done,
+    Failed,
+}
+
+/// A request body read from its connection piece by piece as the handler asks for it, its
+/// `Content-Length` or chunked framing removed, never holding more than the piece being read.
+pub(crate) struct BodyStream<'r, S> {
+    reader: &'r mut RequestReader<S>,
+    state: BodyState,
+    read: usize,
+    max_body_bytes: usize,
+}
+
+impl<S> std::fmt::Debug for BodyStream<'_, S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BodyStream")
+            .field("read", &self.read)
+            .finish_non_exhaustive()
+    }
+}
+
+fn body_error(error: HttpError) -> io::Error {
+    let kind = match error {
+        HttpError::Closed => io::ErrorKind::UnexpectedEof,
+        HttpError::BodyTooLarge | HttpError::TooLarge => io::ErrorKind::FileTooLarge,
+        _ => io::ErrorKind::InvalidData,
+    };
+    io::Error::new(kind, error.to_string())
+}
+
+impl<S: RequestSource> BodyStream<'_, S> {
+    fn next_piece(&mut self, out: &mut [u8]) -> Result<usize, HttpError> {
+        loop {
+            match self.state {
+                BodyState::Done => return Ok(0),
+                BodyState::Failed => return Err(HttpError::Malformed),
+                BodyState::Length(0) => self.state = BodyState::Done,
+                BodyState::Length(left) => {
+                    let wanted = out.len().min(left);
+                    let count = self.reader.read_some(&mut out[..wanted])?;
+                    self.state = BodyState::Length(left - count);
+                    return Ok(count);
+                }
+                BodyState::ChunkLine => {
+                    let line = self.reader.take_line(MAX_CHUNK_LINE_BYTES)?;
+                    let size = chunk_size(&line)?;
+                    if size == 0 {
+                        self.skip_trailers()?;
+                        self.state = BodyState::Done;
+                    } else {
+                        self.state = BodyState::Chunk(size);
+                    }
+                }
+                BodyState::Chunk(0) => {
+                    self.reader.take_crlf()?;
+                    self.state = BodyState::ChunkLine;
+                }
+                BodyState::Chunk(left) => {
+                    let wanted = out.len().min(left);
+                    let count = self.reader.read_some(&mut out[..wanted])?;
+                    self.state = BodyState::Chunk(left - count);
+                    return Ok(count);
+                }
+            }
+        }
+    }
+
+    fn skip_trailers(&mut self) -> Result<(), HttpError> {
+        let mut trailer_bytes = 0usize;
+        let mut trailers = 0usize;
+        loop {
+            let line = self.reader.take_line(MAX_HEAD_BYTES)?;
+            if line.is_empty() {
+                return Ok(());
+            }
+            trailer_bytes += line.len() + 2;
+            trailers += 1;
+            if trailer_bytes > MAX_HEAD_BYTES || trailers > MAX_HEADERS {
+                return Err(HttpError::TooLarge);
+            }
+        }
+    }
+
+    /// Reads and drops what is left of the body, at most `most_bytes`: true when the body
+    /// ended, so the connection can serve its next request.
+    pub(crate) fn finish(&mut self, most_bytes: usize) -> bool {
+        let mut sink = [0u8; READ_BYTES];
+        let mut dropped = 0usize;
+        loop {
+            match self.next_piece(&mut sink) {
+                Ok(0) => return matches!(self.state, BodyState::Done),
+                Ok(count) => {
+                    dropped += count;
+                    if dropped > most_bytes {
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+}
+
+impl<S: RequestSource> Read for BodyStream<'_, S> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        match self.next_piece(out) {
+            Ok(count) => {
+                self.read = self.read.saturating_add(count);
+                if self.read > self.max_body_bytes {
+                    self.state = BodyState::Failed;
+                    return Err(body_error(HttpError::BodyTooLarge));
+                }
+                Ok(count)
+            }
+            Err(error) => {
+                self.state = BodyState::Failed;
+                Err(body_error(error))
+            }
+        }
     }
 }
 
