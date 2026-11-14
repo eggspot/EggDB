@@ -1193,3 +1193,4 @@ its full title with its status.
 - [D1166](decisions/D1166.md) Code-only batch 817 (M6a): JSON_TABLE's PLAN DEFAULT (OUTER | INNER, UNION | CROSS)
 - [D1167](decisions/D1167.md) Code-only batch 818 (M6a): json(b)_populate_record in a select list and in expressions
 - [D1168](decisions/D1168.md) Code-only batch 819 (M6a): pg_cast lists PostgreSQL's built-in casts
+- [D1169](decisions/D1169.md) Code-only batch 820 (M6a): Tables, their indexes and identity sequences keep their OIDs across renames

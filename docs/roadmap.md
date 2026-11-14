@@ -788,7 +788,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D856).
 - The catalog: `tableoid` and the other system columns, `pg_cast` rows, composite types'
   `typrelid`, `information_schema.routines` and `parameters`, OIDs kept across renames (D129, D131). `pg_cast` rows:
-  **code written, unbuilt** (code-only mode, 2026-11-14, D1168).
+  **code written, unbuilt** (code-only mode, 2026-11-14, D1168); OIDs kept across renames: **code written,
+  unbuilt** (code-only mode, 2026-11-14, D1169).
 - pgAdmin, DBeaver and SSMS run in CI, moving from "expected to work" to supported (D12, D163).
 - SQLAlchemy's dialect suite: `relkind` `m` for materialized views in `pg_class`, `nextval` of a
   `SERIAL` column's sequence, two identity columns in one table and identity

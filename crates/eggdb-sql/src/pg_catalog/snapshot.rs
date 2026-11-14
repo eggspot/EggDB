@@ -508,12 +508,25 @@ fn user_schema_names(reader: &dyn KeyValueRead) -> SqlResult<Vec<String>> {
     Ok(names)
 }
 
-fn relation_request(kind: RelationKind, owner: &str, internal: &str) -> OidRequest {
-    OidRequest {
-        kind: kind.code().as_bytes()[0],
-        owner: owner.to_owned(),
-        name: internal.to_owned(),
+fn relation_request(entry: &PendingRelation) -> OidRequest {
+    match &entry.stable_key {
+        Some(key) => OidRequest {
+            kind: entry.kind.code().as_bytes()[0],
+            owner: STABLE_OWNER.to_owned(),
+            name: key.clone(),
+        },
+        None => OidRequest {
+            kind: entry.kind.code().as_bytes()[0],
+            owner: entry.owner.clone(),
+            name: entry.internal.clone(),
+        },
     }
+}
+
+const STABLE_OWNER: &str = "\u{1}stable";
+
+fn table_key(table: &TableDefinition) -> String {
+    format!("table {}", table.id)
 }
 
 struct PendingRelation {
@@ -523,6 +536,7 @@ struct PendingRelation {
     kind: RelationKind,
     owner: String,
     source: RelationSource,
+    stable_key: Option<String>,
 }
 
 fn implicit_identity_sequences(
@@ -585,6 +599,7 @@ fn implicit_identity_sequences(
                     is_called: furthest.is_some(),
                     owned_by: Some(owned),
                 })),
+                stable_key: Some(format!("identity sequence {index} of {}", table_key(table))),
             });
         }
     }
@@ -653,6 +668,7 @@ impl CatalogSnapshot {
                 kind: RelationKind::Table,
                 owner: String::new(),
                 source: RelationSource::Table(Arc::clone(&table)),
+                stable_key: Some(table_key(&table)),
             });
             if !table.primary_key.is_empty() {
                 let name = table.primary_key_constraint_name();
@@ -666,6 +682,7 @@ impl CatalogSnapshot {
                         table: table_at,
                         index: IndexSource::Primary,
                     },
+                    stable_key: Some(format!("primary key of {}", table_key(&table))),
                 });
             }
             for (position, index) in table.indexes.iter().enumerate() {
@@ -679,6 +696,7 @@ impl CatalogSnapshot {
                         table: table_at,
                         index: IndexSource::Secondary(position),
                     },
+                    stable_key: Some(format!("index {} of {}", index.id, table_key(&table))),
                 });
             }
         }
@@ -693,6 +711,7 @@ impl CatalogSnapshot {
                 kind: RelationKind::View,
                 owner: String::new(),
                 source: RelationSource::View(Arc::new(view)),
+                stable_key: None,
             });
         }
         for (name, sequence) in crate::sequences::every_sequence(reader)? {
@@ -706,6 +725,7 @@ impl CatalogSnapshot {
                 kind: RelationKind::Sequence,
                 owner: String::new(),
                 source: RelationSource::Sequence(Box::new(sequence)),
+                stable_key: None,
             });
         }
         let implicit = implicit_identity_sequences(reader, &pending);
@@ -714,7 +734,7 @@ impl CatalogSnapshot {
             Space::Relation,
             &pending
                 .iter()
-                .map(|entry| relation_request(entry.kind, &entry.owner, &entry.internal))
+                .map(relation_request)
                 .collect::<Vec<_>>(),
         );
         let namespace_of = |schema: &str| {

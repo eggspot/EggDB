@@ -1409,3 +1409,20 @@ fn pg_cast_lists_the_built_in_casts_with_their_contexts() {
     );
     assert!(last(&mut session, "SELECT count(DISTINCT oid) = count(*) FROM pg_cast").contains('t'));
 }
+
+#[test]
+fn renaming_a_table_keeps_the_oids_of_the_table_its_indexes_and_its_identity() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(
+        &mut session,
+        "CREATE TABLE ledger (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, code text)",
+    );
+    last(&mut session, "CREATE INDEX ledger_code ON ledger (code)");
+    let query = "SELECT c.oid FROM pg_class c WHERE c.oid = 'TABLE'::regclass OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'TABLE'::regclass) OR c.oid = pg_get_serial_sequence('TABLE', 'id')::regclass ORDER BY c.oid";
+    let before = last(&mut session, &for_table(query, "ledger"));
+    assert_eq!(rows_of(&before).len(), 4);
+    last(&mut session, "ALTER TABLE ledger RENAME TO journal");
+    let after = last(&mut session, &for_table(query, "journal"));
+    assert_eq!(rows_of(&after), rows_of(&before));
+}
