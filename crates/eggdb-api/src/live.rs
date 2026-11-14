@@ -1,16 +1,17 @@
-//! Live queries over Server-Sent Events (D878): the query runs again every interval and its
-//! result is sent as an event whenever it differs from the last one sent, until the client
-//! goes away. A comment line every 15 seconds keeps proxies from closing a quiet stream and
-//! finds clients that left.
+//! Live queries over Server-Sent Events (D878): the query runs again when the database has
+//! committed a change since its last run (checked every interval, D1178) and its result is
+//! sent as an event whenever it differs from the last one sent, until the client goes away.
+//! A comment line every 15 seconds keeps proxies from closing a quiet stream and finds clients
+//! that left.
 
 use crate::{Endpoint, rows_json};
 use eggdb_http::{BodyWriter, Reply, Request, StreamedResponse};
-use eggdb_sql::KeyValueStore;
+use eggdb_sql::{KeyValueRead, KeyValueStore};
 use std::io::{self, Write};
 use std::time::Duration;
 
 const HEARTBEAT: Duration = Duration::from_secs(15);
-const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_INTERVAL: Duration = Duration::from_millis(250);
 const MIN_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -66,6 +67,27 @@ pub(crate) fn write_event(out: &mut BodyWriter<'_>, event: &str, data: &str) -> 
 pub(crate) enum Polled {
     Result(String),
     Failed(String),
+    Unchanged,
+}
+
+/// A poll that runs `poll` only when the store's committed version moved since its last run,
+/// so a live query costs a version check, not a query, while nothing changes. A store that
+/// does not tell its version runs `poll` every time.
+pub(crate) fn on_change<'p>(
+    mut version: impl FnMut() -> Option<u64> + 'p,
+    mut poll: impl FnMut() -> Polled + 'p,
+) -> impl FnMut() -> Polled + 'p {
+    let mut seen: Option<u64> = None;
+    let mut ran = false;
+    move || {
+        let now = version();
+        if ran && now.is_some() && now == seen {
+            return Polled::Unchanged;
+        }
+        ran = true;
+        seen = now;
+        poll()
+    }
 }
 
 /// A streamed reply that calls `poll` every interval and sends its result as a `result_event`
@@ -99,6 +121,7 @@ pub(crate) fn live_reply<'s>(
                     }
                     return Ok(());
                 }
+                Polled::Unchanged => {}
             }
             if options.max_events.is_some_and(|max| sent >= max) {
                 if let Some(closing) = closing_event {
@@ -120,11 +143,22 @@ pub(crate) fn live_reply<'s>(
 }
 
 impl<'s, S: KeyValueStore> Endpoint<'s, S> {
+    /// The committed version the store's next read sees, when the store tells it.
+    pub(crate) fn committed_version(&self) -> Option<u64> {
+        self.store.begin_read().ok().and_then(|read| read.committed_version())
+    }
+
     /// A table read kept open: `sql`'s rows as a JSON array in a `rows` event each time they
     /// change.
     pub(crate) fn live_rows(&self, sql: String, options: LiveOptions) -> Reply<'s> {
+        live_reply(options, "rows", "error", None, self.rows_poller(sql))
+    }
+
+    /// What re-runs `sql` when the database changed: its rows as a JSON array, or the error.
+    pub(crate) fn rows_poller(&self, sql: String) -> impl FnMut() -> Polled + 's {
         let endpoint = self.copy();
-        live_reply(options, "rows", "error", None, move || match endpoint.run(&sql) {
+        let versions = self.copy();
+        on_change(move || versions.committed_version(), move || match endpoint.run(&sql) {
             Ok(results) => Polled::Result(
                 results
                     .iter()

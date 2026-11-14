@@ -797,3 +797,91 @@ fn grpc_serves_each_table_as_a_service() {
     let unknown = grpc_call(&api, "Rename", &[]);
     assert_eq!(grpc_status(&unknown), "12");
 }
+
+fn masked_text(text: &str) -> Vec<u8> {
+    let mask = [0x11, 0x22, 0x33, 0x44];
+    let payload = text.as_bytes();
+    let mut frame = vec![0x81];
+    if payload.len() < 126 {
+        frame.push(0x80 | payload.len() as u8);
+    } else {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    }
+    frame.extend_from_slice(&mask);
+    frame.extend(payload.iter().enumerate().map(|(at, byte)| byte ^ mask[at % 4]));
+    frame
+}
+
+fn websocket_session(endpoint: &Endpoint<'_, MemoryStore>, path: &str, protocol: &str, messages: &[&str]) -> String {
+    let request = Request {
+        method: "GET".to_owned(),
+        path: path.to_owned(),
+        query: None,
+        headers: vec![
+            (
+                "authorization".to_owned(),
+                format!("Basic {}", eggdb_crypto::base64_encode(b"eggdb:secret")),
+            ),
+            ("upgrade".to_owned(), "websocket".to_owned()),
+            ("connection".to_owned(), "Upgrade".to_owned()),
+            ("sec-websocket-version".to_owned(), "13".to_owned()),
+            ("sec-websocket-key".to_owned(), "dGhlIHNhbXBsZSBub25jZQ==".to_owned()),
+            ("sec-websocket-protocol".to_owned(), protocol.to_owned()),
+        ],
+        body: Vec::new(),
+    };
+    let eggdb_http::Reply::Upgraded(upgrade) = endpoint.reply(&request) else {
+        panic!("{path} did not switch to a WebSocket");
+    };
+    assert!(upgrade.headers.iter().any(|(name, value)| name == "Sec-WebSocket-Accept" && value == "s3pPLMBiTxaQ9kYGzzhZRp1zmrE="));
+    let input: Vec<u8> = messages.iter().flat_map(|message| masked_text(message)).collect();
+    let mut reader = std::io::Cursor::new(input);
+    let mut written = Vec::new();
+    (upgrade.run)(&mut reader, &mut written).unwrap();
+    String::from_utf8_lossy(&written).into_owned()
+}
+
+#[test]
+fn graphql_and_live_rows_subscribe_over_websockets() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE books (id integer PRIMARY KEY, title text NOT NULL)",
+        "INSERT INTO books VALUES (1, 'Engines'), (2, 'Notes')",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let graphql = websocket_session(
+        &endpoint,
+        "/graphql",
+        "graphql-transport-ws",
+        &[
+            "{\"type\":\"connection_init\"}",
+            "{\"type\":\"subscribe\",\"id\":\"s1\",\"payload\":{\"query\":\"subscription { books(order_by: {id: asc}) { title } }\"}}",
+        ],
+    );
+    assert!(graphql.contains("{\"type\":\"connection_ack\"}"), "{graphql}");
+    assert!(
+        graphql.contains("{\"type\":\"next\",\"id\":\"s1\",\"payload\":{\"data\":{\"books\":[{\"title\":\"Engines\"},{\"title\":\"Notes\"}]}}}"),
+        "{graphql}"
+    );
+    let early = websocket_session(
+        &endpoint,
+        "/graphql",
+        "graphql-transport-ws",
+        &["{\"type\":\"subscribe\",\"id\":\"s1\",\"payload\":{\"query\":\"subscription { books { title } }\"}}"],
+    );
+    assert!(early.as_bytes().windows(2).any(|pair| pair == [0x88, 0x02]), "{early:?}");
+    let rows = websocket_session(
+        &endpoint,
+        "/realtime",
+        "eggdb-live",
+        &["{\"type\":\"subscribe\",\"id\":\"r1\",\"path\":\"/books?select=title&order=id.desc\"}"],
+    );
+    assert!(
+        rows.contains("{\"type\":\"rows\",\"id\":\"r1\",\"rows\":[{\"title\":\"Notes\"},{\"title\":\"Engines\"}]}"),
+        "{rows}"
+    );
+}

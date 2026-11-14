@@ -70,6 +70,10 @@ enum Relationship {
     Array(ForeignKey),
 }
 
+fn errors_array(message: &str) -> String {
+    format!("[{{\"message\":{}}}]", json_string(message))
+}
+
 fn errors_json(message: &str, code: &str) -> String {
     format!(
         "{{\"errors\":[{{\"message\":{},\"extensions\":{{\"code\":{},\"path\":\"$\"}}}}]}}",
@@ -1125,22 +1129,12 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 )
                 .into();
             }
-            let endpoint = self.copy();
             return crate::live::live_reply(
                 crate::live::LiveOptions::of(request),
                 "next",
                 "next",
                 Some("complete"),
-                move || {
-                    let Some(operation) = prepared.document.operations.get(prepared.operation) else {
-                        return Polled::Failed(errors_json("the operation is missing", "validation-failed"));
-                    };
-                    let mut context = prepared.context();
-                    match endpoint.run_query(&mut context, &operation.selections) {
-                        Ok(data) => Polled::Result(format!("{{\"data\":{data}}}")),
-                        Err((message, code)) => Polled::Failed(errors_json(&message, &code)),
-                    }
-                },
+                self.prepared_poller(prepared),
             );
         }
         let mut context = prepared.context();
@@ -1151,6 +1145,53 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         match outcome {
             Ok(data) => json(200, format!("{{\"data\":{data}}}")).into(),
             Err((message, code)) => graphql_errors(&message, &code).into(),
+        }
+    }
+
+    fn prepared_poller(&self, prepared: Prepared) -> impl FnMut() -> Polled + 's {
+        let endpoint = self.copy();
+        let versions = self.copy();
+        crate::live::on_change(
+            move || versions.committed_version(),
+            move || {
+                let Some(operation) = prepared.document.operations.get(prepared.operation) else {
+                    return Polled::Failed(errors_json("the operation is missing", "validation-failed"));
+                };
+                let mut context = prepared.context();
+                match endpoint.run_query(&mut context, &operation.selections) {
+                    Ok(data) => Polled::Result(format!("{{\"data\":{data}}}")),
+                    Err((message, code)) => Polled::Failed(errors_json(&message, &code)),
+                }
+            },
+        )
+    }
+
+    /// What re-runs the subscription or query in `payload` (a JSON object with `query`, and
+    /// optionally `variables` and `operationName`) when the database changed, for a WebSocket
+    /// subscription; the errors as a JSON array when the payload is not a valid operation, or
+    /// is a mutation.
+    pub(crate) fn graphql_poller(&self, payload: &str) -> Result<Box<dyn FnMut() -> Polled + 's>, String> {
+        let request = Request {
+            method: "POST".to_owned(),
+            path: "/graphql".to_owned(),
+            query: None,
+            headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+            body: payload.as_bytes().to_vec(),
+        };
+        let prepared = match self.prepare_graphql(&request) {
+            Ok(prepared) => prepared,
+            Err(response) => {
+                let body = String::from_utf8(response.body).unwrap_or_default();
+                return Err(body
+                    .strip_prefix("{\"errors\":")
+                    .and_then(|rest| rest.strip_suffix('}'))
+                    .map_or_else(|| errors_array("the operation is not valid"), str::to_owned));
+            }
+        };
+        match prepared.document.operations.get(prepared.operation).map(|operation| operation.kind) {
+            Some(OperationKind::Mutation) => Err(errors_array("a mutation is sent as a request, not a subscription")),
+            Some(_) => Ok(Box::new(self.prepared_poller(prepared))),
+            None => Err(errors_array("the operation is missing")),
         }
     }
 

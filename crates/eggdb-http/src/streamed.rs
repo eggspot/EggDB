@@ -1,6 +1,6 @@
 use crate::Response;
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 /// The bytes a streamed body gathers before it sends them as one chunk.
 pub const STREAM_CHUNK_BYTES: usize = 16 * 1024;
@@ -179,22 +179,87 @@ impl<'a> StreamedResponse<'a> {
     }
 }
 
-/// What a handler answers: a whole [`Response`], or a [`StreamedResponse`] written as it is
-/// produced.
+/// What runs on a connection after `101 Switching Protocols`: it reads the client's bytes and
+/// writes its own until the protocol ends, and the connection then closes. A read that finds
+/// nothing yet fails with `WouldBlock`, so the protocol can do other work while it waits.
+pub type UpgradedProtocol<'a> = Box<dyn FnOnce(&mut dyn Read, &mut dyn Write) -> io::Result<()> + 'a>;
+
+/// A switch of the connection to another protocol (RFC 9110, section 7.8), such as a
+/// WebSocket: the server sends `101 Switching Protocols` with `Upgrade: protocol`,
+/// `Connection: Upgrade` and `headers`, then hands the connection to `run`.
+pub struct Upgrade<'a> {
+    /// The protocol named in the `Upgrade` header.
+    pub protocol: String,
+    /// More header fields of the `101` response.
+    pub headers: Vec<(String, String)>,
+    /// What runs on the connection after the switch.
+    pub run: UpgradedProtocol<'a>,
+}
+
+impl fmt::Debug for Upgrade<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Upgrade")
+            .field("protocol", &self.protocol)
+            .field("headers", &self.headers)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> Upgrade<'a> {
+    /// A switch to `protocol` that runs `run` on the connection.
+    pub fn new(
+        protocol: &str,
+        run: impl FnOnce(&mut dyn Read, &mut dyn Write) -> io::Result<()> + 'a,
+    ) -> Self {
+        Self {
+            protocol: protocol.to_owned(),
+            headers: Vec::new(),
+            run: Box::new(run),
+        }
+    }
+
+    /// The same switch with header `name: value` added to its `101` response; values with
+    /// line breaks are dropped.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        if !value.contains(['\r', '\n']) && !name.contains(['\r', '\n', ':']) {
+            self.headers.push((name.to_owned(), value.to_owned()));
+        }
+        self
+    }
+}
+
+/// What a handler answers: a whole [`Response`], a [`StreamedResponse`] written as it is
+/// produced, or an [`Upgrade`] to another protocol.
 #[derive(Debug)]
 pub enum Reply<'a> {
     /// A response whose body is complete, sent with `Content-Length`.
     Whole(Response),
     /// A response whose body is written in chunks as it is produced.
     Streamed(StreamedResponse<'a>),
+    /// A switch of the connection to another protocol.
+    Upgraded(Upgrade<'a>),
 }
 
 impl Reply<'_> {
-    /// The reply as one whole [`Response`], collecting a streamed body into memory.
+    /// The reply as one whole [`Response`], collecting a streamed body into memory; an
+    /// upgrade becomes its `101` response without running the protocol.
     pub fn into_response(self) -> Response {
         match self {
             Self::Whole(response) => response,
             Self::Streamed(streamed) => streamed.collected(),
+            Self::Upgraded(upgrade) => {
+                let mut headers = vec![
+                    ("Upgrade".to_owned(), upgrade.protocol),
+                    ("Connection".to_owned(), "Upgrade".to_owned()),
+                ];
+                headers.extend(upgrade.headers);
+                Response {
+                    status: 101,
+                    content_type: String::new(),
+                    body: Vec::new(),
+                    headers,
+                }
+            }
         }
     }
 }

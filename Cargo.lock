@@ -349,6 +349,7 @@ name = "eggdb-http"
 version = "0.5.0"
 dependencies = [
  "eggdb-content",
+ "eggdb-crypto",
  "eggdb-platform",
  "eggdb-tls",
 ]

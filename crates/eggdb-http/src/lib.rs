@@ -22,10 +22,16 @@ mod rate_limit;
 mod reader;
 mod socket;
 mod streamed;
+mod websocket;
 
 pub use client::{ClientResponse, HttpTarget, host_header, parse_http_url, post, request};
 pub use rate_limit::{RateLimiter, too_many_requests_response};
-pub use streamed::{BodyProducer, BodyWriter, Reply, STREAM_CHUNK_BYTES, StreamedResponse};
+pub use streamed::{
+    BodyProducer, BodyWriter, Reply, STREAM_CHUNK_BYTES, StreamedResponse, Upgrade, UpgradedProtocol,
+};
+pub use websocket::{
+    WebSocket, WebSocketMessage, wants_websocket, websocket_accept_key, websocket_reply,
+};
 
 use connection::ConnectionHeader;
 use eggdb_platform::connection_limits::{MemoryBudget, Reservation};

@@ -85,6 +85,10 @@ impl<S: RequestSource> RequestReader<S> {
         }
     }
 
+    pub(crate) fn take_buffered(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buffered)
+    }
+
     fn fill(&mut self) -> Result<(), HttpError> {
         let mut chunk = [0u8; READ_BYTES];
         let count = self

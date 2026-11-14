@@ -89,6 +89,7 @@ enum Phase {
     Waiting,
     Head,
     Body,
+    Upgraded,
 }
 
 struct ConnectionStream<'s> {
@@ -101,6 +102,10 @@ struct ConnectionStream<'s> {
 }
 
 impl ConnectionStream<'_> {
+    fn upgraded(&mut self) {
+        self.phase = Phase::Upgraded;
+    }
+
     fn wait_for_request(&mut self, timeout: Duration) {
         self.phase = Phase::Waiting;
         self.deadline = deadline_after(timeout);
@@ -125,7 +130,7 @@ impl ConnectionStream<'_> {
 impl Read for ConnectionStream<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         loop {
-            if Instant::now() >= self.deadline {
+            if self.phase != Phase::Upgraded && Instant::now() >= self.deadline {
                 return Err(io::ErrorKind::TimedOut.into());
             }
             match self.stream.read(buffer) {
@@ -143,7 +148,7 @@ impl Read for ConnectionStream<'_> {
                             | io::ErrorKind::Interrupted
                     ) =>
                 {
-                    if (self.stop)() {
+                    if self.phase == Phase::Upgraded || (self.stop)() {
                         return Err(error);
                     }
                 }
@@ -345,6 +350,24 @@ fn linger(source: &mut ConnectionStream<'_>, writer: &Socket) {
 
 const LEFTOVER_BODY_BYTES: usize = 64 * 1024;
 
+struct UpgradedReader<'r, R: Read> {
+    early: Vec<u8>,
+    at: usize,
+    source: &'r mut R,
+}
+
+impl<R: Read> Read for UpgradedReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.at < self.early.len() {
+            let count = buffer.len().min(self.early.len() - self.at);
+            buffer[..count].copy_from_slice(&self.early[self.at..self.at + count]);
+            self.at += count;
+            return Ok(count);
+        }
+        self.source.read(buffer)
+    }
+}
+
 pub(crate) fn serve_connection<'h>(
     stream: TcpStream,
     client: std::net::IpAddr,
@@ -471,6 +494,29 @@ pub(crate) fn serve_connection<'h>(
                 let connection = ConnectionHeader::of(version, keep);
                 write_whole(&mut paced, &response, head_only, connection).is_ok()
                     && connection.keeps()
+            }
+            Reply::Upgraded(upgrade) => {
+                held.resize(0);
+                let mut head = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: {}\r\nConnection: Upgrade\r\n",
+                    upgrade.protocol
+                );
+                for (name, value) in &upgrade.headers {
+                    head.push_str(&format!("{name}: {value}\r\n"));
+                }
+                head.push_str("\r\n");
+                if writer.write_all(head.as_bytes()).is_err() || writer.flush().is_err() {
+                    return;
+                }
+                let early = reader.take_buffered();
+                reader.source.upgraded();
+                let mut source = UpgradedReader {
+                    early,
+                    at: 0,
+                    source: &mut reader.source,
+                };
+                let _ = (upgrade.run)(&mut source, &mut writer);
+                return;
             }
             Reply::Streamed(streamed) => {
                 let body_bytes = if head_only { 0 } else { streamed.held_bytes };

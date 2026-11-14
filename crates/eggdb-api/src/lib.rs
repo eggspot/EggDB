@@ -19,6 +19,7 @@ mod graphql_execute;
 mod graphql_schema;
 mod grpc;
 mod live;
+mod live_ws;
 mod odata;
 mod ogc;
 mod ogc_tiles;
@@ -410,6 +411,13 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
         if path == "odata" || path.starts_with("odata/") {
             return self.odata(path["odata".len()..].trim_start_matches('/'), request).into();
+        }
+        if eggdb_http::wants_websocket(request) {
+            return match path {
+                "graphql" | "v1/graphql" => self.graphql_websocket(request),
+                "realtime" => self.live_websocket(request),
+                _ => failure(404, "PGRST125", "WebSockets are served at /graphql and /realtime").into(),
+            };
         }
         if path == "graphql" || path == "v1/graphql" {
             return self.graphql(request);
