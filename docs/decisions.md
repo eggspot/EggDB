@@ -1200,3 +1200,4 @@ its full title with its status.
 - [D1173](decisions/D1173.md) Code-only batch 825 (M6a): Identity and serial sequences answer nextval and setval, any number of identities with any options, bound frame offsets
 - [D1174](decisions/D1174.md) Code-only batch 826 (M6a): Temporary tables move with USE, and session locks stay held where they were taken
 - [D1175](decisions/D1175.md) Code-only batch 827 (M6a): GraphQL nested inserts at any depth with on_conflict at every level
+- [D1176](decisions/D1176.md) Code-only batch 828 (M6a): OData $batch (multipart and JSON, atomic change sets) and options inside $expand

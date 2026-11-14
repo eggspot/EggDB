@@ -321,16 +321,48 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             )
     }
 
-    fn run(&self, sql: &str) -> Result<Vec<QueryResult>, eggdb_sql::SqlError> {
+    fn session(&self) -> Result<Session<'s>, eggdb_sql::SqlError> {
         let mut session = Session::with_dialect(self.store, Dialect::PostgreSql);
         session.identify(&self.user, &self.database);
         session.set_protocol("rest");
         if let Some(claims) = &self.claims {
             session.execute(&format!("SELECT set_config('request.jwt.claims', {}, false)", literal(claims)), &mut |_| {})?;
         }
+        Ok(session)
+    }
+
+    fn run(&self, sql: &str) -> Result<Vec<QueryResult>, eggdb_sql::SqlError> {
+        let mut session = self.session()?;
         let mut results = Vec::new();
         session.execute(sql, &mut |result| results.push(result))?;
         Ok(results)
+    }
+
+    fn atomically<T>(
+        &self,
+        body: impl FnOnce(&mut dyn FnMut(&str) -> Result<Vec<QueryResult>, eggdb_sql::SqlError>) -> Result<T, Response>,
+    ) -> Result<T, Response> {
+        let failed = |error: eggdb_sql::SqlError| failure(500, error.state().code(), &error.to_string());
+        let mut session = self.session().map_err(failed)?;
+        session.execute("BEGIN", &mut |_| {}).map_err(failed)?;
+        let outcome = {
+            let mut execute = |sql: &str| -> Result<Vec<QueryResult>, eggdb_sql::SqlError> {
+                let mut results = Vec::new();
+                session.execute(sql, &mut |result| results.push(result))?;
+                Ok(results)
+            };
+            body(&mut execute)
+        };
+        match outcome {
+            Ok(value) => {
+                session.execute("COMMIT", &mut |_| {}).map_err(failed)?;
+                Ok(value)
+            }
+            Err(response) => {
+                let _ = session.execute("ROLLBACK", &mut |_| {});
+                Err(response)
+            }
+        }
     }
 
     /// Answers one HTTP request with its whole response in memory.

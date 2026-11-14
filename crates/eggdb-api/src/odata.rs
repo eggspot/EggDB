@@ -2,8 +2,10 @@
 //! other OData consumers: the service document, `$metadata` in CSDL XML, entity sets with
 //! `$filter`, `$select`, `$orderby`, `$top`, `$skip` and `$count`, server-driven paging with
 //! `@odata.nextLink`, entities by key, `$count` segments, navigation properties from foreign
-//! keys with `$expand`, and inserts, updates and deletes.
+//! keys with `$expand` and its nested options, inserts, updates and deletes, and `$batch`.
 //! Every request runs as SQL in the signed-in user's session. OData is a standard of OASIS.
+
+mod batch;
 
 use crate::request::{identifier, literal, percent_decode};
 use crate::{Endpoint, json_literal, json_string, value_json};
@@ -29,6 +31,13 @@ struct Navigation {
     many: bool,
     from: Vec<String>,
     to: Vec<String>,
+}
+
+struct Resolved<'a> {
+    set: &'a EntitySet,
+    target: String,
+    key: Option<String>,
+    tail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -718,23 +727,79 @@ fn projected(set: &EntitySet, columns: &[&Property], row: &[Value]) -> Vec<Value
         .collect()
 }
 
-fn expand_names<'s>(set: &'s EntitySet, text: Option<&str>) -> Result<Vec<&'s Navigation>, String> {
+const MAX_EXPAND_DEPTH: usize = 8;
+const EXPAND_OPTIONS: [&str; 7] = ["$select", "$filter", "$orderby", "$top", "$skip", "$count", "$expand"];
+
+struct Expansion<'s> {
+    navigation: &'s Navigation,
+    options: Vec<(String, String)>,
+}
+
+fn split_outside_parentheses(text: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut start = 0;
+    for (at, character) in text.char_indices() {
+        match character {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth = depth.saturating_sub(1),
+            found if found == separator && depth == 0 && !quoted => {
+                parts.push(&text[start..at]);
+                start = at + found.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+fn expand_items<'s>(set: &'s EntitySet, text: Option<&str>) -> Result<Vec<Expansion<'s>>, String> {
     let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
         return Ok(Vec::new());
     };
-    if text.contains('(') {
-        return Err("options inside $expand are not supported yet".to_owned());
-    }
     if text == "*" {
-        return Ok(set.navigations.iter().collect());
+        return Ok(set
+            .navigations
+            .iter()
+            .map(|navigation| Expansion {
+                navigation,
+                options: Vec::new(),
+            })
+            .collect());
     }
-    text.split(',')
+    split_outside_parentheses(text, ',')
+        .into_iter()
         .map(str::trim)
-        .map(|name| {
-            set.navigations
+        .map(|item| {
+            let (name, inside) = match item.find('(') {
+                Some(open) => {
+                    let inside = item[open + 1..]
+                        .strip_suffix(')')
+                        .ok_or_else(|| format!("'{item}' does not close its options"))?;
+                    (item[..open].trim(), inside)
+                }
+                None => (item, ""),
+            };
+            let navigation = set
+                .navigations
                 .iter()
                 .find(|navigation| navigation.name == name)
-                .ok_or_else(|| format!("Could not find a navigation property named '{name}' on type '{}'.", set.name))
+                .ok_or_else(|| format!("Could not find a navigation property named '{name}' on type '{}'.", set.name))?;
+            let mut options = Vec::new();
+            for option in split_outside_parentheses(inside, ';').into_iter().map(str::trim).filter(|option| !option.is_empty()) {
+                let (key, value) = option
+                    .split_once('=')
+                    .ok_or_else(|| format!("'{option}' inside $expand is not an option"))?;
+                let key = key.trim();
+                if !EXPAND_OPTIONS.iter().any(|known| known.eq_ignore_ascii_case(key)) {
+                    return Err(format!("'{key}' is not an option OData allows inside $expand"));
+                }
+                options.push((key.to_owned(), value.trim().to_owned()));
+            }
+            Ok(Expansion { navigation, options })
         })
         .collect()
 }
@@ -842,13 +907,42 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         Ok(sets)
     }
 
-    fn expansions(&self, set: &EntitySet, sets: &[EntitySet], navigations: &[&Navigation], rows: &[Vec<Value>]) -> Result<Vec<Vec<String>>, eggdb_sql::SqlError> {
+    fn expansions(
+        &self,
+        set: &EntitySet,
+        sets: &[EntitySet],
+        expanded: &[Expansion<'_>],
+        rows: &[Vec<Value>],
+        depth: usize,
+    ) -> Result<Vec<Vec<String>>, Response> {
+        let bad = |message: String| odata_error(400, "BadRequest", &message);
+        if depth > MAX_EXPAND_DEPTH && !expanded.is_empty() {
+            return Err(bad(format!("$expand nests at most {MAX_EXPAND_DEPTH} levels")));
+        }
         let mut members: Vec<Vec<String>> = vec![Vec::new(); rows.len()];
         let schema = identifier(&self.schema).unwrap_or_else(|| "\"public\"".to_owned());
-        for navigation in navigations {
+        for expansion in expanded {
+            let navigation = expansion.navigation;
             let Some(target) = sets.iter().find(|candidate| candidate.name == navigation.target) else {
                 continue;
             };
+            let options = &expansion.options;
+            let columns = select_columns(target, option(options, "$select")).map_err(bad)?;
+            let nested = expand_items(target, option(options, "$expand")).map_err(bad)?;
+            let filter = match option(options, "$filter") {
+                Some(text) => format!(" AND ({})", filter_sql(target, text).map_err(bad)?),
+                None => String::new(),
+            };
+            let order = match option(options, "$orderby") {
+                Some(text) => order_sql(target, text).map_err(bad)?,
+                None => {
+                    let keys: Vec<String> = target.key_columns().iter().filter_map(|property| identifier(&property.name)).collect();
+                    if keys.is_empty() { String::new() } else { format!(" ORDER BY {}", keys.join(", ")) }
+                }
+            };
+            let top = whole_number(options, "$top").map_err(bad)?;
+            let skip = whole_number(options, "$skip").map_err(bad)?.unwrap_or(0);
+            let counted = option(options, "$count").is_some_and(|value| value.eq_ignore_ascii_case("true"));
             let positions: Vec<Option<usize>> = navigation.from.iter().map(|column| set.position(column)).collect();
             let key_of = |row: &[Value]| -> Option<Vec<String>> {
                 positions.iter().map(|at| at.and_then(|at| row.get(at)).and_then(Value::to_text)).collect()
@@ -856,7 +950,8 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             let mut wanted: Vec<Vec<String>> = rows.iter().filter_map(|row| key_of(row.as_slice())).collect();
             wanted.sort();
             wanted.dedup();
-            let mut found: Vec<(Vec<String>, String)> = Vec::new();
+            let mut found_keys: Vec<Vec<String>> = Vec::new();
+            let mut found_rows: Vec<Vec<Value>> = Vec::new();
             if !wanted.is_empty() {
                 let to: Vec<String> = navigation.to.iter().filter_map(|column| identifier(column)).collect();
                 let conditions: Vec<String> = wanted
@@ -866,33 +961,54 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                         format!("({})", parts.join(" AND "))
                     })
                     .collect();
-                let columns: Vec<String> = target.properties.iter().filter_map(|property| identifier(&property.name)).collect();
+                let every: Vec<String> = target.properties.iter().filter_map(|property| identifier(&property.name)).collect();
                 let table = identifier(&target.name).unwrap_or_default();
-                let results = self.run(&format!(
-                    "SELECT {} FROM {schema}.{table} WHERE {}",
-                    columns.join(", "),
-                    conditions.join(" OR ")
-                ))?;
+                let results = self
+                    .run(&format!(
+                        "SELECT {} FROM {schema}.{table} WHERE ({}){filter}{order}",
+                        every.join(", "),
+                        conditions.join(" OR ")
+                    ))
+                    .map_err(|error| sql_error(&error))?;
                 let target_positions: Vec<Option<usize>> = navigation.to.iter().map(|column| target.position(column)).collect();
-                let all: Vec<&Property> = target.properties.iter().collect();
                 for row in rows_of(&results) {
                     let key: Option<Vec<String>> = target_positions.iter().map(|at| at.and_then(|at| row.get(at)).and_then(Value::to_text)).collect();
                     if let Some(key) = key {
-                        found.push((key, entity_json("", &all, &row)));
+                        found_keys.push(key);
+                        found_rows.push(row);
                     }
                 }
             }
+            let deeper = self.expansions(target, sets, &nested, &found_rows, depth + 1)?;
+            let entities: Vec<String> = found_rows
+                .iter()
+                .zip(&deeper)
+                .map(|(row, extra)| entity_with("", &columns, &projected(target, &columns, row), extra))
+                .collect();
             for (row, member) in rows.iter().zip(members.iter_mut()) {
-                let matches: Vec<&str> = match key_of(row.as_slice()) {
-                    Some(key) => found.iter().filter(|(found_key, _)| *found_key == key).map(|(_, entity)| entity.as_str()).collect(),
+                let matching: Vec<&str> = match key_of(row.as_slice()) {
+                    Some(key) => found_keys
+                        .iter()
+                        .zip(&entities)
+                        .filter(|(found_key, _)| **found_key == key)
+                        .map(|(_, entity)| entity.as_str())
+                        .collect(),
                     None => Vec::new(),
                 };
-                let value = if navigation.many {
-                    format!("[{}]", matches.join(","))
+                if navigation.many {
+                    if counted {
+                        member.push(format!("{}:{}", json_string(&format!("{}@odata.count", navigation.name)), matching.len()));
+                    }
+                    let paged: Vec<&str> = matching
+                        .into_iter()
+                        .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+                        .take(top.map_or(usize::MAX, |top| usize::try_from(top).unwrap_or(usize::MAX)))
+                        .collect();
+                    member.push(format!("{}:[{}]", json_string(&navigation.name), paged.join(",")));
                 } else {
-                    matches.first().map_or_else(|| "null".to_owned(), |entity| (*entity).to_owned())
-                };
-                member.push(format!("{}:{value}", json_string(&navigation.name)));
+                    let value = matching.first().map_or_else(|| "null".to_owned(), |entity| (*entity).to_owned());
+                    member.push(format!("{}:{value}", json_string(&navigation.name)));
+                }
             }
         }
         Ok(members)
@@ -989,22 +1105,17 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         if path == "$metadata" {
             return self.odata_metadata(&sets);
         }
-        let (head, tail) = path.split_once('/').unwrap_or((path, ""));
-        let (name, key) = match head.split_once('(') {
-            Some((name, rest)) => match rest.strip_suffix(')') {
-                Some(key) => (name.to_owned(), Some(key.to_owned())),
-                None => return odata_error(400, "BadRequest", "a key segment needs a closing parenthesis"),
-            },
-            None => (head.to_owned(), None),
+        if path == "$batch" {
+            return match request.method.as_str() {
+                "POST" => self.odata_batch(&sets, request, &base),
+                _ => odata_error(405, "MethodNotAllowed", "$batch takes POST"),
+            };
+        }
+        let Resolved { set, target, key, tail } = match self.resolve(&sets, path) {
+            Ok(resolved) => resolved,
+            Err(response) => return response,
         };
-        let Some(set) = sets.iter().find(|set| set.name == name) else {
-            return odata_error(404, "NotFound", &format!("Resource not found for the segment '{name}'."));
-        };
-        let Some(target) = identifier(&set.name).map(|table| {
-            format!("{}.{table}", identifier(&self.schema).unwrap_or_else(|| "\"public\"".to_owned()))
-        }) else {
-            return odata_error(404, "NotFound", &format!("'{name}' cannot be served"));
-        };
+        let tail = tail.as_str();
         let options = query_options(request.query.as_deref());
         match (key, tail, request.method.as_str()) {
             (None, "$count", "GET") => self.odata_count(set, &target, &options),
@@ -1018,6 +1129,31 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             }
             _ => odata_error(405, "MethodNotAllowed", "this resource does not accept that method"),
         }
+    }
+
+    fn resolve<'a>(&self, sets: &'a [EntitySet], path: &str) -> Result<Resolved<'a>, Response> {
+        let (head, tail) = path.split_once('/').unwrap_or((path, ""));
+        let (name, key) = match head.split_once('(') {
+            Some((name, rest)) => match rest.strip_suffix(')') {
+                Some(key) => (name.to_owned(), Some(key.to_owned())),
+                None => return Err(odata_error(400, "BadRequest", "a key segment needs a closing parenthesis")),
+            },
+            None => (head.to_owned(), None),
+        };
+        let Some(set) = sets.iter().find(|set| set.name == name) else {
+            return Err(odata_error(404, "NotFound", &format!("Resource not found for the segment '{name}'.")));
+        };
+        let Some(target) = identifier(&set.name).map(|table| {
+            format!("{}.{table}", identifier(&self.schema).unwrap_or_else(|| "\"public\"".to_owned()))
+        }) else {
+            return Err(odata_error(404, "NotFound", &format!("'{name}' cannot be served")));
+        };
+        Ok(Resolved {
+            set,
+            target,
+            key,
+            tail: tail.to_owned(),
+        })
     }
 
     fn odata_filter(set: &EntitySet, options: &[(String, String)]) -> Result<String, Response> {
@@ -1065,9 +1201,9 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             Ok(filter) => filter,
             Err(response) => return response,
         };
-        let outcome = (|| -> Result<(Vec<&Property>, Vec<&Navigation>, String, Option<u64>, u64, bool), String> {
+        let outcome = (|| -> Result<(Vec<&Property>, Vec<Expansion<'_>>, String, Option<u64>, u64, bool), String> {
             let columns = select_columns(set, option(options, "$select"))?;
-            let expanded = expand_names(set, option(options, "$expand"))?;
+            let expanded = expand_items(set, option(options, "$expand"))?;
             let order = match option(options, "$orderby") {
                 Some(text) => order_sql(set, text)?,
                 None => String::new(),
@@ -1118,9 +1254,9 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                 Err(error) => return sql_error(&error),
             }
         }
-        let expansions = match self.expansions(set, sets, &expanded, &rows) {
+        let expansions = match self.expansions(set, sets, &expanded, &rows, 0) {
             Ok(expansions) => expansions,
-            Err(error) => return sql_error(&error),
+            Err(response) => return response,
         };
         let entities: Vec<String> = rows
             .iter()
@@ -1163,7 +1299,7 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
             Ok(columns) => columns,
             Err(message) => return odata_error(400, "BadRequest", &message),
         };
-        let expanded = match expand_names(set, option(options, "$expand")) {
+        let expanded = match expand_items(set, option(options, "$expand")) {
             Ok(expanded) => expanded,
             Err(message) => return odata_error(400, "BadRequest", &message),
         };
@@ -1175,9 +1311,9 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         let Some(row) = rows.first() else {
             return odata_error(404, "NotFound", "No entity has that key.");
         };
-        let expansions = match self.expansions(set, sets, &expanded, std::slice::from_ref(row)) {
+        let expansions = match self.expansions(set, sets, &expanded, std::slice::from_ref(row), 0) {
             Ok(expansions) => expansions,
-            Err(error) => return sql_error(&error),
+            Err(response) => return response,
         };
         odata_json(
             200,
@@ -1246,13 +1382,20 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
     }
 
     fn odata_insert(&self, set: &EntitySet, target: &str, body: &[u8], base: &str) -> Response {
-        let assignments = match Self::odata_body(body) {
-            Ok(assignments) => assignments,
+        let sql = match Self::insert_statement(set, target, body) {
+            Ok(sql) => sql,
             Err(response) => return response,
         };
-        let columns: Vec<&Property> = set.properties.iter().collect();
-        let returned: Vec<String> = columns.iter().filter_map(|property| identifier(&property.name)).collect();
-        let sql = if assignments.is_empty() {
+        match self.run(&sql) {
+            Ok(results) => Self::inserted(set, rows_of(&results).first(), base),
+            Err(error) => sql_error(&error),
+        }
+    }
+
+    fn insert_statement(set: &EntitySet, target: &str, body: &[u8]) -> Result<String, Response> {
+        let assignments = Self::odata_body(body)?;
+        let returned: Vec<String> = set.properties.iter().filter_map(|property| identifier(&property.name)).collect();
+        Ok(if assignments.is_empty() {
             format!("INSERT INTO {target} DEFAULT VALUES RETURNING {}", returned.join(", "))
         } else {
             let (names, values): (Vec<String>, Vec<String>) = assignments.into_iter().unzip();
@@ -1262,70 +1405,83 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
                 values.join(", "),
                 returned.join(", ")
             )
-        };
-        match self.run(&sql) {
-            Ok(results) => match rows_of(&results).first() {
-                Some(row) => {
-                    let mut response = odata_json(
-                        201,
-                        entity_json(&format!("{base}$metadata#{}/$entity", set.name), &columns, row),
-                    );
-                    let keys: Vec<String> = set
-                        .key_columns()
-                        .iter()
-                        .filter_map(|key| {
-                            let at = columns.iter().position(|property| property.name == key.name)?;
-                            let value = row.get(at)?;
-                            let text = value.to_text().unwrap_or_default();
-                            let shown = match edm_type(&key.data_type) {
-                                "Edm.Int16" | "Edm.Int32" | "Edm.Int64" | "Edm.Decimal" | "Edm.Double" | "Edm.Single" => text,
-                                _ => format!("'{}'", text.replace('\'', "''")),
-                            };
-                            Some(format!("{}={shown}", key.name))
-                        })
-                        .collect();
-                    let segment = match keys.as_slice() {
-                        [only] => only.split_once('=').map_or_else(String::new, |(_, value)| value.to_owned()),
-                        _ => keys.join(","),
-                    };
-                    response.headers.push(("Location".to_owned(), format!("{base}{}({segment})", set.name)));
-                    response
-                }
-                None => odata_error(500, "InternalError", "the insert returned no row"),
-            },
-            Err(error) => sql_error(&error),
+        })
+    }
+
+    fn inserted(set: &EntitySet, row: Option<&Vec<Value>>, base: &str) -> Response {
+        let columns: Vec<&Property> = set.properties.iter().collect();
+        match row {
+            Some(row) => {
+                let mut response = odata_json(
+                    201,
+                    entity_json(&format!("{base}$metadata#{}/$entity", set.name), &columns, row),
+                );
+                let keys: Vec<String> = set
+                    .key_columns()
+                    .iter()
+                    .filter_map(|key| {
+                        let at = columns.iter().position(|property| property.name == key.name)?;
+                        let value = row.get(at)?;
+                        let text = value.to_text().unwrap_or_default();
+                        let shown = match edm_type(&key.data_type) {
+                            "Edm.Int16" | "Edm.Int32" | "Edm.Int64" | "Edm.Decimal" | "Edm.Double" | "Edm.Single" => text,
+                            _ => format!("'{}'", text.replace('\'', "''")),
+                        };
+                        Some(format!("{}={shown}", key.name))
+                    })
+                    .collect();
+                let segment = match keys.as_slice() {
+                    [only] => only.split_once('=').map_or_else(String::new, |(_, value)| value.to_owned()),
+                    _ => keys.join(","),
+                };
+                response.headers.push(("Location".to_owned(), format!("{base}{}({segment})", set.name)));
+                response
+            }
+            None => odata_error(500, "InternalError", "the insert returned no row"),
         }
     }
 
     fn odata_update(&self, set: &EntitySet, target: &str, key: &str, body: &[u8]) -> Response {
-        let condition = match key_condition(set, key) {
-            Ok(condition) => condition,
-            Err(message) => return odata_error(400, "BadRequest", &message),
-        };
-        let assignments = match Self::odata_body(body) {
-            Ok(assignments) => assignments,
-            Err(response) => return response,
-        };
+        match Self::update_statement(set, target, key, body) {
+            Ok(sql) => self.odata_changed(&sql),
+            Err(response) => response,
+        }
+    }
+
+    fn update_statement(set: &EntitySet, target: &str, key: &str, body: &[u8]) -> Result<String, Response> {
+        let condition = key_condition(set, key).map_err(|message| odata_error(400, "BadRequest", &message))?;
+        let assignments = Self::odata_body(body)?;
         if assignments.is_empty() {
-            return odata_error(400, "BadRequest", "the body changes no property");
+            return Err(odata_error(400, "BadRequest", "the body changes no property"));
         }
         let set_list: Vec<String> = assignments.iter().map(|(name, value)| format!("{name} = {value}")).collect();
-        self.odata_changed(&format!("UPDATE {target} SET {} WHERE {condition} RETURNING 1", set_list.join(", ")))
+        Ok(format!("UPDATE {target} SET {} WHERE {condition} RETURNING 1", set_list.join(", ")))
     }
 
     fn odata_delete(&self, set: &EntitySet, target: &str, key: &str) -> Response {
-        let condition = match key_condition(set, key) {
-            Ok(condition) => condition,
-            Err(message) => return odata_error(400, "BadRequest", &message),
-        };
-        self.odata_changed(&format!("DELETE FROM {target} WHERE {condition} RETURNING 1"))
+        match Self::delete_statement(set, target, key) {
+            Ok(sql) => self.odata_changed(&sql),
+            Err(response) => response,
+        }
+    }
+
+    fn delete_statement(set: &EntitySet, target: &str, key: &str) -> Result<String, Response> {
+        let condition = key_condition(set, key).map_err(|message| odata_error(400, "BadRequest", &message))?;
+        Ok(format!("DELETE FROM {target} WHERE {condition} RETURNING 1"))
     }
 
     fn odata_changed(&self, sql: &str) -> Response {
         match self.run(sql) {
-            Ok(results) if rows_of(&results).is_empty() => odata_error(404, "NotFound", "No entity has that key."),
-            Ok(_) => no_content(),
+            Ok(results) => Self::changed(&results),
             Err(error) => sql_error(&error),
+        }
+    }
+
+    fn changed(results: &[QueryResult]) -> Response {
+        if rows_of(results).is_empty() {
+            odata_error(404, "NotFound", "No entity has that key.")
+        } else {
+            no_content()
         }
     }
 }

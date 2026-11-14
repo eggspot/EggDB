@@ -502,6 +502,88 @@ fn graphql_nested_inserts_go_several_relationships_deep_with_on_conflict() {
     assert!(counted.contains("\"count\":2"), "{counted}");
 }
 
+fn batch(endpoint: &Endpoint<'_, MemoryStore>, content_type: &str, body: &str) -> Response {
+    endpoint.answer(&Request {
+        method: "POST".to_owned(),
+        path: "/odata/$batch".to_owned(),
+        query: None,
+        headers: vec![
+            (
+                "authorization".to_owned(),
+                format!("Basic {}", eggdb_crypto::base64_encode(b"eggdb:secret")),
+            ),
+            ("content-type".to_owned(), content_type.to_owned()),
+        ],
+        body: body.as_bytes().to_vec(),
+    })
+}
+
+#[test]
+fn odata_expands_with_options_and_answers_batches() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE authors (id integer PRIMARY KEY, name text NOT NULL)",
+        "CREATE TABLE books (id integer PRIMARY KEY, title text NOT NULL, pages integer, author_id integer REFERENCES authors (id))",
+        "INSERT INTO authors VALUES (1, 'Ada'), (2, 'Brian')",
+        "INSERT INTO books VALUES (10, 'Engines', 300, 1), (11, 'Notes', 50, 1), (12, 'C', 200, 2)",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let filtered = call(
+        &endpoint,
+        "GET",
+        "/odata/authors?$expand=books($select=title;$filter=pages%20gt%20100;$orderby=title%20desc;$count=true)&$orderby=id",
+        "",
+        None,
+    );
+    assert_eq!(filtered.status, 200, "{}", text(&filtered));
+    assert!(
+        text(&filtered).contains("\"name\":\"Ada\",\"books@odata.count\":1,\"books\":[{\"title\":\"Engines\"}]"),
+        "{}",
+        text(&filtered)
+    );
+    let nested = call(&endpoint, "GET", "/odata/books(11)?$expand=author($expand=books($top=1;$select=id))", "", None);
+    assert!(
+        text(&nested).contains("\"author\":{\"id\":1,\"name\":\"Ada\",\"books\":[{\"id\":10}]}"),
+        "{}",
+        text(&nested)
+    );
+    let refused = call(&endpoint, "GET", "/odata/authors?$expand=books($levels=2)", "", None);
+    assert_eq!(refused.status, 400);
+    let multipart = "--batch_1\r\nContent-Type: application/http\r\nContent-Transfer-Encoding: binary\r\n\r\nGET authors(1) HTTP/1.1\r\nAccept: application/json\r\n\r\n\r\n\
+--batch_1\r\nContent-Type: multipart/mixed; boundary=changeset_1\r\n\r\n\
+--changeset_1\r\nContent-Type: application/http\r\nContent-ID: 1\r\n\r\nPOST authors HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"id\":3,\"name\":\"Cleo\"}\r\n\
+--changeset_1\r\nContent-Type: application/http\r\nContent-ID: 2\r\n\r\nPATCH $1 HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"name\":\"Cleo B.\"}\r\n\
+--changeset_1--\r\n\
+--batch_1--\r\n";
+    let answered = batch(&endpoint, "multipart/mixed; boundary=batch_1", multipart);
+    assert_eq!(answered.status, 200, "{}", text(&answered));
+    assert!(answered.content_type.starts_with("multipart/mixed; boundary=batchresponse_"));
+    for expected in ["HTTP/1.1 200 OK", "HTTP/1.1 201 Created", "HTTP/1.1 204 No Content", "Content-ID: 2"] {
+        assert!(text(&answered).contains(expected), "{expected}: {}", text(&answered));
+    }
+    assert!(text(&call(&endpoint, "GET", "/odata/authors(3)", "", None)).contains("\"name\":\"Cleo B.\""));
+    let undone = "--b\r\nContent-Type: multipart/mixed; boundary=c\r\n\r\n\
+--c\r\nContent-Type: application/http\r\n\r\nPOST authors HTTP/1.1\r\n\r\n{\"id\":4,\"name\":\"Dee\"}\r\n\
+--c\r\nContent-Type: application/http\r\n\r\nDELETE authors(99) HTTP/1.1\r\n\r\n\r\n\
+--c--\r\n\
+--b--\r\n";
+    let failed = batch(&endpoint, "multipart/mixed; boundary=b", undone);
+    assert!(text(&failed).contains("HTTP/1.1 404 Not Found"), "{}", text(&failed));
+    assert_eq!(call(&endpoint, "GET", "/odata/authors(4)", "", None).status, 404);
+    let json = batch(
+        &endpoint,
+        "application/json",
+        "{\"requests\":[{\"id\":\"a\",\"method\":\"POST\",\"url\":\"authors\",\"atomicityGroup\":\"g1\",\"body\":{\"id\":5,\"name\":\"Eve\"}},{\"id\":\"b\",\"method\":\"DELETE\",\"url\":\"authors(99)\",\"atomicityGroup\":\"g1\"},{\"id\":\"c\",\"method\":\"GET\",\"url\":\"authors(1)\"}]}",
+    );
+    assert_eq!(json.status, 200, "{}", text(&json));
+    assert!(text(&json).contains("{\"id\":\"a\",\"atomicityGroup\":\"g1\",\"status\":404"), "{}", text(&json));
+    assert!(text(&json).contains("{\"id\":\"c\",\"status\":200"), "{}", text(&json));
+    assert_eq!(call(&endpoint, "GET", "/odata/authors(5)", "", None).status, 404);
+}
+
 #[test]
 fn odata_serves_metadata_sets_keys_and_writes() {
     let store = MemoryStore::default();
