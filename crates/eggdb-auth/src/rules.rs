@@ -61,6 +61,9 @@ pub enum AuthMethod {
     Certificate,
     /// A Kerberos ticket sent through GSS-API, checked against the service's keytab (D1184).
     Gss(crate::kerberos::KerberosConfig),
+    /// The stored password and a one-time code from the role's authenticator app, sent in clear
+    /// text as `password:code` (D1187).
+    PasswordTotp,
     /// An API key of the role, sent as the password and checked against the hashes
     /// `CREATE EXTENSION eggdb_api_keys` keeps.
     ApiKey,
@@ -70,7 +73,7 @@ pub enum AuthMethod {
 
 impl AuthMethod {
     /// The method's name as a rule file writes it: `scram-sha-256`, `ldap`, `jwt`, `oauth`,
-    /// `cert`, `gss`, `apikey` or `reject`.
+    /// `cert`, `gss`, `password+totp`, `apikey` or `reject`.
     pub fn name(&self) -> &'static str {
         match self {
             Self::ScramSha256 => "scram-sha-256",
@@ -79,6 +82,7 @@ impl AuthMethod {
             Self::OAuthBearer { .. } => "oauth",
             Self::Certificate => "cert",
             Self::Gss(_) => "gss",
+            Self::PasswordTotp => "password+totp",
             Self::ApiKey => "apikey",
             Self::Reject => "reject",
         }
@@ -114,7 +118,7 @@ impl AuthMethod {
     /// Whether the method has the client send its password or token in clear text, so it is
     /// allowed only over TLS or a local socket.
     pub fn sends_secret_in_clear(&self) -> bool {
-        matches!(self, Self::Ldap(_) | Self::Jwt { .. } | Self::OAuthBearer { .. } | Self::ApiKey)
+        matches!(self, Self::Ldap(_) | Self::Jwt { .. } | Self::OAuthBearer { .. } | Self::ApiKey | Self::PasswordTotp)
     }
 }
 
@@ -269,6 +273,7 @@ impl AuthRules {
                 "scram-sha-256" => AuthMethod::ScramSha256,
                 "reject" => AuthMethod::Reject,
                 "apikey" => AuthMethod::ApiKey,
+                "password+totp" => AuthMethod::PasswordTotp,
                 "ldap" => {
                     let written = required(&found, "server", line)?;
                     let (server, mut security) = if let Some(rest) = written.strip_prefix("ldaps://") {
@@ -381,7 +386,7 @@ impl AuthRules {
                     return Err(RulesError {
                         line,
                         message: format!(
-                            "unknown method {other}; use scram-sha-256, ldap, jwt, oauth, cert, gss, apikey or reject"
+                            "unknown method {other}; use scram-sha-256, password+totp, ldap, jwt, oauth, cert, gss, apikey or reject"
                         ),
                     });
                 }

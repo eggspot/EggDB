@@ -18,6 +18,7 @@ pub mod scram;
 pub mod scram_sha1;
 pub mod sigv2;
 pub mod sigv4;
+pub mod totp;
 
 pub use jwt::{JwtError, JwtKeys, JwtPolicy};
 pub use ldap::{LdapConfig, LdapError, LdapSearch, LdapSecurity};

@@ -395,6 +395,7 @@ fn authenticate_by_rule<D: DatabaseDirectory>(
         }
         eggdb_auth::AuthMethod::Reject => deny(wire, "the rule file rejects the user"),
         eggdb_auth::AuthMethod::Gss(_) => deny(wire, "Kerberos (gss) logins go through the PostgreSQL protocol"),
+        eggdb_auth::AuthMethod::PasswordTotp => deny(wire, "password+totp logins go through the PostgreSQL protocol"),
         eggdb_auth::AuthMethod::OAuthBearer { .. } => deny(wire, "oauth needs OAUTHBEARER, which MySQL clients do not have"),
         eggdb_auth::AuthMethod::Certificate => {
             let named = wire

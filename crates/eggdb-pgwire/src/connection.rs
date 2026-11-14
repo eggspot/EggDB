@@ -678,6 +678,21 @@ fn authenticate_externally<S: KeyValueStore>(
                 Err(error) => Err(error.to_string()),
             }
         }
+        eggdb_auth::AuthMethod::PasswordTotp => match secret.rsplit_once(':') {
+            Some((password, code)) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+                if !stored_role_verifier(store, user).is_some_and(|verifier| verifier.matches_password(password.as_bytes())) {
+                    Err("the password is not the role's".to_owned())
+                } else if eggdb_sql::mfa::check_totp(store, user, code, now) {
+                    Ok(())
+                } else {
+                    Err("the one-time code is wrong, out of date or already used".to_owned())
+                }
+            }
+            None => Err("password+totp takes the password, a colon and the one-time code".to_owned()),
+        },
         eggdb_auth::AuthMethod::ApiKey => {
             if eggdb_sql::api_keys::check_api_key(store, user, &secret) {
                 Ok(())

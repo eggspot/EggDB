@@ -192,6 +192,7 @@ fn added_function_type(
         name if crate::standards::FUNCTIONS.contains(&name) => {
             Some(crate::standards::result_type(name))
         }
+        name if crate::mfa::FUNCTIONS.contains(&name) => Some(SqlType::Text),
         name if crate::privacy::FUNCTIONS.contains(&name) => {
             Some(crate::privacy::result_type(name))
         }

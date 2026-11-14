@@ -1670,6 +1670,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::standards::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::mfa::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::privacy::function(name, &values) {
             return result;
         }

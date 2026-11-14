@@ -33,6 +33,7 @@ mod bytea;
 mod cancel;
 mod catalog;
 pub mod cdc;
+pub mod mfa;
 mod commit_signal;
 pub mod multi_primary;
 pub mod placement;
