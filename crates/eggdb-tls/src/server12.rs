@@ -1,12 +1,12 @@
 //! The server side of a TLS 1.2 handshake (RFC 5246) with ECDHE key exchange (RFC 8422), AEAD
-//! suites only, extended master secret when offered (RFC 7627), no resumption and no
-//! renegotiation (RFC 5746).
+//! suites only, extended master secret when offered (RFC 7627), client certificates when the
+//! configuration asks for them (D1185), no resumption and no renegotiation (RFC 5746).
 
 use std::io::{Read, Write};
 
 use crate::alert::AlertDescription;
 use crate::cipher_suite::{CipherSuite, Tls12Authentication, version};
-use crate::config::{MaximumVersion, ServerConfig};
+use crate::config::{ClientAuthentication, MaximumVersion, ServerConfig};
 use crate::error::TlsError;
 use crate::handshake::{
     CertificateMessage, ClientHello, DOWNGRADE_TO_TLS12_SENTINEL, DigitallySigned,
@@ -14,18 +14,76 @@ use crate::handshake::{
     extension_type, finished_message, handshake_message, handshake_type, message_body, named_group,
 };
 use crate::negotiation::{
-    EphemeralKey, choose_application_protocol, tls12_groups, choose_signature_scheme,
-    scheme_algorithm,
+    EphemeralKey, SUPPORTED_SIGNATURE_SCHEMES, choose_application_protocol, tls12_groups,
+    choose_signature_scheme, scheme_algorithm, scheme_fits_key,
 };
 use crate::private_key::FillRandom;
 use crate::record::{Tls12RecordProtection, content_type};
 use crate::record_layer::{Protection, RecordLayer};
 use crate::session::{Established, SessionInfo, Tls12Traffic, Traffic};
-use crate::signature::SubjectPublicKey;
+use crate::signature::{SubjectPublicKey, verify_signature};
+use crate::verify::{KeyPurpose, TrustStore, verify_certificate_chain};
+use crate::x509::Certificate;
 use crate::tls12::{extended_master_secret, finished_verify_data, key_block, master_secret};
 use eggdb_crypto::constant_time_eq;
 
 const EMPTY_RENEGOTIATION_INFO_SCSV: u16 = 0x00ff;
+const RSA_SIGN: u8 = 1;
+const ECDSA_SIGN: u8 = 64;
+
+fn certificate_request() -> Vec<u8> {
+    let mut body = vec![2, RSA_SIGN, ECDSA_SIGN];
+    let schemes = SUPPORTED_SIGNATURE_SCHEMES.len() * 2;
+    body.extend_from_slice(&(schemes as u16).to_be_bytes());
+    for scheme in SUPPORTED_SIGNATURE_SCHEMES {
+        body.extend_from_slice(&scheme.to_be_bytes());
+    }
+    body.extend_from_slice(&0u16.to_be_bytes());
+    handshake_message(handshake_type::CERTIFICATE_REQUEST, &body)
+}
+
+fn client_chain(message: &[u8], required: bool, trust: &TrustStore) -> Result<Vec<Certificate>, TlsError> {
+    let certificate_message = CertificateMessage::decode_tls12(message_body(message))?;
+    if certificate_message.entries.is_empty() {
+        if required {
+            return Err(TlsError::protocol(
+                AlertDescription::HandshakeFailure,
+                "the client sent no certificate",
+            ));
+        }
+        return Ok(Vec::new());
+    }
+    let chain = certificate_message
+        .entries
+        .iter()
+        .map(|entry| Certificate::from_der(&entry.certificate))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            TlsError::protocol(
+                AlertDescription::BadCertificate,
+                "the client's certificate could not be parsed",
+            )
+        })?;
+    verify_certificate_chain(&chain, trust, KeyPurpose::ClientAuthentication, crate::client::unix_now())?;
+    Ok(chain)
+}
+
+fn check_certificate_verify(message: &[u8], chain: &[Certificate], signed_messages: &[u8]) -> Result<(), TlsError> {
+    let signed = DigitallySigned::decode(message_body(message))?;
+    let leaf_key = chain[0].public_key();
+    let algorithm = scheme_algorithm(signed.scheme, false)
+        .filter(|_| SUPPORTED_SIGNATURE_SCHEMES.contains(&signed.scheme) && scheme_fits_key(signed.scheme, leaf_key))
+        .ok_or(TlsError::protocol(
+            AlertDescription::IllegalParameter,
+            "the client signed with a scheme the server did not offer",
+        ))?;
+    verify_signature(algorithm, leaf_key, signed_messages, &signed.signature).map_err(|_| {
+        TlsError::protocol(
+            AlertDescription::DecryptError,
+            "the client's CertificateVerify does not verify",
+        )
+    })
+}
 
 pub(crate) fn tls12_protection(
     suite: CipherSuite,
@@ -125,6 +183,12 @@ pub(crate) fn handshake<S: Read + Write>(
 
     let mut transcript = hash.transcript();
     transcript.update(&client_hello_message);
+    let client_trust = match &config.client_authentication {
+        ClientAuthentication::None => None,
+        ClientAuthentication::Optional { trust } => Some((trust, false)),
+        ClientAuthentication::Required { trust } => Some((trust, true)),
+    };
+    let mut handshake_messages = if client_trust.is_some() { client_hello_message.clone() } else { Vec::new() };
     let mut server_random = [0u8; 32];
     fill_random(&mut server_random)?;
     if config.maximum_version == MaximumVersion::Tls13 {
@@ -157,6 +221,7 @@ pub(crate) fn handshake<S: Read + Write>(
     }
     .encode();
     transcript.update(&server_hello);
+    handshake_messages.extend_from_slice(&server_hello);
     layer.queue(content_type::HANDSHAKE, &server_hello)?;
 
     let chain: Vec<&[u8]> = config
@@ -166,6 +231,7 @@ pub(crate) fn handshake<S: Read + Write>(
         .collect();
     let certificate = CertificateMessage::from_chain(&chain).encode_tls12();
     transcript.update(&certificate);
+    handshake_messages.extend_from_slice(&certificate);
     layer.queue(content_type::HANDSHAKE, &certificate)?;
 
     let ephemeral = EphemeralKey::generate(group, &mut *fill_random)?.ok_or(TlsError::protocol(
@@ -192,13 +258,34 @@ pub(crate) fn handshake<S: Read + Write>(
     }
     .encode();
     transcript.update(&key_exchange);
+    handshake_messages.extend_from_slice(&key_exchange);
     layer.queue(content_type::HANDSHAKE, &key_exchange)?;
+    if client_trust.is_some() {
+        let request = certificate_request();
+        transcript.update(&request);
+        handshake_messages.extend_from_slice(&request);
+        layer.queue(content_type::HANDSHAKE, &request)?;
+    }
     let done = handshake_message(handshake_type::SERVER_HELLO_DONE, &[]);
     transcript.update(&done);
+    handshake_messages.extend_from_slice(&done);
     layer.queue(content_type::HANDSHAKE, &done)?;
     layer.flush()?;
 
+    let mut peer_certificates = Vec::new();
+    if let Some((trust, required)) = client_trust {
+        let (message_type, message) = layer.read_handshake_message(Some(&mut transcript))?;
+        if message_type != handshake_type::CERTIFICATE {
+            return Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "expected the client's Certificate",
+            ));
+        }
+        handshake_messages.extend_from_slice(&message);
+        peer_certificates = client_chain(&message, required, trust)?;
+    }
     let (message_type, message) = layer.read_handshake_message(Some(&mut transcript))?;
+    handshake_messages.extend_from_slice(&message);
     if message_type != handshake_type::CLIENT_KEY_EXCHANGE {
         return Err(TlsError::protocol(
             AlertDescription::UnexpectedMessage,
@@ -218,6 +305,16 @@ pub(crate) fn handshake<S: Read + Write>(
     } else {
         master_secret(hash, &pre_master_secret, &hello.random, &server_random)
     };
+    if !peer_certificates.is_empty() {
+        let (message_type, message) = layer.read_handshake_message(Some(&mut transcript))?;
+        if message_type != handshake_type::CERTIFICATE_VERIFY {
+            return Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "expected the client's CertificateVerify",
+            ));
+        }
+        check_certificate_verify(&message, &peer_certificates, &handshake_messages)?;
+    }
     let iv_bytes = Tls12RecordProtection::iv_bytes(suite.aead());
     let keys = key_block(
         hash,
@@ -263,7 +360,7 @@ pub(crate) fn handshake<S: Read + Write>(
             cipher_suite: suite,
             application_protocol,
             server_name,
-            peer_certificates: Vec::new(),
+            peer_certificates,
             server_certificate: config.chain().first().cloned(),
             key_exchange_group: group,
             resumed: false,

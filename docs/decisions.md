@@ -1209,3 +1209,4 @@ its full title with its status.
 - [D1182](decisions/D1182.md) Code-only batch 834 (M6a): Realtime channels in Supabase's style, from the engine's change capture
 - [D1183](decisions/D1183.md) Code-only batch 835 (M6a): Live queries woken by commits
 - [D1184](decisions/D1184.md) Code-only batch 836 (M6b): Kerberos logins through GSSAPI, in our own clean room
+- [D1185](decisions/D1185.md) Code-only batch 837 (M6b): Client certificates over TLS 1.2, and psql signing in with one in CI

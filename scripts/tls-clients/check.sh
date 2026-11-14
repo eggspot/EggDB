@@ -14,7 +14,8 @@ with each protocol's own client over TLS:
   through SSL_CERT_FILE).
 Then it serves the RESP, REST and MQTT listeners on a non-loopback address, where serve ends TLS in
 front of each protocol (D1155), and connects with redis-cli --tls, curl over HTTPS and an
-openssl s_client handshake, all checking the chain against the authority, and resumes a TLS 1.3
+openssl s_client handshake, all checking the chain against the authority, signs in with a client
+certificate (a cert rule) through psql over TLS 1.3 and TLS 1.2 (D803, D1185), and resumes a TLS 1.3
 session from the server's ticket with openssl s_client -sess_out and -sess_in (D1159). Where aioquic
 is installed for HTTP3_PYTHON (default python3) it also sends a GET over HTTP/3 to --http3-listen,
 checking the chain against the authority (D1163); REQUIRE_HTTP3=1 makes its absence a failure. Then it serves with
@@ -111,6 +112,29 @@ for encryption in true strict; do
     || fail "sqlcmd -N $encryption failed: $(cat "$work/sqlcmd.out" "$work/sqlcmd.err")"
   grep -qx '42' "$work/sqlcmd.out" || fail "sqlcmd -N $encryption printed $(cat "$work/sqlcmd.out")"
 done
+stop_server
+
+openssl ecparam -name prime256v1 -genkey -noout -out "$work/client.key"
+chmod 600 "$work/client.key"
+openssl req -new -key "$work/client.key" -subj "/CN=carol" -out "$work/client.csr"
+printf 'extendedKeyUsage=clientAuth\nbasicConstraints=critical,CA:FALSE\n' > "$work/client.ext"
+openssl x509 -req -in "$work/client.csr" -CA "$work/ca.pem" -CAkey "$work/ca.key" -CAcreateserial \
+  -days 2 -sha256 -extfile "$work/client.ext" -out "$work/client.pem"
+printf 'carol cert\n' > "$work/cert.rules"
+start_server --tls-certificate "$work/server.pem" --tls-key "$work/server-pkcs8.key" \
+  --tls-client-ca "$work/ca.pem" --tls-min-version 1.2 --auth-rules "$work/cert.rules"
+PGPASSWORD=$password "${psql_words[@]}" "host=localhost port=$pg_port user=eggdb dbname=tls sslmode=verify-full sslrootcert=$work/ca.pem" \
+  -X -q -c 'CREATE ROLE carol LOGIN' > "$work/role.out" 2>&1 || fail "CREATE ROLE carol: $(cat "$work/role.out")"
+for version in TLSv1.3 TLSv1.2; do
+  "${psql_words[@]}" "host=localhost port=$pg_port user=carol dbname=tls sslmode=verify-full sslrootcert=$work/ca.pem sslcert=$work/client.pem sslkey=$work/client.key ssl_min_protocol_version=$version ssl_max_protocol_version=$version" \
+    -X -A -t -c 'SELECT current_user' > "$work/cert-psql.out" 2> "$work/cert-psql.err" \
+    || fail "psql with a client certificate over $version failed: $(cat "$work/cert-psql.err")"
+  grep -qx 'carol' "$work/cert-psql.out" || fail "psql with a client certificate over $version printed $(cat "$work/cert-psql.out")"
+done
+if "${psql_words[@]}" "host=localhost port=$pg_port user=carol dbname=tls sslmode=verify-full sslrootcert=$work/ca.pem" \
+  -X -A -t -c 'SELECT current_user' > "$work/no-cert.out" 2>&1 < /dev/null; then
+  fail "carol logged in without a client certificate"
+fi
 stop_server
 
 start_server --tls-certificate "$work/server.pem" --tls-key "$work/server-pkcs8.key" \

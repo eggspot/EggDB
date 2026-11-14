@@ -60,12 +60,6 @@ pub(crate) fn handshake<S: Read + Write>(
         versions.contains(&version::TLS12)
     };
     if config.minimum_version == MinimumVersion::Tls12 && offers_tls12 {
-        if matches!(config.client_authentication, ClientAuthentication::Required { .. }) {
-            return Err(TlsError::protocol(
-                AlertDescription::ProtocolVersion,
-                "client certificates are checked over TLS 1.3 only",
-            ));
-        }
         return crate::server12::handshake(layer, config, message, hello, fill_random);
     }
     Err(TlsError::protocol(
