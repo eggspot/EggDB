@@ -600,6 +600,7 @@ pub struct Session<'s> {
     keeps_failed_statement_changes: bool,
     transaction_mode: read_only::TransactionMode,
     advisory_locks: crate::advisory_locks::AdvisoryLocks,
+    attached: Vec<String>,
     notifications: crate::notifications::Notifications,
     deallocated: Vec<Option<String>>,
     sql_prepared: prepared::SqlPreparedStatements,
@@ -693,6 +694,7 @@ impl<'s> Session<'s> {
             keeps_failed_statement_changes: false,
             transaction_mode: read_only::TransactionMode::default(),
             advisory_locks: crate::advisory_locks::AdvisoryLocks::new(store.store_id()),
+            attached: Vec::new(),
             temporary: crate::temporary::TemporaryObjects::default(),
             portals: crate::portals::Portals::default(),
             notifications: crate::notifications::Notifications::default(),
@@ -1481,6 +1483,7 @@ impl<'s> Session<'s> {
         let settings = Arc::clone(&self.settings);
         let _path = self.enter_search_path(&settings);
         let _types = crate::user_types::enter(None);
+        let _attached = crate::attached::enter(&self.attached);
         let mut retried = false;
         let (mut parser, prepares_statement) = loop {
             let mut parser = Parser::new(text, &tokens)
@@ -1554,6 +1557,7 @@ impl<'s> Session<'s> {
         let _constraints = self.enter_constraints();
         let _nls = self.enter_oracle_nls();
         let _types = crate::user_types::enter(None);
+        let _attached = crate::attached::enter(&self.attached);
         let mut retried = false;
         let statement = loop {
             let mut parser = Parser::new(text, &tokens)
@@ -1707,6 +1711,7 @@ impl<'s> Session<'s> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         copy: &mut dyn CopyChannel,
     ) -> SqlResult<()> {
+        let _attached = crate::attached::enter(&self.attached);
         if self.reads_the_postgresql_catalog(text) {
             return self.in_connection_dialect(|session| {
                 session.execute_prepared_with_copy(text, parameters, on_result, copy)
@@ -1962,6 +1967,7 @@ impl<'s> Session<'s> {
         let _clock = crate::datetime::enter_statement(settings.time_zone);
         let _bytes = crate::bytea::enter_dialect(self.dialect);
         let _path = self.enter_search_path(&settings);
+        let _attached = crate::attached::enter(&self.attached);
         let mut parser = Parser::new(text, tokens)
             .with_context(Parameters::Absent, &settings)
             .in_dialect(self.dialect);
@@ -3344,6 +3350,8 @@ impl<'s> Session<'s> {
             }
             Statement::Commit => return self.commit(),
             Statement::TwoPhase(command) => return self.two_phase(command),
+            Statement::Attach { path, alias } => return self.attach(path, alias),
+            Statement::Detach(alias) => return self.detach(alias),
             Statement::Rollback => return self.rollback(),
             Statement::Savepoint(command @ crate::ast::SavepointCommand::RollbackTo(_)) => {
                 return self.savepoint_command(command);
@@ -4050,6 +4058,8 @@ impl<'s> Session<'s> {
             | Statement::Commit
             | Statement::Rollback
             | Statement::TwoPhase(_)
+            | Statement::Attach { .. }
+            | Statement::Detach(_)
             | Statement::Savepoint(_)
             | Statement::InstallExtension { .. }
             | Statement::MaterializedView(_)
@@ -4802,6 +4812,98 @@ impl<'s> Session<'s> {
                 Ok(QueryResult::rows(tag.to_owned(), columns, rows))
             }
         }
+    }
+
+    fn attach(&mut self, path: &str, alias: &Name) -> SqlResult<QueryResult> {
+        let name = alias.text.to_ascii_lowercase();
+        let taken = name == "main"
+            || name == "temp"
+            || self.attached.iter().any(|attached| *attached == name);
+        if taken {
+            return Err(SqlError::new(
+                SqlState::DUPLICATE_OBJECT,
+                format!("database {name} is already in use"),
+            )
+            .at(alias.position));
+        }
+        if self.in_block() {
+            return Err(SqlError::new(
+                SqlState::ACTIVE_SQL_TRANSACTION,
+                "cannot ATTACH database within transaction",
+            )
+            .at(alias.position));
+        }
+        let statements = if crate::attached::is_memory(path) {
+            Vec::new()
+        } else {
+            match crate::attached::read(path, &name) {
+                Some(Ok(statements)) => statements,
+                Some(Err(reason)) => {
+                    return Err(SqlError::new(
+                        SqlState::IO_ERROR,
+                        format!("unable to open database: {path}: {reason}"),
+                    ));
+                }
+                None => {
+                    return Err(SqlError::not_supported(
+                        "ATTACH of a file where no reader of attached files is set; ':memory:' works everywhere",
+                    ));
+                }
+            }
+        };
+        let schema = Name {
+            text: name.clone(),
+            position: alias.position,
+        };
+        let dialect = self.dialect;
+        self.write("ATTACH", |writer, tables| {
+            let leftover = crate::comments::schema_comment(writer, &name)?
+                .is_some_and(|comment| comment == crate::attached::MARKER);
+            if leftover {
+                crate::schemas::drop_schemas(writer, tables, std::slice::from_ref(&schema), true, true, dialect)?;
+            }
+            crate::schemas::create_schema(writer, &schema, false, dialect)?;
+            crate::comments::set_schema_comment(writer, &name, crate::attached::MARKER)?;
+            Ok(QueryResult::command("ATTACH"))
+        })?;
+        self.attached.push(name.clone());
+        let _attached = crate::attached::enter(&self.attached);
+        for statement in statements {
+            if let Err(error) = self.execute(&statement, &mut |_| {}) {
+                let _ = self.detach(alias);
+                return Err(error);
+            }
+        }
+        Ok(QueryResult::command("ATTACH"))
+    }
+
+    fn detach(&mut self, alias: &Name) -> SqlResult<QueryResult> {
+        let name = alias.text.to_ascii_lowercase();
+        let Some(position) = self.attached.iter().position(|attached| *attached == name) else {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_OBJECT,
+                format!("no such database: {name}"),
+            )
+            .at(alias.position));
+        };
+        if self.in_block() {
+            return Err(SqlError::new(
+                SqlState::ACTIVE_SQL_TRANSACTION,
+                format!("database {name} is locked"),
+            )
+            .at(alias.position));
+        }
+        let schema = Name {
+            text: name.clone(),
+            position: alias.position,
+        };
+        let dialect = self.dialect;
+        self.write("DETACH", |writer, tables| {
+            crate::schemas::drop_schemas(writer, tables, std::slice::from_ref(&schema), true, true, dialect)?;
+            Ok(QueryResult::command("DETACH"))
+        })?;
+        self.attached.remove(position);
+        Ok(QueryResult::command("DETACH"))
     }
 
     fn prepare_transaction(&mut self, gid: &str) -> SqlResult<QueryResult> {

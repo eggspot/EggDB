@@ -29,6 +29,17 @@ fn wrong_kind(name: &Name, kind: &str) -> SqlError {
     .at(name.position)
 }
 
+pub(crate) fn schema_comment(reader: &dyn KeyValueRead, schema: &str) -> SqlResult<Option<String>> {
+    reader
+        .get(&schema_comment_key(schema))?
+        .map(|bytes| decode_comment(&bytes))
+        .transpose()
+}
+
+pub(crate) fn set_schema_comment(writer: &mut dyn KeyValueWrite, schema: &str, text: &str) -> SqlResult<()> {
+    store(writer, &schema_comment_key(schema), Some(text)).map(|_| ())
+}
+
 fn store(writer: &mut dyn KeyValueWrite, key: &[u8], text: Option<&str>) -> SqlResult<QueryResult> {
     match text {
         Some(text) if !text.is_empty() => {

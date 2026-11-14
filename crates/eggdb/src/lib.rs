@@ -66,6 +66,7 @@
 
 mod change_archive;
 mod cluster_meta;
+mod attach;
 mod collection;
 mod collection_counts;
 mod concurrent;

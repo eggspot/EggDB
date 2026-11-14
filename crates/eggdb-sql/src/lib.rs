@@ -22,6 +22,7 @@ pub mod activity;
 pub mod api_keys;
 pub mod audit_events;
 mod advisory_locks;
+mod attached;
 mod aggregate;
 mod alter;
 mod arrays;
@@ -485,6 +486,7 @@ pub use stack_depth::{SESSION_STACK_BYTES, set_thread_stack_size};
 pub use session::freshness::{Freshness, set_replication_hooks};
 pub use session::switchover::set_switchover_hook;
 pub use session::shard_move::{set_database_move_hook, set_shard_move_hook, set_tenant_move_hook};
+pub use attached::{AttachReader, set_attach_reader};
 pub use store::{
     ConcurrentIsolation, ConcurrentWrite, PreparedTransactionInfo, EntryVisitor, KeyValueRead, KeyValueStore, KeyValueWrite, PageLookups, ScanDirection,
     SnapshotHandle, StoreBackup, StoreFailure,

@@ -24,6 +24,11 @@ pub(crate) enum Statement {
     Commit,
     Rollback,
     TwoPhase(TwoPhase),
+    Attach {
+        path: String,
+        alias: Name,
+    },
+    Detach(Name),
     Savepoint(SavepointCommand),
     Analyze(Vec<Name>),
     Role(crate::roles::RoleStatement),

@@ -942,6 +942,12 @@ impl<'t> Parser<'t> {
                     position: name.position,
                 });
             }
+            if crate::attached::is_attached(&name.text) {
+                return Ok(Name {
+                    text: crate::schemas::written_qualified(&name.text.to_ascii_lowercase(), &table.text),
+                    position: name.position,
+                });
+            }
             if name.text != "main" {
                 return Err(SqlError::new(
                     SqlState::INVALID_CATALOG_NAME,

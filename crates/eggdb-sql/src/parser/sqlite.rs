@@ -403,8 +403,26 @@ impl<'t> Parser<'t> {
                 }
                 Statement::Ignored { tag, notice: None }
             }
-            "attach" | "detach" => {
-                return Err(self.not_supported(&word.to_ascii_uppercase()));
+            "attach" => {
+                self.at += 1;
+                self.take_word("database");
+                let path = match self.peek_kind() {
+                    TokenKind::String(text) => text.as_ref().to_owned(),
+                    TokenKind::Word(word) => word.to_string(),
+                    TokenKind::QuotedIdentifier(word) => word.clone(),
+                    _ => return Err(self.unexpected()),
+                };
+                self.at += 1;
+                self.expect_word("as")?;
+                Statement::Attach {
+                    path,
+                    alias: self.name()?,
+                }
+            }
+            "detach" => {
+                self.at += 1;
+                self.take_word("database");
+                Statement::Detach(self.name()?)
             }
             _ => return Ok(None),
         };

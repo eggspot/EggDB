@@ -372,6 +372,8 @@ pub(crate) fn classify(
         | Statement::Unlisten(_)
         | Statement::Notify { .. }
         | Statement::TwoPhase(_)
+        | Statement::Attach { .. }
+        | Statement::Detach(_)
         | Statement::Set { .. }
         | Statement::Show { .. }
         | Statement::Reset { .. }

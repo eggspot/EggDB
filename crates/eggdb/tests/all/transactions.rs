@@ -749,3 +749,45 @@ fn a_prepared_transaction_survives_a_reopen_and_commits_from_another_session() {
         .unwrap();
     assert_eq!(rows, vec![vec![eggdb::sql::Value::Integer(25)]]);
 }
+
+#[test]
+fn sqlite_sessions_attach_memory_and_eggdb_files_under_an_alias() {
+    use eggdb::sql::{Dialect, Value};
+    let other_file = TempPath::new("attach-other");
+    {
+        let other = Database::open(other_file.path()).unwrap();
+        let mut session = other.sql_store().session(Dialect::Sqlite);
+        session
+            .execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)", &mut |_| {})
+            .unwrap();
+        session
+            .execute("INSERT INTO items VALUES (1, 'kettle'), (2, 'pan')", &mut |_| {})
+            .unwrap();
+        drop(session);
+        other.close().unwrap();
+    }
+    let file = TempPath::new("attach-main");
+    let db = Database::open(file.path()).unwrap();
+    let store = db.sql_store();
+    let mut session = store.session(Dialect::Sqlite);
+    let path = other_file.path().display().to_string().replace('\'', "''");
+    session
+        .execute(&format!("ATTACH DATABASE '{path}' AS shop"), &mut |_| {})
+        .unwrap();
+    let mut rows = Vec::new();
+    session
+        .execute("SELECT name FROM shop.items ORDER BY id", &mut |result| rows.extend(result.rows))
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![vec![Value::Text("kettle".into())], vec![Value::Text("pan".into())]]
+    );
+    session.execute("ATTACH ':memory:' AS scratch", &mut |_| {}).unwrap();
+    session.execute("CREATE TABLE scratch.notes (body TEXT)", &mut |_| {}).unwrap();
+    session.execute("INSERT INTO scratch.notes VALUES ('hi')", &mut |_| {}).unwrap();
+    let error = session.execute("ATTACH ':memory:' AS scratch", &mut |_| {}).unwrap_err();
+    assert!(error.to_string().contains("already in use"), "{error}");
+    session.execute("DETACH DATABASE scratch", &mut |_| {}).unwrap();
+    assert!(session.execute("SELECT * FROM scratch.notes", &mut |_| {}).is_err());
+    session.execute("DETACH shop", &mut |_| {}).unwrap();
+}

@@ -97,6 +97,7 @@ impl Database {
     /// This database as a store for SQL: [`Store::session`] runs SQL on it in any dialect.
     pub fn sql_store(&self) -> Store<'_> {
         eggdb_sql::set_random_source(eggdb_platform::secure_random::fill);
+        crate::attach::install();
         Store(self)
     }
 }

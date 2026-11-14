@@ -489,7 +489,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M4 Embedded key-value and the single file
 - A benchmark against SQLite's `:memory:` in the compare job (D175). **Code written, unbuilt** (code-only mode,
   2026-11-13, D951): `sqlite_compare.memory_get` and `memory_batch_put`.
-- `ATTACH` of in-memory, EggDB and SQLite files, in every dialect that has it (D175, sql.md).
+- `ATTACH` of in-memory, EggDB and SQLite files, in every dialect that has it (D175, sql.md). **Code written, unbuilt** (code-only mode, 2026-11-14, D1131): SQLite's `ATTACH` and
+  `DETACH`; an attached file is read into the alias's schema, and writing back to it is left.
 - SQL tables kept in their own collection, named `sql` (D139: "SQL in collections is later work").
 - Collections in the C API and the language drivers beyond D139 (D292). Renaming and counting collections in the C API
   (`eggdb_rename_collection`, `eggdb_collection_stats`): **code written, unbuilt** (code-only mode, 2026-11-13, D929).
