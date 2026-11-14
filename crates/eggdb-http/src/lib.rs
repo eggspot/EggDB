@@ -48,6 +48,24 @@ pub const MAX_REQUESTS_PER_CONNECTION: usize = 100;
 /// The longest request body [`serve`] reads: 1 MiB.
 pub const MAX_BODY_BYTES: usize = 1 << 20;
 
+thread_local! {
+    static RESPONSE_ROOM_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// How many bytes the response to the request being handled on this thread may take before the
+/// listener refuses it as over the memory budget, so a handler can refuse a large body before it
+/// builds it. `usize::MAX` outside a request served with [`Limits`].
+pub fn response_room_bytes() -> usize {
+    RESPONSE_ROOM_BYTES.with(std::cell::Cell::get)
+}
+
+pub(crate) fn with_response_room<T>(room: usize, work: impl FnOnce() -> T) -> T {
+    let earlier = RESPONSE_ROOM_BYTES.with(|cell| cell.replace(room));
+    let result = work();
+    RESPONSE_ROOM_BYTES.with(|cell| cell.set(earlier));
+    result
+}
+
 /// A request's line and headers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {

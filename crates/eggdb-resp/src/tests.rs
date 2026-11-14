@@ -361,6 +361,41 @@ fn replies_of_many_keys_stop_with_oom_once_they_pass_the_reply_room() {
 }
 
 #[test]
+fn a_large_value_and_an_exec_s_replies_are_measured_against_the_reply_room() {
+    let mut redis = Harness::new();
+    let value = "v".repeat(1000);
+    assert_eq!(redis.text(&format!("SET big {value}")), "+OK|");
+    let mut run = |line: &str, reply_room_bytes: usize| {
+        let arguments: Vec<Vec<u8>> = line
+            .split(' ')
+            .map(|word| word.as_bytes().to_vec())
+            .collect();
+        let context = Context {
+            keyspace: &redis.keyspace,
+            password_sha256: None,
+            now_ms: redis.now_ms,
+            reply_room_bytes,
+            blocked_clients: 0,
+            scripts: None,
+        };
+        let mut out = Vec::new();
+        crate::transactions::execute_with_transactions(&context, &mut redis.client, &arguments)
+            .encode(&mut out, false);
+        String::from_utf8(out).unwrap()
+    };
+    assert!(run("GET big", 500).starts_with("-OOM "));
+    assert!(run("GET big", 2000).starts_with("$1000\r\n"));
+    assert_eq!(run("MULTI", usize::MAX), "+OK\r\n");
+    for _ in 0..3 {
+        assert_eq!(run("GET big", usize::MAX), "+QUEUED\r\n");
+    }
+    let replies = run("EXEC", 2500);
+    assert!(replies.starts_with("*3\r\n$1000\r\n"), "{replies}");
+    assert_eq!(replies.matches("$1000\r\n").count(), 2, "{replies}");
+    assert!(replies.contains("-OOM "), "{replies}");
+}
+
+#[test]
 fn object_encoding_names_redis_s_representations() {
     let mut redis = Harness::new();
     redis.run("SET n 12345");

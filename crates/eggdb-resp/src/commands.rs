@@ -520,9 +520,15 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
     let now = context.now_ms;
     match (name, args.len()) {
         ("get", 1) => reading(context, db, |keys| {
-            Ok(Reply::Bulk(
-                as_string(load(keys, &args[0], now)?.as_ref())?.cloned(),
-            ))
+            if let Some(stored) = keys.stored_bytes(&args[0])? {
+                context.check_value_room(stored)?;
+            }
+            let entry = load(keys, &args[0], now)?;
+            let value = as_string(entry.as_ref())?;
+            if let Some(value) = value {
+                context.check_reply_room(bulk_reply_bytes(value))?;
+            }
+            Ok(Reply::Bulk(value.cloned()))
         }),
         ("set", count) if count >= 2 => set(context, db, args),
         ("setnx", 2) => writing(context, db, |keys| {
@@ -670,6 +676,9 @@ fn key_command(context: &Context<'_>, db: u32, name: &str, args: &[Vec<u8>]) -> 
             if (name == "getset" && count == 2) || (name == "getdel" && count == 1) =>
         {
             writing(context, db, |keys| {
+                if let Some(stored) = keys.stored_bytes(&args[0])? {
+                    context.check_value_room(stored)?;
+                }
                 let entry = load(keys, &args[0], now)?;
                 let old = as_string(entry.as_ref())?.cloned();
                 if name == "getset" {

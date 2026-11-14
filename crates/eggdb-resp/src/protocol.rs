@@ -87,6 +87,29 @@ impl Reply {
         Self::Bulk(None)
     }
 
+    /// An upper bound of the bytes [`Reply::encode`] writes for this reply in either protocol,
+    /// counted without building it: each element's length line is counted at its widest.
+    pub fn encoded_bytes_at_most(&self) -> usize {
+        const LINE_BYTES: usize = 24;
+        match self {
+            Self::Status(text) | Self::Error(text) => text.len().saturating_add(3),
+            Self::Integer(_) | Self::Bulk(None) | Self::Array(None) | Self::Double(_) => LINE_BYTES * 2,
+            Self::Bulk(Some(bytes)) => bytes.len().saturating_add(LINE_BYTES),
+            Self::DoubleWithText(_, text) => text.len().saturating_add(LINE_BYTES * 2),
+            Self::Array(Some(items)) | Self::Set(items) | Self::Push(items) => items
+                .iter()
+                .fold(LINE_BYTES, |total, item| total.saturating_add(item.encoded_bytes_at_most())),
+            Self::Map(pairs) | Self::PairArray(pairs) | Self::Pairs(pairs) => {
+                pairs.iter().fold(LINE_BYTES, |total, (key, value)| {
+                    total
+                        .saturating_add(LINE_BYTES)
+                        .saturating_add(key.encoded_bytes_at_most())
+                        .saturating_add(value.encoded_bytes_at_most())
+                })
+            }
+        }
+    }
+
     /// The reply in RESP3 when `resp3`, else RESP2.
     pub fn encode(&self, out: &mut Vec<u8>, resp3: bool) {
         match self {

@@ -974,7 +974,19 @@ impl<'k> Api<'k> {
         ))
     }
 
+    fn stored_document_fits(&self, index: &str, id: &str) -> Result<bool, Failure> {
+        let room = eggdb_http::response_room_bytes();
+        if room == usize::MAX {
+            return Ok(true);
+        }
+        let stored = read(self.keyspace, |keys| keys.stored_bytes(&document_key(index, id)))?;
+        Ok(stored.is_none_or(|bytes| bytes <= room))
+    }
+
     fn get_document(&self, index: &str, id: &str, request: &Request, head: bool) -> Answer {
+        if !head && !self.stored_document_fits(index, id)? {
+            return Ok(over_memory_budget());
+        }
         let found = read(self.keyspace, |keys| {
             Ok(keys
                 .get(&document_key(index, id))?
@@ -1012,6 +1024,9 @@ impl<'k> Api<'k> {
     }
 
     fn get_source(&self, index: &str, id: &str, request: &Request, head: bool) -> Answer {
+        if !head && !self.stored_document_fits(index, id)? {
+            return Ok(over_memory_budget());
+        }
         let found = read(self.keyspace, |keys| {
             Ok(keys
                 .get(&document_key(index, id))?

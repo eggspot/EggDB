@@ -22,6 +22,12 @@ type Database = BTreeMap<Vec<u8>, Vec<u8>>;
 pub trait KeysRead {
     /// The stored bytes of `key`.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
+    /// How many bytes `key` stores, without handing them over, so a caller can refuse a value
+    /// too large for its reply before reading it. A store that keeps value lengths answers
+    /// without reading the value.
+    fn stored_bytes(&self, key: &[u8]) -> Result<Option<usize>, String> {
+        Ok(self.get(key)?.map(|value| value.len()))
+    }
     /// Every key, in byte order.
     fn keys(&self) -> Result<Vec<Vec<u8>>, String>;
     /// Calls `visit` with each key in byte order, one at a time, until it returns `false` or an

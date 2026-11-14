@@ -66,17 +66,20 @@ fn exec(context: &Context<'_>, client: &mut Client) -> Reply {
             db,
             keys: RefCell::new(keys),
         };
-        let inner = Context {
-            keyspace: &open,
-            password_sha256: context.password_sha256,
-            now_ms: context.now_ms,
-            reply_room_bytes: context.reply_room_bytes,
-            blocked_clients: context.blocked_clients,
-            scripts: context.scripts,
-        };
+        let mut room = context.reply_room_bytes;
         let mut gathered = Vec::with_capacity(queued.len());
         for arguments in &queued {
-            gathered.push(execute(&inner, client, arguments));
+            let inner = Context {
+                keyspace: &open,
+                password_sha256: context.password_sha256,
+                now_ms: context.now_ms,
+                reply_room_bytes: room,
+                blocked_clients: context.blocked_clients,
+                scripts: context.scripts,
+            };
+            let reply = execute(&inner, client, arguments);
+            room = room.saturating_sub(reply.encoded_bytes_at_most());
+            gathered.push(reply);
         }
         replies = Some(gathered);
         Ok(())

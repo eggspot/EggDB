@@ -77,6 +77,74 @@ struct Connection<'s> {
     read_only_transaction: bool,
     staged: crate::staged::StagedChanges,
     replies_held: Reservation<'s>,
+    pending_held: Reservation<'s>,
+}
+
+const PACKED_HEADER_BYTES: usize = 9;
+const PACKED_ELEMENT_ID_BYTES: usize = 24;
+
+fn packed_text_bytes(text: &str) -> usize {
+    text.len().saturating_add(PACKED_HEADER_BYTES)
+}
+
+fn packed_properties_bytes(properties: &[(String, Value)]) -> usize {
+    properties.iter().fold(PACKED_HEADER_BYTES, |total, (name, value)| {
+        total
+            .saturating_add(packed_text_bytes(name))
+            .saturating_add(packed_bytes_at_most(value))
+    })
+}
+
+fn packed_node_bytes(node: &eggdb_graph::Node) -> usize {
+    node.labels
+        .iter()
+        .fold(PACKED_HEADER_BYTES * 2 + PACKED_ELEMENT_ID_BYTES, |total, label| {
+            total.saturating_add(packed_text_bytes(label))
+        })
+        .saturating_add(packed_properties_bytes(&node.properties))
+}
+
+fn packed_relationship_bytes(relationship: &eggdb_graph::Relationship) -> usize {
+    (PACKED_HEADER_BYTES * 4 + PACKED_ELEMENT_ID_BYTES * 3)
+        .saturating_add(packed_text_bytes(&relationship.kind))
+        .saturating_add(packed_properties_bytes(&relationship.properties))
+}
+
+fn packed_bytes_at_most(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::Boolean(_) | Value::Integer(_) | Value::Float(_) => PACKED_HEADER_BYTES,
+        Value::String(text) => packed_text_bytes(text),
+        Value::List(items) => items.iter().fold(PACKED_HEADER_BYTES, |total, item| {
+            total.saturating_add(packed_bytes_at_most(item))
+        }),
+        Value::Map(entries) => packed_properties_bytes(entries),
+        Value::Node(node) => packed_node_bytes(node),
+        Value::Relationship(relationship) => packed_relationship_bytes(relationship),
+        Value::Path(path) => {
+            let nodes = path.nodes.iter().map(packed_node_bytes).fold(0, usize::saturating_add);
+            let relationships = path
+                .relationships
+                .iter()
+                .map(packed_relationship_bytes)
+                .fold(0, usize::saturating_add);
+            (PACKED_HEADER_BYTES * 4)
+                .saturating_add(nodes)
+                .saturating_add(relationships)
+                .saturating_add(path.relationships.len().saturating_mul(PACKED_HEADER_BYTES * 2))
+        }
+        Value::Temporal(_) | Value::Point(_) => PACKED_HEADER_BYTES * 6,
+    }
+}
+
+fn record_bytes_at_most(row: &[Value]) -> usize {
+    row.iter()
+        .fold(PACKED_HEADER_BYTES * 2, |total, value| total.saturating_add(packed_bytes_at_most(value)))
+}
+
+fn rows_bytes_at_most(rows: &[Vec<Value>]) -> usize {
+    rows.iter()
+        .map(|row| record_bytes_at_most(row))
+        .fold(0, usize::saturating_add)
 }
 
 fn choose_version(proposals: &[u8; 16]) -> Option<(u8, u8)> {
@@ -207,14 +275,24 @@ impl Connection<'_> {
             _ => usize::MAX,
         };
         let Some(mut result) = self.pending.take() else {
+            self.pending_held.resize(0);
             replies.push(self.summary());
             return;
         };
         let taken = wanted.min(result.rows.len());
+        self.pending_held
+            .hold_if_large(rows_bytes_at_most(&result.rows[taken..]));
         let first_record = replies.len();
         let mut reply_bytes = replies.iter().map(Vec::len).fold(0, usize::saturating_add);
         let mut out_of_budget = false;
         for row in result.rows.drain(..taken) {
+            if !self
+                .replies_held
+                .hold_if_large(reply_bytes.saturating_add(record_bytes_at_most(&row)))
+            {
+                out_of_budget = true;
+                break;
+            }
             let record = message(
                 RECORD,
                 |out| {
@@ -235,11 +313,14 @@ impl Connection<'_> {
         if out_of_budget {
             replies.truncate(first_record);
             self.replies_held.resize(0);
+            self.pending_held.resize(0);
             self.failed = true;
             replies.push(failure(OUT_OF_MEMORY_CODE, OUT_OF_MEMORY_BUDGET));
         } else if result.rows.is_empty() {
+            self.pending_held.resize(0);
             replies.push(self.summary());
         } else {
+            self.pending_held.hold_if_large(rows_bytes_at_most(&result.rows));
             self.pending = Some(result);
             replies.push(metadata(&[("has_more", Value::Boolean(true))]));
         }
@@ -268,6 +349,7 @@ impl Connection<'_> {
         if logon_flow && signature == LOGOFF {
             self.authenticated = false;
             self.pending = None;
+            self.pending_held.resize(0);
             self.in_transaction = false;
             replies.push(metadata(&[]));
             return true;
@@ -308,6 +390,7 @@ impl Connection<'_> {
         if signature == RESET {
             self.failed = false;
             self.pending = None;
+            self.pending_held.resize(0);
             self.in_transaction = false;
             self.staged = crate::staged::StagedChanges::default();
             replies.push(metadata(&[]));
@@ -357,6 +440,11 @@ impl Connection<'_> {
                         }
                     });
                 match outcome {
+                    Ok(result) if !self.pending_held.hold_if_large(rows_bytes_at_most(&result.rows)) => {
+                        self.pending = None;
+                        self.failed = true;
+                        replies.push(failure(OUT_OF_MEMORY_CODE, OUT_OF_MEMORY_BUDGET));
+                    }
                     Ok(result) => {
                         let columns = Value::List(
                             result.columns.iter().cloned().map(Value::String).collect(),
@@ -377,6 +465,7 @@ impl Connection<'_> {
             PULL => self.pull(fields.first(), replies),
             DISCARD => {
                 self.pending = None;
+                self.pending_held.resize(0);
                 replies.push(self.summary());
             }
             BEGIN => {
@@ -480,6 +569,7 @@ pub(crate) fn serve_stream(
         read_only_transaction: false,
         staged: crate::staged::StagedChanges::default(),
         replies_held: config.memory_budget.empty_reservation(),
+        pending_held: config.memory_budget.empty_reservation(),
     };
     let mut read_held = config.memory_budget.empty_reservation();
     loop {

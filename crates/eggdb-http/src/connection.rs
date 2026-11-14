@@ -424,7 +424,15 @@ pub(crate) fn serve_connection<'h>(
         let head_only = request.method == "HEAD";
         let reply = match limits.rate_limit.map(|limiter| limiter.admit(client)) {
             Some(Err(wait)) => Reply::Whole(crate::too_many_requests_response(wait)),
-            _ => handler(&request),
+            _ => {
+                let room = limits
+                    .memory_budget
+                    .limit_bytes()
+                    .saturating_sub(limits.memory_budget.used_bytes())
+                    .saturating_add(held.bytes())
+                    .max(eggdb_platform::connection_limits::UNCOUNTED_BUFFER_BYTES);
+                crate::with_response_room(room, || handler(&request))
+            }
         };
         drop(request);
         let mut paced = PacedWriter::new(&mut writer);

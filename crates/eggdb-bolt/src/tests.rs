@@ -243,7 +243,7 @@ fn a_message_past_the_memory_budget_ends_its_connection_before_it_is_read() {
 }
 
 #[test]
-fn records_past_the_memory_budget_fail_their_pull_and_the_connection_goes_on_after_reset() {
+fn a_result_whose_rows_pass_the_memory_budget_fails_its_run_and_the_connection_goes_on_after_reset() {
     let keyspace = MemoryKeyspace::default();
     let (budget, config) = budgeted(200_000);
     let mut input = handshake([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]]);
@@ -275,9 +275,36 @@ fn records_past_the_memory_budget_fail_their_pull_and_the_connection_goes_on_aft
     let (_, messages) = responses(&output);
     assert_eq!(
         signatures(&messages),
-        [0x70, 0x70, 0x7f, 0x70, 0x70, 0x71, 0x70]
+        [0x70, 0x7f, 0x7e, 0x70, 0x70, 0x71, 0x70]
     );
-    assert!(is_out_of_memory(&messages[2]));
+    assert!(is_out_of_memory(&messages[1]));
+    assert_eq!(budget.used_bytes(), 0);
+}
+
+#[test]
+fn rows_waiting_for_pull_hold_the_budget_until_they_are_pulled_or_discarded() {
+    let keyspace = MemoryKeyspace::default();
+    let (budget, config) = budgeted(400_000);
+    let mut input = handshake([[0, 0, 0, 5], [0; 4], [0; 4], [0; 4]]);
+    input.extend(hello("secret"));
+    input.extend(encode_request(
+        0x10,
+        &[
+            text("UNWIND range(1, 20) AS i RETURN $x AS x"),
+            map(vec![("x", text(&"c".repeat(10_000)))]),
+            map(vec![]),
+        ],
+    ));
+    input.extend(encode_request(0x3f, &[map(vec![("n", Packed::Integer(5))])]));
+    input.extend(encode_request(0x2f, &[map(vec![])]));
+    input.extend(encode_request(0x02, &[]));
+    let mut output = Vec::new();
+    serve_stream(&keyspace, &config, 1, input.as_slice(), &mut output).unwrap();
+    let (_, messages) = responses(&output);
+    assert_eq!(
+        signatures(&messages),
+        [0x70, 0x70, 0x71, 0x71, 0x71, 0x71, 0x71, 0x70, 0x70]
+    );
     assert_eq!(budget.used_bytes(), 0);
 }
 

@@ -721,7 +721,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Replies measured before they are built (RESP's `EXEC`, single large values, a Bolt record, an
   HTTP response body), a Bolt result's rows waiting for `PULL` and the queues' stored messages
   counted, and AMQP deliveries that never fit refused instead of offered again each round; every
-  listener's reads and RESP's pub/sub queues already hold the server's memory budget (D284, D307).
+  listener's reads and RESP's pub/sub queues already hold the server's memory budget (D284, D307). **Code written,
+  unbuilt** (code-only mode, 2026-11-14, D1156).
 - One shared listener crate for the protocol servers (D122).
 - Connections served from an event loop over the completion queue instead of a thread per
   connection (D103, D165). Check: a many-connections benchmark.
