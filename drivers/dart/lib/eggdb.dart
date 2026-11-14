@@ -117,20 +117,236 @@ class _Api {
   }
 }
 
+typedef _HandleCall = Int32 Function(Pointer<Void>);
+typedef _HandleDart = int Function(Pointer<Void>);
+typedef _IndexCall = Int32 Function(Pointer<Void>, Size);
+typedef _IndexDart = int Function(Pointer<Void>, int);
+typedef _ResultsCall = Int32 Function(Pointer<Void>, Pointer<Pointer<_Result>>, Pointer<Size>);
+typedef _ResultsDart = int Function(Pointer<Void>, Pointer<Pointer<_Result>>, Pointer<Size>);
+typedef _BeginCopyCall = Int32 Function(Pointer<Void>, Pointer<Uint8>, Pointer<Pointer<Void>>);
+typedef _BeginCopyDart = int Function(Pointer<Void>, Pointer<Uint8>, Pointer<Pointer<Void>>);
+
+class _StatementApi {
+  _StatementApi(DynamicLibrary library)
+      : prepare = library.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size, Pointer<Pointer<Void>>),
+            int Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Pointer<Void>>)>('eggdb_sql_prepare'),
+        parameterCount = library.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Size>),
+            int Function(Pointer<Void>, Pointer<Size>)>('eggdb_stmt_parameter_count'),
+        bindNull = library.lookupFunction<_IndexCall, _IndexDart>('eggdb_stmt_bind_null'),
+        bindInt64 = library.lookupFunction<Int32 Function(Pointer<Void>, Size, Int64), int Function(Pointer<Void>, int, int)>(
+            'eggdb_stmt_bind_int64'),
+        bindDouble = library.lookupFunction<Int32 Function(Pointer<Void>, Size, Double),
+            int Function(Pointer<Void>, int, double)>('eggdb_stmt_bind_double'),
+        bindBool = library.lookupFunction<Int32 Function(Pointer<Void>, Size, Int32), int Function(Pointer<Void>, int, int)>(
+            'eggdb_stmt_bind_bool'),
+        bindText = library.lookupFunction<Int32 Function(Pointer<Void>, Size, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, int, Pointer<Uint8>, int)>('eggdb_stmt_bind_text'),
+        bindBlob = library.lookupFunction<Int32 Function(Pointer<Void>, Size, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, int, Pointer<Uint8>, int)>('eggdb_stmt_bind_blob'),
+        clearBindings = library.lookupFunction<_HandleCall, _HandleDart>('eggdb_stmt_clear_bindings'),
+        execute = library.lookupFunction<_ResultsCall, _ResultsDart>('eggdb_stmt_execute'),
+        reset = library.lookupFunction<_HandleCall, _HandleDart>('eggdb_stmt_reset'),
+        columnCount = library.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Size>),
+            int Function(Pointer<Void>, Pointer<Size>)>('eggdb_stmt_column_count'),
+        columnName = library.lookupFunction<Int32 Function(Pointer<Void>, Size, Pointer<Pointer<Uint8>>),
+            int Function(Pointer<Void>, int, Pointer<Pointer<Uint8>>)>('eggdb_stmt_column_name'),
+        step = library.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Int32>), int Function(Pointer<Void>, Pointer<Int32>)>(
+            'eggdb_stmt_step'),
+        row = library.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Pointer<_Value>>, Pointer<Size>),
+            int Function(Pointer<Void>, Pointer<Pointer<_Value>>, Pointer<Size>)>('eggdb_stmt_row'),
+        finalize = library.lookupFunction<_HandleCall, _HandleDart>('eggdb_stmt_finalize'),
+        copyInBegin = library.lookupFunction<_BeginCopyCall, _BeginCopyDart>('eggdb_sql_copy_in_begin'),
+        copyOutBegin = library.lookupFunction<_BeginCopyCall, _BeginCopyDart>('eggdb_sql_copy_out_begin'),
+        copyPut = library.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Uint8>, Size),
+            int Function(Pointer<Void>, Pointer<Uint8>, int)>('eggdb_copy_put'),
+        copyRead = library.lookupFunction<Int32 Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>),
+            int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>)>('eggdb_copy_read'),
+        copyEnd = library.lookupFunction<_ResultsCall, _ResultsDart>('eggdb_copy_end'),
+        copyFree = library.lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>('eggdb_copy_free');
+
+  final int Function(Pointer<Void>, Pointer<Uint8>, int, Pointer<Pointer<Void>>) prepare;
+  final int Function(Pointer<Void>, Pointer<Size>) parameterCount;
+  final _IndexDart bindNull;
+  final int Function(Pointer<Void>, int, int) bindInt64;
+  final int Function(Pointer<Void>, int, double) bindDouble;
+  final int Function(Pointer<Void>, int, int) bindBool;
+  final int Function(Pointer<Void>, int, Pointer<Uint8>, int) bindText;
+  final int Function(Pointer<Void>, int, Pointer<Uint8>, int) bindBlob;
+  final _HandleDart clearBindings;
+  final _ResultsDart execute;
+  final _HandleDart reset;
+  final int Function(Pointer<Void>, Pointer<Size>) columnCount;
+  final int Function(Pointer<Void>, int, Pointer<Pointer<Uint8>>) columnName;
+  final int Function(Pointer<Void>, Pointer<Int32>) step;
+  final int Function(Pointer<Void>, Pointer<Pointer<_Value>>, Pointer<Size>) row;
+  final _HandleDart finalize;
+  final _BeginCopyDart copyInBegin;
+  final _BeginCopyDart copyOutBegin;
+  final int Function(Pointer<Void>, Pointer<Uint8>, int) copyPut;
+  final int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Size>) copyRead;
+  final _ResultsDart copyEnd;
+  final void Function(Pointer<Void>) copyFree;
+}
+
+Object? _converted(_Value cell) => switch (cell.kind) {
+      1 => cell.integer,
+      2 => cell.real,
+      3 => utf8.decode(cell.data.asTypedList(cell.len)),
+      4 => Uint8List.fromList(cell.data.asTypedList(cell.len)),
+      _ => null,
+    };
+
+List<StatementResult> _gathered(Pointer<_Result> results, int count) {
+  final gathered = <StatementResult>[];
+  for (var index = 0; index < count; index++) {
+    final result = (results + index).ref;
+    final columns = [for (var column = 0; column < result.columnCount; column++) _cString(result.columnNames[column])];
+    final rows = <List<Object?>>[];
+    for (var row = 0; row < result.rowCount; row++) {
+      rows.add([
+        for (var column = 0; column < result.columnCount; column++)
+          _converted((result.values + row * result.columnCount + column).ref)
+      ]);
+    }
+    gathered.add(StatementResult(_cString(result.tag), columns, rows));
+  }
+  return gathered;
+}
+
+int _copiedRows(List<StatementResult> results) {
+  for (final result in results.reversed) {
+    final words = result.tag.split(' ');
+    if (words.length == 2 && words[0] == 'COPY') return int.tryParse(words[1]) ?? -1;
+  }
+  return -1;
+}
+
+class Statement {
+  Statement._(this._database, this._handle, this.parameterCount);
+
+  final Database _database;
+  Pointer<Void> _handle;
+  final int parameterCount;
+
+  _Api get _api => _database._api;
+  _StatementApi get _calls => _database._calls;
+
+  Pointer<Void> _live() {
+    if (_handle == nullptr) throw EggDbException('the statement is finalized', '26000', 0);
+    return _handle;
+  }
+
+  void bind(List<Object?> parameters) {
+    final handle = _live();
+    _api.check(_calls.reset(handle));
+    _api.check(_calls.clearBindings(handle));
+    for (var index = 0; index < parameters.length; index++) {
+      _api.check(_bindOne(handle, index + 1, parameters[index]));
+    }
+  }
+
+  int _bindOne(Pointer<Void> handle, int index, Object? value) {
+    if (value == null) return _calls.bindNull(handle, index);
+    if (value is bool) return _calls.bindBool(handle, index, value ? 1 : 0);
+    if (value is int) return _calls.bindInt64(handle, index, value);
+    if (value is double) return _calls.bindDouble(handle, index, value);
+    if (value is Uint8List) {
+      final pointer = _api.malloc(value.isEmpty ? 1 : value.length).cast<Uint8>();
+      pointer.asTypedList(value.length).setAll(0, value);
+      try {
+        return _calls.bindBlob(handle, index, pointer, value.length);
+      } finally {
+        _api.free(pointer.cast());
+      }
+    }
+    final text = value is DateTime ? value.toIso8601String() : '$value';
+    final bytes = utf8.encode(text);
+    final pointer = _api.text(text);
+    try {
+      return _calls.bindText(handle, index, pointer, bytes.length);
+    } finally {
+      _api.free(pointer.cast());
+    }
+  }
+
+  List<StatementResult> execute([List<Object?> parameters = const []]) {
+    bind(parameters);
+    final results = _api.malloc(sizeOf<Pointer<_Result>>()).cast<Pointer<_Result>>();
+    final count = _api.malloc(sizeOf<Size>()).cast<Size>();
+    try {
+      _api.check(_calls.execute(_handle, results, count));
+      return _gathered(results.value, count.value);
+    } finally {
+      _api.free(results.cast());
+      _api.free(count.cast());
+    }
+  }
+
+  List<String> columns() {
+    final handle = _live();
+    final count = _api.malloc(sizeOf<Size>()).cast<Size>();
+    final name = _api.malloc(sizeOf<Pointer<Uint8>>()).cast<Pointer<Uint8>>();
+    try {
+      _api.check(_calls.columnCount(handle, count));
+      return [
+        for (var column = 0; column < count.value; column++)
+          () {
+            _api.check(_calls.columnName(handle, column, name));
+            return _cString(name.value);
+          }()
+      ];
+    } finally {
+      _api.free(count.cast());
+      _api.free(name.cast());
+    }
+  }
+
+  Iterable<List<Object?>> rows([List<Object?> parameters = const []]) sync* {
+    bind(parameters);
+    final hasRow = _api.malloc(sizeOf<Int32>()).cast<Int32>();
+    final values = _api.malloc(sizeOf<Pointer<_Value>>()).cast<Pointer<_Value>>();
+    final count = _api.malloc(sizeOf<Size>()).cast<Size>();
+    try {
+      while (true) {
+        _api.check(_calls.step(_live(), hasRow));
+        if (hasRow.value == 0) return;
+        _api.check(_calls.row(_handle, values, count));
+        yield [for (var column = 0; column < count.value; column++) _converted((values.value + column).ref)];
+      }
+    } finally {
+      if (_handle != nullptr) _calls.reset(_handle);
+      _api.free(hasRow.cast());
+      _api.free(values.cast());
+      _api.free(count.cast());
+    }
+  }
+
+  void finalize() {
+    if (_handle == nullptr) return;
+    _calls.finalize(_handle);
+    _handle = nullptr;
+    _database._statements.remove(this);
+  }
+}
+
 class Database {
-  Database._(this._api, this._database, this._session, this.dialect);
+  Database._(this._api, this._database, this._session, this.dialect, this._calls);
+
+  final _StatementApi _calls;
+  final Set<Statement> _statements = {};
 
   factory Database.open(String pathOrUrl, {String dialect = 'sqlite', String? library}) {
     final name = library ??
         Platform.environment['EGGDB_LIBRARY'] ??
         (Platform.isMacOS ? 'libeggdb_capi.dylib' : Platform.isWindows ? 'eggdb_capi.dll' : 'libeggdb_capi.so');
-    final api = _Api(_openLibrary(name));
+    final library = _openLibrary(name);
+    final api = _Api(library);
     final out = api.malloc(sizeOf<Pointer<Void>>()).cast<Pointer<Void>>();
     final path = api.text(pathOrUrl);
     try {
       if (pathOrUrl.startsWith('postgresql://') || pathOrUrl.startsWith('postgres://')) {
         api.check(api.sqlConnect(path, out));
-        return Database._(api, nullptr, out.value, 'postgresql');
+        return Database._(api, nullptr, out.value, 'postgresql', _StatementApi(library));
       }
       final options = api.malloc(sizeOf<_Options>()).cast<_Options>();
       options.ref
@@ -148,7 +364,7 @@ class Database {
         api.close(database);
         api.check(opened);
       }
-      return Database._(api, database, out.value, dialect);
+      return Database._(api, database, out.value, dialect, _StatementApi(library));
     } finally {
       api.free(path.cast());
       api.free(out.cast());
@@ -207,28 +423,7 @@ class Database {
     final statement = _api.text(_numbered(sql));
     try {
       _api.check(_api.execute(_session, statement, array, count, results, resultCount));
-      final gathered = <StatementResult>[];
-      for (var index = 0; index < resultCount.value; index++) {
-        final result = (results.value + index).ref;
-        final columns = [for (var column = 0; column < result.columnCount; column++) _cString(result.columnNames[column])];
-        final rows = <List<Object?>>[];
-        for (var row = 0; row < result.rowCount; row++) {
-          final cells = <Object?>[];
-          for (var column = 0; column < result.columnCount; column++) {
-            final cell = (result.values + row * result.columnCount + column).ref;
-            cells.add(switch (cell.kind) {
-              1 => cell.integer,
-              2 => cell.real,
-              3 => utf8.decode(cell.data.asTypedList(cell.len)),
-              4 => Uint8List.fromList(cell.data.asTypedList(cell.len)),
-              _ => null,
-            });
-          }
-          rows.add(cells);
-        }
-        gathered.add(StatementResult(_cString(result.tag), columns, rows));
-      }
-      return gathered;
+      return _gathered(results.value, resultCount.value);
     } finally {
       for (final pointer in kept) {
         _api.free(pointer.cast());
@@ -240,8 +435,110 @@ class Database {
     }
   }
 
+  Pointer<Void> _live() {
+    if (_session == nullptr) throw EggDbException('the database is closed', '08003', 0);
+    return _session;
+  }
+
+  Statement prepare(String sql) {
+    final text = _numbered(sql);
+    final bytes = utf8.encode(text);
+    final pointer = _api.text(text);
+    final out = _api.malloc(sizeOf<Pointer<Void>>()).cast<Pointer<Void>>();
+    final count = _api.malloc(sizeOf<Size>()).cast<Size>();
+    try {
+      _api.check(_calls.prepare(_live(), pointer, bytes.length, out));
+      final handle = out.value;
+      final status = _calls.parameterCount(handle, count);
+      if (status != 0) {
+        _calls.finalize(handle);
+        _api.check(status);
+      }
+      final statement = Statement._(this, handle, count.value);
+      _statements.add(statement);
+      return statement;
+    } finally {
+      _api.free(pointer.cast());
+      _api.free(out.cast());
+      _api.free(count.cast());
+    }
+  }
+
+  Iterable<List<Object?>> iterate(String sql, [List<Object?> parameters = const []]) sync* {
+    final statement = prepare(sql);
+    try {
+      yield* statement.rows(parameters);
+    } finally {
+      statement.finalize();
+    }
+  }
+
+  Pointer<Void> _beginCopy(_BeginCopyDart begin, String sql) {
+    final text = _api.text(sql);
+    final out = _api.malloc(sizeOf<Pointer<Void>>()).cast<Pointer<Void>>();
+    try {
+      _api.check(begin(_live(), text, out));
+      return out.value;
+    } finally {
+      _api.free(text.cast());
+      _api.free(out.cast());
+    }
+  }
+
+  List<StatementResult> _endCopy(Pointer<Void> copy) {
+    final results = _api.malloc(sizeOf<Pointer<_Result>>()).cast<Pointer<_Result>>();
+    final count = _api.malloc(sizeOf<Size>()).cast<Size>();
+    try {
+      _api.check(_calls.copyEnd(copy, results, count));
+      return _gathered(results.value, count.value);
+    } finally {
+      _api.free(results.cast());
+      _api.free(count.cast());
+    }
+  }
+
+  int copyFrom(String sql, Iterable<List<int>> pieces) {
+    final copy = _beginCopy(_calls.copyInBegin, sql);
+    try {
+      for (final piece in pieces) {
+        if (piece.isEmpty) continue;
+        final pointer = _api.malloc(piece.length).cast<Uint8>();
+        pointer.asTypedList(piece.length).setAll(0, piece);
+        final status = _calls.copyPut(copy, pointer, piece.length);
+        _api.free(pointer.cast());
+        _api.check(status);
+      }
+      return _copiedRows(_endCopy(copy));
+    } finally {
+      _calls.copyFree(copy);
+    }
+  }
+
+  int copyFromText(String sql, String data) => copyFrom(sql, [utf8.encode(data)]);
+
+  Iterable<Uint8List> copyTo(String sql) sync* {
+    final copy = _beginCopy(_calls.copyOutBegin, sql);
+    final data = _api.malloc(sizeOf<Pointer<Uint8>>()).cast<Pointer<Uint8>>();
+    final length = _api.malloc(sizeOf<Size>()).cast<Size>();
+    try {
+      while (true) {
+        _api.check(_calls.copyRead(copy, data, length));
+        if (length.value == 0) break;
+        yield Uint8List.fromList(data.value.asTypedList(length.value));
+      }
+      _endCopy(copy);
+    } finally {
+      _calls.copyFree(copy);
+      _api.free(data.cast());
+      _api.free(length.cast());
+    }
+  }
+
   void close() {
     if (_session == nullptr) return;
+    for (final statement in _statements.toList()) {
+      statement.finalize();
+    }
     _api.sqlClose(_session);
     if (_database != nullptr) _api.close(_database);
     _session = nullptr;

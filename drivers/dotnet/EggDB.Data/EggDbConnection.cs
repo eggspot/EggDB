@@ -115,6 +115,10 @@ public sealed class EggDbConnection : DbConnection
         {
             return;
         }
+        foreach (var statement in _prepared.ToArray())
+        {
+            statement.Dispose();
+        }
         Native.SqlClose(_session);
         if (_database != 0)
         {
@@ -146,6 +150,98 @@ public sealed class EggDbConnection : DbConnection
     {
         Close();
         base.Dispose(disposing);
+    }
+
+    private readonly List<EggDbPreparedStatement> _prepared = new();
+
+    internal void Track(EggDbPreparedStatement statement) => _prepared.Add(statement);
+
+    internal void Untrack(EggDbPreparedStatement statement) => _prepared.Remove(statement);
+
+    private nint OpenSession() =>
+        _state == ConnectionState.Open ? _session : throw new InvalidOperationException("the connection is not open");
+
+    internal unsafe EggDbPreparedStatement PrepareStatement(string text)
+    {
+        var bytes = Encoding.UTF8.GetBytes(Numbered(text));
+        nint handle;
+        fixed (byte* first = bytes)
+        {
+            Native.Check(Native.Prepare(OpenSession(), first, (nuint)bytes.Length, out handle));
+        }
+        return new EggDbPreparedStatement(this, handle);
+    }
+
+    /// <summary>Runs a <c>COPY ... FROM STDIN</c> with the data read from <paramref name="source"/>, sent in
+    /// pieces as it is read, and returns the number of rows loaded.</summary>
+    public unsafe long CopyFrom(string copyCommand, Stream source)
+    {
+        Native.Check(Native.CopyInBegin(OpenSession(), copyCommand, out var copy));
+        try
+        {
+            var buffer = new byte[64 * 1024];
+            int read;
+            while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                fixed (byte* first = buffer)
+                {
+                    Native.Check(Native.CopyPut(copy, first, (nuint)read));
+                }
+            }
+            return CopiedRows(EndCopy(copy));
+        }
+        finally
+        {
+            Native.CopyFree(copy);
+        }
+    }
+
+    /// <summary>Runs a <c>COPY ... FROM STDIN</c> with <paramref name="data"/> as its UTF-8 input and returns
+    /// the number of rows loaded.</summary>
+    public long CopyFrom(string copyCommand, string data) =>
+        CopyFrom(copyCommand, new MemoryStream(Encoding.UTF8.GetBytes(data), writable: false));
+
+    /// <summary>Runs a <c>COPY ... TO STDOUT</c> and writes its data to <paramref name="destination"/> as it
+    /// is read.</summary>
+    public unsafe void CopyTo(string copyCommand, Stream destination)
+    {
+        Native.Check(Native.CopyOutBegin(OpenSession(), copyCommand, out var copy));
+        try
+        {
+            while (true)
+            {
+                Native.Check(Native.CopyRead(copy, out var data, out var length));
+                if (length == 0)
+                {
+                    break;
+                }
+                destination.Write(new ReadOnlySpan<byte>((void*)data, (int)length));
+            }
+            EndCopy(copy);
+        }
+        finally
+        {
+            Native.CopyFree(copy);
+        }
+    }
+
+    private static List<StatementResult> EndCopy(nint copy)
+    {
+        Native.Check(Native.CopyEnd(copy, out var results, out var count));
+        return Gather(results, (int)count);
+    }
+
+    private static long CopiedRows(List<StatementResult> results)
+    {
+        for (var index = results.Count - 1; index >= 0; index--)
+        {
+            var words = results[index].Tag.Split(' ');
+            if (words.Length == 2 && words[0] == "COPY" && long.TryParse(words[1], out var count))
+            {
+                return count;
+            }
+        }
+        return -1;
     }
 
     internal unsafe List<StatementResult> Run(string text, IReadOnlyList<object?> parameters)
@@ -190,6 +286,8 @@ public sealed class EggDbConnection : DbConnection
             }
         }
     }
+
+    internal string Numbered(string text) => Bound(text, Array.Empty<object?>()).Text;
 
     private (string Text, List<object?> Parameters) Bound(string text, IReadOnlyList<object?> parameters)
     {
@@ -244,7 +342,7 @@ public sealed class EggDbConnection : DbConnection
         return (output.ToString(), kept);
     }
 
-    private string? ParameterText(object? value) => value switch
+    internal string? ParameterText(object? value) => value switch
     {
         null or DBNull => null,
         bool flag => Dialect == "postgresql" ? (flag ? "true" : "false") : (flag ? "1" : "0"),
@@ -254,7 +352,7 @@ public sealed class EggDbConnection : DbConnection
         _ => value.ToString(),
     };
 
-    private static unsafe List<StatementResult> Gather(nint results, int count)
+    internal static unsafe List<StatementResult> Gather(nint results, int count)
     {
         var gathered = new List<StatementResult>(count);
         var first = (NativeResult*)results;
@@ -284,7 +382,7 @@ public sealed class EggDbConnection : DbConnection
         return gathered;
     }
 
-    private static unsafe object? Converted(NativeValue value) => value.Kind switch
+    internal static unsafe object? Converted(NativeValue value) => value.Kind switch
     {
         Native.Integer => value.Integer,
         Native.Real => value.Real,

@@ -8,13 +8,23 @@ namespace EggDB.Data;
 public sealed class EggDbCommand : DbCommand
 {
     private string _commandText = string.Empty;
+    private EggDbPreparedStatement? _prepared;
+    private string[]? _preparedNames;
 
     /// <inheritdoc />
     [AllowNull]
     public override string CommandText
     {
         get => _commandText;
-        set => _commandText = value ?? string.Empty;
+        set
+        {
+            var text = value ?? string.Empty;
+            if (text != _commandText)
+            {
+                ReleasePrepared();
+            }
+            _commandText = text;
+        }
     }
 
     /// <inheritdoc />
@@ -45,7 +55,29 @@ public sealed class EggDbCommand : DbCommand
     {
         var named = ((EggDbParameterCollection)DbParameterCollection).NamedValues();
         var (text, values) = NamedParameters.Positional(_commandText, named);
+        if (PreparedFor(named) is { } prepared)
+        {
+            prepared.Bind(values);
+            return prepared.Execute();
+        }
         return OpenConnection().Run(text, values);
+    }
+
+    private EggDbPreparedStatement? PreparedFor(IReadOnlyList<(string Name, object? Value)> named)
+    {
+        if (_prepared is null || _prepared.IsFinalized)
+        {
+            return null;
+        }
+        var names = named.Select(pair => pair.Name).ToArray();
+        return _preparedNames is not null && names.SequenceEqual(_preparedNames) ? _prepared : null;
+    }
+
+    private void ReleasePrepared()
+    {
+        _prepared?.Dispose();
+        _prepared = null;
+        _preparedNames = null;
     }
 
     /// <inheritdoc />
@@ -77,15 +109,42 @@ public sealed class EggDbCommand : DbCommand
         return last is { Rows.Count: > 0 } && last.Columns.Length > 0 ? last.Rows[0][0] ?? DBNull.Value : null;
     }
 
-    /// <inheritdoc />
+    /// <summary>Checks the command once on its connection; later runs bind the parameters' typed values to
+    /// the prepared statement instead of sending the text again.</summary>
     public override void Prepare()
     {
+        ReleasePrepared();
+        var named = ((EggDbParameterCollection)DbParameterCollection).NamedValues();
+        var (text, _) = NamedParameters.Positional(_commandText, named);
+        _prepared = OpenConnection().PrepareStatement(text);
+        _preparedNames = named.Select(pair => pair.Name).ToArray();
+    }
+
+    /// <inheritdoc />
+    protected override void Dispose(bool disposing)
+    {
+        ReleasePrepared();
+        base.Dispose(disposing);
     }
 
     /// <inheritdoc />
     protected override DbParameter CreateDbParameter() => new EggDbParameter();
 
     /// <inheritdoc />
-    protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) =>
-        new EggDbDataReader(Run());
+    protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
+    {
+        var named = ((EggDbParameterCollection)DbParameterCollection).NamedValues();
+        if (PreparedFor(named) is { } prepared)
+        {
+            var (_, values) = NamedParameters.Positional(_commandText, named);
+            prepared.Bind(values);
+            var columns = prepared.Columns();
+            if (columns.Length > 0)
+            {
+                return new EggDbDataReader(prepared, columns);
+            }
+            return new EggDbDataReader(prepared.Execute());
+        }
+        return new EggDbDataReader(Run());
+    }
 }

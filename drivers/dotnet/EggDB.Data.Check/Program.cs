@@ -53,6 +53,46 @@ using (var connection = new EggDbConnection($"Data Source={path};Dialect=sqlite"
     }
 }
 File.Delete(path);
+using (var connection = new EggDbConnection("Data Source=:memory:;Dialect=postgresql"))
+{
+    connection.Open();
+    using (var create = connection.CreateCommand())
+    {
+        create.CommandText = "CREATE TABLE t (id integer, name text)";
+        create.ExecuteNonQuery();
+    }
+    using (var insert = connection.CreateCommand())
+    {
+        insert.CommandText = "INSERT INTO t VALUES (?, ?)";
+        insert.Parameters.Add(new EggDbParameter { Value = 0L });
+        insert.Parameters.Add(new EggDbParameter { Value = string.Empty });
+        insert.Prepare();
+        foreach (var (id, name) in new[] { (1L, "ada"), (2L, "grace") })
+        {
+            insert.Parameters[0].Value = id;
+            insert.Parameters[1].Value = name;
+            Check(insert.ExecuteNonQuery() == 1, "a prepared insert changes one row");
+        }
+    }
+    Check(connection.CopyFrom("COPY t FROM STDIN", "3\tedsger\n") == 1, "COPY loads one row");
+    using (var select = connection.CreateCommand())
+    {
+        select.CommandText = "SELECT name FROM t WHERE id > ? ORDER BY id";
+        select.Parameters.Add(new EggDbParameter { Value = 1 });
+        select.Prepare();
+        using var reader = select.ExecuteReader();
+        Check(reader.HasRows, "the stepped reader has rows");
+        var names = new List<string>();
+        while (reader.Read())
+        {
+            names.Add(reader.GetString(0));
+        }
+        Check(string.Join(",", names) == "grace,edsger", $"stepped rows: {string.Join(",", names)}");
+    }
+    using var copied = new MemoryStream();
+    connection.CopyTo("COPY (SELECT id FROM t ORDER BY id) TO STDOUT", copied);
+    Check(System.Text.Encoding.UTF8.GetString(copied.ToArray()) == "1\n2\n3\n", "COPY reads the rows back");
+}
 var keyValuePath = Path.Combine(Path.GetTempPath(), $"eggdb-kv-{Guid.NewGuid():N}.db");
 using (var store = new EggDbKeyValue(keyValuePath))
 {

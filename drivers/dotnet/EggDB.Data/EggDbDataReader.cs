@@ -7,6 +7,9 @@ namespace EggDB.Data;
 public sealed class EggDbDataReader : DbDataReader
 {
     private readonly List<StatementResult> _results;
+    private readonly EggDbPreparedStatement? _stepper;
+    private object?[]? _steppedRow;
+    private object?[]? _nextSteppedRow;
     private int _result;
     private int _row = -1;
 
@@ -15,9 +18,16 @@ public sealed class EggDbDataReader : DbDataReader
         _results = results.Where(result => result.Columns.Length > 0).ToList();
     }
 
+    internal EggDbDataReader(EggDbPreparedStatement stepper, string[] columns)
+    {
+        _results = new List<StatementResult> { new(string.Empty, columns, new List<object?[]>()) };
+        _stepper = stepper;
+        _nextSteppedRow = stepper.Step();
+    }
+
     private StatementResult? Current => _result < _results.Count ? _results[_result] : null;
 
-    private object? ValueAt(int ordinal) => Current?.Rows[_row][ordinal];
+    private object? ValueAt(int ordinal) => _stepper is not null ? _steppedRow?[ordinal] : Current?.Rows[_row][ordinal];
 
     /// <inheritdoc />
     public override object this[int ordinal] => GetValue(ordinal);
@@ -32,7 +42,8 @@ public sealed class EggDbDataReader : DbDataReader
     public override int FieldCount => Current?.Columns.Length ?? 0;
 
     /// <inheritdoc />
-    public override bool HasRows => Current is { Rows.Count: > 0 };
+    public override bool HasRows =>
+        _stepper is not null ? _result == 0 && (_steppedRow is not null || _nextSteppedRow is not null) : Current is { Rows.Count: > 0 };
 
     /// <inheritdoc />
     public override bool IsClosed => false;
@@ -96,7 +107,8 @@ public sealed class EggDbDataReader : DbDataReader
     /// <inheritdoc />
     public override Type GetFieldType(int ordinal)
     {
-        foreach (var row in Current?.Rows ?? new List<object?[]>())
+        var rows = _stepper is not null ? new[] { _steppedRow, _nextSteppedRow }.OfType<object?[]>() : Current?.Rows ?? new List<object?[]>();
+        foreach (var row in rows)
         {
             if (row[ordinal] is { } value)
             {
@@ -154,17 +166,48 @@ public sealed class EggDbDataReader : DbDataReader
     {
         _result++;
         _row = -1;
+        if (_stepper is not null)
+        {
+            EndStepping();
+        }
         return Current is not null;
     }
 
     /// <inheritdoc />
     public override bool Read()
     {
+        if (_stepper is not null)
+        {
+            _steppedRow = _result == 0 ? _nextSteppedRow : null;
+            if (_steppedRow is null)
+            {
+                EndStepping();
+                return false;
+            }
+            _nextSteppedRow = _stepper.Step();
+            return true;
+        }
         if (Current is null || _row + 1 >= Current.Rows.Count)
         {
             return false;
         }
         _row++;
         return true;
+    }
+
+    /// <inheritdoc />
+    public override void Close()
+    {
+        if (_stepper is not null)
+        {
+            EndStepping();
+        }
+        base.Close();
+    }
+
+    private void EndStepping()
+    {
+        _nextSteppedRow = null;
+        _stepper?.Reset();
     }
 }

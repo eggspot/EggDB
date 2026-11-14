@@ -23,7 +23,21 @@ void main() {
   } on EggDbException catch (error) {
     require(error.sqlState?.length == 5, 'the error has a SQLSTATE');
   }
+  final insert = db.prepare('INSERT INTO people (name, score) VALUES (?, ?)');
+  require(insert.parameterCount == 2, 'two parameters');
+  insert.execute(['Grace', 3.25]);
+  insert.execute(['Edsger', 4]);
+  insert.finalize();
+  final names = [for (final row in db.iterate('SELECT name FROM people WHERE score > ? ORDER BY id', [3])) row[0]];
+  require(names.join(',') == 'Grace,Edsger', 'stepped rows');
   db.close();
+
+  final pg = Database.open(':memory:', dialect: 'postgresql');
+  pg.execute('CREATE TABLE t (id integer, name text)');
+  require(pg.copyFromText('COPY t FROM STDIN', '1\tada\n2\tgrace\n') == 2, 'COPY loads two rows');
+  final copied = pg.copyTo('COPY t TO STDOUT').expand((piece) => piece).toList();
+  require(String.fromCharCodes(copied) == '1\tada\n2\tgrace\n', 'COPY reads the rows back');
+  pg.close();
 
   final path = '${Directory.systemTemp.path}/eggdb-dart-kv-$pid.eggdb';
   final store = KeyValue.open(path);
