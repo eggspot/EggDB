@@ -723,7 +723,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   counted, and AMQP deliveries that never fit refused instead of offered again each round; every
   listener's reads and RESP's pub/sub queues already hold the server's memory budget (D284, D307). **Code written,
   unbuilt** (code-only mode, 2026-11-14, D1156).
-- One shared listener crate for the protocol servers (D122).
+- One shared listener crate for the protocol servers (D122). **Code written, unbuilt** (code-only mode, 2026-11-14, D1157):
+  `crates/eggdb-listener`.
 - Connections served from an event loop over the completion queue instead of a thread per
   connection (D103, D165). Check: a many-connections benchmark.
 - TLS session resumption, and the processor's AES instructions (D161).

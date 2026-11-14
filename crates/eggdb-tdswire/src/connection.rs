@@ -23,6 +23,7 @@ use eggdb_sql::{
     SqlResult, SqlState, Value,
 };
 use std::time::{Duration, Instant};
+pub(crate) use eggdb_listener::printable;
 
 const DATETIME_OUT_OF_RANGE: u32 = 242;
 const ARITHMETIC_OVERFLOW: u32 = 8115;
@@ -52,34 +53,6 @@ const TOO_MANY_RESULT_COLUMNS: u32 = 1056;
 const BULK_DATA_INCORRECT: u16 = 4804;
 const BULK_COLUMN_LENGTH: u16 = 4815;
 const BULK_COLUMN_TYPE: u16 = 4816;
-
-pub(crate) fn printable(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '\\' => shown.push_str("\\\\"),
-            '"' => shown.push_str("\\\""),
-            '\n' => shown.push_str("\\n"),
-            '\r' => shown.push_str("\\r"),
-            '\t' => shown.push_str("\\t"),
-            special
-                if special.is_control()
-                    || matches!(
-                        special,
-                        '\u{200e}'
-                            | '\u{200f}'
-                            | '\u{061c}'
-                            | '\u{2028}'..='\u{202e}'
-                            | '\u{2066}'..='\u{2069}'
-                    ) =>
-            {
-                shown.push_str(&format!("\\u{{{:x}}}", u32::from(special)));
-            }
-            other => shown.push(other),
-        }
-    }
-    shown
-}
 
 fn bracketed(name: &str) -> String {
     format!("[{}]", name.replace(']', "]]"))

@@ -6,13 +6,13 @@ use eggdb_platform::connection_limits::{
 };
 use eggdb_platform::local_socket::{LocalListener, LocalStream};
 use eggdb_sql::{CancelSignal, DatabaseDirectory, FixedDatabases, KeyValueStore};
-use std::collections::VecDeque;
-use std::fmt;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+pub use eggdb_listener::{ListenError, listen, listen_on_loopback};
+pub(crate) use eggdb_listener::{AuthenticationThrottle, Slot, take_slot};
 
 /// The pipe SQL Server's clients open for a local default instance (`np:\\.\pipe\sql\query`).
 pub const SQL_SERVER_DEFAULT_PIPE: &str = r"sql\query";
@@ -33,10 +33,6 @@ pub const MAX_UNAUTHENTICATED_CONNECTIONS: usize = MAX_LOGINS_IN_PROGRESS;
 const MAX_REFUSING_THREADS: usize = 8;
 pub(crate) const REFUSAL_TIMEOUT: Duration = Duration::from_millis(250);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const FAILURE_WINDOW: Duration = Duration::from_secs(60);
-const DELAY_PER_RECENT_FAILURE: Duration = Duration::from_millis(250);
-const LONGEST_FAILURE_DELAY: Duration = Duration::from_secs(5);
-
 /// What a server serves and to whom.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -67,79 +63,6 @@ pub struct ServerConfig {
     /// The rule file that picks how stored roles log in (`--auth-rules`), as on the PostgreSQL
     /// listener; `oauth` is refused, TDS clients having no `OAUTHBEARER`.
     pub auth_rules: Option<std::sync::Arc<eggdb_auth::AuthRules>>,
-}
-
-/// Why a listener was not opened.
-#[derive(Debug)]
-pub enum ListenError {
-    /// The address is not a loopback address (D102): without TLS, a server only listens where
-    /// only this machine can connect.
-    NotLoopback(SocketAddr),
-    /// The operating system refused, for example because the port is in use.
-    Io(io::Error),
-}
-
-impl fmt::Display for ListenError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotLoopback(address) => write!(
-                f,
-                "{address} is not a loopback address; without TLS EggDB listens only on 127.0.0.1, ::1 or another loopback address, so only this machine can connect: give it a certificate (--tls-certificate and --tls-key, or --tls-self-signed) to listen on other addresses"
-            ),
-            Self::Io(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl std::error::Error for ListenError {}
-
-/// Opens a TCP listener at `address`, which must be a loopback address (`127.0.0.0/8` or
-/// `::1`); any other address is refused before anything is bound (D102). Port 0 picks a free
-/// port.
-pub fn listen_on_loopback(address: SocketAddr) -> Result<TcpListener, ListenError> {
-    listen(address, false)
-}
-
-/// Opens the listener on `address`: any address when the server has TLS (`tls_configured`),
-/// only loopback addresses without it.
-pub fn listen(address: SocketAddr, tls_configured: bool) -> Result<TcpListener, ListenError> {
-    if !tls_configured && !address.ip().is_loopback() {
-        return Err(ListenError::NotLoopback(address));
-    }
-    TcpListener::bind(address).map_err(ListenError::Io)
-}
-
-pub(crate) struct AuthenticationThrottle {
-    recent_failures: Mutex<VecDeque<Instant>>,
-}
-
-impl AuthenticationThrottle {
-    fn new() -> Self {
-        Self {
-            recent_failures: Mutex::new(VecDeque::new()),
-        }
-    }
-
-    pub(crate) fn delay_after_failure(&self) -> Duration {
-        let now = Instant::now();
-        let mut failures = self
-            .recent_failures
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while failures
-            .front()
-            .is_some_and(|failed| now.duration_since(*failed) > FAILURE_WINDOW)
-        {
-            failures.pop_front();
-        }
-        if failures.len() < 1024 {
-            failures.push_back(now);
-        }
-        let count = u32::try_from(failures.len()).unwrap_or(u32::MAX);
-        DELAY_PER_RECENT_FAILURE
-            .saturating_mul(count)
-            .min(LONGEST_FAILURE_DELAY)
-    }
 }
 
 pub(crate) struct Shared<'a> {
@@ -174,23 +97,6 @@ impl Shared<'_> {
             }
         }
     }
-}
-
-pub(crate) struct Slot<'c>(&'c AtomicUsize);
-
-impl Drop for Slot<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-pub(crate) fn take_slot(counter: &AtomicUsize, limit: usize) -> Option<Slot<'_>> {
-    counter
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-            (count < limit).then_some(count + 1)
-        })
-        .ok()
-        .map(|_| Slot(counter))
 }
 
 /// Serves SQL Server's TDS protocol on `listener` over `store` until `stop` returns true, or

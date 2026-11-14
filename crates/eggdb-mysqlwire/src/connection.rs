@@ -17,6 +17,7 @@ use eggdb_sql::{
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+pub(crate) use eggdb_listener::printable;
 
 /// The largest packet accepted before authentication succeeds.
 pub const MAX_AUTHENTICATION_PACKET_BYTES: usize = 16 * 1024;
@@ -25,27 +26,6 @@ pub const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PREPARED_STATEMENTS: usize = 4096;
 const MAX_PLACEHOLDERS: usize = 65_535;
 const MAX_HELD_BYTES: usize = MAX_PACKET_BYTES;
-
-pub(crate) fn printable(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '\\' => shown.push_str("\\\\"),
-            '"' => shown.push_str("\\\""),
-            '\n' => shown.push_str("\\n"),
-            '\r' => shown.push_str("\\r"),
-            '\t' => shown.push_str("\\t"),
-            special
-                if special.is_control()
-                    || matches!(special, '\u{2028}' | '\u{2029}' | '\u{202e}') =>
-            {
-                shown.push_str(&format!("\\u{{{:x}}}", u32::from(special)));
-            }
-            other => shown.push(other),
-        }
-    }
-    shown
-}
 
 fn fresh_nonce() -> Option<[u8; NONCE_BYTES]> {
     let mut nonce = [0u8; NONCE_BYTES];

@@ -1181,3 +1181,4 @@ its full title with its status.
 - [D1154](decisions/D1154.md) Code-only batch 803 (M5): the Python driver through the CPython C API with buffer-protocol batches
 - [D1155](decisions/D1155.md) Code-only batch 804 (M6a): TLS on every other listener, ended in front of each protocol server
 - [D1156](decisions/D1156.md) Code-only batch 805 (M6a): replies measured before they are built: RESP EXEC and large values, Bolt records and pending rows, HTTP response room
+- [D1157](decisions/D1157.md) Code-only batch 806 (M6a): one shared listener crate for the protocol servers
