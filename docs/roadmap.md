@@ -838,7 +838,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Server-Sent Events for REST reads and GraphQL subscriptions: **code written, unbuilt** (code-only mode,
   2026-11-12, D878); WebSocket transports (`graphql-transport-ws`, `eggdb-live`) and re-runs only after a commit: **code
   written, unbuilt** (code-only mode, 2026-11-15, D1178); Supabase-style realtime channels with `postgres_changes`:
-  **code written, unbuilt** (code-only mode, 2026-11-15, D1182). Left: pushing changes from the commit path.
+  **code written, unbuilt** (code-only mode, 2026-11-15, D1182); live queries woken by commits: **code written, unbuilt**
+  (code-only mode, 2026-11-15, D1183).
 - End-user sign-in for apps: sign-up, password, magic link, social login and OpenID Connect, with
   JWT sessions mapped onto row-level security (D37). **Code written, unbuilt** (code-only mode, 2026-11-12, D771), in
   `eggdb_app_auth`; the OAuth redirect flow and fetching providers' key sets are left.

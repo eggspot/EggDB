@@ -17,6 +17,7 @@ use std::io;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const QUICKEST_CHECK: Duration = Duration::from_millis(50);
 const MOST_CHANNELS: usize = 100;
 const MOST_COMMITS_A_CHECK: u64 = 256;
 const CLOSE_BAD_MESSAGE: u16 = 1003;
@@ -301,6 +302,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let mut channel_id = 0u64;
         let mut position = eggdb_sql::cdc::latest_capture_sequence(self.store).unwrap_or_default();
         let mut last_check = Instant::now();
+        let mut seen_generation = eggdb_sql::commit_generation();
         loop {
             match socket.poll_message()? {
                 Some(WebSocketMessage::Closed(_)) => return Ok(()),
@@ -374,8 +376,12 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 }
                 None => {}
             }
-            if last_check.elapsed() >= CHECK_INTERVAL && channels.iter().any(|channel| !channel.listeners.is_empty()) {
+            let generation = eggdb_sql::commit_generation();
+            let elapsed = last_check.elapsed();
+            let due = elapsed >= CHECK_INTERVAL || (generation != seen_generation && elapsed >= QUICKEST_CHECK);
+            if due && channels.iter().any(|channel| !channel.listeners.is_empty()) {
                 last_check = Instant::now();
+                seen_generation = generation;
                 let Ok((last, changes)) = eggdb_sql::cdc::captured_changes_after(self.store, position, MOST_COMMITS_A_CHECK) else {
                     continue;
                 };

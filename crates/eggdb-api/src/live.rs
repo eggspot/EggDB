@@ -104,6 +104,7 @@ pub(crate) fn live_reply<'s>(
         let mut last: Option<String> = None;
         let mut sent = 0u64;
         let mut quiet = Duration::ZERO;
+        let mut generation = eggdb_sql::commit_generation();
         loop {
             match poll() {
                 Polled::Result(payload) => {
@@ -129,8 +130,12 @@ pub(crate) fn live_reply<'s>(
                 }
                 return Ok(());
             }
-            std::thread::sleep(options.interval);
-            quiet += options.interval;
+            let waited = std::time::Instant::now();
+            generation = eggdb_sql::wait_for_commit(generation, options.interval);
+            if let Some(rest) = MIN_INTERVAL.checked_sub(waited.elapsed()) {
+                std::thread::sleep(rest);
+            }
+            quiet += waited.elapsed();
             if quiet >= HEARTBEAT {
                 out.write_all(b": keep-alive\n\n")?;
                 out.flush()?;

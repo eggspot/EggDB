@@ -1207,3 +1207,4 @@ its full title with its status.
 - [D1180](decisions/D1180.md) Code-only batch 832 (M6a): json_populate_record on a table's row type in expressions and with a column alias list
 - [D1181](decisions/D1181.md) Code-only batch 833 (M6a): gRPC server reflection, over streamed calls in eggdb-http2
 - [D1182](decisions/D1182.md) Code-only batch 834 (M6a): Realtime channels in Supabase's style, from the engine's change capture
+- [D1183](decisions/D1183.md) Code-only batch 835 (M6a): Live queries woken by commits

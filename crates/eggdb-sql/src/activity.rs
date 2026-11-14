@@ -59,6 +59,7 @@ pub(crate) fn statement_finished(succeeded: bool) {
 
 pub(crate) fn committed() {
     COMMITS.fetch_add(1, Ordering::Relaxed);
+    crate::commit_signal::notify_commit();
 }
 
 pub(crate) fn rolled_back() {

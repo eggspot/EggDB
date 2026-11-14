@@ -23,6 +23,17 @@ const MOST_SUBSCRIPTIONS: usize = 64;
 const INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 const CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const QUICKEST_CHECK: Duration = Duration::from_millis(50);
+
+fn check_due(last_check: Instant, seen_generation: &mut u64) -> bool {
+    let generation = eggdb_sql::commit_generation();
+    let elapsed = last_check.elapsed();
+    if elapsed >= CHECK_INTERVAL || (generation != *seen_generation && elapsed >= QUICKEST_CHECK) {
+        *seen_generation = generation;
+        return true;
+    }
+    false
+}
 const CLOSE_UNAUTHORIZED: u16 = 4401;
 const CLOSE_BAD_MESSAGE: u16 = 4400;
 const CLOSE_INIT_TIMEOUT: u16 = 4408;
@@ -86,6 +97,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let mut live: Vec<Live<'s>> = Vec::new();
         let mut last_check = Instant::now();
         let mut quiet_since = Instant::now();
+        let mut seen_generation = eggdb_sql::commit_generation();
         loop {
             match socket.poll_message()? {
                 Some(WebSocketMessage::Closed(_)) => return Ok(()),
@@ -149,7 +161,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             if !acknowledged && opened.elapsed() >= INIT_TIMEOUT {
                 return socket.close(CLOSE_INIT_TIMEOUT);
             }
-            if last_check.elapsed() >= CHECK_INTERVAL {
+            if check_due(last_check, &mut seen_generation) {
                 last_check = Instant::now();
                 let mut finished = Vec::new();
                 for subscription in &mut live {
@@ -182,6 +194,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         let mut live: Vec<Live<'s>> = Vec::new();
         let mut last_check = Instant::now();
         let mut quiet_since = Instant::now();
+        let mut seen_generation = eggdb_sql::commit_generation();
         loop {
             match socket.poll_message()? {
                 Some(WebSocketMessage::Closed(_)) => return Ok(()),
@@ -224,7 +237,7 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 }
                 None => {}
             }
-            if last_check.elapsed() >= CHECK_INTERVAL {
+            if check_due(last_check, &mut seen_generation) {
                 last_check = Instant::now();
                 let mut finished = Vec::new();
                 for subscription in &mut live {
