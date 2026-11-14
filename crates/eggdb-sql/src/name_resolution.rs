@@ -1805,6 +1805,7 @@ impl Binding<'_> {
         }
         let mut resolver = self.resolver(reader, tables)?;
         resolver.resolve_target(&mut update.table)?;
+        crate::system_columns::rewrite_update(resolver.reader, resolver.tables, update)?;
         let table = update.table.name.text.clone();
         if resolver.target_privilege.is_some() {
             let written: Vec<String> = update
@@ -1913,6 +1914,7 @@ impl Binding<'_> {
         }
         let mut resolver = self.resolver(reader, tables)?;
         resolver.target(&mut delete.table)?;
+        crate::system_columns::rewrite_delete(resolver.reader, resolver.tables, delete)?;
         let table = delete.table.name.text.clone();
         let reads_rows = delete.filter.is_some() || delete.returning.is_some();
         let exprs: Vec<&mut Expr> = delete.filter.iter_mut().collect();

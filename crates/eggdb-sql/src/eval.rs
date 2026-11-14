@@ -1555,6 +1555,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::pg_catalog::monitoring_function(name, &values) {
             return result;
         }
+        if name == crate::system_columns::ROW_VERSION_FUNCTION {
+            return Ok(crate::system_columns::row_version_of(&values));
+        }
         if name == crate::sqlserver_security::BLOCK_VIOLATION_FUNCTION {
             return crate::sqlserver_security::block_violation(&values);
         }

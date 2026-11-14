@@ -1,5 +1,5 @@
 use crate::OutputColumn;
-use crate::ast::{Expr, ExprKind, OrderItem, Select};
+use crate::ast::{Delete, Expr, ExprKind, InsertValue, OrderItem, Select, SelectItem, Update};
 use crate::encoding::{TableDefinition, decode_row, encode_row, prefix_end, rows_prefix};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::execute::{Relation, TableCache};
@@ -22,6 +22,9 @@ const COLUMNS: [(&str, &str, SqlType); 6] = [
     ("xmax", "\u{2}xmax", XID),
     ("cmax", "\u{2}cmax", CID),
 ];
+
+pub(crate) const ROW_VERSION_FUNCTION: &str = "\u{2}row_version";
+pub(crate) const ROW_VERSION_TYPE: SqlType = XID;
 
 const MAX_HEAP_TUPLES_PER_PAGE: u64 = 291;
 const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
@@ -101,7 +104,7 @@ pub(crate) fn generated_rows(
         &mut |key, bytes| {
             crate::cancel::check()?;
             let mut row = decode_row(bytes, &table.columns)?;
-            let version = row_version(key, &row);
+            let version = row_version(&row);
             let tuple = tuple_id(&table, &prefix, key);
             row.extend([
                 Value::Oid(table_oid),
@@ -138,12 +141,173 @@ fn tuple_id(table: &TableDefinition, prefix: &[u8], key: &[u8]) -> String {
     format!("({block},{offset})")
 }
 
-fn row_version(key: &[u8], row: &[Value]) -> u32 {
-    let mut bytes = key.to_vec();
-    bytes.extend_from_slice(&encode_row(row));
-    let folded = fnv64(&bytes);
+fn row_version(row: &[Value]) -> u32 {
+    let folded = fnv64(&encode_row(row));
     let version = (folded ^ (folded >> 32)) as u32;
     version.max(FIRST_NORMAL_TRANSACTION_ID)
+}
+
+pub(crate) fn row_version_of(values: &[Value]) -> Value {
+    Value::Oid(row_version(values))
+}
+
+pub(crate) fn rewrite_update(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    update: &mut Update,
+) -> SqlResult<()> {
+    let Some(table) = plain_table(reader, tables, &update.table.name.text)? else {
+        return Ok(());
+    };
+    let assigned = update.assignments.iter().filter_map(|(_, value)| match value {
+        InsertValue::Expr(expr) => Some(expr),
+        InsertValue::Default => None,
+    });
+    if !dml_names_them(&table, update.filter.as_ref(), &update.returning, assigned) {
+        return Ok(());
+    }
+    let replacements = Replacements::of(reader, &table, &update.returning, update.filter.as_ref())?;
+    for expr in crate::execute::update_exprs(update) {
+        replacements.apply(expr);
+    }
+    Ok(())
+}
+
+pub(crate) fn rewrite_delete(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    delete: &mut Delete,
+) -> SqlResult<()> {
+    let Some(table) = plain_table(reader, tables, &delete.table.name.text)? else {
+        return Ok(());
+    };
+    if !dml_names_them(&table, delete.filter.as_ref(), &delete.returning, std::iter::empty()) {
+        return Ok(());
+    }
+    let replacements = Replacements::of(reader, &table, &delete.returning, delete.filter.as_ref())?;
+    for expr in crate::execute::delete_exprs(delete) {
+        replacements.apply(expr);
+    }
+    Ok(())
+}
+
+fn plain_table(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    name: &str,
+) -> SqlResult<Option<std::sync::Arc<TableDefinition>>> {
+    if crate::constraints::current_dialect() != crate::Dialect::PostgreSql {
+        return Ok(None);
+    }
+    Ok(match tables.relation(reader, name)? {
+        Some(Relation::Table(table)) => Some(table),
+        _ => None,
+    })
+}
+
+fn dml_names_them<'e>(
+    table: &TableDefinition,
+    filter: Option<&'e Expr>,
+    returning: &'e Option<Vec<SelectItem>>,
+    others: impl Iterator<Item = &'e Expr>,
+) -> bool {
+    wanted_for(table)
+        && filter
+            .into_iter()
+            .chain(returned(returning))
+            .chain(others)
+            .any(names_a_system_column)
+}
+
+fn returned(returning: &Option<Vec<SelectItem>>) -> impl Iterator<Item = &Expr> {
+    returning.iter().flatten().filter_map(|item| match item {
+        SelectItem::Expr { expr, .. } => Some(expr),
+        SelectItem::Wildcard { .. } => None,
+    })
+}
+
+struct Replacements {
+    table_oid: u32,
+    columns: Vec<String>,
+}
+
+impl Replacements {
+    fn of(
+        reader: &dyn KeyValueRead,
+        table: &TableDefinition,
+        returning: &Option<Vec<SelectItem>>,
+        filter: Option<&Expr>,
+    ) -> SqlResult<Self> {
+        let names_table_oid = filter
+            .into_iter()
+            .chain(returned(returning))
+            .any(|expr| names_column(expr, "tableoid"));
+        let table_oid = if names_table_oid {
+            crate::pg_catalog::snapshot_for(reader)?
+                .table_oid(&table.name)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        Ok(Self {
+            table_oid,
+            columns: table.columns.iter().map(|column| column.name.clone()).collect(),
+        })
+    }
+
+    fn apply(&self, expr: &mut Expr) {
+        if let ExprKind::Column { name, .. } = &expr.kind
+            && let Some(replacement) = self.replacement(name, expr.position)
+        {
+            *expr = replacement;
+            return;
+        }
+        for child in crate::eval::children_mut(expr) {
+            self.apply(child);
+        }
+    }
+
+    fn replacement(&self, name: &str, position: usize) -> Option<Expr> {
+        let constant = |sql_type: SqlType, value: u32| Expr {
+            kind: ExprKind::Constant {
+                sql_type,
+                value: Value::Oid(value),
+            },
+            position,
+        };
+        Some(match name {
+            "tableoid" => constant(OID, self.table_oid),
+            "xmax" => constant(XID, 0),
+            "cmin" | "cmax" => constant(CID, 0),
+            "xmin" => Expr {
+                kind: ExprKind::Function {
+                    name: ROW_VERSION_FUNCTION.to_owned(),
+                    arguments: self
+                        .columns
+                        .iter()
+                        .map(|column| Expr {
+                            kind: ExprKind::Column {
+                                qualifier: None,
+                                name: column.clone(),
+                            },
+                            position,
+                        })
+                        .collect(),
+                },
+                position,
+            },
+            _ => return None,
+        })
+    }
+}
+
+fn names_column(expr: &Expr, wanted: &str) -> bool {
+    match &expr.kind {
+        ExprKind::Column { name, .. } => name == wanted,
+        _ => crate::eval::children(expr)
+            .into_iter()
+            .any(|child| names_column(child, wanted)),
+    }
 }
 
 fn fnv64(bytes: &[u8]) -> u64 {

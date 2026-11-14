@@ -1458,3 +1458,31 @@ fn user_tables_answer_tableoid_ctid_xmin_and_the_other_system_columns() {
     assert_eq!(rows_of(&star), ["b", "c"]);
     assert!(last(&mut session, "SELECT pg_typeof(ctid), pg_typeof(xmin), pg_typeof(cmin) FROM notes LIMIT 1").contains("tid|xid|cid"));
 }
+
+#[test]
+fn update_and_delete_use_xmin_as_a_concurrency_token_as_npgsql_does() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(&mut session, "CREATE TABLE blogs (id integer PRIMARY KEY, title text)");
+    last(&mut session, "INSERT INTO blogs VALUES (1, 'first')");
+    let token = last(&mut session, "SELECT xmin FROM blogs WHERE id = 1");
+    let token = rows_of(&token)[0].to_owned();
+    let updated = last(
+        &mut session,
+        &format!("UPDATE blogs SET title = 'second' WHERE id = 1 AND xmin = {token} RETURNING xmin"),
+    );
+    let new_token = rows_of(&updated)[0].to_owned();
+    assert_ne!(new_token, token);
+    let current = last(&mut session, "SELECT xmin FROM blogs WHERE id = 1");
+    assert_eq!(rows_of(&current), [new_token.as_str()]);
+    let stale = last(
+        &mut session,
+        &format!("UPDATE blogs SET title = 'third' WHERE id = 1 AND xmin = {token} RETURNING id"),
+    );
+    assert!(rows_of(&stale).is_empty());
+    let deleted = last(
+        &mut session,
+        &format!("DELETE FROM blogs WHERE id = 1 AND xmin = {new_token} RETURNING tableoid = 'blogs'::regclass"),
+    );
+    assert_eq!(rows_of(&deleted), ["t"]);
+}
