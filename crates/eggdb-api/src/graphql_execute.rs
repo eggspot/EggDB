@@ -21,6 +21,28 @@ use std::collections::HashMap;
 const MAX_FRAGMENT_DEPTH: usize = 32;
 const INSERTED_ROWS: &str = "eggdb_graphql_inserted";
 const NEW_ROW: &str = "eggdb_graphql_new";
+const MAX_NESTED_INSERT_DEPTH: usize = 16;
+
+#[derive(Default)]
+struct Steps {
+    written: Vec<String>,
+    named: usize,
+}
+
+impl Steps {
+    fn next_name(&mut self) -> String {
+        self.named += 1;
+        format!("eggdb_graphql_step_{}", self.named)
+    }
+}
+
+struct NestedInsert<'v> {
+    table: &'v str,
+    object: &'v GqlValue,
+    links: &'v [(String, String)],
+    conflict: Option<&'v GqlValue>,
+    step: Option<String>,
+}
 
 pub(crate) const AGGREGATE_FUNCTIONS: [&str; 10] = [
     "sum",
@@ -709,16 +731,16 @@ impl Context<'_> {
             .any(|(name, value)| value.field("data").is_some() && self.relationship(table, name).is_some())
     }
 
-    fn values_insert(&self, table: &str, object: &GqlValue, links: &[(String, String)]) -> Result<String, String> {
-        let GqlValue::Object(fields) = object else {
-            return Err("expected objects to insert".to_owned());
-        };
-        if self.nests(table, object) {
-            return Err("nested inserts go one relationship deep".to_owned());
-        }
+    fn values_insert(
+        &mut self,
+        table: &str,
+        own: &[(String, GqlValue)],
+        links: &[(String, String)],
+        conflict: Option<&GqlValue>,
+    ) -> Result<String, String> {
         let mut columns = Vec::new();
         let mut values = Vec::new();
-        for (name, value) in fields {
+        for (name, value) in own {
             columns.push(identifier(name).ok_or_else(|| format!("field '{name}' is not a column name"))?);
             values.push(sql_literal(value)?);
         }
@@ -731,7 +753,14 @@ impl Context<'_> {
         } else {
             format!("({}) VALUES ({})", columns.join(", "), values.join(", "))
         };
-        Ok(format!("INSERT INTO {} {head} RETURNING *", self.target(table)?))
+        let clause = match conflict {
+            Some(conflict @ GqlValue::Object(_)) => {
+                let alias = identifier(table).ok_or_else(|| format!("'{table}' is not a table name"))?;
+                self.conflict_clause(table, &alias, conflict)?
+            }
+            _ => String::new(),
+        };
+        Ok(format!("INSERT INTO {} {head}{clause} RETURNING *", self.target(table)?))
     }
 
     fn links(key: &ForeignKey, from: &[String], to: &[String], source: &str) -> Result<Vec<(String, String)>, String> {
@@ -746,48 +775,103 @@ impl Context<'_> {
             .and_then(|links| if links.is_empty() { Err(format!("the relationship to '{}' has no columns", key.parent)) } else { Ok(links) })
     }
 
-    fn nested_object_sql(&mut self, table: &str, object: &GqlValue) -> Result<String, String> {
+    fn nested_conflict(relationship: &GqlValue, parent_side: bool) -> Result<Option<GqlValue>, String> {
+        let Some(conflict) = relationship.field("on_conflict").filter(|conflict| **conflict != GqlValue::Null) else {
+            return Ok(None);
+        };
+        let updates_nothing = match conflict.field("update_columns") {
+            Some(GqlValue::List(items)) => items.is_empty(),
+            Some(GqlValue::Enum(_)) => false,
+            _ => true,
+        };
+        if parent_side && updates_nothing {
+            return Err("on_conflict on an object relationship needs update_columns, so the existing row comes back to link to".to_owned());
+        }
+        Ok(Some(conflict.clone()))
+    }
+
+    fn insert_steps(&mut self, insert: NestedInsert<'_>, steps: &mut Steps, depth: usize) -> Result<String, String> {
+        let NestedInsert { table, object, links, conflict, step } = insert;
+        if depth > MAX_NESTED_INSERT_DEPTH {
+            return Err(format!("nested inserts go at most {MAX_NESTED_INSERT_DEPTH} relationships deep"));
+        }
         let GqlValue::Object(fields) = object else {
             return Err("expected objects to insert".to_owned());
         };
-        let mut steps: Vec<String> = Vec::new();
         let mut own = Vec::new();
-        let mut links = Vec::new();
+        let mut links = links.to_vec();
         let mut children = Vec::new();
         for (name, value) in fields {
             match (value.field("data"), self.relationship(table, name)) {
                 (Some(data), Some(Relationship::Object(key))) => {
-                    let step = format!("eggdb_graphql_parent_{}", steps.len());
-                    steps.push(format!("{step} AS ({})", self.values_insert(&key.parent, data, &[])?));
-                    links.extend(Self::links(&key, &key.child_columns, &key.parent_columns, &step)?);
+                    let parent_conflict = Self::nested_conflict(value, true)?;
+                    let parent_step = self.insert_steps(
+                        NestedInsert {
+                            table: &key.parent,
+                            object: data,
+                            links: &[],
+                            conflict: parent_conflict.as_ref(),
+                            step: None,
+                        },
+                        steps,
+                        depth + 1,
+                    )?;
+                    links.extend(Self::links(&key, &key.child_columns, &key.parent_columns, &parent_step)?);
                 }
-                (Some(data), Some(Relationship::Array(key))) => children.push((key, data.clone())),
+                (Some(data), Some(Relationship::Array(key))) => {
+                    children.push((key, data.clone(), Self::nested_conflict(value, false)?));
+                }
                 _ => own.push((name.clone(), value.clone())),
             }
         }
-        steps.push(format!("{NEW_ROW} AS ({})", self.values_insert(table, &GqlValue::Object(own), &links)?));
-        for (key, data) in children {
+        let name = step.unwrap_or_else(|| steps.next_name());
+        let statement = self.values_insert(table, &own, &links, conflict)?;
+        steps.written.push(format!("{name} AS ({statement})"));
+        for (key, data, child_conflict) in children {
             let items = match data {
                 GqlValue::List(items) => items,
                 single => vec![single],
             };
-            let child_links = Self::links(&key, &key.child_columns, &key.parent_columns, NEW_ROW)?;
+            let child_links = Self::links(&key, &key.child_columns, &key.parent_columns, &name)?;
             for item in &items {
-                let step = format!("eggdb_graphql_child_{}", steps.len());
-                steps.push(format!("{step} AS ({})", self.values_insert(&key.child, item, &child_links)?));
+                self.insert_steps(
+                    NestedInsert {
+                        table: &key.child,
+                        object: item,
+                        links: &child_links,
+                        conflict: child_conflict.as_ref(),
+                        step: None,
+                    },
+                    steps,
+                    depth + 1,
+                )?;
             }
         }
-        Ok(format!("WITH {} INSERT INTO {INSERTED_ROWS} SELECT * FROM {NEW_ROW}", steps.join(", ")))
+        Ok(name)
+    }
+
+    fn nested_object_sql(&mut self, table: &str, object: &GqlValue, conflict: Option<&GqlValue>) -> Result<String, String> {
+        let mut steps = Steps::default();
+        self.insert_steps(
+            NestedInsert {
+                table,
+                object,
+                links: &[],
+                conflict,
+                step: Some(NEW_ROW.to_owned()),
+            },
+            &mut steps,
+            0,
+        )?;
+        Ok(format!("WITH {} INSERT INTO {INSERTED_ROWS} SELECT * FROM {NEW_ROW}", steps.written.join(", ")))
     }
 
     fn nested_insert_sql(&mut self, table: &str, field: &Field, single: bool, objects: &[GqlValue]) -> Result<String, String> {
-        if self.argument(field, "on_conflict").is_some() {
-            return Err("on_conflict does not go with nested inserts yet".to_owned());
-        }
+        let conflict = self.argument(field, "on_conflict").filter(|conflict| *conflict != GqlValue::Null);
         let alias = identifier(table).ok_or_else(|| format!("'{table}' is not a table name"))?;
         let mut statements = vec![format!("CREATE TEMPORARY TABLE {INSERTED_ROWS} (LIKE {})", self.target(table)?)];
         for object in objects {
-            statements.push(self.nested_object_sql(table, object)?);
+            statements.push(self.nested_object_sql(table, object, conflict.as_ref())?);
         }
         let returning = self.returning_object(table, &alias, field, single)?;
         statements.push(format!("SELECT {returning} FROM {INSERTED_ROWS} AS {alias}"));
@@ -849,6 +933,10 @@ impl Context<'_> {
 
     fn conflict_sql(&mut self, table: &str, alias: &str, field: &Field) -> Result<String, String> {
         let conflict = self.argument(field, "on_conflict").unwrap_or(GqlValue::Null);
+        self.conflict_clause(table, alias, &conflict)
+    }
+
+    fn conflict_clause(&mut self, table: &str, alias: &str, conflict: &GqlValue) -> Result<String, String> {
         let Some(GqlValue::Enum(constraint)) = conflict.field("constraint").cloned() else {
             return Err("on_conflict needs a constraint".to_owned());
         };

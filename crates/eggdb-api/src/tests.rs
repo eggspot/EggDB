@@ -459,6 +459,50 @@ fn graphql_nested_inserts_follow_relationships() {
 }
 
 #[test]
+fn graphql_nested_inserts_go_several_relationships_deep_with_on_conflict() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for sql in [
+        "CREATE TABLE publishers (id integer PRIMARY KEY, name text NOT NULL)",
+        "CREATE TABLE authors (id integer PRIMARY KEY, name text NOT NULL, publisher_id integer REFERENCES publishers (id))",
+        "CREATE TABLE books (id integer PRIMARY KEY, title text NOT NULL, author_id integer REFERENCES authors (id))",
+    ] {
+        session.execute(sql, &mut |_| {}).unwrap();
+    }
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let deep = graphql(
+        &endpoint,
+        "mutation { insert_publishers_one(object: {id: 1, name: \"Tor\", authors: {data: [{id: 1, name: \"Ada\", books: {data: [{id: 10, title: \"Engines\"}, {id: 11, title: \"Notes\"}]}}]}}) { name authors { name books(order_by: {id: asc}) { title } } } }",
+        "{}",
+    );
+    assert!(
+        deep.contains("\"authors\":[{\"name\":\"Ada\",\"books\":[{\"title\":\"Engines\"},{\"title\":\"Notes\"}]}]"),
+        "{deep}"
+    );
+    let upward = graphql(
+        &endpoint,
+        "mutation { insert_books_one(object: {id: 12, title: \"Cities\", author: {data: {id: 2, name: \"Italo\", publisher: {data: {id: 2, name: \"Einaudi\"}}}}}) { title author { name publisher { name } } } }",
+        "{}",
+    );
+    assert!(upward.contains("\"publisher\":{\"name\":\"Einaudi\"}"), "{upward}");
+    let merged = graphql(
+        &endpoint,
+        "mutation { insert_books_one(object: {id: 13, title: \"Lathe\", author: {data: {id: 1, name: \"Ada L.\"}, on_conflict: {constraint: authors_pkey, update_columns: [name]}}}) { author { id name } } }",
+        "{}",
+    );
+    assert!(merged.contains("\"author\":{\"id\":1,\"name\":\"Ada L.\"}"), "{merged}");
+    let refused = graphql(
+        &endpoint,
+        "mutation { insert_books_one(object: {id: 14, title: \"X\", author: {data: {id: 1, name: \"Ada\"}, on_conflict: {constraint: authors_pkey, update_columns: []}}}) { id } }",
+        "{}",
+    );
+    assert!(refused.contains("needs update_columns"), "{refused}");
+    let counted = graphql(&endpoint, "{ books_aggregate { aggregate { count } } authors_aggregate { aggregate { count } } }", "{}");
+    assert!(counted.contains("\"count\":4"), "{counted}");
+    assert!(counted.contains("\"count\":2"), "{counted}");
+}
+
+#[test]
 fn odata_serves_metadata_sets_keys_and_writes() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

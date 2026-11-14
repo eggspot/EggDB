@@ -822,7 +822,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   foreign keys and mutations over `POST /graphql`: **code written, unbuilt** (code-only mode, 2026-11-12, D875).
   Introspection (`__schema`, `__type`): **code written, unbuilt** (code-only mode, 2026-11-12, D876); subscriptions
   over Server-Sent Events (D878); nested inserts one relationship deep: **code written, unbuilt** (code-only mode,
-  2026-11-12, D909). Left: nested inserts deeper than one relationship, and `on_conflict` with them.
+  2026-11-12, D909); nested inserts at any depth with `on_conflict`: **code written, unbuilt** (code-only mode,
+  2026-11-15, D1175).
 - gRPC and OData APIs generated from the schema, OData for Excel, Power BI and SAP (D37). The OData v4 service
   (`$metadata`, entity sets with `$filter`/`$select`/`$orderby`/`$top`/`$skip`/`$count`, keys, writes): **code
   written, unbuilt** (code-only mode, 2026-11-12, D877); navigation properties from foreign keys and `$expand`:
