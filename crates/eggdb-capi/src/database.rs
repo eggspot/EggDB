@@ -131,7 +131,7 @@ impl EggdbDb {
     }
 }
 
-fn open_options(options: Option<&EggdbOptions>) -> Result<Options, Failure> {
+pub(crate) fn open_options(options: Option<&EggdbOptions>) -> Result<Options, Failure> {
     let options = options.copied().unwrap_or_default();
     let unknown = options.flags & !KNOWN_OPEN_FLAGS;
     if unknown != 0 {

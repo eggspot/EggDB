@@ -137,6 +137,38 @@ int eggdb_close(eggdb_db *db);
 int eggdb_backup(eggdb_db *db, const char *path, eggdb_backup_report *report);
 int eggdb_compact(eggdb_db *db, eggdb_compact_report *report);
 int eggdb_compact_file(const char *path, eggdb_compact_report *report);
+
+typedef struct eggdb_check_report {
+    uint64_t stamp;
+    uint64_t entries;
+    uint64_t key_bytes;
+    uint64_t value_bytes;
+    uint32_t tree_height;
+    uint64_t tree_pages;
+    uint64_t overflow_values;
+    uint64_t overflow_pages;
+    uint64_t free_pages;
+    uint64_t log_pages;
+    uint64_t leaked_pages;
+} eggdb_check_report;
+
+typedef struct eggdb_stats {
+    uint64_t page_size;
+    uint64_t page_count;
+    uint64_t free_pages;
+    uint64_t file_bytes;
+    uint64_t last_commit;
+    uint64_t cache_pages;
+    uint64_t cached_pages;
+    uint64_t cache_hits;
+    uint64_t cache_misses;
+    uint64_t log_bytes_since_checkpoint;
+    uint32_t expiring_keys;
+} eggdb_stats;
+
+int eggdb_check(eggdb_db *db, eggdb_check_report *report);
+int eggdb_stats(eggdb_db *db, eggdb_stats *stats);
+int eggdb_open_v2(const char *path, const eggdb_options *options, const char *settings, eggdb_db **db);
 int eggdb_remove_expired(eggdb_db *db, uint64_t *removed);
 int eggdb_set_power_source(eggdb_db *db, uint32_t source);
 int eggdb_suspend(eggdb_db *db);

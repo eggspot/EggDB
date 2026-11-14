@@ -690,7 +690,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D874). Left: user aggregates and window functions, collations,
   `sqlite3_backup_*`, and rows streamed per step. `sqlite3_backup_*`: **code written, unbuilt** (code-only mode, 2026-11-14, D1145).
 - The C API: parsed plans kept in prepared statements, binary result formats, typed `Parse` on
-  server sessions and the remaining open options, `check` and `stats` (D142, D268, D293).
+  server sessions and the remaining open options, `check` and `stats` (D142, D268, D293). The remaining open options
+  (`eggdb_open_v2` settings), `eggdb_check` and `eggdb_stats`: **code written, unbuilt** (code-only mode, 2026-11-14,
+  D1146); left: plans kept in prepared statements, binary result formats and typed `Parse`.
 - Asynchronous C API calls, completed by one callback per batch (D17, D293).
 - Every language driver using the new C API calls (prepared handles, stepping, `COPY`) (D293).
 - Each driver benchmarked in embedded mode against SQLite's binding in its language, as D17 lists

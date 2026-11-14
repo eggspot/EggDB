@@ -1170,3 +1170,4 @@ its full title with its status.
 - [D1143](decisions/D1143.md) Code-only batch 792 (M5): subqueries in the SET of a joined UPDATE
 - [D1144](decisions/D1144.md) Code-only batch 793 (M5): renamed references in views' SQLite text, and the sqllogictest minimum kept in the repository
 - [D1145](decisions/D1145.md) Code-only batch 794 (M5): libsqlite3's online backup calls
+- [D1146](decisions/D1146.md) Code-only batch 795 (M5): the C API's check, stats and the remaining open options through eggdb_open_v2
