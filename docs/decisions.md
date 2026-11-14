@@ -1186,3 +1186,4 @@ its full title with its status.
 - [D1159](decisions/D1159.md) Code-only batch 808 (M6a): TLS 1.3 session resumption with tickets on the server
 - [D1160](decisions/D1160.md) Code-only batch 810 (M6a): QUIC's wire layer: varints, frames, packet headers, packet numbers and packet protection
 - [D1161](decisions/D1161.md) Code-only batch 811 (M6a): QUIC's TLS 1.3 handshake without a record layer, and transport parameters
+- [D1162](decisions/D1162.md) Code-only batch 812 (M6a): a QUIC server connection without I/O, with RFC 9002 loss detection and NewReno

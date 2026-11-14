@@ -11,4 +11,5 @@ workspace = true
 
 [dependencies]
 eggdb-crypto = { path = "../eggdb-crypto" }
+eggdb-platform = { path = "../eggdb-platform" }
 eggdb-tls = { path = "../eggdb-tls" }
