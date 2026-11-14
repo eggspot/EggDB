@@ -103,6 +103,10 @@ fn sqlite_code(error: &SqlError) -> c_int {
 }
 
 impl Sqlite3 {
+    fn database(&self) -> Arc<Database> {
+        Arc::clone(&self._database)
+    }
+
     fn record(&mut self, code: c_int, message: &str) -> c_int {
         self.code = code;
         self.error = CString::new(message.replace('\0', " ")).unwrap_or_default();
@@ -1008,6 +1012,7 @@ pub extern "C" fn sqlite3_libversion_number() -> c_int {
     VERSION_NUMBER
 }
 
+mod backup;
 mod functions;
 mod interface;
 
@@ -1019,5 +1024,9 @@ pub use functions::{
     sqlite3_result_text, sqlite3_result_value, sqlite3_user_data, sqlite3_value_blob,
     sqlite3_value_bytes, sqlite3_value_double, sqlite3_value_int, sqlite3_value_int64,
     sqlite3_value_text, sqlite3_value_type,
+};
+pub use backup::{
+    Sqlite3Backup, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
+    sqlite3_backup_remaining, sqlite3_backup_step,
 };
 pub use interface::*;

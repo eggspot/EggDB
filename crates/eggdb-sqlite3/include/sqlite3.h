@@ -45,6 +45,13 @@ int sqlite3_close(sqlite3 *db);
 int sqlite3_close_v2(sqlite3 *db);
 int sqlite3_exec(sqlite3 *db, const char *sql, int (*callback)(void *, int, char **, char **), void *argument, char **errmsg);
 void sqlite3_free(void *pointer);
+
+typedef struct sqlite3_backup sqlite3_backup;
+sqlite3_backup *sqlite3_backup_init(sqlite3 *destination, const char *destination_name, sqlite3 *source, const char *source_name);
+int sqlite3_backup_step(sqlite3_backup *backup, int pages);
+int sqlite3_backup_finish(sqlite3_backup *backup);
+int sqlite3_backup_remaining(sqlite3_backup *backup);
+int sqlite3_backup_pagecount(sqlite3_backup *backup);
 int sqlite3_prepare_v2(sqlite3 *db, const char *sql, int length, sqlite3_stmt **statement, const char **tail);
 int sqlite3_bind_int(sqlite3_stmt *statement, int index, int value);
 int sqlite3_bind_int64(sqlite3_stmt *statement, int index, sqlite3_int64 value);

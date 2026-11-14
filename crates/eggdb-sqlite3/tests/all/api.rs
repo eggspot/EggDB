@@ -311,3 +311,56 @@ fn the_interface_reports_text_state_and_completeness() {
         sqlite3_close(db);
     }
 }
+
+fn open_memory() -> *mut Sqlite3 {
+    let mut db = ptr::null_mut();
+    let name = CString::new(":memory:").unwrap();
+    // SAFETY: a NUL-terminated name and memory for one pointer.
+    assert_eq!(unsafe { sqlite3_open(name.as_ptr(), &mut db) }, SQLITE_OK);
+    db
+}
+
+fn exec(db: *mut Sqlite3, sql: &str) {
+    let sql = CString::new(sql).unwrap();
+    // SAFETY: a live connection and a NUL-terminated script.
+    let code = unsafe { sqlite3_exec(db, sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut()) };
+    assert_eq!(code, SQLITE_OK);
+}
+
+#[test]
+fn an_online_backup_copies_one_connections_database_into_anothers() {
+    let source = open_memory();
+    let target = open_memory();
+    exec(source, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes VALUES (1, 'kept'), (2, 'also');");
+    exec(target, "CREATE TABLE old (x INTEGER); INSERT INTO old VALUES (9);");
+    let main = CString::new("main").unwrap();
+    // SAFETY: two live, distinct connections and NUL-terminated names.
+    let backup = unsafe { sqlite3_backup_init(target, main.as_ptr(), source, main.as_ptr()) };
+    assert!(!backup.is_null());
+    // SAFETY: a live backup.
+    assert_eq!(unsafe { sqlite3_backup_step(backup, -1) }, SQLITE_DONE);
+    // SAFETY: a live backup.
+    assert_eq!(unsafe { sqlite3_backup_remaining(backup) }, 0);
+    // SAFETY: a live backup, used no more.
+    assert_eq!(unsafe { sqlite3_backup_finish(backup) }, SQLITE_OK);
+    let query = CString::new("SELECT count(*) FROM notes").unwrap();
+    let mut statement = ptr::null_mut();
+    // SAFETY: a live connection, NUL-terminated text and memory for one pointer.
+    assert_eq!(unsafe { sqlite3_prepare_v2(target, query.as_ptr(), -1, &mut statement, ptr::null_mut()) }, SQLITE_OK);
+    // SAFETY: a live statement.
+    assert_eq!(unsafe { sqlite3_step(statement) }, SQLITE_ROW);
+    // SAFETY: a live statement on a row.
+    assert_eq!(unsafe { sqlite3_column_int(statement, 0) }, 2);
+    // SAFETY: a live statement, used no more.
+    unsafe { sqlite3_finalize(statement) };
+    // SAFETY: the same connection on both sides is refused.
+    assert!(unsafe { sqlite3_backup_init(target, main.as_ptr(), target, main.as_ptr()) }.is_null());
+    // SAFETY: live connections, used no more.
+    unsafe {
+        sqlite3_close(source);
+    }
+    // SAFETY: as above.
+    unsafe {
+        sqlite3_close(target);
+    }
+}
