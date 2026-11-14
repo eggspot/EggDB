@@ -777,7 +777,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   cursors: **code written, unbuilt** (code-only mode, 2026-11-11, D558).
 - Temporary tables and session locks carried across `USE` instead of refusing it (D294).
 - PostgreSQL's regression suite run from outside the repo, with its pass rate published and a
-  stated minimum, as for every protocol and dialect (D10, D45).
+  stated minimum, as for every protocol and dialect (D10, D45). **Code written, unbuilt** (code-only mode, 2026-11-14, D1147):
+  `scripts/pg-regress.sh` and the weekly `PostgreSQL regression suite` workflow; the minimum is set from the first run.
 - Generated REST: JWT sign-in with roles per request, embedded resources, `or=`/`and=` groups,
   `POST /rpc/<function>`, upserts and an OpenAPI document (D235). `or=`/`and=` groups: **code written,
   unbuilt** (code-only mode, 2026-11-11, D456); `/rpc/<function>`, upserts and the OpenAPI

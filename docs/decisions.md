@@ -1171,3 +1171,4 @@ its full title with its status.
 - [D1144](decisions/D1144.md) Code-only batch 793 (M5): renamed references in views' SQLite text, and the sqllogictest minimum kept in the repository
 - [D1145](decisions/D1145.md) Code-only batch 794 (M5): libsqlite3's online backup calls
 - [D1146](decisions/D1146.md) Code-only batch 795 (M5): the C API's check, stats and the remaining open options through eggdb_open_v2
+- [D1147](decisions/D1147.md) Code-only batch 796 (M6a): PostgreSQL's regression suite run from outside the repo, with its pass rate and minimum

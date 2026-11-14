@@ -1,0 +1,71 @@
+name: PostgreSQL regression suite
+
+on:
+  schedule:
+    - cron: "27 5 * * 6"
+  workflow_dispatch:
+    inputs:
+      minimum:
+        description: "The pass rate below which the run fails, in percent; empty for the one in benchmarks/conformance.txt"
+        required: false
+        default: ""
+
+concurrency:
+  group: pg-regress
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  PG_REGRESS_MINIMUM: ${{ inputs.minimum || vars.PG_REGRESS_MINIMUM || '' }}
+
+jobs:
+  pg-regress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-v2-pg-regress-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-pg-regress-${{ runner.os }}-
+      - name: Fetch PostgreSQL 17's regression tests (test data run from outside the repo, never shipped or read, D1)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          git clone --depth 1 --branch REL_17_STABLE --filter=blob:none --sparse https://github.com/postgres/postgres.git "$RUNNER_TEMP/postgres"
+          git -C "$RUNNER_TEMP/postgres" sparse-checkout set src/test/regress
+      - name: Run the suite against eggdb serve and publish the pass rate (D10, D45, D1147)
+        run: |
+          cargo build --release -p eggdb
+          mkdir -p "$RUNNER_TEMP/work"
+          scripts/pg-regress.sh target/release/eggdb "$RUNNER_TEMP/postgres/src/test/regress" "$RUNNER_TEMP/work" "$RUNNER_TEMP/pg-regress-rates.txt"
+      - name: Summarise the rate
+        if: always()
+        run: |
+          {
+            echo "## PostgreSQL regression suite"
+            echo
+            echo '```'
+            tail -n 1 "$RUNNER_TEMP/pg-regress-rates.txt" 2>/dev/null || echo "no results"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the per-test results and outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-regress-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/pg-regress-rates.txt
+            ${{ runner.temp }}/work/results/
+          retention-days: 30

@@ -1,1 +1,2 @@
 sqllogictest minimum_pass_percent 0
+pg_regress minimum_pass_percent 0
