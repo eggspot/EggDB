@@ -1,6 +1,8 @@
 package eggdb_test
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -84,5 +86,62 @@ func TestQuestionMarksAreNumberedForPostgreSQL(t *testing.T) {
 	}
 	if sum != 5 || mark != "?" {
 		t.Fatalf("got %d %q", sum, mark)
+	}
+}
+
+func TestPreparedStatementsStepRowsAndCopyMovesData(t *testing.T) {
+	db := open(t, ":memory:?dialect=postgresql")
+	ctx := context.Background()
+	connection, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(ctx, "CREATE TABLE t (id integer, name text)"); err != nil {
+		t.Fatal(err)
+	}
+	insert, err := connection.PrepareContext(ctx, "INSERT INTO t VALUES (?, ?)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, name := range []string{"ada", "grace", "edsger"} {
+		if _, err := insert.ExecContext(ctx, int64(id+1), name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert.Close()
+	loaded, err := eggdb.CopyFrom(ctx, connection, "COPY t FROM STDIN", strings.NewReader("4\tbarbara\n5\tdonald\n"))
+	if err != nil || loaded != 2 {
+		t.Fatalf("copy from: %d, %v", loaded, err)
+	}
+	selecting, err := connection.PrepareContext(ctx, "SELECT name FROM t WHERE id > ? ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer selecting.Close()
+	rows, err := selecting.QueryContext(ctx, int64(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(names, ",") != "edsger,barbara,donald" {
+		t.Fatalf("stepped rows: %v", names)
+	}
+	var out bytes.Buffer
+	if err := eggdb.CopyTo(ctx, connection, "COPY (SELECT id FROM t WHERE id <= 2 ORDER BY id) TO STDOUT", &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "1\n2\n" {
+		t.Fatalf("copy to: %q", out.String())
 	}
 }

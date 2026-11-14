@@ -30,6 +30,28 @@ int main(int argc, char **argv) {
         require(failure.sqlstate().size() == 5, "the error has a SQLSTATE");
     }
     {
+        auto insert = db.prepare("INSERT INTO people (name, score) VALUES (?, ?)");
+        require(insert.parameter_count() == 2, "two parameters");
+        insert.bind_all({std::string("Grace"), 3.25}).execute();
+        insert.bind_all({std::string("Edsger"), std::int64_t{4}}).execute();
+        auto select = db.prepare("SELECT name FROM people WHERE score > ? ORDER BY id");
+        select.bind_all({2.5});
+        std::vector<std::string> names;
+        while (auto row = select.step()) {
+            names.push_back(std::get<std::string>((*row)[0]));
+        }
+        require(names == std::vector<std::string>{"Grace", "Edsger"}, "stepped rows");
+    }
+    {
+        auto pg = eggdb::session::open(":memory:", "postgresql");
+        pg.execute("CREATE TABLE t (id integer, name text)");
+        auto loaded = pg.copy_in("COPY t FROM STDIN", "1\tada\n2\tgrace\n");
+        require(!loaded.empty() && loaded.back().tag == "COPY 2", "COPY loads two rows");
+        std::string out;
+        pg.copy_out("COPY t TO STDOUT", [&](const std::string &piece) { out += piece; });
+        require(out == "1\tada\n2\tgrace\n", "COPY reads the rows back");
+    }
+    {
         auto store = eggdb::key_value::open(":memory:");
         {
             auto txn = store.write();

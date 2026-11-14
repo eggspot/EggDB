@@ -101,7 +101,32 @@ func (c *conn) run(query string, args []driver.NamedValue) ([]statementResult, e
 }
 
 func (c *conn) Prepare(query string) (driver.Stmt, error) {
-	return &stmt{conn: c, query: query}, nil
+	numbered, _ := bound(query, c.dialect, nil)
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	prepared, err := c.session.prepare(numbered)
+	if err != nil {
+		return nil, err
+	}
+	return &stmt{conn: c, query: query, prepared: prepared}, nil
+}
+
+func (c *conn) CheckNamedValue(value *driver.NamedValue) error {
+	if value.Name != "" {
+		return &Error{Message: "named parameters are not supported; use ?", SQLState: "0A000"}
+	}
+	switch typed := value.Value.(type) {
+	case int:
+		value.Value = int64(typed)
+		return nil
+	case int32:
+		value.Value = int64(typed)
+		return nil
+	case float32:
+		value.Value = float64(typed)
+		return nil
+	}
+	return driver.ErrSkip
 }
 
 func (c *conn) Close() error {
@@ -175,32 +200,186 @@ func (t *tx) Rollback() error {
 }
 
 type stmt struct {
-	conn  *conn
-	query string
+	conn     *conn
+	query    string
+	prepared *nativeStatement
 }
 
 func (s *stmt) Close() error {
+	s.conn.mutex.Lock()
+	defer s.conn.mutex.Unlock()
+	s.prepared.finalize()
 	return nil
 }
 
 func (s *stmt) NumInput() int {
+	if s.conn.dialect != "postgresql" && strings.ContainsRune(s.query, '?') {
+		return s.prepared.parameters
+	}
 	return -1
 }
 
 func (s *stmt) Exec(args []driver.Value) (driver.Result, error) {
-	return s.conn.ExecContext(context.Background(), s.query, named(args))
+	return s.ExecContext(context.Background(), named(args))
 }
 
 func (s *stmt) Query(args []driver.Value) (driver.Rows, error) {
-	return s.conn.QueryContext(context.Background(), s.query, named(args))
+	return s.QueryContext(context.Background(), named(args))
 }
 
 func (s *stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	return s.conn.ExecContext(ctx, s.query, args)
+	values, err := positional(args)
+	if err != nil {
+		return nil, err
+	}
+	s.conn.mutex.Lock()
+	defer s.conn.mutex.Unlock()
+	if err := s.prepared.bindAll(values, s.conn.dialect); err != nil {
+		return nil, err
+	}
+	results, err := s.prepared.execute()
+	if err != nil {
+		return nil, err
+	}
+	var total int64
+	for _, result := range results {
+		total += result.changedRows()
+	}
+	return changed(total), nil
 }
 
 func (s *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	return s.conn.QueryContext(ctx, s.query, args)
+	values, err := positional(args)
+	if err != nil {
+		return nil, err
+	}
+	s.conn.mutex.Lock()
+	defer s.conn.mutex.Unlock()
+	if err := s.prepared.bindAll(values, s.conn.dialect); err != nil {
+		return nil, err
+	}
+	columns, err := s.prepared.columnNames()
+	if err != nil {
+		return nil, err
+	}
+	return &steppedRows{stmt: s, columns: columns}, nil
+}
+
+func positional(args []driver.NamedValue) ([]any, error) {
+	values := make([]any, len(args))
+	for index, arg := range args {
+		if arg.Name != "" {
+			return nil, &Error{Message: "named parameters are not supported; use ?", SQLState: "0A000"}
+		}
+		values[index] = arg.Value
+	}
+	return values, nil
+}
+
+type steppedRows struct {
+	stmt    *stmt
+	columns []string
+	done    bool
+}
+
+func (r *steppedRows) Columns() []string {
+	return r.columns
+}
+
+func (r *steppedRows) Close() error {
+	r.stmt.conn.mutex.Lock()
+	defer r.stmt.conn.mutex.Unlock()
+	r.stmt.prepared.reset()
+	r.done = true
+	return nil
+}
+
+func (r *steppedRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.stmt.conn.mutex.Lock()
+	defer r.stmt.conn.mutex.Unlock()
+	cells := make([]any, len(dest))
+	found, err := r.stmt.prepared.step(cells)
+	if err != nil {
+		r.done = true
+		return err
+	}
+	if !found {
+		r.done = true
+		return io.EOF
+	}
+	for index := range dest {
+		dest[index] = cells[index]
+	}
+	return nil
+}
+
+// CopyFrom runs a COPY ... FROM STDIN on the connection with the data read from source, sent in
+// pieces as it is read, and returns the number of rows loaded.
+func CopyFrom(ctx context.Context, connection *sql.Conn, query string, source io.Reader) (int64, error) {
+	var loaded int64
+	err := connection.Raw(func(raw any) error {
+		c, ok := raw.(*conn)
+		if !ok {
+			return errors.New("eggdb: CopyFrom needs a connection from the eggdb driver")
+		}
+		c.mutex.Lock()
+		defer c.mutex.Unlock()
+		results, err := c.session.copyIn(query, func(put func([]byte) error) error {
+			buffer := make([]byte, 64*1024)
+			for {
+				read, err := source.Read(buffer)
+				if read > 0 {
+					if putErr := put(buffer[:read]); putErr != nil {
+						return putErr
+					}
+				}
+				if err == io.EOF {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+			}
+		})
+		if err != nil {
+			return err
+		}
+		loaded = copiedRows(results)
+		return nil
+	})
+	return loaded, err
+}
+
+// CopyTo runs a COPY ... TO STDOUT on the connection and writes its data to sink as it is read.
+func CopyTo(ctx context.Context, connection *sql.Conn, query string, sink io.Writer) error {
+	return connection.Raw(func(raw any) error {
+		c, ok := raw.(*conn)
+		if !ok {
+			return errors.New("eggdb: CopyTo needs a connection from the eggdb driver")
+		}
+		c.mutex.Lock()
+		defer c.mutex.Unlock()
+		_, err := c.session.copyOut(query, func(piece []byte) error {
+			_, err := sink.Write(piece)
+			return err
+		})
+		return err
+	})
+}
+
+func copiedRows(results []statementResult) int64 {
+	for index := len(results) - 1; index >= 0; index-- {
+		words := strings.Fields(results[index].tag)
+		if len(words) == 2 && words[0] == "COPY" {
+			if count, err := strconv.ParseInt(words[1], 10, 64); err == nil {
+				return count
+			}
+		}
+	}
+	return -1
 }
 
 func named(args []driver.Value) []driver.NamedValue {

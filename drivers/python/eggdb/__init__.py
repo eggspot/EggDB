@@ -162,6 +162,28 @@ def _api():
         "eggdb_scan_open": (c_int, [c_void_p, c_char_p, c_char_p, c_size_t, c_char_p, c_size_t, c_uint32, POINTER(c_void_p)]),
         "eggdb_scan_next": (c_int, [c_void_p, c_void_p, c_size_t, POINTER(POINTER(_Entry)), POINTER(c_size_t)]),
         "eggdb_scan_free": (None, [c_void_p]),
+        "eggdb_sql_prepare": (c_int, [c_void_p, c_char_p, c_size_t, POINTER(c_void_p)]),
+        "eggdb_stmt_parameter_count": (c_int, [c_void_p, POINTER(c_size_t)]),
+        "eggdb_stmt_bind_null": (c_int, [c_void_p, c_size_t]),
+        "eggdb_stmt_bind_int64": (c_int, [c_void_p, c_size_t, c_int64]),
+        "eggdb_stmt_bind_double": (c_int, [c_void_p, c_size_t, c_double]),
+        "eggdb_stmt_bind_bool": (c_int, [c_void_p, c_size_t, c_int]),
+        "eggdb_stmt_bind_text": (c_int, [c_void_p, c_size_t, c_char_p, c_size_t]),
+        "eggdb_stmt_bind_blob": (c_int, [c_void_p, c_size_t, c_char_p, c_size_t]),
+        "eggdb_stmt_clear_bindings": (c_int, [c_void_p]),
+        "eggdb_stmt_execute": (c_int, [c_void_p, POINTER(POINTER(_Result)), POINTER(c_size_t)]),
+        "eggdb_stmt_reset": (c_int, [c_void_p]),
+        "eggdb_stmt_column_count": (c_int, [c_void_p, POINTER(c_size_t)]),
+        "eggdb_stmt_column_name": (c_int, [c_void_p, c_size_t, POINTER(c_char_p)]),
+        "eggdb_stmt_step": (c_int, [c_void_p, POINTER(c_int)]),
+        "eggdb_stmt_row": (c_int, [c_void_p, POINTER(POINTER(_Value)), POINTER(c_size_t)]),
+        "eggdb_stmt_finalize": (c_int, [c_void_p]),
+        "eggdb_sql_copy_in_begin": (c_int, [c_void_p, c_char_p, POINTER(c_void_p)]),
+        "eggdb_sql_copy_out_begin": (c_int, [c_void_p, c_char_p, POINTER(c_void_p)]),
+        "eggdb_copy_put": (c_int, [c_void_p, c_char_p, c_size_t]),
+        "eggdb_copy_read": (c_int, [c_void_p, POINTER(POINTER(c_uint8)), POINTER(c_size_t)]),
+        "eggdb_copy_end": (c_int, [c_void_p, POINTER(POINTER(_Result)), POINTER(c_size_t)]),
+        "eggdb_copy_free": (None, [c_void_p]),
     }
     for name, (restype, argtypes) in prototypes.items():
         function = getattr(library, name)
@@ -234,6 +256,42 @@ def _placeholders(sql, dialect, parameters):
     return "".join(out), kept
 
 
+def _numbered(sql, dialect):
+    return _placeholders(sql, dialect, [])[0]
+
+
+_INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
+
+
+def _bind(api, statement, index, value, dialect):
+    if value is None:
+        return api.eggdb_stmt_bind_null(statement, index)
+    if isinstance(value, bool):
+        return api.eggdb_stmt_bind_bool(statement, index, 1 if value else 0)
+    if isinstance(value, int) and _INT64_MIN <= value <= _INT64_MAX:
+        return api.eggdb_stmt_bind_int64(statement, index, value)
+    if isinstance(value, float):
+        return api.eggdb_stmt_bind_double(statement, index, value)
+    if _is_bytes(value):
+        data = bytes(value)
+        return api.eggdb_stmt_bind_blob(statement, index, data, len(data))
+    text = _parameter_text(value, dialect).encode("utf-8")
+    return api.eggdb_stmt_bind_text(statement, index, text, len(text))
+
+
+def _gathered(results, count):
+    gathered = []
+    for index in range(count):
+        result = results[index]
+        names = [result.column_names[column].decode("utf-8") for column in range(result.column_count)]
+        rows = []
+        for row in range(result.row_count):
+            start = row * result.column_count
+            rows.append(tuple(_converted(result.values[start + column]) for column in range(result.column_count)))
+        gathered.append(((result.tag or b"").decode("utf-8"), names, rows))
+    return gathered
+
+
 def _converted(value):
     if value.kind == _NULL:
         return None
@@ -301,16 +359,62 @@ class Connection:
         )
         if status != 0:
             _raise_last(status)
-        gathered = []
-        for index in range(count.value):
-            result = results[index]
-            names = [result.column_names[column].decode("utf-8") for column in range(result.column_count)]
-            rows = []
-            for row in range(result.row_count):
-                start = row * result.column_count
-                rows.append(tuple(_converted(result.values[start + column]) for column in range(result.column_count)))
-            gathered.append(((result.tag or b"").decode("utf-8"), names, rows))
-        return gathered
+        return _gathered(results, count.value)
+
+    def _live_session(self):
+        if self._session is None:
+            raise InterfaceError("the connection is closed")
+        return self._session
+
+    def prepare(self, sql):
+        """Checks one statement once and returns a `Statement` that runs it as often as needed,
+        with `?` placeholders bound to typed values."""
+        return Statement(self, sql)
+
+    def iterate(self, sql, parameters=()):
+        """Runs one statement and yields its rows one at a time, stepping through them: from a
+        server each row is read from the connection as it is needed."""
+        self._begin_if_needed()
+        statement = self.prepare(sql)
+        try:
+            yield from statement.rows(parameters)
+        finally:
+            statement.close()
+
+    def copy_from(self, sql, data):
+        """Runs `COPY ... FROM STDIN` with `data`: bytes, str, or an iterable of bytes or str pieces
+        cut anywhere. Returns the number of rows loaded."""
+        self._begin_if_needed()
+        api = _api()
+        copy = c_void_p()
+        _checked(api.eggdb_sql_copy_in_begin(self._live_session(), sql.encode("utf-8"), byref(copy)))
+        try:
+            pieces = [data] if isinstance(data, (bytes, bytearray, memoryview, str)) else data
+            for piece in pieces:
+                chunk = piece.encode("utf-8") if isinstance(piece, str) else bytes(piece)
+                if chunk:
+                    _checked(api.eggdb_copy_put(copy, chunk, len(chunk)))
+            return _copied_rows(_copy_end(api, copy))
+        finally:
+            api.eggdb_copy_free(copy)
+
+    def copy_to(self, sql):
+        """Runs `COPY ... TO STDOUT` and yields its data in pieces of bytes as they are read."""
+        self._begin_if_needed()
+        api = _api()
+        copy = c_void_p()
+        _checked(api.eggdb_sql_copy_out_begin(self._live_session(), sql.encode("utf-8"), byref(copy)))
+        try:
+            while True:
+                data = POINTER(c_uint8)()
+                length = c_size_t()
+                _checked(api.eggdb_copy_read(copy, byref(data), byref(length)))
+                if length.value == 0:
+                    break
+                yield ctypes.string_at(data, length.value)
+            _copy_end(api, copy)
+        finally:
+            api.eggdb_copy_free(copy)
 
     def _begin_if_needed(self):
         if not self.autocommit and not self._in_transaction:
@@ -386,17 +490,23 @@ class Cursor:
                 self._rows = rows
                 self.rowcount = len(rows)
             else:
-                words = tag.split()
-                if words and words[0] in ("INSERT", "UPDATE", "DELETE") and words[-1].isdigit():
-                    self.rowcount = int(words[-1])
+                self.rowcount = _affected(tag)
         return self
 
     def executemany(self, sql, sequence):
-        """Runs one statement for each set of parameters."""
+        """Runs one statement for each set of parameters, prepared once."""
+        self.connection._begin_if_needed()
+        statement = self.connection.prepare(sql)
         total = 0
-        for parameters in sequence:
-            self.execute(sql, parameters)
-            total += max(self.rowcount, 0)
+        try:
+            for parameters in sequence:
+                gathered = statement.execute(parameters)
+                if gathered:
+                    total += max(_affected(gathered[-1][0]), 0)
+        finally:
+            statement.close()
+        self.description = None
+        self._rows = []
         self.rowcount = total
         return self
 
@@ -428,6 +538,111 @@ class Cursor:
     def __iter__(self):
         while self._rows:
             yield self._rows.pop(0)
+
+
+def _affected(tag):
+    words = tag.split()
+    if words and words[0] in ("INSERT", "UPDATE", "DELETE", "MERGE") and words[-1].isdigit():
+        return int(words[-1])
+    return -1
+
+
+def _copy_end(api, copy):
+    results = POINTER(_Result)()
+    count = c_size_t()
+    _checked(api.eggdb_copy_end(copy, byref(results), byref(count)))
+    return _gathered(results, count.value)
+
+
+def _copied_rows(gathered):
+    for tag, _names, _rows in reversed(gathered):
+        words = tag.split()
+        if words and words[0] == "COPY" and words[-1].isdigit():
+            return int(words[-1])
+    return -1
+
+
+class Statement:
+    """One statement checked once, run many times with typed bindings or stepped a row at a time."""
+
+    def __init__(self, connection, sql):
+        api = _api()
+        text = _numbered(sql, connection._dialect).encode("utf-8")
+        handle = c_void_p()
+        _checked(api.eggdb_sql_prepare(connection._live_session(), text, len(text), byref(handle)))
+        self.connection = connection
+        self._handle = handle
+        count = c_size_t()
+        _checked(api.eggdb_stmt_parameter_count(handle, byref(count)))
+        self.parameter_count = count.value
+
+    def _live(self):
+        if self._handle is None:
+            raise InterfaceError("the statement is closed")
+        return self._handle
+
+    def _bind_all(self, parameters):
+        api = _api()
+        handle = self._live()
+        _checked(api.eggdb_stmt_reset(handle))
+        _checked(api.eggdb_stmt_clear_bindings(handle))
+        values = list(parameters)
+        if len(values) > self.parameter_count:
+            raise ProgrammingError(f"{len(values)} parameters given for {self.parameter_count} placeholders")
+        for index, value in enumerate(values, start=1):
+            _checked(_bind(api, handle, index, value, self.connection._dialect))
+
+    def execute(self, parameters=()):
+        """Runs the statement with `parameters` and returns its results as (tag, column names, rows)."""
+        self._bind_all(parameters)
+        results = POINTER(_Result)()
+        count = c_size_t()
+        _checked(_api().eggdb_stmt_execute(self._handle, byref(results), byref(count)))
+        return _gathered(results, count.value)
+
+    def columns(self):
+        """The names of the columns the statement returns, when they are known."""
+        api = _api()
+        count = c_size_t()
+        _checked(api.eggdb_stmt_column_count(self._live(), byref(count)))
+        names = []
+        for column in range(count.value):
+            name = c_char_p()
+            _checked(api.eggdb_stmt_column_name(self._handle, column, byref(name)))
+            names.append((name.value or b"").decode("utf-8"))
+        return names
+
+    def rows(self, parameters=()):
+        """Runs the statement with `parameters` and yields its rows one at a time."""
+        self._bind_all(parameters)
+        api = _api()
+        handle = self._handle
+        try:
+            while True:
+                has_row = c_int()
+                _checked(api.eggdb_stmt_step(handle, byref(has_row)))
+                if not has_row.value:
+                    return
+                values = POINTER(_Value)()
+                count = c_size_t()
+                _checked(api.eggdb_stmt_row(handle, byref(values), byref(count)))
+                yield tuple(_converted(values[column]) for column in range(count.value))
+        finally:
+            if self._handle is not None:
+                api.eggdb_stmt_reset(self._handle)
+
+    def close(self):
+        """Frees the statement."""
+        if self._handle is not None:
+            _api().eggdb_stmt_finalize(self._handle)
+            self._handle = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        self.close()
+        return False
 
 
 def _key_bytes(value):

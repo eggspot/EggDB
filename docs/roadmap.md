@@ -694,7 +694,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (`eggdb_open_v2` settings), `eggdb_check` and `eggdb_stats`: **code written, unbuilt** (code-only mode, 2026-11-14,
   D1146); left: plans kept in prepared statements, binary result formats and typed `Parse`.
 - Asynchronous C API calls, completed by one callback per batch (D17, D293).
-- Every language driver using the new C API calls (prepared handles, stepping, `COPY`) (D293).
+- Every language driver using the new C API calls (prepared handles, stepping, `COPY`) (D293). Python, Go and C++:
+  **code written, unbuilt** (code-only mode, 2026-11-14, D1148).
 - Each driver benchmarked in embedded mode against SQLite's binding in its language, as D17 lists
   them (D17, D182). Check: gated in CI.
 - JDBC's `DatabaseMetaData`, and a JNI binding for Java before 22 (D16, D182). `DatabaseMetaData`: **code written,

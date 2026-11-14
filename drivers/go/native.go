@@ -173,3 +173,206 @@ func converted(value *C.eggdb_value) any {
 		return nil
 	}
 }
+
+type nativeStatement struct {
+	session    *nativeSession
+	handle     *C.eggdb_stmt
+	parameters int
+	columns    []string
+}
+
+func (s *nativeSession) prepare(sql string) (*nativeStatement, error) {
+	if s.session == nil {
+		return nil, &Error{Message: "the connection is closed", SQLState: "08003"}
+	}
+	cSQL := C.CString(sql)
+	defer C.free(unsafe.Pointer(cSQL))
+	prepared := &nativeStatement{session: s}
+	if status := C.eggdb_sql_prepare(s.session, cSQL, C.size_t(len(sql)), &prepared.handle); status != C.EGGDB_OK {
+		return nil, lastError(status)
+	}
+	var count C.size_t
+	if status := C.eggdb_stmt_parameter_count(prepared.handle, &count); status != C.EGGDB_OK {
+		err := lastError(status)
+		prepared.finalize()
+		return nil, err
+	}
+	prepared.parameters = int(count)
+	return prepared, nil
+}
+
+func (p *nativeStatement) finalize() {
+	if p.handle != nil {
+		C.eggdb_stmt_finalize(p.handle)
+		p.handle = nil
+	}
+}
+
+func (p *nativeStatement) bindAll(values []any, dialect string) error {
+	if p.handle == nil {
+		return &Error{Message: "the statement is closed", SQLState: "26000"}
+	}
+	if status := C.eggdb_stmt_reset(p.handle); status != C.EGGDB_OK {
+		return lastError(status)
+	}
+	if status := C.eggdb_stmt_clear_bindings(p.handle); status != C.EGGDB_OK {
+		return lastError(status)
+	}
+	for index, value := range values {
+		if status, err := p.bind(C.size_t(index+1), value, dialect); err != nil {
+			return err
+		} else if status != C.EGGDB_OK {
+			return lastError(status)
+		}
+	}
+	return nil
+}
+
+func (p *nativeStatement) bind(index C.size_t, value any, dialect string) (C.int, error) {
+	switch typed := value.(type) {
+	case nil:
+		return C.eggdb_stmt_bind_null(p.handle, index), nil
+	case bool:
+		flag := C.int(0)
+		if typed {
+			flag = 1
+		}
+		return C.eggdb_stmt_bind_bool(p.handle, index, flag), nil
+	case int64:
+		return C.eggdb_stmt_bind_int64(p.handle, index, C.int64_t(typed)), nil
+	case float64:
+		return C.eggdb_stmt_bind_double(p.handle, index, C.double(typed)), nil
+	case []byte:
+		if len(typed) == 0 {
+			return C.eggdb_stmt_bind_blob(p.handle, index, nil, 0), nil
+		}
+		data := C.CBytes(typed)
+		defer C.free(data)
+		return C.eggdb_stmt_bind_blob(p.handle, index, (*C.uint8_t)(data), C.size_t(len(typed))), nil
+	default:
+		text, err := parameterText(value, dialect)
+		if err != nil {
+			return 0, err
+		}
+		cText := C.CString(*text)
+		defer C.free(unsafe.Pointer(cText))
+		return C.eggdb_stmt_bind_text(p.handle, index, cText, C.size_t(len(*text))), nil
+	}
+}
+
+func (p *nativeStatement) execute() ([]statementResult, error) {
+	var results *C.eggdb_result
+	var count C.size_t
+	if status := C.eggdb_stmt_execute(p.handle, &results, &count); status != C.EGGDB_OK {
+		return nil, lastError(status)
+	}
+	return gathered(results, int(count)), nil
+}
+
+func (p *nativeStatement) columnNames() ([]string, error) {
+	var count C.size_t
+	if status := C.eggdb_stmt_column_count(p.handle, &count); status != C.EGGDB_OK {
+		return nil, lastError(status)
+	}
+	names := make([]string, int(count))
+	for column := range names {
+		var name *C.char
+		if status := C.eggdb_stmt_column_name(p.handle, C.size_t(column), &name); status != C.EGGDB_OK {
+			return nil, lastError(status)
+		}
+		names[column] = C.GoString(name)
+	}
+	return names, nil
+}
+
+func (p *nativeStatement) step(dest []any) (bool, error) {
+	var hasRow C.int
+	if status := C.eggdb_stmt_step(p.handle, &hasRow); status != C.EGGDB_OK {
+		return false, lastError(status)
+	}
+	if hasRow == 0 {
+		return false, nil
+	}
+	var values *C.eggdb_value
+	var count C.size_t
+	if status := C.eggdb_stmt_row(p.handle, &values, &count); status != C.EGGDB_OK {
+		return false, lastError(status)
+	}
+	cells := unsafe.Slice(values, int(count))
+	for index := range cells {
+		if index < len(dest) {
+			dest[index] = converted(&cells[index])
+		}
+	}
+	return true, nil
+}
+
+func (p *nativeStatement) reset() {
+	if p.handle != nil {
+		C.eggdb_stmt_reset(p.handle)
+	}
+}
+
+func (s *nativeSession) copyIn(sql string, pieces func(put func([]byte) error) error) ([]statementResult, error) {
+	if s.session == nil {
+		return nil, &Error{Message: "the connection is closed", SQLState: "08003"}
+	}
+	cSQL := C.CString(sql)
+	defer C.free(unsafe.Pointer(cSQL))
+	var copy *C.eggdb_copy
+	if status := C.eggdb_sql_copy_in_begin(s.session, cSQL, &copy); status != C.EGGDB_OK {
+		return nil, lastError(status)
+	}
+	defer C.eggdb_copy_free(copy)
+	put := func(piece []byte) error {
+		if len(piece) == 0 {
+			return nil
+		}
+		data := C.CBytes(piece)
+		defer C.free(data)
+		if status := C.eggdb_copy_put(copy, (*C.uint8_t)(data), C.size_t(len(piece))); status != C.EGGDB_OK {
+			return lastError(status)
+		}
+		return nil
+	}
+	if err := pieces(put); err != nil {
+		return nil, err
+	}
+	return endCopy(copy)
+}
+
+func (s *nativeSession) copyOut(sql string, each func([]byte) error) ([]statementResult, error) {
+	if s.session == nil {
+		return nil, &Error{Message: "the connection is closed", SQLState: "08003"}
+	}
+	cSQL := C.CString(sql)
+	defer C.free(unsafe.Pointer(cSQL))
+	var copy *C.eggdb_copy
+	if status := C.eggdb_sql_copy_out_begin(s.session, cSQL, &copy); status != C.EGGDB_OK {
+		return nil, lastError(status)
+	}
+	defer C.eggdb_copy_free(copy)
+	for {
+		var data *C.uint8_t
+		var length C.size_t
+		if status := C.eggdb_copy_read(copy, &data, &length); status != C.EGGDB_OK {
+			return nil, lastError(status)
+		}
+		if length == 0 {
+			break
+		}
+		if err := each(C.GoBytes(unsafe.Pointer(data), C.int(length))); err != nil {
+			return nil, err
+		}
+	}
+	return endCopy(copy)
+}
+
+func endCopy(copy *C.eggdb_copy) ([]statementResult, error) {
+	var results *C.eggdb_result
+	var count C.size_t
+	if status := C.eggdb_copy_end(copy, &results, &count); status != C.EGGDB_OK {
+		return nil, lastError(status)
+	}
+	return gathered(results, int(count)), nil
+}

@@ -45,6 +45,30 @@ class DbApiTest(unittest.TestCase):
         self.assertEqual(connection.execute("SELECT w FROM t WHERE v = ?", (7,)).fetchone(), ("it's",))
         connection.close()
 
+    def test_prepared_statements_bind_typed_values_and_step_through_rows(self):
+        connection = eggdb.connect(":memory:")
+        connection.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score REAL, photo BLOB)")
+        with connection.prepare("INSERT INTO t VALUES (?, ?, ?, ?)") as insert:
+            self.assertEqual(insert.parameter_count, 4)
+            for number in range(1, 4):
+                insert.execute((number, f"n{number}", number / 2, bytes([number])))
+        self.assertEqual(
+            list(connection.iterate("SELECT id, name, score, photo FROM t WHERE id >= ? ORDER BY id", (2,))),
+            [(2, "n2", 1.0, b"\x02"), (3, "n3", 1.5, b"\x03")],
+        )
+        with connection.prepare("SELECT name FROM t WHERE id = ?") as select:
+            self.assertEqual(select.columns(), ["name"])
+            self.assertEqual(list(select.rows((1,))), [("n1",)])
+            self.assertEqual(list(select.rows((3,))), [("n3",)])
+        connection.close()
+
+    def test_copy_loads_and_reads_rows_in_pieces(self):
+        connection = eggdb.connect(":memory:", dialect="postgresql")
+        connection.execute("CREATE TABLE t (id integer, name text)")
+        self.assertEqual(connection.copy_from("COPY t FROM STDIN", ["1\tad", "a\n2\tgr", "ace\n"]), 2)
+        self.assertEqual(b"".join(connection.copy_to("COPY t TO STDOUT")), b"1\tada\n2\tgrace\n")
+        connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()

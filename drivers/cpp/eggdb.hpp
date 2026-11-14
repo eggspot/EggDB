@@ -40,6 +40,152 @@ struct result {
     std::vector<std::string> columns;
     std::vector<std::vector<value>> rows;
 };
+inline value converted(const eggdb_value *cell) {
+    switch (cell->kind) {
+        case EGGDB_INTEGER: return value(cell->integer);
+        case EGGDB_REAL: return value(cell->real);
+        case EGGDB_TEXT: return value(std::string(reinterpret_cast<const char *>(cell->data), cell->len));
+        case EGGDB_BLOB: return value(std::vector<std::uint8_t>(cell->data, cell->data + cell->len));
+        default: return value(std::monostate{});
+    }
+}
+inline std::vector<result> gathered(const eggdb_result *results, std::size_t count) {
+    std::vector<result> out;
+    for (std::size_t index = 0; index < count; ++index) {
+        const eggdb_result &one = results[index];
+        result collected;
+        collected.tag = one.tag ? one.tag : "";
+        for (std::size_t column = 0; column < one.column_count; ++column) {
+            collected.columns.emplace_back(one.column_names[column]);
+        }
+        for (std::size_t row = 0; row < one.row_count; ++row) {
+            std::vector<value> cells;
+            cells.reserve(one.column_count);
+            for (std::size_t column = 0; column < one.column_count; ++column) {
+                cells.push_back(converted(eggdb_result_value(&one, row, column)));
+            }
+            collected.rows.push_back(std::move(cells));
+        }
+        out.push_back(std::move(collected));
+    }
+    return out;
+}
+class statement {
+public:
+    statement(statement &&other) noexcept : stmt_(std::exchange(other.stmt_, nullptr)) {}
+    statement &operator=(statement &&other) noexcept {
+        if (this != &other) {
+            finalize();
+            stmt_ = std::exchange(other.stmt_, nullptr);
+        }
+        return *this;
+    }
+    statement(const statement &) = delete;
+    statement &operator=(const statement &) = delete;
+    ~statement() { finalize(); }
+    std::size_t parameter_count() {
+        std::size_t count = 0;
+        check(eggdb_stmt_parameter_count(live(), &count));
+        return count;
+    }
+    statement &bind(std::size_t index, const value &bound) {
+        if (std::holds_alternative<std::monostate>(bound)) {
+            check(eggdb_stmt_bind_null(live(), index));
+        } else if (const auto *integer = std::get_if<std::int64_t>(&bound)) {
+            check(eggdb_stmt_bind_int64(live(), index, *integer));
+        } else if (const auto *real = std::get_if<double>(&bound)) {
+            check(eggdb_stmt_bind_double(live(), index, *real));
+        } else if (const auto *text = std::get_if<std::string>(&bound)) {
+            check(eggdb_stmt_bind_text(live(), index, text->data(), text->size()));
+        } else {
+            const auto &blob = std::get<std::vector<std::uint8_t>>(bound);
+            check(eggdb_stmt_bind_blob(live(), index, blob.data(), blob.size()));
+        }
+        return *this;
+    }
+    statement &bind_bool(std::size_t index, bool flag) {
+        check(eggdb_stmt_bind_bool(live(), index, flag ? 1 : 0));
+        return *this;
+    }
+    statement &bind_all(const std::vector<value> &values) {
+        check(eggdb_stmt_reset(live()));
+        check(eggdb_stmt_clear_bindings(live()));
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            bind(index + 1, values[index]);
+        }
+        return *this;
+    }
+    std::vector<result> execute() {
+        const eggdb_result *results = nullptr;
+        std::size_t count = 0;
+        check(eggdb_stmt_execute(live(), &results, &count));
+        return gathered(results, count);
+    }
+    std::vector<std::string> columns() {
+        std::size_t count = 0;
+        check(eggdb_stmt_column_count(live(), &count));
+        std::vector<std::string> names;
+        for (std::size_t column = 0; column < count; ++column) {
+            const char *name = nullptr;
+            check(eggdb_stmt_column_name(live(), column, &name));
+            names.emplace_back(name ? name : "");
+        }
+        return names;
+    }
+    std::optional<std::vector<value>> step() {
+        int has_row = 0;
+        check(eggdb_stmt_step(live(), &has_row));
+        if (has_row == 0) {
+            return std::nullopt;
+        }
+        const eggdb_value *values = nullptr;
+        std::size_t count = 0;
+        check(eggdb_stmt_row(live(), &values, &count));
+        std::vector<value> cells;
+        cells.reserve(count);
+        for (std::size_t column = 0; column < count; ++column) {
+            cells.push_back(converted(&values[column]));
+        }
+        return cells;
+    }
+    void reset() { check(eggdb_stmt_reset(live())); }
+    void finalize() noexcept {
+        if (stmt_) {
+            eggdb_stmt_finalize(stmt_);
+            stmt_ = nullptr;
+        }
+    }
+private:
+    friend class session;
+    explicit statement(eggdb_stmt *stmt) : stmt_(stmt) {}
+    eggdb_stmt *live() {
+        if (stmt_ == nullptr) {
+            throw error(EGGDB_ERR_INVALID_ARGUMENT, "26000", "the statement is finalized");
+        }
+        return stmt_;
+    }
+    eggdb_stmt *stmt_;
+};
+class copy_handle {
+public:
+    explicit copy_handle(eggdb_copy *copy) : copy_(copy) {}
+    copy_handle(const copy_handle &) = delete;
+    copy_handle &operator=(const copy_handle &) = delete;
+    ~copy_handle() {
+        if (copy_) {
+            eggdb_copy_free(copy_);
+        }
+    }
+    eggdb_copy *get() const noexcept { return copy_; }
+    std::vector<result> end() {
+        const eggdb_result *results = nullptr;
+        std::size_t count = 0;
+        check(eggdb_copy_end(copy_, &results, &count));
+        return gathered(results, count);
+    }
+private:
+    eggdb_copy *copy_;
+};
 
 class session {
 public:
@@ -89,33 +235,53 @@ public:
         const eggdb_result *results = nullptr;
         std::size_t count = 0;
         check(eggdb_sql_execute_with_parameters(sql_, text.c_str(), bound.data(), bound.size(), &results, &count));
-        std::vector<result> out;
-        for (std::size_t index = 0; index < count; ++index) {
-            const eggdb_result &one = results[index];
-            result gathered;
-            gathered.tag = one.tag ? one.tag : "";
-            for (std::size_t column = 0; column < one.column_count; ++column) {
-                gathered.columns.emplace_back(one.column_names[column]);
-            }
-            for (std::size_t row = 0; row < one.row_count; ++row) {
-                std::vector<value> cells;
-                for (std::size_t column = 0; column < one.column_count; ++column) {
-                    const eggdb_value *cell = eggdb_result_value(&one, row, column);
-                    switch (cell->kind) {
-                        case EGGDB_INTEGER: cells.emplace_back(cell->integer); break;
-                        case EGGDB_REAL: cells.emplace_back(cell->real); break;
-                        case EGGDB_TEXT: cells.emplace_back(std::string(reinterpret_cast<const char *>(cell->data), cell->len)); break;
-                        case EGGDB_BLOB: cells.emplace_back(std::vector<std::uint8_t>(cell->data, cell->data + cell->len)); break;
-                        default: cells.emplace_back(std::monostate{}); break;
-                    }
-                }
-                gathered.rows.push_back(std::move(cells));
-            }
-            out.push_back(std::move(gathered));
-        }
-        return out;
+        return gathered(results, count);
     }
-
+    statement prepare(const std::string &text) {
+        eggdb_stmt *stmt = nullptr;
+        check(eggdb_sql_prepare(sql_, text.data(), text.size(), &stmt));
+        return statement(stmt);
+    }
+    template <typename Source>
+    std::vector<result> copy_in_pieces(const std::string &text, Source &&next_piece) {
+        eggdb_copy *copy = nullptr;
+        check(eggdb_sql_copy_in_begin(sql_, text.c_str(), &copy));
+        copy_handle handle(copy);
+        for (;;) {
+            std::optional<std::string> piece = next_piece();
+            if (!piece) {
+                break;
+            }
+            check(eggdb_copy_put(copy, reinterpret_cast<const std::uint8_t *>(piece->data()), piece->size()));
+        }
+        return handle.end();
+    }
+    std::vector<result> copy_in(const std::string &text, const std::string &data) {
+        bool given = false;
+        return copy_in_pieces(text, [&]() -> std::optional<std::string> {
+            if (given) {
+                return std::nullopt;
+            }
+            given = true;
+            return data;
+        });
+    }
+    template <typename Sink>
+    std::vector<result> copy_out(const std::string &text, Sink &&each_piece) {
+        eggdb_copy *copy = nullptr;
+        check(eggdb_sql_copy_out_begin(sql_, text.c_str(), &copy));
+        copy_handle handle(copy);
+        for (;;) {
+            const std::uint8_t *data = nullptr;
+            std::size_t length = 0;
+            check(eggdb_copy_read(copy, &data, &length));
+            if (length == 0) {
+                break;
+            }
+            each_piece(std::string(reinterpret_cast<const char *>(data), length));
+        }
+        return handle.end();
+    }
     void close() noexcept {
         if (sql_) {
             eggdb_sql_close(sql_);
