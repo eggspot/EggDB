@@ -423,6 +423,7 @@ fn tls13<S: Read + Write>(
             write_secret: application_secrets.server,
             exporter_master_secret,
         }),
+        resumption: None,
     })
 }
 

@@ -729,7 +729,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   connection (D103, D165). Check: a many-connections benchmark.
 - TLS session resumption, and the processor's AES instructions (D161). The processor's AES instructions: **code written, unbuilt**
   (code-only mode, 2026-11-14, D1158). Server-side TLS 1.3 resumption with tickets: **code written, unbuilt**
-  (code-only mode, 2026-11-14, D1159). Left: tickets offered and stored by EggDB's own client.
+  (code-only mode, 2026-11-14, D1159); EggDB's own client offering and storing tickets: **code written,
+  unbuilt** (code-only mode, 2026-11-14, D1159).
 - HTTP/2, gRPC and QUIC as shared crates of our own (D34).
 - Elasticsearch search and scroll hits sent as a stream, like the REST API's rows (D325). Search:
   **code written, unbuilt** (code-only mode, 2026-11-11, D463); scroll pages are whole responses of

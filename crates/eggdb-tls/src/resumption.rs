@@ -244,6 +244,154 @@ pub fn selected_identity(index: u16) -> Vec<u8> {
     index.to_be_bytes().to_vec()
 }
 
+/// A ticket a client keeps to resume its next connection, with what the resumed session takes
+/// over from the one that issued it.
+#[derive(Clone)]
+pub(crate) struct StoredTicket {
+    pub(crate) server_name: Option<String>,
+    pub(crate) cipher_suite: u16,
+    pub(crate) ticket: Vec<u8>,
+    pub(crate) age_add: u32,
+    pub(crate) received_unix_milliseconds: u64,
+    pub(crate) lifetime_seconds: u32,
+    pub(crate) psk: Vec<u8>,
+    pub(crate) server_certificates: Vec<crate::x509::Certificate>,
+}
+
+impl StoredTicket {
+    pub(crate) fn obfuscated_age(&self, now_unix_milliseconds: u64) -> u32 {
+        (now_unix_milliseconds.saturating_sub(self.received_unix_milliseconds) as u32).wrapping_add(self.age_add)
+    }
+
+    fn is_fresh(&self, now_unix_milliseconds: u64) -> bool {
+        now_unix_milliseconds.saturating_sub(self.received_unix_milliseconds)
+            < u64::from(self.lifetime_seconds.min(TICKET_LIFETIME_SECONDS)) * 1000
+    }
+}
+
+/// Where a client keeps the last ticket a server gave it, to offer once on its next connection
+/// to the same server name. Share one store between the connections that should resume each
+/// other; each ticket is used once.
+#[derive(Default)]
+pub struct ClientSessionStore {
+    slot: std::sync::Mutex<Option<StoredTicket>>,
+}
+
+impl std::fmt::Debug for ClientSessionStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientSessionStore")
+            .field("holds_a_ticket", &self.holds_a_ticket())
+            .finish()
+    }
+}
+
+impl ClientSessionStore {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether a ticket waits for the next connection.
+    pub fn holds_a_ticket(&self) -> bool {
+        self.slot
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn take_for(&self, server_name: Option<&str>, now_unix_milliseconds: u64) -> Option<StoredTicket> {
+        let mut slot = self.slot.lock().ok()?;
+        let ticket = slot.take()?;
+        (ticket.server_name.as_deref() == server_name && ticket.is_fresh(now_unix_milliseconds)).then_some(ticket)
+    }
+
+    pub(crate) fn keep(&self, ticket: StoredTicket) {
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = Some(ticket);
+        }
+    }
+}
+
+/// What a client connection needs to turn the server's NewSessionTicket messages into stored
+/// tickets.
+pub(crate) struct ClientResumption {
+    pub(crate) store: std::sync::Arc<ClientSessionStore>,
+    pub(crate) hash: HashKind,
+    pub(crate) cipher_suite: u16,
+    pub(crate) resumption_master_secret: Vec<u8>,
+    pub(crate) server_name: Option<String>,
+    pub(crate) server_certificates: Vec<crate::x509::Certificate>,
+}
+
+impl std::fmt::Debug for ClientResumption {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientResumption")
+            .field("cipher_suite", &self.cipher_suite)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ClientResumption {
+    /// Keeps the ticket of a NewSessionTicket body, deriving its key from its nonce.
+    pub(crate) fn receive_ticket(&self, body: &[u8]) -> Result<(), CodecError> {
+        let mut reader = Reader::new(body);
+        let lifetime_seconds = reader.read_u32()?;
+        let age_add = reader.read_u32()?;
+        let nonce = reader.read_vector_u8(0..=255)?.to_vec();
+        let ticket = reader.read_vector_u16(1..=65_535)?.to_vec();
+        reader.read_vector_u16(0..=65_534)?;
+        reader.finish()?;
+        if lifetime_seconds == 0 {
+            return Ok(());
+        }
+        self.store.keep(StoredTicket {
+            server_name: self.server_name.clone(),
+            cipher_suite: self.cipher_suite,
+            ticket,
+            age_add,
+            received_unix_milliseconds: now_unix_milliseconds(),
+            lifetime_seconds,
+            psk: hkdf_expand_label(
+                self.hash,
+                &self.resumption_master_secret,
+                b"resumption",
+                &nonce,
+                self.hash.digest_bytes(),
+            ),
+            server_certificates: self.server_certificates.clone(),
+        });
+        Ok(())
+    }
+}
+
+/// A client's `pre_shared_key` extension offering `identity` with a zeroed binder of
+/// `binder_bytes`, to be filled in by [`fill_binder`] once the rest of the hello is encoded.
+pub fn pre_shared_key_offer(identity: &[u8], obfuscated_ticket_age: u32, binder_bytes: usize) -> crate::handshake::Extension {
+    let mut writer = Writer::new();
+    writer.write_vector_u16(|identities| {
+        identities.write_vector_u16(|field| field.write_bytes(identity));
+        identities.write_u32(obfuscated_ticket_age);
+    });
+    writer.write_vector_u16(|binders| binders.write_vector_u8(|binder| binder.write_bytes(&vec![0; binder_bytes])));
+    crate::handshake::Extension {
+        extension_type: crate::handshake::extension_type::PRE_SHARED_KEY,
+        data: writer.into_bytes(),
+    }
+}
+
+/// How many bytes the binder list of one binder of `binder_bytes` takes at the end of a hello.
+pub fn single_binder_list_bytes(binder_bytes: usize) -> usize {
+    2 + 1 + binder_bytes
+}
+
+/// Writes `binder` over the zeroed binder that ends `hello_message`.
+pub fn fill_binder(hello_message: &mut [u8], binder: &[u8]) {
+    let start = hello_message.len().saturating_sub(binder.len());
+    hello_message[start..].copy_from_slice(binder);
+}
+
 /// Milliseconds since the Unix epoch now, or 0 on a clock before it.
 pub fn now_unix_milliseconds() -> u64 {
     std::time::SystemTime::now()

@@ -31,6 +31,7 @@ pub struct TlsStream<S> {
     peer_closed: bool,
     sent_close: bool,
     failed: bool,
+    resumption: Option<crate::resumption::ClientResumption>,
 }
 
 impl<S: Read + Write> TlsStream<S> {
@@ -79,6 +80,7 @@ impl<S: Read + Write> TlsStream<S> {
             layer,
             info: established.info,
             traffic: established.traffic,
+            resumption: established.resumption,
             is_client,
             post_handshake: HandshakeBuffer::new(),
             received: Vec::new(),
@@ -194,7 +196,11 @@ impl<S: Read + Write> TlsStream<S> {
         while let Some((message_type, message)) = self.post_handshake.next_message() {
             let tls13 = matches!(self.traffic, Traffic::Tls13(_));
             match message_type {
-                handshake_type::NEW_SESSION_TICKET if tls13 && self.is_client => {}
+                handshake_type::NEW_SESSION_TICKET if tls13 && self.is_client => {
+                    if let Some(resumption) = &self.resumption {
+                        resumption.receive_ticket(message_body(&message))?;
+                    }
+                }
                 handshake_type::KEY_UPDATE if tls13 => {
                     self.receive_key_update(message_body(&message))?
                 }

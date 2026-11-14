@@ -113,4 +113,5 @@ impl Traffic {
 pub(crate) struct Established {
     pub(crate) info: SessionInfo,
     pub(crate) traffic: Traffic,
+    pub(crate) resumption: Option<crate::resumption::ClientResumption>,
 }

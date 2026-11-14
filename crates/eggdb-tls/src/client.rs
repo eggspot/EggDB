@@ -20,6 +20,10 @@ use crate::negotiation::{
 use crate::private_key::FillRandom;
 use crate::record::{Tls13RecordProtection, content_type};
 use crate::record_layer::{Protection, RecordLayer};
+use crate::resumption::{
+    ClientResumption, PSK_DHE_KE, StoredTicket, binder, fill_binder, now_unix_milliseconds,
+    pre_shared_key_offer, resumption_master_secret, single_binder_list_bytes,
+};
 use crate::session::{Established, SessionInfo, Tls13Traffic, Traffic};
 use crate::signature::verify_signature;
 use crate::verify::{KeyPurpose, verify_certificate_chain, verify_server_name};
@@ -140,6 +144,38 @@ fn client_hello(
     }
 }
 
+fn ticket_hash(ticket: &StoredTicket) -> Option<crate::cipher_suite::HashKind> {
+    CipherSuite::from_id(ticket.cipher_suite)
+        .filter(|suite| suite.is_tls13())
+        .map(CipherSuite::hash)
+}
+
+fn hello_with_resumption(
+    config: &ClientConfig,
+    mut hello: ClientHello,
+    ticket: Option<&StoredTicket>,
+    transcript_before: Option<&crate::cipher_suite::TranscriptHash>,
+) -> Vec<u8> {
+    if config.session_store.is_some() && config.offers_tls13() {
+        hello.extensions.push(Extension::psk_key_exchange_modes(&[PSK_DHE_KE]));
+    }
+    let Some((ticket, hash)) = ticket.and_then(|ticket| ticket_hash(ticket).map(|hash| (ticket, hash))) else {
+        return hello.encode();
+    };
+    hello.extensions.push(pre_shared_key_offer(
+        &ticket.ticket,
+        ticket.obfuscated_age(now_unix_milliseconds()),
+        hash.digest_bytes(),
+    ));
+    let mut message = hello.encode();
+    let partial_length = message.len() - single_binder_list_bytes(hash.digest_bytes());
+    let mut transcript = transcript_before.cloned().unwrap_or_else(|| hash.transcript());
+    transcript.update(&message[..partial_length]);
+    let made = binder(hash, &ticket.psk, &transcript.current());
+    fill_binder(&mut message, &made);
+    message
+}
+
 fn key_shares(ephemerals: &[EphemeralKey]) -> Vec<KeyShareEntry> {
     ephemerals
         .iter()
@@ -191,8 +227,19 @@ pub(crate) fn handshake<S: Read + Write>(
             TlsError::protocol(AlertDescription::InternalError, "a key exchange group is unavailable"),
         )?);
     }
-    let mut hello_message =
-        client_hello(config, random, &session_id, &key_shares(&ephemerals), None).encode();
+    let offered_suites_now = offered_suites(config);
+    let mut ticket = config
+        .session_store
+        .as_ref()
+        .filter(|_| config.offers_tls13())
+        .and_then(|store| store.take_for(config.server_name_indication.as_deref(), now_unix_milliseconds()))
+        .filter(|ticket| offered_suites_now.contains(&ticket.cipher_suite));
+    let mut hello_message = hello_with_resumption(
+        config,
+        client_hello(config, random, &session_id, &key_shares(&ephemerals), None),
+        ticket.as_ref(),
+        None,
+    );
     layer.queue(content_type::HANDSHAKE, &hello_message)?;
     layer.flush()?;
 
@@ -225,15 +272,21 @@ pub(crate) fn handshake<S: Read + Write>(
         let cookie = server_hello
             .extension(extension_type::COOKIE)
             .map(<[u8]>::to_vec);
-        hello_message =
+        if ticket.as_ref().and_then(ticket_hash) != Some(suite.hash()) {
+            ticket = None;
+        }
+        hello_message = hello_with_resumption(
+            config,
             client_hello(
                 config,
                 random,
                 &session_id,
                 &key_shares(&ephemerals),
                 cookie.as_deref(),
-            )
-            .encode();
+            ),
+            ticket.as_ref(),
+            Some(&transcript),
+        );
         transcript.update(&hello_message);
         layer.queue_change_cipher_spec();
         sent_change_cipher_spec = true;
@@ -324,7 +377,19 @@ pub(crate) fn handshake<S: Read + Write>(
                 "the server's key share is not a valid public key",
             ))?;
 
-    let mut schedule = KeySchedule::new(hash, None);
+    let resumed_ticket = match server_hello.extension(extension_type::PRE_SHARED_KEY) {
+        None => None,
+        Some(selected) => match &ticket {
+            Some(offered) if selected == [0, 0] && offered.cipher_suite == suite.id() => Some(offered),
+            _ => {
+                return Err(TlsError::protocol(
+                    AlertDescription::IllegalParameter,
+                    "the server selected a pre-shared key the client did not offer",
+                ));
+            }
+        },
+    };
+    let mut schedule = KeySchedule::new(hash, resumed_ticket.map(|offered| offered.psk.as_slice()));
     let handshake_secrets = schedule.enter_handshake(&shared_secret, &transcript.current());
     let protection = |secret: &[u8]| {
         Tls13RecordProtection::new(suite.aead(), &traffic_keys(hash, suite.aead(), secret))
@@ -359,59 +424,64 @@ pub(crate) fn handshake<S: Read + Write>(
         ));
     }
 
-    let (mut message_type, mut message) = layer.read_handshake_message(Some(&mut transcript))?;
-    let mut certificate_request_context = None;
-    if message_type == handshake_type::CERTIFICATE_REQUEST {
-        certificate_request_context =
-            Some(CertificateRequest::decode(message_body(&message))?.request_context);
-        (message_type, message) = layer.read_handshake_message(Some(&mut transcript))?;
-    }
-    if message_type != handshake_type::CERTIFICATE {
-        return Err(TlsError::protocol(
-            AlertDescription::UnexpectedMessage,
-            "expected the server's Certificate",
-        ));
-    }
-    let certificate_message = CertificateMessage::decode_tls13(message_body(&message))?;
-    if !certificate_message.request_context.is_empty() {
-        return Err(TlsError::protocol(
-            AlertDescription::IllegalParameter,
-            "the server's Certificate has a request context",
-        ));
-    }
-    let chain = check_server_certificates(config, &certificate_message.entries)?;
-    let before_verify = transcript.current();
+    let (chain, certificate_request_context) = if let Some(resumed) = resumed_ticket {
+        (resumed.server_certificates.clone(), None)
+    } else {
+        let (mut message_type, mut message) = layer.read_handshake_message(Some(&mut transcript))?;
+        let mut certificate_request_context = None;
+        if message_type == handshake_type::CERTIFICATE_REQUEST {
+            certificate_request_context =
+                Some(CertificateRequest::decode(message_body(&message))?.request_context);
+            (message_type, message) = layer.read_handshake_message(Some(&mut transcript))?;
+        }
+        if message_type != handshake_type::CERTIFICATE {
+            return Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "expected the server's Certificate",
+            ));
+        }
+        let certificate_message = CertificateMessage::decode_tls13(message_body(&message))?;
+        if !certificate_message.request_context.is_empty() {
+            return Err(TlsError::protocol(
+                AlertDescription::IllegalParameter,
+                "the server's Certificate has a request context",
+            ));
+        }
+        let chain = check_server_certificates(config, &certificate_message.entries)?;
+        let before_verify = transcript.current();
 
-    let (message_type, message) = layer.read_handshake_message(Some(&mut transcript))?;
-    if message_type != handshake_type::CERTIFICATE_VERIFY {
-        return Err(TlsError::protocol(
-            AlertDescription::UnexpectedMessage,
-            "expected CertificateVerify",
-        ));
-    }
-    let signed = DigitallySigned::decode(message_body(&message))?;
-    let leaf_key = chain[0].public_key();
-    let algorithm = scheme_algorithm(signed.scheme, true)
-        .filter(|_| {
-            SUPPORTED_SIGNATURE_SCHEMES.contains(&signed.scheme)
-                && scheme_fits_key(signed.scheme, leaf_key)
-        })
-        .ok_or(TlsError::protocol(
-            AlertDescription::IllegalParameter,
-            "the server signed with a scheme the client did not offer",
-        ))?;
-    verify_signature(
-        algorithm,
-        leaf_key,
-        &certificate_verify_content(true, &before_verify),
-        &signed.signature,
-    )
-    .map_err(|_| {
-        TlsError::protocol(
-            AlertDescription::DecryptError,
-            "the server's CertificateVerify does not verify",
+        let (message_type, message) = layer.read_handshake_message(Some(&mut transcript))?;
+        if message_type != handshake_type::CERTIFICATE_VERIFY {
+            return Err(TlsError::protocol(
+                AlertDescription::UnexpectedMessage,
+                "expected CertificateVerify",
+            ));
+        }
+        let signed = DigitallySigned::decode(message_body(&message))?;
+        let leaf_key = chain[0].public_key();
+        let algorithm = scheme_algorithm(signed.scheme, true)
+            .filter(|_| {
+                SUPPORTED_SIGNATURE_SCHEMES.contains(&signed.scheme)
+                    && scheme_fits_key(signed.scheme, leaf_key)
+            })
+            .ok_or(TlsError::protocol(
+                AlertDescription::IllegalParameter,
+                "the server signed with a scheme the client did not offer",
+            ))?;
+        verify_signature(
+            algorithm,
+            leaf_key,
+            &certificate_verify_content(true, &before_verify),
+            &signed.signature,
         )
-    })?;
+        .map_err(|_| {
+            TlsError::protocol(
+                AlertDescription::DecryptError,
+                "the server's CertificateVerify does not verify",
+            )
+        })?;
+        (chain, certificate_request_context)
+    };
 
     let expected = finished_verify_data(hash, &handshake_secrets.server, &transcript.current());
     let (message_type, message) = layer.read_handshake_message(None)?;
@@ -448,6 +518,16 @@ pub(crate) fn handshake<S: Read + Write>(
     layer.queue(content_type::HANDSHAKE, &finished)?;
     layer.flush()?;
     layer.set_write_protection(protection(&application_secrets.client)?);
+    transcript.update(&finished);
+    let resumption = config.session_store.as_ref().map(|store| ClientResumption {
+        store: std::sync::Arc::clone(store),
+        hash,
+        cipher_suite: suite.id(),
+        resumption_master_secret: resumption_master_secret(hash, schedule.stage_secret(), &transcript.current()),
+        server_name: config.server_name_indication.clone(),
+        server_certificates: chain.clone(),
+    });
+    let resumed = resumed_ticket.is_some();
     layer.set_read_protection(protection(&application_secrets.server)?)?;
     layer.ignore_change_cipher_spec = false;
 
@@ -460,7 +540,7 @@ pub(crate) fn handshake<S: Read + Write>(
             server_certificate: chain.first().cloned(),
             peer_certificates: chain,
             key_exchange_group: server_share.group,
-            resumed: false,
+            resumed,
         },
         traffic: Traffic::Tls13(Tls13Traffic {
             hash,
@@ -469,5 +549,6 @@ pub(crate) fn handshake<S: Read + Write>(
             write_secret: application_secrets.client,
             exporter_master_secret,
         }),
+        resumption,
     })
 }

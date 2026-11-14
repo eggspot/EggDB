@@ -374,3 +374,56 @@ fn a_server_that_issues_tickets_still_serves_a_client_that_offers_no_resumption(
     assert!(!server.info().resumed);
     assert!(!client.info().resumed);
 }
+
+fn connect_once(
+    server_config: &ServerConfig,
+    client_config: &ClientConfig,
+) -> (bool, bool, Option<Certificate>) {
+    let (server_socket, client_socket) = connected_pair();
+    let server_config = server_config.clone();
+    let server = thread::spawn(move || {
+        let mut stream = TlsStream::accept(server_socket, &server_config).expect("server handshake");
+        stream.write_all(b"x").expect("write");
+        let mut done = [0u8; 1];
+        stream.read_exact(&mut done).expect("read");
+        stream.info().resumed
+    });
+    let mut client = TlsStream::connect(client_socket, client_config).expect("client handshake");
+    let mut first = [0u8; 1];
+    client.read_exact(&mut first).expect("read");
+    client.write_all(b"y").expect("write");
+    let resumed = client.info().resumed;
+    let certificate = client.info().server_certificate.clone();
+    let server_resumed = server.join().expect("server");
+    (server_resumed, resumed, certificate)
+}
+
+#[test]
+fn a_client_with_a_session_store_resumes_its_second_connection_from_the_ticket() {
+    let (mut server_config, certificate) = server_setup("db.example.com");
+    server_config.session_tickets = Some(std::sync::Arc::new(
+        eggdb_tls::resumption::SessionTickets::new(&mut eggdb_platform::secure_random::fill)
+            .expect("a ticket key"),
+    ));
+    let store = std::sync::Arc::new(eggdb_tls::resumption::ClientSessionStore::new());
+    let mut client_config = full_verification(&certificate, "db.example.com");
+    client_config.session_store = Some(std::sync::Arc::clone(&store));
+    let (server_resumed, client_resumed, _) = connect_once(&server_config, &client_config);
+    assert!(!server_resumed && !client_resumed);
+    assert!(store.holds_a_ticket());
+    let (server_resumed, client_resumed, seen) = connect_once(&server_config, &client_config);
+    assert!(server_resumed && client_resumed);
+    assert_eq!(seen, Some(certificate));
+    let other = server_setup("db.example.com").0;
+    let mut other_with_tickets = other.clone();
+    other_with_tickets.session_tickets = Some(std::sync::Arc::new(
+        eggdb_tls::resumption::SessionTickets::new(&mut eggdb_platform::secure_random::fill)
+            .expect("a ticket key"),
+    ));
+    assert!(store.holds_a_ticket());
+    let (server_socket, client_socket) = connected_pair();
+    let server = thread::spawn(move || TlsStream::accept(server_socket, &other_with_tickets).map(|stream| stream.info().resumed));
+    let client = TlsStream::connect(client_socket, &client_config);
+    assert!(client.is_err(), "the other server's certificate is not trusted, so the full handshake fails");
+    let _ = server.join();
+}

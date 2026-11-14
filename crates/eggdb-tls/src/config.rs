@@ -168,6 +168,9 @@ pub struct ClientConfig {
     /// Only FIPS-approved algorithms: AES-GCM suites, and P-256 or the ML-KEM hybrid for key
     /// exchange.
     pub fips_only: bool,
+    /// Where tickets are kept between connections: with a store, the client asks TLS 1.3 servers
+    /// for tickets and resumes its next connection to the same server name from the one it holds.
+    pub session_store: Option<std::sync::Arc<crate::resumption::ClientSessionStore>>,
 }
 
 impl ClientConfig {
@@ -185,6 +188,7 @@ impl ClientConfig {
             minimum_version: MinimumVersion::default(),
             maximum_version: MaximumVersion::default(),
             fips_only: false,
+            session_store: None,
         }
     }
 

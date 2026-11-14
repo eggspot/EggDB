@@ -274,5 +274,6 @@ pub(crate) fn handshake<S: Read + Write>(
             client_random: hello.random,
             server_random,
         }),
+        resumption: None,
     })
 }
