@@ -2851,7 +2851,9 @@ impl<'t> Parser<'t> {
             "refcursor" if self.postgresql() => {
                 SqlType::Catalog(crate::pg_catalog::CatalogType::RefCursor)
             }
-            "jsonpath" if self.postgresql() => SqlType::Text,
+            "jsonpath" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::JSONPATH),
+            "tsvector" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::TSVECTOR),
+            "tsquery" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::TSQUERY),
             "varchar" => SqlType::Varchar(self.varchar_length(token.start)?),
             "character" | "char" if self.is_word("varying") => {
                 self.at += 1;

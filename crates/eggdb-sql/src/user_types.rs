@@ -587,6 +587,9 @@ pub(crate) fn parse_input(text: &str, defined: DefinedType) -> SqlResult<Value> 
 }
 
 fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
+    if let Some(value) = crate::text_types::parse(text, defined) {
+        return value;
+    }
     if defined == DefinedType::CITEXT {
         Ok(crate::citext::value(text.to_owned()))
     } else if defined == DefinedType::HSTORE {
@@ -606,6 +609,12 @@ fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) ->
         Value::Bpchar(text) => Some(crate::types::without_trailing_spaces(text)),
         other => crate::citext::text_of(other),
     };
+    if crate::text_types::is_text_type(target) {
+        return match (text, conversion) {
+            (Some(text), Conversion::Explicit | Conversion::Assignment) => parse_base(text, target),
+            _ => Err(cannot_cast(&value, target)),
+        };
+    }
     if crate::citext::is_citext(target) {
         return Ok(crate::citext::value(match text {
             Some(text) => text.to_owned(),

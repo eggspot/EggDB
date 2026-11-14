@@ -59,7 +59,14 @@ fn query_of(value: &str) -> TsQuery {
 /// `vector @@ query`: a text-search vector (or text, read with the default configuration)
 /// against a query (or text, read as `plainto_tsquery` reads it).
 pub(crate) fn matches(left: &Value, right: &Value) -> SqlResult<Value> {
-    let textual = |value: &Value| matches!(value, Value::Null | Value::Text(_) | Value::Bpchar(_));
+    let textual = |value: &Value| match value {
+        Value::Null | Value::Text(_) | Value::Bpchar(_) => true,
+        Value::Defined(defined) => matches!(
+            defined.as_ref(),
+            crate::types::DefinedValue::TsVector(_) | crate::types::DefinedValue::TsQuery(_)
+        ),
+        _ => false,
+    };
     if !textual(left) || !textual(right) {
         return Err(SqlError::new(
             SqlState::UNDEFINED_FUNCTION,
@@ -162,7 +169,7 @@ fn setweight(values: &[Value]) -> SqlResult<Value> {
                 .collect(),
         ),
     };
-    Ok(Value::Text(
+    Ok(crate::text_types::tsvector_value(
         vector_of(&vector)
             .with_weight(weight, listed.as_deref())
             .to_string(),
@@ -262,7 +269,11 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
                 Chosen::BuiltIn(config) => written(name, *config, &input)?,
                 Chosen::Defined(analyzer) => written(name, &**analyzer, &input)?,
             };
-            Ok(Value::Text(written))
+            Ok(if name == "to_tsvector" {
+                crate::text_types::tsvector_value(written)
+            } else {
+                crate::text_types::tsquery_value(written)
+            })
         }
     }
 }
@@ -283,11 +294,11 @@ mod tests {
     fn functions_give_postgresql_text_forms_and_match() {
         assert_eq!(
             call("to_tsvector", &["english", "The fat cats ate fat rats"]),
-            Value::Text("'ate':4 'cat':3 'fat':2,5 'rat':6".to_owned())
+            crate::text_types::tsvector_value("'ate':4 'cat':3 'fat':2,5 'rat':6".to_owned())
         );
         assert_eq!(
             call("to_tsquery", &["fat & rats"]),
-            Value::Text("'fat' & 'rat'".to_owned())
+            crate::text_types::tsquery_value("'fat' & 'rat'".to_owned())
         );
         let vector = call("to_tsvector", &["a fat rat"]);
         let query = call("plainto_tsquery", &["fat rats"]);

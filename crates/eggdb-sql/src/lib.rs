@@ -275,6 +275,7 @@ mod mysql_fulltext;
 mod sqlserver_fulltext;
 mod table_sample;
 mod text_search;
+mod text_types;
 mod text_search_catalog;
 mod time_zones;
 mod top_n;

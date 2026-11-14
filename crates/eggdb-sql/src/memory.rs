@@ -66,6 +66,9 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
             crate::types::DefinedValue::Hstore(hstore) => hstore.held_bytes(),
             crate::types::DefinedValue::Vector(values) => crate::vector_type::held_bytes(values),
             crate::types::DefinedValue::Geometry(ewkb) => crate::geometry_type::held_bytes(ewkb),
+            crate::types::DefinedValue::TsVector(text)
+            | crate::types::DefinedValue::TsQuery(text)
+            | crate::types::DefinedValue::JsonPath(text) => text.len(),
         },
         _ => 0,
     }

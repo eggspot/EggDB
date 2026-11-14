@@ -749,7 +749,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D461).
 - PostgreSQL's network address, geometric, bit string, `money`, `xml` and multirange types (D19). `xml` read as
   `text`: **code written, unbuilt** (code-only mode, 2026-11-12, D697).
-- `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289).
+- `tsvector`, `tsquery` and `jsonpath` as types of their own (D195, D289). **Code written, unbuilt** (code-only mode, 2026-11-14,
+  D1165); their binary wire formats are left.
 - `refcursor` and `refcursor[]` table columns kept as their own types, a file format change with
   its security review; `refcursor[]` values are built (D35, D301).
 - `regprocedure`, transition tables in row-level triggers, and `pg_sequences.last_value` for

@@ -137,8 +137,29 @@ impl DefinedType {
         oid: crate::geometry_type::GEOMETRY_OID,
     };
 
+    /// The type `tsvector`: a document's lexemes with their positions and weights.
+    pub const TSVECTOR: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::text_types::TSVECTOR_OID,
+    };
+
+    /// The type `tsquery`: a text-search query of lexemes and operators.
+    pub const TSQUERY: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::text_types::TSQUERY_OID,
+    };
+
+    /// The type `jsonpath`: an SQL/JSON path expression.
+    pub const JSONPATH: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::text_types::JSONPATH_OID,
+    };
+
     pub(crate) fn builtin_base_named(name: &str) -> Option<Self> {
         match name {
+            "tsvector" => Some(Self::TSVECTOR),
+            "tsquery" => Some(Self::TSQUERY),
+            "jsonpath" => Some(Self::JSONPATH),
             "citext" => Some(Self::CITEXT),
             "hstore" => Some(Self::HSTORE),
             "vector" => Some(Self::VECTOR),
@@ -150,6 +171,9 @@ impl DefinedType {
     pub(crate) fn builtin_base_name(oid: u32) -> Option<&'static str> {
         match oid {
             crate::citext::CITEXT_OID => Some("citext"),
+            crate::text_types::TSVECTOR_OID => Some("tsvector"),
+            crate::text_types::TSQUERY_OID => Some("tsquery"),
+            crate::text_types::JSONPATH_OID => Some("jsonpath"),
             crate::hstore::HSTORE_OID => Some("hstore"),
             crate::vector_type::VECTOR_OID => Some("vector"),
             crate::geometry_type::GEOMETRY_OID => Some("geometry"),
@@ -189,6 +213,12 @@ pub enum DefinedValue {
     Vector(Vec<f32>),
     /// A `geometry` value: its extended well-known binary, with its SRID.
     Geometry(Vec<u8>),
+    /// A `tsvector` value, in its canonical text form.
+    TsVector(String),
+    /// A `tsquery` value, in its canonical text form.
+    TsQuery(String),
+    /// A `jsonpath` value, as written.
+    JsonPath(String),
 }
 
 impl DefinedValue {
@@ -205,6 +235,9 @@ impl DefinedValue {
             Self::Hstore(_) => SqlType::Defined(DefinedType::HSTORE),
             Self::Vector(_) => SqlType::Defined(DefinedType::VECTOR),
             Self::Geometry(_) => SqlType::Defined(DefinedType::GEOMETRY),
+            Self::TsVector(_) => SqlType::Defined(DefinedType::TSVECTOR),
+            Self::TsQuery(_) => SqlType::Defined(DefinedType::TSQUERY),
+            Self::JsonPath(_) => SqlType::Defined(DefinedType::JSONPATH),
         }
     }
 
@@ -218,6 +251,7 @@ impl DefinedValue {
             Self::Hstore(hstore) => crate::hstore::to_text(hstore),
             Self::Vector(values) => crate::vector_type::to_text(values),
             Self::Geometry(ewkb) => crate::geometry_type::to_text(ewkb),
+            Self::TsVector(text) | Self::TsQuery(text) | Self::JsonPath(text) => text.clone(),
         }
     }
 }
@@ -601,6 +635,10 @@ impl Value {
         match self {
             Self::Text(text) => Some(text),
             Self::Bpchar(text) => Some(without_trailing_spaces(text)),
+            Self::Defined(defined) => match defined.as_ref() {
+                DefinedValue::JsonPath(text) => Some(text),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1448,8 +1486,17 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (_, DefinedValue::Citext(_)) => Ordering::Greater,
         (DefinedValue::Hstore(_), _) => Ordering::Less,
         (_, DefinedValue::Hstore(_)) => Ordering::Greater,
+        (DefinedValue::TsVector(a), DefinedValue::TsVector(b))
+        | (DefinedValue::TsQuery(a), DefinedValue::TsQuery(b))
+        | (DefinedValue::JsonPath(a), DefinedValue::JsonPath(b)) => a.as_bytes().cmp(b.as_bytes()),
         (DefinedValue::Vector(_), _) => Ordering::Less,
         (_, DefinedValue::Vector(_)) => Ordering::Greater,
+        (DefinedValue::Geometry(_), _) => Ordering::Less,
+        (_, DefinedValue::Geometry(_)) => Ordering::Greater,
+        (DefinedValue::TsVector(_), _) => Ordering::Less,
+        (_, DefinedValue::TsVector(_)) => Ordering::Greater,
+        (DefinedValue::TsQuery(_), _) => Ordering::Less,
+        (_, DefinedValue::TsQuery(_)) => Ordering::Greater,
     }
 }
 
@@ -1482,6 +1529,15 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
                 out.push(21);
                 out.extend_from_slice(&(ewkb.len() as u64).to_le_bytes());
                 out.extend_from_slice(ewkb);
+            }
+            DefinedValue::TsVector(text) | DefinedValue::TsQuery(text) | DefinedValue::JsonPath(text) => {
+                out.push(match defined.as_ref() {
+                    DefinedValue::TsVector(_) => 22,
+                    DefinedValue::TsQuery(_) => 23,
+                    _ => 24,
+                });
+                out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+                out.extend_from_slice(text.as_bytes());
             }
             DefinedValue::Vector(values) => {
                 out.push(20);

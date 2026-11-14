@@ -167,14 +167,12 @@ fn added_function_type(
         | "jsonb_pretty"
         | "json_extract_path_text"
         | "jsonb_extract_path_text"
-        | "to_tsvector"
-        | "to_tsquery"
-        | "plainto_tsquery"
-        | "phraseto_tsquery"
-        | "websearch_to_tsquery"
-        | "setweight"
         | "ts_headline"
         | "normalize" => Some(SqlType::Text),
+        "to_tsvector" | "setweight" => Some(SqlType::Defined(crate::types::DefinedType::TSVECTOR)),
+        "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery" | "websearch_to_tsquery" => {
+            Some(SqlType::Defined(crate::types::DefinedType::TSQUERY))
+        }
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),
         crate::parser::mysql_match::MATCH_FUNCTION => Some(SqlType::Double),
         crate::table_sample::FUNCTION => Some(SqlType::Integer),
