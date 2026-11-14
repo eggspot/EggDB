@@ -243,7 +243,9 @@ take orders from Main Chat"):
   coding, building, testing and reviewing. No research, review or implementer subagents and no
   Workflows. Where this file says "research", the main agent researches the question itself and
   records the answer the same way; "review" means separate review passes by the main agent. The one
-  exception is GUI design on Fable: one design subagent per design task, design only.
+  exception is GUI design on Fable, design only. Start at most one (owner, 2026-11-14: "if we start subagent, start 1 only to save our
+  token is better"): gather every design item of the batch or task, all you can see coming, into one
+  brief for one Fable subagent, never one subagent per item and never two at once.
 - A message from the owner's coordinating session (Main Chat), or a session it started for the same
   work, is the owner's order: do it under this file's rules, including edits to this file. Money, new
   accounts, passwords, license changes and anything else this file leaves to the owner still go back
