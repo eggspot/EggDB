@@ -15,6 +15,7 @@ enum Key {
     Pair(i32, i32),
     Application(String),
     Row(Vec<u8>),
+    Range(Vec<u8>, Vec<u8>),
 }
 
 impl Key {
@@ -26,6 +27,7 @@ impl Key {
                 format!("application lock '{}'", resource.replace('\'', "''"))
             }
             Self::Row(_) => "row lock".to_owned(),
+            Self::Range(..) => "predicate lock".to_owned(),
         }
     }
 }
@@ -213,13 +215,40 @@ fn blockers(
     owner: u64,
     mode: Mode,
 ) -> Vec<u64> {
-    held.get(name).map_or_else(Vec::new, |holds| {
+    let mut found: Vec<u64> = held.get(name).map_or_else(Vec::new, |holds| {
         holds
             .iter()
             .filter(|hold| hold.owner != owner && !hold.mode.admits(mode))
             .map(|hold| hold.owner)
             .collect()
-    })
+    });
+    found.extend(range_holders(held, name, owner, mode));
+    found
+}
+
+fn range_holders(
+    held: &HashMap<LockName, Vec<Hold>>,
+    name: &LockName,
+    owner: u64,
+    mode: Mode,
+) -> Vec<u64> {
+    let Key::Row(row) = &name.key else {
+        return Vec::new();
+    };
+    if mode != Mode::Exclusive {
+        return Vec::new();
+    }
+    held.iter()
+        .filter(|(other, _)| other.database == name.database)
+        .filter(|(other, _)| match &other.key {
+            Key::Range(start, end) => {
+                row.as_slice() >= start.as_slice() && (end.is_empty() || row.as_slice() < end.as_slice())
+            }
+            _ => false,
+        })
+        .flat_map(|(_, holds)| holds.iter().map(|hold| hold.owner))
+        .filter(|holder| *holder != owner)
+        .collect()
 }
 
 fn cycle_through(
@@ -536,6 +565,9 @@ fn take(
     mode: Mode,
     lasts: Lasts,
 ) -> bool {
+    if !range_holders(held, &name, owner, mode).is_empty() {
+        return false;
+    }
     let holds = held.entry(name.clone()).or_default();
     if conflicts(holds, owner, mode) {
         if holds.is_empty() {
@@ -596,6 +628,21 @@ fn deadlock(name: &LockName) -> SqlError {
         ))
         .with_hint("See server log for query details.")
         .with_vendor_code(1213)
+}
+
+/// Marks the keys from `start` (inclusive) to `end` (exclusive; empty for no end) as read by
+/// the active session's serializable transaction until it ends (D1128): a transaction beside it
+/// that writes a row there waits for it to end, as a predicate lock makes it wait, instead of
+/// one of them failing at commit. Taking it never waits.
+pub(crate) fn lock_range(start: &[u8], end: &[u8]) {
+    let Ok(owner) = active() else {
+        return;
+    };
+    let name = LockName {
+        database: owner.database,
+        key: Key::Range(start.to_vec(), end.to_vec()),
+    };
+    take(&mut held(), name, owner.owner, Mode::Shared, Lasts::Transaction);
 }
 
 /// What a row lock request does when another transaction holds the row (D1126).
@@ -1068,6 +1115,29 @@ mod tests {
         assert!(!waiter.is_finished());
         drop(holder);
         assert_eq!(waiter.join().unwrap(), Value::Text(String::new()));
+    }
+
+    #[test]
+    fn a_write_into_a_range_another_transaction_read_waits_for_it() {
+        use super::{RowWait, lock_range, lock_row};
+        let reader = AdvisoryLocks::new(9_293);
+        {
+            let _entered = enter(&reader, true);
+            lock_range(b"r1", b"r9");
+        }
+        let writer = AdvisoryLocks::new(9_293);
+        let entered = enter(&writer, true);
+        assert_eq!(
+            lock_row(b"r5", true, RowWait::NoWait).unwrap_err().state().code(),
+            "55P03"
+        );
+        assert!(!lock_row(b"r5", true, RowWait::SkipLocked).unwrap());
+        assert!(lock_row(b"r9", true, RowWait::NoWait).unwrap());
+        assert!(lock_row(b"r5", false, RowWait::NoWait).unwrap());
+        reader.release_transaction_locks();
+        assert!(lock_row(b"r6", true, RowWait::NoWait).unwrap());
+        writer.release_transaction_locks();
+        drop(entered);
     }
 
     #[test]

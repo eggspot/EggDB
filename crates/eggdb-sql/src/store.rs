@@ -325,6 +325,13 @@ pub trait ConcurrentWrite: KeyValueWrite {
     /// Checks the transaction and stores its changes durably under `gid` instead of applying
     /// them (D1127).
     fn prepare_concurrent(self: Box<Self>, gid: &str) -> SqlResult<()>;
+
+    /// Whether the rows it reads are kept from other writers until it ends, so they wait
+    /// instead of one of them failing at commit (D1128): serializable transactions do. `false`
+    /// by default.
+    fn holds_predicate_locks(&self) -> bool {
+        false
+    }
 }
 
 /// A transaction prepared for a two-phase commit and not yet resolved (D1127).
@@ -739,12 +746,30 @@ fn lock_timeout() -> Option<std::time::Duration> {
 
 pub(crate) struct ConcurrentBoxed<'s>(Box<dyn ConcurrentWrite + 's>);
 
+impl ConcurrentBoxed<'_> {
+    fn note_read(&self, start: &[u8], end: Option<&[u8]>) {
+        if !self.0.holds_predicate_locks() || !crate::encoding::is_row_key(start) {
+            return;
+        }
+        match end {
+            Some(end) => crate::advisory_locks::lock_range(start, end),
+            None => {
+                let mut after = start.to_vec();
+                after.push(0);
+                crate::advisory_locks::lock_range(start, &after);
+            }
+        }
+    }
+}
+
 impl KeyValueRead for ConcurrentBoxed<'_> {
     fn get(&self, key: &[u8]) -> SqlResult<Option<Vec<u8>>> {
+        self.note_read(key, None);
         self.0.get(key)
     }
 
     fn get_with(&self, key: &[u8], read: &mut dyn FnMut(&[u8]) -> SqlResult<()>) -> SqlResult<bool> {
+        self.note_read(key, None);
         self.0.get_with(key, read)
     }
 
@@ -755,6 +780,7 @@ impl KeyValueRead for ConcurrentBoxed<'_> {
         direction: ScanDirection,
         visit: &mut EntryVisitor<'_>,
     ) -> SqlResult<()> {
+        self.note_read(start, Some(end));
         self.0.scan(start, end, direction, visit)
     }
 

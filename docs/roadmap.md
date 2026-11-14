@@ -444,7 +444,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-13, D1125); left: per database (`ALTER DATABASE ... SET`) and per table.
 - Row versions in the storage engine (MVCC), so changes larger than memory spill (D172).
 - Collections and expiring keys inside concurrent transactions (D172). **Code written, unbuilt** (code-only mode, 2026-11-13, D1124).
-- Waiting on a predicate lock instead of failing at commit (D172).
+- Waiting on a predicate lock instead of failing at commit (D172). **Code written, unbuilt** (code-only mode, 2026-11-14, D1128).
 - Row locks that hold other writers: `FOR UPDATE`/`FOR SHARE` with `NOWAIT` and `SKIP LOCKED`
   across concurrent sessions (D32, D173). **Code written, unbuilt** (code-only mode, 2026-11-13, D1126); left: joins, views
   and tables without a primary key.

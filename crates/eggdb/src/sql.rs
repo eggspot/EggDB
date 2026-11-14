@@ -702,6 +702,10 @@ impl eggdb_sql::ConcurrentWrite for SqlConcurrentWriter<'_> {
         (*self).commit()
     }
 
+    fn holds_predicate_locks(&self) -> bool {
+        self.0.borrow().isolation() == crate::Isolation::Serializable
+    }
+
     fn prepare_concurrent(self: Box<Self>, gid: &str) -> SqlResult<()> {
         self.0.into_inner().prepare(gid).map(|_| ()).map_err(store_error)
     }
