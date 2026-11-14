@@ -63,6 +63,10 @@ impl RowSample {
         self.seen
     }
 
+    pub(crate) fn row_values(&self) -> Vec<&[Value]> {
+        self.rows.iter().map(|(_, row)| row.as_slice()).collect()
+    }
+
     pub(crate) fn statistics(&self, columns: &[Column]) -> Vec<ColumnStatistics> {
         columns
             .iter()

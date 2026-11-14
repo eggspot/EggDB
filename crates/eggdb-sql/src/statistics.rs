@@ -111,6 +111,7 @@ pub(crate) fn analyze(
             &statistics_key(&table.name),
             &encode(sample.total_rows(), &columns),
         )?;
+        crate::extended_statistics::analyze_table(writer, &table, &sample.row_values())?;
         analyzed.push(table.name);
     }
     if crate::constraints::current_dialect() == crate::Dialect::MySql {
@@ -202,7 +203,8 @@ pub(crate) fn every_column_statistics(
 }
 
 pub(crate) fn forget(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
-    writer.delete(&statistics_key(table)).map(|_| ())
+    writer.delete(&statistics_key(table))?;
+    crate::extended_statistics::forget_table(writer, table)
 }
 
 pub(crate) fn rename(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -> SqlResult<()> {

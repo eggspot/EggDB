@@ -532,7 +532,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Column statistics (`pg_stats`, histograms, correlation) gathered by `ANALYZE` (D40, D178). **Code written,
   unbuilt** (code-only mode, 2026-11-12, D786). Left: extended statistics (`CREATE STATISTICS`), array element
   statistics, and the cost-based optimizer using the histograms for ranges. Histograms and most common values in the
-  estimates that order joins: **code written, unbuilt** (code-only mode, 2026-11-14, D1136).
+  estimates that order joins: **code written, unbuilt** (code-only mode, 2026-11-14, D1136). Extended statistics (`CREATE
+  STATISTICS` with `ndistinct` and `dependencies`) used for correlated equalities: **code written, unbuilt** (code-only
+  mode, 2026-11-14, D1137); left: `mcv` lists, array element statistics and `pg_statistic_ext`.
 - A cost-based optimizer that orders joins by cost (D40, D178). Check: TPC-H's joins, and the
   Linux join at 1.0 times SQLite's (D100). Inner joins ordered by estimated size: **code written, unbuilt** (code-only mode, 2026-11-14,
   D1136); left: outer joins and a full cost model over join methods.

@@ -3506,6 +3506,19 @@ impl<'s> Session<'s> {
                     crate::roles::run(writer, binding.settings, &role)
                 })
             }
+            Statement::ExtendedStatistics(command) => {
+                let mut command = command.clone();
+                let tag = match &command {
+                    crate::ast::ExtendedStatistics::Create { .. } => "CREATE STATISTICS",
+                    crate::ast::ExtendedStatistics::Drop { .. } => "DROP STATISTICS",
+                };
+                self.write(tag, |writer, tables| {
+                    if let crate::ast::ExtendedStatistics::Create { table, .. } = &mut command {
+                        binding.names(writer, tables, std::slice::from_mut(table))?;
+                    }
+                    crate::extended_statistics::run(writer, tables, &command)
+                })
+            }
             Statement::Analyze(names) => {
                 let mut names = names.clone();
                 self.write("ANALYZE", |writer, tables| {

@@ -203,6 +203,8 @@ pub(crate) fn refused_in_function(
         Statement::TwoPhase(command) => command.tag(),
         Statement::Attach { .. } => "ATTACH",
         Statement::Detach(_) => "DETACH",
+        Statement::ExtendedStatistics(crate::ast::ExtendedStatistics::Create { .. }) => "CREATE STATISTICS",
+        Statement::ExtendedStatistics(crate::ast::ExtendedStatistics::Drop { .. }) => "DROP STATISTICS",
         Statement::Set { .. } | Statement::Reset { .. } => "SET ON/OFF",
         Statement::CreateTable(_) => "CREATE TABLE",
         Statement::DropTable { .. } => "DROP TABLE",

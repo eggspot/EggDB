@@ -374,6 +374,7 @@ pub(crate) fn classify(
         | Statement::TwoPhase(_)
         | Statement::Attach { .. }
         | Statement::Detach(_)
+        | Statement::ExtendedStatistics(_)
         | Statement::Set { .. }
         | Statement::Show { .. }
         | Statement::Reset { .. }

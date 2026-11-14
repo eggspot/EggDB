@@ -29,6 +29,7 @@ pub(crate) enum Statement {
         alias: Name,
     },
     Detach(Name),
+    ExtendedStatistics(ExtendedStatistics),
     Savepoint(SavepointCommand),
     Analyze(Vec<Name>),
     Role(crate::roles::RoleStatement),
@@ -2119,6 +2120,22 @@ impl TwoPhase {
             Self::Recover => "XA RECOVER",
         }
     }
+}
+
+/// PostgreSQL's `CREATE STATISTICS` and `DROP STATISTICS` (D1137).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ExtendedStatistics {
+    Create {
+        name: Name,
+        if_not_exists: bool,
+        kinds: u8,
+        columns: Vec<Name>,
+        table: Name,
+    },
+    Drop {
+        names: Vec<Name>,
+        if_exists: bool,
+    },
 }
 
 /// A query's `FOR UPDATE` or `FOR SHARE` clause (D1126): the rows it returns are locked until

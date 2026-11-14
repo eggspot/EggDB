@@ -96,6 +96,16 @@ fn column_of<'e>(expr: &'e Expr) -> Option<(&'e str, &'e str)> {
     }
 }
 
+fn equality_column(condition: &Expr) -> Option<&str> {
+    let ExprKind::Binary(BinaryOperator::Equal, left, right) = &condition.kind else {
+        return None;
+    };
+    match (column_of(left), literal_text(right), column_of(right), literal_text(left)) {
+        (Some((_, name)), Some(_), _, _) | (_, _, Some((_, name)), Some(_)) => Some(name),
+        _ => None,
+    }
+}
+
 fn literal_text(expr: &Expr) -> Option<String> {
     match &expr.kind {
         ExprKind::Literal(Literal::Integer(number)) => Some(number.to_string()),
@@ -290,6 +300,7 @@ pub(crate) fn order_inner_joins(reader: &dyn KeyValueRead, select: &mut Select) 
         return Ok(false);
     }
     let columns: EveryColumnStatistics = crate::statistics::every_column_statistics(reader)?;
+    let extended = crate::extended_statistics::every(reader)?;
     let Some(from) = select.from.take() else {
         return Ok(false);
     };
@@ -311,11 +322,21 @@ pub(crate) fn order_inner_joins(reader: &dyn KeyValueRead, select: &mut Select) 
             let label = label_of(&reference);
             let total = counts.get(&reference.name.text).copied().unwrap_or(0) as f64;
             let statistics = columns.get(&reference.name.text);
-            let share: f64 = conditions
-                .iter()
-                .filter(|condition| only_on(condition, &label))
-                .map(|condition| selectivity(condition, statistics, total))
-                .product();
+            let mut equalities: Vec<(String, f64)> = Vec::new();
+            let mut others = 1.0;
+            for condition in conditions.iter().filter(|condition| only_on(condition, &label)) {
+                let share = selectivity(condition, statistics, total);
+                match equality_column(condition) {
+                    Some(column) => equalities.push((column.to_owned(), share)),
+                    None => others *= share,
+                }
+            }
+            let share = match extended.get(&reference.name.text) {
+                Some(objects) if equalities.len() > 1 => {
+                    crate::extended_statistics::combined_selectivity(objects, &equalities)
+                }
+                _ => equalities.iter().map(|(_, share)| share).product(),
+            } * others;
             Relation {
                 reference,
                 label,

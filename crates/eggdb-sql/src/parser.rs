@@ -1,5 +1,6 @@
 mod asof;
 mod two_phase;
+mod extended_statistics;
 mod match_recognize;
 mod foreign_tables;
 mod sqlserver_security;
@@ -1915,6 +1916,9 @@ impl<'t> Parser<'t> {
         if self.postgresql() && self.is_word("policy") {
             return self.create_policy();
         }
+        if self.postgresql() && self.is_word("statistics") {
+            return self.create_statistics();
+        }
         if self.postgresql() && self.at_text_search_object() {
             return self.create_text_search();
         }
@@ -3024,6 +3028,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("policy") {
             return self.drop_policy();
+        }
+        if self.postgresql() && self.is_word("statistics") {
+            return self.drop_statistics();
         }
         if self.postgresql() && self.at_text_search_object() {
             return self.drop_text_search();
