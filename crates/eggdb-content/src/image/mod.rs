@@ -1,6 +1,7 @@
-//! Image renditions (D1078): PNG and baseline JPEG read with codecs of EggDB's own, the Exif
-//! orientation applied, the picture scaled down to fit a box by area averaging, and the result
-//! written as PNG or baseline JPEG. Both formats are royalty-free.
+//! Image renditions (D1078) and transforms (D1179): PNG and baseline JPEG read with codecs of
+//! EggDB's own, the Exif orientation applied, the picture cropped, scaled by area averaging to
+//! fit, cover or fill a box, and the result written as PNG or baseline JPEG. Both formats are
+//! royalty-free.
 
 mod jpeg_decode;
 mod jpeg_encode;
@@ -9,6 +10,50 @@ mod png;
 use crate::ContentError;
 
 const MOST_PIXELS: usize = 64 << 20;
+const MOST_SIDE: usize = 65_535;
+
+/// How a transform fits the picture into the width and height it asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fit {
+    /// Inside the box, keeping the picture's shape.
+    #[default]
+    Contain,
+    /// Over the whole box, keeping the shape, and centred with the overflow cut off.
+    Cover,
+    /// Exactly the box, stretched.
+    Fill,
+}
+
+/// A rectangle of the picture, in pixels from its top left corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crop {
+    /// The left edge.
+    pub x: usize,
+    /// The top edge.
+    pub y: usize,
+    /// The width.
+    pub width: usize,
+    /// The height.
+    pub height: usize,
+}
+
+/// What a transform does to a picture: crop it first, then scale it into the box, then write
+/// it in a format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Transform {
+    /// The box's width; from the height and the picture's shape when only that is given.
+    pub width: Option<usize>,
+    /// The box's height; from the width and the picture's shape when only that is given.
+    pub height: Option<usize>,
+    /// How the picture fits the box.
+    pub fit: Fit,
+    /// The rectangle kept before scaling.
+    pub crop: Option<Crop>,
+    /// The format written; the source's own when `None`.
+    pub format: Option<RenditionFormat>,
+    /// Whether the picture may grow beyond its own size.
+    pub enlarge: bool,
+}
 
 /// A decoded picture: 8-bit RGBA, rows top to bottom.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +152,101 @@ pub fn fit(image: &Image, max_width: usize, max_height: usize) -> Image {
     let scale = (max_width as f64 / image.width as f64).min(max_height as f64 / image.height as f64).min(1.0);
     let width = ((image.width as f64 * scale).round() as usize).max(1);
     let height = ((image.height as f64 * scale).round() as usize).max(1);
+    resampled(image, width, height)
+}
+
+/// The rectangle `crop` of `image`; an error when it reaches outside the picture or is empty.
+pub fn crop(image: &Image, crop: Crop) -> Result<Image, ContentError> {
+    let inside = crop.width > 0
+        && crop.height > 0
+        && crop.x.checked_add(crop.width).is_some_and(|right| right <= image.width)
+        && crop.y.checked_add(crop.height).is_some_and(|bottom| bottom <= image.height);
+    if !inside {
+        return Err(failure(format!(
+            "the crop {}x{} at {},{} is not inside the {}x{} picture",
+            crop.width, crop.height, crop.x, crop.y, image.width, image.height
+        )));
+    }
+    let mut rgba = Vec::with_capacity(crop.width * crop.height * 4);
+    for row in crop.y..crop.y + crop.height {
+        let start = (row * image.width + crop.x) * 4;
+        rgba.extend_from_slice(&image.rgba[start..start + crop.width * 4]);
+    }
+    Ok(Image {
+        width: crop.width,
+        height: crop.height,
+        rgba,
+    })
+}
+
+fn scaled_side(side: usize, scale: f64) -> usize {
+    ((side as f64 * scale).round() as usize).clamp(1, MOST_SIDE)
+}
+
+fn boxed(image: &Image, transform: &Transform) -> (usize, usize) {
+    let (source_width, source_height) = (image.width as f64, image.height as f64);
+    match (transform.width, transform.height) {
+        (Some(width), Some(height)) => (width, height),
+        (Some(width), None) => (width, scaled_side(image.height, width as f64 / source_width)),
+        (None, Some(height)) => (scaled_side(image.width, height as f64 / source_height), height),
+        (None, None) => (image.width, image.height),
+    }
+}
+
+/// `image` transformed as `transform` says, before it is written: cropped, then contained in,
+/// covering or filling the box.
+pub fn transformed(image: &Image, transform: &Transform) -> Result<Image, ContentError> {
+    let cropped = match transform.crop {
+        Some(rectangle) => crop(image, rectangle)?,
+        None => image.clone(),
+    };
+    let (width, height) = boxed(&cropped, transform);
+    if width == 0 || height == 0 || width > MOST_SIDE || height > MOST_SIDE || width.saturating_mul(height) > MOST_PIXELS {
+        return Err(failure("a transform is 1 to 65,535 pixels wide and high, and at most 64 megapixels"));
+    }
+    let limit = |scale: f64| if transform.enlarge { scale } else { scale.min(1.0) };
+    let (source_width, source_height) = (cropped.width as f64, cropped.height as f64);
+    Ok(match transform.fit {
+        Fit::Contain => {
+            let scale = limit((width as f64 / source_width).min(height as f64 / source_height));
+            resampled(&cropped, scaled_side(cropped.width, scale), scaled_side(cropped.height, scale))
+        }
+        Fit::Cover => {
+            let scale = limit((width as f64 / source_width).max(height as f64 / source_height));
+            let scaled = resampled(&cropped, scaled_side(cropped.width, scale), scaled_side(cropped.height, scale));
+            let (kept_width, kept_height) = (width.min(scaled.width), height.min(scaled.height));
+            crop(
+                &scaled,
+                Crop {
+                    x: (scaled.width - kept_width) / 2,
+                    y: (scaled.height - kept_height) / 2,
+                    width: kept_width,
+                    height: kept_height,
+                },
+            )?
+        }
+        Fit::Fill => {
+            let (width, height) = if transform.enlarge {
+                (width, height)
+            } else {
+                (width.min(cropped.width), height.min(cropped.height))
+            };
+            resampled(&cropped, width, height)
+        }
+    })
+}
+
+/// The PNG or JPEG `bytes` transformed as `transform` says, and the format it is written in.
+pub fn transform(bytes: &[u8], transform: &Transform) -> Result<(Vec<u8>, RenditionFormat), ContentError> {
+    let format = transform
+        .format
+        .or_else(|| source_format(bytes))
+        .ok_or_else(|| failure("transforms read PNG and JPEG images"))?;
+    let image = decode_image(bytes)?;
+    Ok((encode_image(&transformed(&image, transform)?, format), format))
+}
+
+fn resampled(image: &Image, width: usize, height: usize) -> Image {
     if width == image.width && height == image.height {
         return image.clone();
     }
@@ -212,5 +352,25 @@ mod tests {
         let turned = oriented(image, 6);
         assert_eq!((turned.width, turned.height), (1, 2));
         assert_eq!(turned.rgba[0], 1);
+    }
+
+    #[test]
+    fn transforms_crop_then_contain_cover_or_fill_the_box() {
+        let image = gradient(40, 20);
+        let cropped = crop(&image, Crop { x: 10, y: 5, width: 20, height: 10 }).unwrap();
+        assert_eq!((cropped.width, cropped.height), (20, 10));
+        assert_eq!(&cropped.rgba[..4], &image.rgba[(5 * 40 + 10) * 4..(5 * 40 + 10) * 4 + 4]);
+        assert!(crop(&image, Crop { x: 30, y: 0, width: 20, height: 5 }).is_err());
+        let boxed = |fit: Fit, enlarge: bool| {
+            let out = transformed(&image, &Transform { width: Some(10), height: Some(10), fit, enlarge, ..Transform::default() }).unwrap();
+            (out.width, out.height)
+        };
+        assert_eq!(boxed(Fit::Contain, false), (10, 5));
+        assert_eq!(boxed(Fit::Cover, false), (10, 10));
+        assert_eq!(boxed(Fit::Fill, false), (10, 10));
+        let wide = transformed(&image, &Transform { width: Some(80), enlarge: true, ..Transform::default() }).unwrap();
+        assert_eq!((wide.width, wide.height), (80, 40));
+        let kept = transformed(&image, &Transform { width: Some(80), ..Transform::default() }).unwrap();
+        assert_eq!((kept.width, kept.height), (40, 20));
     }
 }

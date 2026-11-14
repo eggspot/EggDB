@@ -1440,9 +1440,15 @@ impl Session<'_> {
             db: &db,
             prefix: super::serve_resp::OBJECT_COLLECTIONS,
         };
-        let s3_endpoint = s3_secret
-            .as_ref()
-            .map(|secret| eggdb_s3::Endpoint::new(&object_database, &config.user, secret));
+        let object_transforms = super::serve_transforms::SqlObjectTransforms {
+            store: &store,
+            user: config.user.clone(),
+            database: config.database.clone(),
+        };
+        let s3_endpoint = s3_secret.as_ref().map(|secret| {
+            eggdb_s3::Endpoint::new(&object_database, &config.user, secret)
+                .with_object_transform(&object_transforms)
+        });
         let dynamodb_database = super::serve_resp::DatabaseKeyspace {
             db: &db,
             prefix: super::serve_resp::DYNAMODB_COLLECTIONS,

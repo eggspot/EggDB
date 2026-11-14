@@ -1203,3 +1203,4 @@ its full title with its status.
 - [D1176](decisions/D1176.md) Code-only batch 828 (M6a): OData $batch (multipart and JSON, atomic change sets) and options inside $expand
 - [D1177](decisions/D1177.md) Code-only batch 829 (M6a): A gRPC API generated from the schema (--grpc-listen)
 - [D1178](decisions/D1178.md) Code-only batch 830 (M6a): WebSocket transports for subscriptions and live queries, re-run only after a commit
+- [D1179](decisions/D1179.md) Code-only batch 831 (M6a): Objects transformed on the way out (resize, crop, convert, WebAssembly functions)

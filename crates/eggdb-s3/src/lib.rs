@@ -11,9 +11,11 @@ mod api;
 /// A client for S3-compatible object stores, signed with SigV4.
 pub mod client;
 mod store;
+mod transform;
 mod xml;
 
 pub use api::{Endpoint, MAX_REQUEST_BYTES, over_memory_budget};
+pub use transform::{MOST_TRANSFORMED_BYTES, ObjectTransform, TRANSFORM_PARAMETER};
 
 #[cfg(test)]
 mod tests;

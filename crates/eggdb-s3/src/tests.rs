@@ -493,3 +493,52 @@ fn a_large_object_streamed_as_it_arrives_reads_back_whole_and_bad_digests_leave_
     assert!(text(&refused).contains("BadDigest"));
     assert_eq!(call(&endpoint, "GET", "/big/other.bin", &[], b"", "secret").status, 404);
 }
+
+struct Reversed;
+
+impl crate::ObjectTransform for Reversed {
+    fn run(&self, name: &str, bytes: &[u8], _content_type: &str) -> Result<Vec<u8>, String> {
+        match name {
+            "reverse" => Ok(bytes.iter().rev().copied().collect()),
+            other => Err(format!("no transform {other}")),
+        }
+    }
+}
+
+#[test]
+fn objects_are_transformed_on_the_way_out() {
+    let keyspace = MemoryKeyspace::default();
+    let transforms = Reversed;
+    let endpoint = Endpoint::new(&keyspace, "eggdb", "secret").with_object_transform(&transforms);
+    assert_eq!(call(&endpoint, "PUT", "/photos", &[], b"", "secret").status, 200);
+    let rgba: Vec<u8> = (0..8 * 4).flat_map(|at| [at as u8 * 8, 64, 255 - at as u8, 255]).collect();
+    let picture = eggdb_content::encode_image(
+        &eggdb_content::Image { width: 8, height: 4, rgba },
+        eggdb_content::RenditionFormat::Png,
+    );
+    assert_eq!(
+        call(&endpoint, "PUT", "/photos/egg.png", &[("content-type", "image/png")], &picture, "secret").status,
+        200
+    );
+    let covered = call(&endpoint, "GET", "/photos/egg.png?x-eggdb-transform=w%3A2%2Ch%3A2%2Cfit%3Acover%2Cformat%3Ajpeg", &[], b"", "secret");
+    assert_eq!(covered.status, 200, "{}", text(&covered));
+    assert_eq!(covered.content_type, "image/jpeg");
+    let decoded = eggdb_content::decode_image(&covered.body).unwrap();
+    assert_eq!((decoded.width, decoded.height), (2, 2));
+    let cropped = call(&endpoint, "GET", "/photos/egg.png?x-eggdb-transform=crop%3A2_1_4_2", &[], b"", "secret");
+    let decoded = eggdb_content::decode_image(&cropped.body).unwrap();
+    assert_eq!((decoded.width, decoded.height), (4, 2));
+    assert_ne!(header(&cropped, "etag"), header(&covered, "etag"));
+    assert_eq!(
+        call(&endpoint, "PUT", "/photos/note.txt", &[("content-type", "text/plain")], b"eggs", "secret").status,
+        200
+    );
+    let reversed = call(&endpoint, "GET", "/photos/note.txt?x-eggdb-transform=wasm%3Areverse", &[], b"", "secret");
+    assert_eq!(text(&reversed), "sgge");
+    let unknown = call(&endpoint, "GET", "/photos/note.txt?x-eggdb-transform=wasm%3Ablur", &[], b"", "secret");
+    assert_eq!(unknown.status, 422);
+    let bad = call(&endpoint, "GET", "/photos/egg.png?x-eggdb-transform=fit%3Astretch", &[], b"", "secret");
+    assert_eq!(bad.status, 400);
+    let not_an_image = call(&endpoint, "GET", "/photos/note.txt?x-eggdb-transform=w%3A10", &[], b"", "secret");
+    assert_eq!(not_an_image.status, 422);
+}

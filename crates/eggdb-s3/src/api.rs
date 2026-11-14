@@ -35,6 +35,7 @@ pub struct Endpoint<'k> {
     access_key: String,
     secret: String,
     uploads: AtomicU64,
+    object_transform: Option<&'k dyn crate::ObjectTransform>,
 }
 
 impl std::fmt::Debug for Endpoint<'_> {
@@ -401,7 +402,14 @@ impl<'k> Endpoint<'k> {
             access_key: access_key.to_owned(),
             secret: secret.to_owned(),
             uploads: AtomicU64::new(1),
+            object_transform: None,
         }
+    }
+
+    /// The same endpoint, running `x-eggdb-transform=wasm:<name>` through `transform`.
+    pub fn with_object_transform(mut self, transform: &'k dyn crate::ObjectTransform) -> Self {
+        self.object_transform = Some(transform);
+        self
     }
 
     /// Answers one HTTP request with its whole response in memory.
@@ -915,6 +923,9 @@ impl<'k> Endpoint<'k> {
     }
 
     fn get_object(&self, call: &Call<'_>, head_only: bool) -> Response {
+        if let Some(text) = call.param(crate::TRANSFORM_PARAMETER) {
+            return self.transformed_object(call, text, head_only);
+        }
         let (info, record) = match self.store.object_record(&call.bucket, &call.key) {
             Ok(found) => found,
             Err(error) => {
@@ -989,6 +1000,62 @@ impl<'k> Endpoint<'k> {
                 headers,
             },
             Err(error) => store_failure(&error, &call.resource),
+        }
+    }
+
+    fn transformed_object(&self, call: &Call<'_>, text: &str, head_only: bool) -> Response {
+        let requested = match crate::transform::parse(text) {
+            Ok(requested) => requested,
+            Err(message) => return failure(400, "InvalidArgument", &message, &call.resource),
+        };
+        if call.request.header("range").is_some() {
+            return failure(400, "InvalidArgument", "a transformed object is read whole, without Range", &call.resource);
+        }
+        let (info, _) = match self.store.object_record(&call.bucket, &call.key) {
+            Ok(found) => found,
+            Err(error) => return store_failure(&error, &call.resource),
+        };
+        if info.size > crate::MOST_TRANSFORMED_BYTES {
+            return failure(400, "InvalidArgument", "objects over 64 MiB are not transformed", &call.resource);
+        }
+        let mut body = match self.store.read_object(&call.bucket, &call.key, None) {
+            Ok((_, body)) => body,
+            Err(error) => return store_failure(&error, &call.resource),
+        };
+        let mut content_type = info.content_type.clone();
+        if let Some(name) = &requested.named {
+            let Some(transform) = self.object_transform else {
+                return failure(501, "NotImplemented", "this server runs no named transforms", &call.resource);
+            };
+            body = match transform.run(name, &body, &content_type) {
+                Ok(transformed) => transformed,
+                Err(message) => return failure(422, "InvalidRequest", &message, &call.resource),
+            };
+        }
+        if let Some(image) = &requested.image {
+            match eggdb_content::transform(&body, image) {
+                Ok((transformed, format)) => {
+                    body = transformed;
+                    content_type = crate::transform::content_type_of(format).to_owned();
+                }
+                Err(error) => return failure(422, "InvalidRequest", &error.to_string(), &call.resource),
+            }
+        }
+        let mut headers: Vec<(String, String)> = object_headers(&info)
+            .into_iter()
+            .filter(|(name, _)| name != "ETag" && name != "Accept-Ranges")
+            .collect();
+        let tag = eggdb_crypto::sha256(format!("{}\0{text}", etag(&info)).as_bytes());
+        headers.push(("ETag".to_owned(), format!("\"{}\"", hex(&tag[..16]))));
+        if head_only {
+            headers.push(("Content-Length".to_owned(), body.len().to_string()));
+            body.clear();
+        }
+        Response {
+            status: 200,
+            content_type,
+            body,
+            headers,
         }
     }
 
