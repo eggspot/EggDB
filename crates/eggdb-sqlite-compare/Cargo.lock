@@ -107,6 +107,8 @@ dependencies = [
  "eggdb-auth",
  "eggdb-crypto",
  "eggdb-http",
+ "eggdb-http2",
+ "eggdb-platform",
  "eggdb-sql",
 ]
 

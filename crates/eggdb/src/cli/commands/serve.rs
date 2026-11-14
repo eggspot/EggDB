@@ -155,7 +155,7 @@ impl Session<'_> {
             Some(address),
             options.mysql_listen,
             options.tds_listen,
-            options.mcp_listen, options.resp_listen, options.es_listen, options.mongo_listen, options.bolt_listen, options.gremlin_listen, options.amqp_listen, options.mqtt_listen, options.sqs_listen, options.s3_listen, options.dynamodb_listen, options.observability_listen, options.trino_listen, options.flight_listen, options.smtp_listen, options.imap_listen, options.jmap_listen, options.dav_listen, options.sparql_listen, options.clickhouse_listen, options.rest_listen, options.cql_listen, options.stomp_listen, options.nats_listen,
+            options.mcp_listen, options.resp_listen, options.es_listen, options.mongo_listen, options.bolt_listen, options.gremlin_listen, options.amqp_listen, options.mqtt_listen, options.sqs_listen, options.s3_listen, options.dynamodb_listen, options.observability_listen, options.trino_listen, options.flight_listen, options.grpc_listen, options.smtp_listen, options.imap_listen, options.jmap_listen, options.dav_listen, options.sparql_listen, options.clickhouse_listen, options.rest_listen, options.cql_listen, options.stomp_listen, options.nats_listen,
         ]
             .into_iter()
             .flatten()
@@ -624,6 +624,15 @@ impl Session<'_> {
                 address,
                 "--flight-listen",
                 "Arrow Flight SQL",
+                tls.as_ref(),
+            )?),
+            None => None,
+        };
+        let grpc_listener = match options.grpc_listen {
+            Some(address) => Some(tls_relays.listener(
+                address,
+                "--grpc-listen",
+                "the gRPC API",
                 tls.as_ref(),
             )?),
             None => None,
@@ -1736,6 +1745,12 @@ impl Session<'_> {
                 }
                 None => Ok(()),
             });
+            let grpc_server = scope.spawn(|| match &grpc_listener {
+                Some(listener) => {
+                    eggdb_api::serve_grpc(&rest_endpoint, listener, max_connections, &stop_signals::requested)
+                }
+                None => Ok(()),
+            });
             let cql_server = scope.spawn(|| match &cql_listener {
                 Some(listener) => {
                     eggdb_cql::serve(&store, listener, &cql_config, &stop_signals::requested)
@@ -2247,6 +2262,7 @@ impl Session<'_> {
             let _ = clickhouse_server.join();
             let _ = trino_server.join();
             let _ = flight_server.join();
+            let _ = grpc_server.join();
             let _ = sparql_server.join();
             let _ = smtp_server.join();
             let _ = imap_server.join();

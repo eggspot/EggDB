@@ -17,11 +17,14 @@ mod cql2;
 mod graphql;
 mod graphql_execute;
 mod graphql_schema;
+mod grpc;
 mod live;
 mod odata;
 mod ogc;
 mod ogc_tiles;
 mod request;
+
+pub use grpc::{GrpcApi, serve_grpc};
 
 use eggdb_http::{Reply, Request, Response, StreamedResponse};
 use eggdb_sql::json::{Json, Node, parse_document};
@@ -410,6 +413,18 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         }
         if path == "graphql" || path == "v1/graphql" {
             return self.graphql(request);
+        }
+        if path == "grpc/eggdb.proto" {
+            return match self.grpc_proto() {
+                Ok(text) => Response {
+                    status: 200,
+                    content_type: "text/plain; charset=utf-8".to_owned(),
+                    body: text.into_bytes(),
+                    headers: Vec::new(),
+                }
+                .into(),
+                Err(error) => failure(500, error.state().code(), &error.to_string()).into(),
+            };
         }
         if path == "ogc" || path.starts_with("ogc/") {
             return self.ogc(&path[3..], request).into();

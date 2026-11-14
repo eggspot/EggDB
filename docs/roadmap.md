@@ -828,7 +828,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (`$metadata`, entity sets with `$filter`/`$select`/`$orderby`/`$top`/`$skip`/`$count`, keys, writes): **code
   written, unbuilt** (code-only mode, 2026-11-12, D877); navigation properties from foreign keys and `$expand`:
   **code written, unbuilt** (code-only mode, 2026-11-12, D910); OData's `$batch` and options inside `$expand`: **code
-  written, unbuilt** (code-only mode, 2026-11-15, D1176). Left: gRPC.
+  written, unbuilt** (code-only mode, 2026-11-15, D1176); the gRPC API (`--grpc-listen`): **code written, unbuilt**
+  (code-only mode, 2026-11-15, D1177). Left: gRPC server reflection.
 - Realtime subscriptions over WebSocket and Server-Sent Events on live queries (D37). Live queries over
   Server-Sent Events for REST reads and GraphQL subscriptions: **code written, unbuilt** (code-only mode,
   2026-11-12, D878). Left: WebSocket transports and change-driven invalidation.

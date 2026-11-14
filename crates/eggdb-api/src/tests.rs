@@ -726,3 +726,74 @@ fn ogc_features_filter_with_cql2() {
     let refused = call(&endpoint, "GET", "/ogc/collections/cities/items?filter=secret%20%3D%201", "", None);
     assert_eq!(refused.status, 400);
 }
+
+fn grpc_call(api: &crate::GrpcApi<'_, '_, MemoryStore>, method: &str, message: &[u8]) -> eggdb_http2::Http2Response {
+    use eggdb_http2::Handler;
+    api.handle(&eggdb_http2::Http2Request {
+        headers: vec![
+            (":method".to_owned(), "POST".to_owned()),
+            (":path".to_owned(), format!("/eggdb.v1.BooksService/{method}")),
+            ("content-type".to_owned(), "application/grpc".to_owned()),
+            (
+                "authorization".to_owned(),
+                format!("Basic {}", eggdb_crypto::base64_encode(b"eggdb:secret")),
+            ),
+        ],
+        body: eggdb_http2::grpc_message(message),
+    })
+}
+
+fn grpc_status(response: &eggdb_http2::Http2Response) -> &str {
+    response
+        .trailers
+        .iter()
+        .find(|(name, _)| name == "grpc-status")
+        .map_or("", |(_, value)| value.as_str())
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+#[test]
+fn grpc_serves_each_table_as_a_service() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session
+        .execute(
+            "CREATE TABLE books (id integer PRIMARY KEY, title text NOT NULL, pages integer, price double precision)",
+            &mut |_| {},
+        )
+        .unwrap();
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let proto = text(&call(&endpoint, "GET", "/grpc/eggdb.proto", "", None));
+    for expected in [
+        "package eggdb.v1;",
+        "optional string title = 2;",
+        "message BooksKey {\n  int32 id = 1;\n}",
+        "rpc List(BooksListRequest) returns (stream Books);",
+    ] {
+        assert!(proto.contains(expected), "{expected}: {proto}");
+    }
+    let api = crate::GrpcApi::new(&endpoint);
+    let mut engines = vec![0x08, 0x01, 0x12, 0x07];
+    engines.extend_from_slice(b"Engines");
+    engines.extend_from_slice(&[0x18, 0xac, 0x02]);
+    let inserted = grpc_call(&api, "Insert", &engines);
+    assert_eq!(grpc_status(&inserted), "0", "{:?}", inserted.trailers);
+    assert!(contains(&inserted.body.concat(), b"Engines"));
+    let listed = grpc_call(&api, "List", &[0x08, 0x0a]);
+    assert_eq!(grpc_status(&listed), "0");
+    assert_eq!(listed.body.len(), 1);
+    let updated = grpc_call(&api, "Update", &[0x08, 0x01, 0x18, 0xad, 0x02]);
+    assert_eq!(grpc_status(&updated), "0", "{:?}", updated.trailers);
+    assert!(contains(&updated.body.concat(), &[0x18, 0xad, 0x02]));
+    let found = grpc_call(&api, "Get", &[0x08, 0x01]);
+    assert!(contains(&found.body.concat(), b"Engines"));
+    let deleted = grpc_call(&api, "Delete", &[0x08, 0x01]);
+    assert!(contains(&deleted.body.concat(), &[0x08, 0x01]));
+    let missing = grpc_call(&api, "Get", &[0x08, 0x01]);
+    assert_eq!(grpc_status(&missing), "5");
+    let unknown = grpc_call(&api, "Rename", &[]);
+    assert_eq!(grpc_status(&unknown), "12");
+}
