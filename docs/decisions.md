@@ -1190,3 +1190,4 @@ its full title with its status.
 - [D1163](decisions/D1163.md) Code-only batch 813 (M6a): QUIC's UDP server, HTTP/3 with QPACK, and serve --http3-listen
 - [D1164](decisions/D1164.md) Code-only batch 814 (M6a): large HTTP request bodies handed to the handler as they arrive, first for S3 PutObject
 - [D1165](decisions/D1165.md) Code-only batch 815 (M6a): tsvector, tsquery and jsonpath as types of their own
+- [D1166](decisions/D1166.md) Code-only batch 817 (M6a): JSON_TABLE's PLAN DEFAULT (OUTER | INNER, UNION | CROSS)

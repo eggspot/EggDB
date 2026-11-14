@@ -507,6 +507,40 @@ impl Parser<'_> {
         Ok(())
     }
 
+    fn json_table_plan(&mut self) -> SqlResult<crate::sql_json::PlanJoin> {
+        let mut join = crate::sql_json::PlanJoin::default();
+        if !self.is_word("plan") {
+            return Ok(join);
+        }
+        let position = self.position();
+        self.at += 1;
+        if !self.take_word("default") {
+            return Err(SqlError::not_supported(
+                "JSON_TABLE's PLAN with named nested paths is not supported; use PLAN DEFAULT (OUTER | INNER, UNION | CROSS)",
+            )
+            .at(position));
+        }
+        self.expect(&TokenKind::LeftParen)?;
+        loop {
+            if self.take_word("outer") {
+                join.inner = false;
+            } else if self.take_word("inner") {
+                join.inner = true;
+            } else if self.take_word("union") {
+                join.cross = false;
+            } else if self.take_word("cross") {
+                join.cross = true;
+            } else {
+                return Err(self.unexpected());
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        Ok(join)
+    }
+
     fn json_table_on_error(&mut self) -> SqlResult<Option<Behavior>> {
         let ends_clause = |parser: &Self, at: usize| {
             parser.is_word_at(at, "on") && parser.is_word_at(at + 1, "error")
@@ -646,6 +680,7 @@ impl Parser<'_> {
         self.expect_word("columns")?;
         let mut found = TableColumns::default();
         let columns = self.json_table_columns(&mut found, 0)?;
+        let join = self.json_table_plan()?;
         if let Some(behavior) = self.json_table_on_error()? {
             on_error = Some(behavior);
         }
@@ -661,6 +696,7 @@ impl Parser<'_> {
                 path,
                 on_error: on_error.unwrap_or(Behavior::EmptyArray),
                 columns,
+                join,
             },
             passing,
             names: found.names,

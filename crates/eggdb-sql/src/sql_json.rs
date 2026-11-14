@@ -672,6 +672,32 @@ pub(crate) struct TablePlan {
     pub(crate) on_error: Behavior,
     /// The columns, nested ones included.
     pub(crate) columns: Vec<TableColumn>,
+    /// How nested paths join their parents and their siblings (`PLAN DEFAULT`).
+    pub(crate) join: PlanJoin,
+}
+
+/// `PLAN DEFAULT (OUTER | INNER, UNION | CROSS)`: whether a row whose nested paths give no rows
+/// is kept (`OUTER`, the default) or dropped (`INNER`), and whether sibling nested paths give
+/// their rows one after another (`UNION`, the default) or every combination of them (`CROSS`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PlanJoin {
+    /// `INNER` rather than `OUTER`.
+    pub(crate) inner: bool,
+    /// `CROSS` rather than `UNION`.
+    pub(crate) cross: bool,
+}
+
+impl PlanJoin {
+    fn code(self) -> i64 {
+        i64::from(self.inner) | (i64::from(self.cross) << 1)
+    }
+
+    fn of_code(code: i64) -> Option<Self> {
+        (0..=3).contains(&code).then_some(Self {
+            inner: code & 1 != 0,
+            cross: code & 2 != 0,
+        })
+    }
 }
 
 struct PlanWriter(String);
@@ -813,6 +839,9 @@ impl TablePlan {
         writer.text(&self.path);
         writer.number(self.on_error.code());
         writer.columns(&self.columns);
+        if self.join != PlanJoin::default() {
+            writer.number(self.join.code());
+        }
         writer.0
     }
 
@@ -821,6 +850,11 @@ impl TablePlan {
         let path = reader.text()?.to_owned();
         let on_error = reader.behavior()?;
         let columns = reader.columns(0)?;
+        let join = if reader.at == text.len() {
+            PlanJoin::default()
+        } else {
+            PlanJoin::of_code(reader.number()?).ok_or_else(damaged_plan)?
+        };
         if reader.at != text.len() {
             return Err(damaged_plan());
         }
@@ -828,6 +862,7 @@ impl TablePlan {
             path,
             on_error,
             columns,
+            join,
         })
     }
 }
@@ -1184,6 +1219,7 @@ struct TableRun<'a> {
     width: usize,
     produced: Cell<u64>,
     row_limit: u64,
+    join: PlanJoin,
 }
 
 fn too_many_rows(row_limit: u64) -> SqlError {
@@ -1282,6 +1318,34 @@ impl TableRun<'_> {
         }
     }
 
+    fn crossed(&self, groups: Vec<Vec<Vec<Value>>>) -> SqlResult<Vec<Vec<Value>>> {
+        let mut combined = vec![vec![Value::Null; self.width]];
+        for group in groups {
+            let group = if group.is_empty() {
+                if self.join.inner {
+                    return Ok(Vec::new());
+                }
+                vec![vec![Value::Null; self.width]]
+            } else {
+                group
+            };
+            let mut next = Vec::with_capacity(combined.len().saturating_mul(group.len()));
+            for left in &combined {
+                for right in &group {
+                    self.charge_one_row()?;
+                    next.push(
+                        left.iter()
+                            .zip(right)
+                            .map(|(mine, theirs)| if theirs.is_null() { mine.clone() } else { theirs.clone() })
+                            .collect(),
+                    );
+                }
+            }
+            combined = next;
+        }
+        Ok(combined)
+    }
+
     fn rows_for(
         &self,
         item: &Json,
@@ -1290,7 +1354,7 @@ impl TableRun<'_> {
     ) -> SqlResult<Vec<Vec<Value>>> {
         crate::stack_depth::check()?;
         let mut own = Vec::new();
-        let mut children: Vec<Vec<Value>> = Vec::new();
+        let mut groups: Vec<Vec<Vec<Value>>> = Vec::new();
         for column in columns {
             match column {
                 PreparedColumn::Ordinality { slot } => {
@@ -1310,13 +1374,24 @@ impl TableRun<'_> {
                     on_error,
                 } => own.push((*slot, self.exists(item, *slot, path, *on_error)?)),
                 PreparedColumn::Nested { path, columns } => {
+                    let mut group = Vec::new();
                     for (index, child) in self.items(item, path)?.iter().enumerate() {
-                        children.extend(self.rows_for(child, ordinal(index), columns)?);
+                        group.extend(self.rows_for(child, ordinal(index), columns)?);
                     }
+                    groups.push(group);
                 }
             }
         }
+        let has_nested = !groups.is_empty();
+        let mut children = if self.join.cross {
+            self.crossed(groups)?
+        } else {
+            groups.into_iter().flatten().collect()
+        };
         if children.is_empty() {
+            if self.join.inner && has_nested {
+                return Ok(Vec::new());
+            }
             self.charge_one_row()?;
             children.push(vec![Value::Null; self.width]);
         }
@@ -1376,6 +1451,7 @@ fn table_rows_within(
         width,
         produced: Cell::new(0),
         row_limit,
+        join: plan.join,
     };
     for (index, item) in run.items(&document, &root)?.iter().enumerate() {
         for row in run.rows_for(item, ordinal(index), &columns)? {
@@ -1414,6 +1490,7 @@ mod tests {
                     }],
                 },
             ],
+            join: PlanJoin::default(),
         };
         let encoded = plan.encode();
         assert_eq!(TablePlan::decode(&encoded).ok(), Some(plan));
@@ -1424,6 +1501,21 @@ mod tests {
         }
         assert!(TablePlan::decode("99999999999999999999:x").is_err());
         assert!(TablePlan::decode("1:$0;1;9;").is_err());
+        let joined = TablePlan {
+            join: PlanJoin { inner: true, cross: true },
+            ..plan_with_no_columns()
+        };
+        assert_eq!(TablePlan::decode(&joined.encode()).ok(), Some(joined));
+        assert!(TablePlan::decode("1:$0;0;7;").is_err());
+    }
+
+    fn plan_with_no_columns() -> TablePlan {
+        TablePlan {
+            path: "$".to_owned(),
+            on_error: Behavior::EmptyArray,
+            columns: Vec::new(),
+            join: PlanJoin::default(),
+        }
     }
 
     #[test]
@@ -1450,6 +1542,7 @@ mod tests {
                     },
                 ],
             }],
+            join: PlanJoin::default(),
         };
         let values = vec![
             Value::Text("[[1, 2, 3], [4, 5, 6]]".into()),
@@ -1467,6 +1560,58 @@ mod tests {
             Ok(())
         })?;
         Ok(rows)
+    }
+
+    fn sibling_rows(document: &str, join: PlanJoin) -> Vec<Vec<Value>> {
+        let plan = TablePlan {
+            path: "$".to_owned(),
+            on_error: Behavior::Error,
+            columns: vec![
+                TableColumn::Nested { path: "$.a[*]".to_owned(), columns: vec![TableColumn::Ordinality] },
+                TableColumn::Nested { path: "$.b[*]".to_owned(), columns: vec![TableColumn::Ordinality] },
+            ],
+            join,
+        };
+        let values = vec![
+            Value::Text(document.into()),
+            Value::Text(plan.encode()),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ];
+        let names = vec!["a".to_owned(), "b".to_owned()];
+        let mut types = vec![Some(SqlType::Text); TABLE_FIXED_ARGUMENTS];
+        types.extend([Some(SqlType::BigInt), Some(SqlType::BigInt)]);
+        let mut rows = Vec::new();
+        table_rows_within(&values, &names, &types, 1000, &mut |row| {
+            rows.push(row);
+            Ok(())
+        })
+        .unwrap();
+        rows
+    }
+
+    #[test]
+    fn plan_default_joins_siblings_by_union_or_cross_and_parents_outer_or_inner() {
+        let number = |value: i64| Value::BigInt(value);
+        let both = r#"{"a": [10, 20], "b": [30]}"#;
+        assert_eq!(
+            sibling_rows(both, PlanJoin::default()),
+            vec![vec![number(1), Value::Null], vec![number(2), Value::Null], vec![Value::Null, number(1)]]
+        );
+        assert_eq!(
+            sibling_rows(both, PlanJoin { inner: false, cross: true }),
+            vec![vec![number(1), number(1)], vec![number(2), number(1)]]
+        );
+        let only_a = r#"{"a": [10], "b": []}"#;
+        assert_eq!(
+            sibling_rows(only_a, PlanJoin { inner: false, cross: true }),
+            vec![vec![number(1), Value::Null]]
+        );
+        assert!(sibling_rows(only_a, PlanJoin { inner: true, cross: true }).is_empty());
+        assert_eq!(sibling_rows(only_a, PlanJoin { inner: true, cross: false }).len(), 1);
+        assert!(sibling_rows(r#"{"a": [], "b": []}"#, PlanJoin { inner: true, cross: false }).is_empty());
+        assert_eq!(sibling_rows(r#"{"a": [], "b": []}"#, PlanJoin::default()).len(), 1);
     }
 
     #[test]
