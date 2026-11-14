@@ -596,7 +596,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   of non-null expressions (D342).
 - A correlated `(a, b) IN (SELECT ...)` looked up by key instead of scanned (D323).
 - A data-modifying `WITH` query that resolves conflicts (sql.md); `CREATE RECURSIVE VIEW` is
-  built (D299).
+  built (D299). **Code written, unbuilt** (code-only mode, 2026-11-14, D1141).
 - Multidimensional arrays and array slices (D19, D288). Slices of one-dimensional arrays (`a[lo:hi]`, `a[:hi]`, `a[lo:]`):
   **code written, unbuilt** (code-only mode, 2026-11-13, D977). Left: multidimensional arrays.
 - Generated columns' rest (D322): SQL Server's `sys.computed_columns` rows, the generation clause

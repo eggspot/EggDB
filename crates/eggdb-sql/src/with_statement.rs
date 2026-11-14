@@ -186,6 +186,21 @@ fn replace_in_statement(statement: &mut Statement, materialized: &[Materialized]
                 }
                 InsertSource::DefaultValues => {}
             }
+            if let crate::ast::OnDuplicate::Update(assignments, predicate) = &mut insert.on_duplicate {
+                for (_, value) in assignments.iter_mut() {
+                    replace_in_expr(value, materialized)?;
+                }
+                if let Some(predicate) = predicate {
+                    replace_in_expr(predicate, materialized)?;
+                }
+            }
+            if let Some(crate::ast::ConflictTarget::Inferred {
+                predicate: Some(predicate),
+                ..
+            }) = &mut insert.conflict_target
+            {
+                replace_in_expr(predicate, materialized)?;
+            }
             replace_in_returning(&mut insert.returning, materialized)
         }
         Statement::Update(update) => {

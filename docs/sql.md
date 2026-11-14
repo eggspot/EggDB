@@ -5352,7 +5352,7 @@ The other differences:
   correlated subquery is `0A000`, and `INSERT ... VALUES` cannot have a subquery that names the
   inserted row. Subqueries nest at most 32 levels and a statement holds at most 1,024 `SELECT`s
   (`54001`). Every `WITH` query runs, even one nothing names, and `MATERIALIZED` and `NOT
-  MATERIALIZED` change nothing; a data-modifying `WITH` query that resolves conflicts, and `EXPLAIN` of a query with
+  MATERIALIZED` change nothing; a data-modifying `WITH` query may resolve conflicts (`ON CONFLICT`, whose clauses may name earlier `WITH` queries, D1141), while `EXPLAIN` of a query with
   derived tables, or with `WITH` or set operations inside a subquery, answer `0A000`. A derived table, a `WITH` query, a `LATERAL` item and the operands of
   a set operation are held in memory, counted with the statement's other rows against the 1 GiB
   limit, and a correlated subquery keeps up to 32 MiB of results by outer value. A `LATERAL` item

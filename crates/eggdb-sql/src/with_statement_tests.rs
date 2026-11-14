@@ -94,3 +94,24 @@ fn data_modifying_with_queries_keep_postgresqls_rules() {
         "count\n1\nSELECT 1"
     );
 }
+
+#[test]
+fn a_with_query_upserts_and_its_conflict_clause_reads_an_earlier_with_query() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    answer(&mut session, "CREATE TABLE stock (sku text PRIMARY KEY, quantity integer)");
+    answer(&mut session, "INSERT INTO stock VALUES ('a', 5)");
+    let output = answer(
+        &mut session,
+        "WITH delivered AS (SELECT 'a' AS sku, 3 AS quantity UNION ALL SELECT 'b', 7), \
+         merged AS (INSERT INTO stock SELECT sku, quantity FROM delivered \
+           ON CONFLICT (sku) DO UPDATE SET quantity = stock.quantity + (SELECT quantity FROM delivered WHERE delivered.sku = excluded.sku) \
+           RETURNING sku, quantity) \
+         SELECT sku, quantity FROM merged ORDER BY sku",
+    );
+    assert_eq!(output, "sku\tquantity\na\t8\nb\t7\nSELECT 2");
+    assert_eq!(
+        answer(&mut session, "SELECT sum(quantity) FROM stock"),
+        "sum\n15\nSELECT 1"
+    );
+}
