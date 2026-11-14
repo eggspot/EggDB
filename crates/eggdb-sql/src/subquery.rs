@@ -2192,7 +2192,21 @@ fn rows_a_lone_function_needs(select: &Select) -> Option<u64> {
 fn literal_row_count(expr: &Expr) -> Option<u64> {
     match expr.kind {
         ExprKind::Literal(Literal::Integer(count)) => u64::try_from(count).ok(),
+        _ if is_fixed_count(expr) => crate::execute::row_count(Some(expr), "LIMIT").ok().flatten(),
         _ => None,
+    }
+}
+
+fn is_fixed_count(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Literal(_) | ExprKind::Constant { .. } => true,
+        ExprKind::Cast { expr, .. } | ExprKind::Unary(_, expr) => is_fixed_count(expr),
+        ExprKind::Binary(
+            crate::ast::BinaryOperator::Add | crate::ast::BinaryOperator::Subtract | crate::ast::BinaryOperator::Multiply,
+            left,
+            right,
+        ) => is_fixed_count(left) && is_fixed_count(right),
+        _ => false,
     }
 }
 
