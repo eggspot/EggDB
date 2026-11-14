@@ -518,7 +518,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `benchmarks/footprint.txt`.
 - YCSB workloads against SQLite and Redis (D7). **Code written, unbuilt** (code-only mode, 2026-11-13, D954): A to F against SQLite,
   A to D and F against Redis.
-- A published branch-coverage target for the core, rising every release toward SQLite's (D41).
+- A published branch-coverage target for the core, rising every release toward SQLite's (D41). **Code written, unbuilt**
+  (code-only mode, 2026-11-14, D1133): `scripts/coverage.sh`, the weekly `Coverage` workflow and `docs/coverage.md`.
 - Published descriptions of the CI runners the benchmarks use, a public results page, conformance
   and benchmark dashboards, and the farm's matrix of every driver and ORM version (D32, D252).
 - Joules per query per workload and idle wake-ups, reported and then gated (D44, D252).

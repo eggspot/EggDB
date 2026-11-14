@@ -1,0 +1,28 @@
+name: Coverage
+
+on:
+  schedule:
+    - cron: "17 4 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-branches:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Measure the core's branch coverage against its published target
+        run: scripts/coverage.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-report
+          path: target/coverage/report.txt
+          retention-days: 30

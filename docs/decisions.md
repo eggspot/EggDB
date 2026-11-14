@@ -1157,3 +1157,4 @@ its full title with its status.
 - [D1130](decisions/D1130.md) Code-only batch 779 (M3): the savepoint undo log bounded as a whole
 - [D1131](decisions/D1131.md) Code-only batch 780 (M4): SQLite's ATTACH and DETACH over schemas, with attached SQLite and EggDB files read in
 - [D1132](decisions/D1132.md) Code-only batch 781 (M4): SQL's tables read through a collection named sql
+- [D1133](decisions/D1133.md) Code-only batch 782 (M4): a published branch-coverage target for the core with a weekly coverage run
