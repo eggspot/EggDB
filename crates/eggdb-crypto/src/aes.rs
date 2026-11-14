@@ -177,16 +177,22 @@ fn add_round_key(state: &mut [u8; AES_BLOCK_BYTES], round_key: &[u8; AES_BLOCK_B
 /// The AES block cipher (FIPS 197) under one key of 128, 192 or 256 bits. The S-box and its
 /// inverse are computed, not looked up: each byte is inverted in GF(2^8) on bit planes shared by
 /// up to 64 bytes, so no memory access and no branch depends on the key or the data.
+///
+/// Where the processor has AES instructions (AES-NI on x86-64, the Armv8 Cryptography Extension
+/// on AArch64), detected once when the cipher is made, blocks go through them instead; they
+/// take the same time for every key and block too.
 #[derive(Clone)]
 pub struct Aes {
     round_keys: [[u8; AES_BLOCK_BYTES]; MAX_ROUNDS + 1],
     rounds: usize,
+    instructions: bool,
 }
 
 impl std::fmt::Debug for Aes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Aes")
             .field("rounds", &self.rounds)
+            .field("instructions", &self.instructions)
             .finish_non_exhaustive()
     }
 }
@@ -227,7 +233,16 @@ impl Aes {
         {
             round_key.copy_from_slice(four.as_flattened());
         }
-        Ok(Self { round_keys, rounds })
+        Ok(Self {
+            round_keys,
+            rounds,
+            instructions: instructions::available(),
+        })
+    }
+
+    /// Whether this cipher runs on the processor's AES instructions.
+    pub fn uses_processor_instructions(&self) -> bool {
+        self.instructions
     }
 
     /// Encrypts one block in place.
@@ -237,6 +252,13 @@ impl Aes {
 
     /// Encrypts every block of `blocks` in place, four at a time through the shared S-box.
     pub fn encrypt_blocks(&self, blocks: &mut [[u8; AES_BLOCK_BYTES]]) {
+        if self.instructions && instructions::encrypt_blocks(&self.round_keys, self.rounds, blocks) {
+            return;
+        }
+        self.encrypt_blocks_computed(blocks);
+    }
+
+    fn encrypt_blocks_computed(&self, blocks: &mut [[u8; AES_BLOCK_BYTES]]) {
         for group in blocks.chunks_mut(LANES / AES_BLOCK_BYTES) {
             for block in group.iter_mut() {
                 add_round_key(block, &self.round_keys[0]);
@@ -256,6 +278,13 @@ impl Aes {
 
     /// Decrypts one block in place with FIPS 197's inverse cipher.
     pub fn decrypt_block(&self, block: &mut [u8; AES_BLOCK_BYTES]) {
+        if self.instructions && instructions::decrypt_block(&self.round_keys, self.rounds, block) {
+            return;
+        }
+        self.decrypt_block_computed(block);
+    }
+
+    fn decrypt_block_computed(&self, block: &mut [u8; AES_BLOCK_BYTES]) {
         add_round_key(block, &self.round_keys[self.rounds]);
         for round in (1..self.rounds).rev() {
             inverse_shift_rows(block);
@@ -269,9 +298,207 @@ impl Aes {
     }
 }
 
+type RoundKeys = [[u8; AES_BLOCK_BYTES]; MAX_ROUNDS + 1];
+
+#[cfg(target_arch = "x86_64")]
+mod instructions {
+    use super::{AES_BLOCK_BYTES, RoundKeys};
+    use std::arch::x86_64::{
+        __m128i, _mm_aesdec_si128, _mm_aesdeclast_si128, _mm_aesenc_si128, _mm_aesenclast_si128,
+        _mm_aesimc_si128, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_set_epi64x, _mm_xor_si128,
+    };
+
+    pub(super) fn available() -> bool {
+        std::arch::is_x86_feature_detected!("aes") && std::arch::is_x86_feature_detected!("sse4.1")
+    }
+
+    pub(super) fn encrypt_blocks(keys: &RoundKeys, rounds: usize, blocks: &mut [[u8; AES_BLOCK_BYTES]]) -> bool {
+        if !available() {
+            return false;
+        }
+        // SAFETY: the processor was just detected to support AES-NI and SSE 4.1, the only
+        // features `encrypt_with_aes_ni` enables.
+        unsafe { encrypt_with_aes_ni(keys, rounds, blocks) };
+        true
+    }
+
+    pub(super) fn decrypt_block(keys: &RoundKeys, rounds: usize, block: &mut [u8; AES_BLOCK_BYTES]) -> bool {
+        if !available() {
+            return false;
+        }
+        // SAFETY: the processor was just detected to support AES-NI and SSE 4.1, the only
+        // features `decrypt_with_aes_ni` enables.
+        unsafe { decrypt_with_aes_ni(keys, rounds, block) };
+        true
+    }
+
+    #[target_feature(enable = "aes,sse4.1")]
+    fn load(bytes: &[u8; AES_BLOCK_BYTES]) -> __m128i {
+        let (halves, _) = bytes.as_chunks::<8>();
+        _mm_set_epi64x(i64::from_le_bytes(halves[1]), i64::from_le_bytes(halves[0]))
+    }
+
+    #[target_feature(enable = "aes,sse4.1")]
+    fn store(state: __m128i, bytes: &mut [u8; AES_BLOCK_BYTES]) {
+        bytes[..8].copy_from_slice(&_mm_cvtsi128_si64(state).to_le_bytes());
+        bytes[8..].copy_from_slice(&_mm_extract_epi64::<1>(state).to_le_bytes());
+    }
+
+    #[target_feature(enable = "aes,sse4.1")]
+    fn encrypt_with_aes_ni(keys: &RoundKeys, rounds: usize, blocks: &mut [[u8; AES_BLOCK_BYTES]]) {
+        let mut loaded = [load(&keys[0]); 15];
+        for (slot, key) in loaded.iter_mut().zip(keys.iter()).take(rounds + 1) {
+            *slot = load(key);
+        }
+        for block in blocks {
+            let mut state = _mm_xor_si128(load(block), loaded[0]);
+            for key in &loaded[1..rounds] {
+                state = _mm_aesenc_si128(state, *key);
+            }
+            state = _mm_aesenclast_si128(state, loaded[rounds]);
+            store(state, block);
+        }
+    }
+
+    #[target_feature(enable = "aes,sse4.1")]
+    fn decrypt_with_aes_ni(keys: &RoundKeys, rounds: usize, block: &mut [u8; AES_BLOCK_BYTES]) {
+        let mut state = _mm_xor_si128(load(block), load(&keys[rounds]));
+        for round in (1..rounds).rev() {
+            state = _mm_aesdec_si128(state, _mm_aesimc_si128(load(&keys[round])));
+        }
+        state = _mm_aesdeclast_si128(state, load(&keys[0]));
+        store(state, block);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod instructions {
+    use super::{AES_BLOCK_BYTES, RoundKeys};
+    use std::arch::aarch64::{
+        uint8x16_t, vaesdq_u8, vaeseq_u8, vaesimcq_u8, vaesmcq_u8, vcombine_u64, vcreate_u64,
+        vdupq_n_u8, veorq_u8, vgetq_lane_u64, vreinterpretq_u8_u64, vreinterpretq_u64_u8,
+    };
+
+    pub(super) fn available() -> bool {
+        std::arch::is_aarch64_feature_detected!("aes")
+    }
+
+    pub(super) fn encrypt_blocks(keys: &RoundKeys, rounds: usize, blocks: &mut [[u8; AES_BLOCK_BYTES]]) -> bool {
+        if !available() {
+            return false;
+        }
+        // SAFETY: the processor was just detected to support the AES instructions, the only
+        // feature `encrypt_with_armv8_aes` enables beyond the baseline NEON.
+        unsafe { encrypt_with_armv8_aes(keys, rounds, blocks) };
+        true
+    }
+
+    pub(super) fn decrypt_block(keys: &RoundKeys, rounds: usize, block: &mut [u8; AES_BLOCK_BYTES]) -> bool {
+        if !available() {
+            return false;
+        }
+        // SAFETY: the processor was just detected to support the AES instructions, the only
+        // feature `decrypt_with_armv8_aes` enables beyond the baseline NEON.
+        unsafe { decrypt_with_armv8_aes(keys, rounds, block) };
+        true
+    }
+
+    #[target_feature(enable = "aes")]
+    fn load(bytes: &[u8; AES_BLOCK_BYTES]) -> uint8x16_t {
+        let (halves, _) = bytes.as_chunks::<8>();
+        vreinterpretq_u8_u64(vcombine_u64(
+            vcreate_u64(u64::from_le_bytes(halves[0])),
+            vcreate_u64(u64::from_le_bytes(halves[1])),
+        ))
+    }
+
+    #[target_feature(enable = "aes")]
+    fn store(state: uint8x16_t, bytes: &mut [u8; AES_BLOCK_BYTES]) {
+        let words = vreinterpretq_u64_u8(state);
+        bytes[..8].copy_from_slice(&vgetq_lane_u64::<0>(words).to_le_bytes());
+        bytes[8..].copy_from_slice(&vgetq_lane_u64::<1>(words).to_le_bytes());
+    }
+
+    #[target_feature(enable = "aes")]
+    fn encrypt_with_armv8_aes(keys: &RoundKeys, rounds: usize, blocks: &mut [[u8; AES_BLOCK_BYTES]]) {
+        let mut loaded = [load(&keys[0]); 15];
+        for (slot, key) in loaded.iter_mut().zip(keys.iter()).take(rounds + 1) {
+            *slot = load(key);
+        }
+        for block in blocks {
+            let mut state = load(block);
+            for key in &loaded[..rounds - 1] {
+                state = vaesmcq_u8(vaeseq_u8(state, *key));
+            }
+            state = veorq_u8(vaeseq_u8(state, loaded[rounds - 1]), loaded[rounds]);
+            store(state, block);
+        }
+    }
+
+    #[target_feature(enable = "aes")]
+    fn decrypt_with_armv8_aes(keys: &RoundKeys, rounds: usize, block: &mut [u8; AES_BLOCK_BYTES]) {
+        let zero = vdupq_n_u8(0);
+        let mut state = vaesdq_u8(load(block), load(&keys[rounds]));
+        for round in (1..rounds).rev() {
+            state = vaesimcq_u8(veorq_u8(state, load(&keys[round])));
+            state = vaesdq_u8(state, zero);
+        }
+        state = veorq_u8(state, load(&keys[0]));
+        store(state, block);
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod instructions {
+    use super::{AES_BLOCK_BYTES, RoundKeys};
+
+    pub(super) fn available() -> bool {
+        false
+    }
+
+    pub(super) fn encrypt_blocks(_keys: &RoundKeys, _rounds: usize, _blocks: &mut [[u8; AES_BLOCK_BYTES]]) -> bool {
+        false
+    }
+
+    pub(super) fn decrypt_block(_keys: &RoundKeys, _rounds: usize, _block: &mut [u8; AES_BLOCK_BYTES]) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Aes, inverse_sub_bytes, sub_bytes};
+
+    #[test]
+    fn the_processor_s_instructions_agree_with_the_computed_cipher() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for key_length in [16usize, 24, 32] {
+            let key: Vec<u8> = (0..key_length).map(|_| next() as u8).collect();
+            let cipher = Aes::new(&key).expect("a key of a valid length");
+            let mut blocks: Vec<[u8; 16]> = (0..9)
+                .map(|_| {
+                    let mut block = [0u8; 16];
+                    block.iter_mut().for_each(|byte| *byte = next() as u8);
+                    block
+                })
+                .collect();
+            let mut computed = blocks.clone();
+            cipher.encrypt_blocks(&mut blocks);
+            cipher.encrypt_blocks_computed(&mut computed);
+            assert_eq!(blocks, computed, "encryption with a {key_length}-byte key");
+            for (block, expected) in blocks.iter_mut().zip(computed.iter_mut()) {
+                cipher.decrypt_block(block);
+                cipher.decrypt_block_computed(expected);
+                assert_eq!(block, expected, "decryption with a {key_length}-byte key");
+            }
+        }
+    }
 
     #[test]
     fn decrypting_undoes_fips_197s_example() {

@@ -1182,3 +1182,4 @@ its full title with its status.
 - [D1155](decisions/D1155.md) Code-only batch 804 (M6a): TLS on every other listener, ended in front of each protocol server
 - [D1156](decisions/D1156.md) Code-only batch 805 (M6a): replies measured before they are built: RESP EXEC and large values, Bolt records and pending rows, HTTP response room
 - [D1157](decisions/D1157.md) Code-only batch 806 (M6a): one shared listener crate for the protocol servers
+- [D1158](decisions/D1158.md) Code-only batch 807 (M6a): AES on the processor's AES instructions (AES-NI, Armv8)
