@@ -6,6 +6,8 @@ use crate::session::QueryResult;
 use crate::settings::SavedSettings;
 use crate::store::{EntryVisitor, KeyValueRead, KeyValueWrite, ScanDirection};
 
+use std::time::Duration;
+
 const MOST_SAVEPOINTS: usize = 4096;
 const UNDO_ENTRY_OVERHEAD: usize = 64;
 
@@ -206,12 +208,68 @@ impl KeyValueWrite for UndoWrite<'_> {
         Ok(deleted)
     }
 
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        self.journaled(|inner| inner.put_with_expiry(key, value, ttl))
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        self.journaled(|inner| inner.collection_put(name, key, value, ttl))
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.journaled(|inner| inner.collection_delete(name, key))
+    }
+
+    fn increment(&mut self, collection: Option<&str>, key: &[u8], by: i64) -> SqlResult<Option<i64>> {
+        self.journaled(|inner| inner.increment(collection, key, by))
+    }
+
+    fn compare_and_set(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        self.journaled(|inner| inner.compare_and_set(collection, key, expected, new))
+    }
+
+    fn set_expiry(&mut self, collection: Option<&str>, key: &[u8], ttl: Duration) -> SqlResult<Option<bool>> {
+        self.journaled(|inner| inner.set_expiry(collection, key, ttl))
+    }
+
+    fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.journaled(|inner| inner.clear_expiry(collection, key))
+    }
+
     fn commit(self) -> SqlResult<()> {
         Ok(())
     }
 
     fn rollback(self) -> SqlResult<()> {
         Ok(())
+    }
+}
+
+impl UndoWrite<'_> {
+    fn journaled<T>(&mut self, write: impl FnOnce(&mut dyn KeyValueWrite) -> SqlResult<T>) -> SqlResult<T> {
+        if !self.inner.start_change_journal() {
+            return Err(SqlError::not_supported(
+                "key-value writes inside a savepoint on a store that cannot record them",
+            ));
+        }
+        let result = write(&mut *self.inner);
+        for (key, previous) in self.inner.take_change_journal() {
+            self.hold(&key, previous.as_deref())?;
+            self.logged(UndoEntry::Host { key, previous });
+        }
+        result
     }
 }
 

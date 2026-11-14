@@ -445,6 +445,14 @@ impl KeyValueWrite for SqlWriter<'_> {
         self.0.store_prefix_in_lsm_tree(prefix).map_err(store_error)
     }
 
+    fn start_change_journal(&mut self) -> bool {
+        self.0.start_journal()
+    }
+
+    fn take_change_journal(&mut self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        self.0.take_journal()
+    }
+
     fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
         self.0.put_with_expiry(key, value, ttl).map_err(store_error)
     }
@@ -1148,6 +1156,14 @@ impl KeyValueWrite for SharedWriter<'_, '_> {
                 .store_prefix_in_lsm_tree(prefix)
                 .map_err(store_error)
         })
+    }
+
+    fn start_change_journal(&mut self) -> bool {
+        self.writing(|transaction| Ok(transaction.start_journal())).unwrap_or(false)
+    }
+
+    fn take_change_journal(&mut self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        self.writing(|transaction| Ok(transaction.take_journal())).unwrap_or_default()
     }
 
     fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {

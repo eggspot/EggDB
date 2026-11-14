@@ -745,6 +745,18 @@ impl<'db> WriteTransaction<'db> {
         }
     }
 
+    pub(crate) fn start_journal(&mut self) -> bool {
+        if self.journal.is_some() {
+            return false;
+        }
+        self.journal = Some(Vec::new());
+        true
+    }
+
+    pub(crate) fn take_journal(&mut self) -> Vec<StoredChange> {
+        self.journal.take().unwrap_or_default()
+    }
+
     pub(crate) fn journaled<T>(
         &mut self,
         work: impl FnOnce(&mut Self) -> T,

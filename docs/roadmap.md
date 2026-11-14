@@ -477,7 +477,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   single `SELECT` (`Select::locking`): **code written, unbuilt** (code-only mode, 2026-11-13, D1126); left: using it
   for the read-only checks, `OF` lists and clauses over `WITH` queries.
 - `ROLLBACK TO SAVEPOINT` undoes key-value writes made through `eggdb serve`'s RESP and wire
-  sessions once those share a block with SQL (D319).
+  sessions once those share a block with SQL (D319). The session's side, for any key-value write a session's statement makes
+  inside a savepoint: **code written, unbuilt** (code-only mode, 2026-11-14, D1129); left: RESP sessions sharing a
+  SQL block, which they do not yet.
 - The savepoint undo log bounded as a whole against the session's memory budget, or spilled to
   disk: each statement's before-images stop at 1 GiB with `53200` (D317), but the log keeps every
   statement's and key-value write's entries until `RELEASE`, `ROLLBACK TO` or `COMMIT` (D266,

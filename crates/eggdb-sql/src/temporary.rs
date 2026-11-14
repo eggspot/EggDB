@@ -1,3 +1,4 @@
+use std::time::Duration;
 use crate::ast::OnCommit;
 use crate::encoding::{
     TableDefinition, is_temporary_key, is_view_record, prefix_end, rows_prefix,
@@ -392,6 +393,58 @@ impl KeyValueWrite for TemporaryWrite<'_> {
             return Ok(self.objects.delete(key));
         }
         self.inner.delete(key)
+    }
+
+    fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
+        self.inner.put_with_expiry(key, value, ttl)
+    }
+
+    fn collection_put(
+        &mut self,
+        name: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> SqlResult<bool> {
+        self.inner.collection_put(name, key, value, ttl)
+    }
+
+    fn collection_delete(&mut self, name: &str, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.inner.collection_delete(name, key)
+    }
+
+    fn increment(&mut self, collection: Option<&str>, key: &[u8], by: i64) -> SqlResult<Option<i64>> {
+        self.inner.increment(collection, key, by)
+    }
+
+    fn compare_and_set(
+        &mut self,
+        collection: Option<&str>,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> SqlResult<Option<(bool, Option<Vec<u8>>)>> {
+        self.inner.compare_and_set(collection, key, expected, new)
+    }
+
+    fn set_expiry(&mut self, collection: Option<&str>, key: &[u8], ttl: Duration) -> SqlResult<Option<bool>> {
+        self.inner.set_expiry(collection, key, ttl)
+    }
+
+    fn clear_expiry(&mut self, collection: Option<&str>, key: &[u8]) -> SqlResult<Option<bool>> {
+        self.inner.clear_expiry(collection, key)
+    }
+
+    fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
+        self.inner.restore(key, previous)
+    }
+
+    fn start_change_journal(&mut self) -> bool {
+        self.inner.start_change_journal()
+    }
+
+    fn take_change_journal(&mut self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        self.inner.take_change_journal()
     }
 
     fn commit(self) -> SqlResult<()> {

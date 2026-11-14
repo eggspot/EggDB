@@ -1153,3 +1153,4 @@ its full title with its status.
 - [D1126](decisions/D1126.md) Code-only batch 775 (M3): row locks with FOR UPDATE, NOWAIT and SKIP LOCKED, and deadlocks between row and advisory locks
 - [D1127](decisions/D1127.md) Code-only batch 776 (M3): two-phase commit with PREPARE TRANSACTION, COMMIT PREPARED and MySQL XA
 - [D1128](decisions/D1128.md) Code-only batch 777 (M3): predicate locks that writers wait on instead of failing serializable commits
+- [D1129](decisions/D1129.md) Code-only batch 778 (M3): savepoints undo key-value writes made through a session's writer

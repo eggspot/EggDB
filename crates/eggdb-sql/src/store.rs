@@ -241,6 +241,20 @@ pub trait KeyValueWrite: KeyValueRead {
         Err(no_key_value_writes())
     }
 
+    /// Starts recording the keys the store itself changes, and what each held before, for the
+    /// writes made until [`take_change_journal`](Self::take_change_journal), so a savepoint can
+    /// undo the key-value tools' writes exactly (D1129). `false`, the default, when the store
+    /// cannot.
+    fn start_change_journal(&mut self) -> bool {
+        false
+    }
+
+    /// The stored keys changed since [`start_change_journal`](Self::start_change_journal), in
+    /// order, each with what it held before, and stops recording.
+    fn take_change_journal(&mut self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        Vec::new()
+    }
+
     /// Puts `key` back as it was before a write made outside SQL in the same transaction:
     /// holding `previous`, or absent when it is `None`. `key` and `previous` are what the store
     /// itself keeps, which can include keys [`put`](Self::put) refuses, such as the ones a
@@ -697,6 +711,14 @@ impl KeyValueWrite for Box<dyn BoxedWrite + '_> {
 
     fn prepare_transaction(self, gid: &str) -> SqlResult<()> {
         self.prepare_boxed(gid)
+    }
+
+    fn start_change_journal(&mut self) -> bool {
+        (**self).start_change_journal()
+    }
+
+    fn take_change_journal(&mut self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        (**self).take_change_journal()
     }
 
     fn rollback(self) -> SqlResult<()> {
