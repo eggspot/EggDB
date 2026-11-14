@@ -723,6 +723,7 @@ pub(crate) fn writes_binary(sql_type: SqlType) -> bool {
         SqlType::Catalog(kind) => !matches!(
             kind,
             CatalogType::NodeTree
+                | CatalogType::Tid
                 | CatalogType::AclItem
                 | CatalogType::AnyArray
                 | CatalogType::Pseudo(_)

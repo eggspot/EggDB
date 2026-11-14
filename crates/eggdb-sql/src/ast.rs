@@ -1593,6 +1593,7 @@ pub(crate) enum GeneratedTable {
     Catalog(crate::pg_catalog::CatalogRelation),
     Variable(String),
     Sequence(String),
+    SystemColumns(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

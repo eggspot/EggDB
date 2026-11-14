@@ -1426,3 +1426,35 @@ fn renaming_a_table_keeps_the_oids_of_the_table_its_indexes_and_its_identity() {
     let after = last(&mut session, &for_table(query, "journal"));
     assert_eq!(rows_of(&after), rows_of(&before));
 }
+
+#[test]
+fn user_tables_answer_tableoid_ctid_xmin_and_the_other_system_columns() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    last(&mut session, "CREATE TABLE notes (body text)");
+    last(&mut session, "INSERT INTO notes VALUES ('a'), ('b')");
+    assert!(
+        last(
+            &mut session,
+            "SELECT tableoid = 'notes'::regclass FROM notes LIMIT 1"
+        )
+        .contains('t')
+    );
+    let tuples = last(&mut session, "SELECT ctid FROM notes ORDER BY body");
+    assert_eq!(rows_of(&tuples), ["(0,1)", "(0,2)"]);
+    assert!(last(&mut session, "SELECT body FROM notes n WHERE n.ctid = '(0,2)'").contains('b'));
+    let before = last(&mut session, "SELECT xmin FROM notes WHERE body = 'a'");
+    last(&mut session, "UPDATE notes SET body = 'c' WHERE body = 'a'");
+    let after = last(&mut session, "SELECT xmin FROM notes WHERE body = 'c'");
+    assert_ne!(rows_of(&before), rows_of(&after));
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
+            "SELECT xmax, cmin, cmax FROM notes WHERE body = 'b'"
+        )),
+        ["0|0|0"]
+    );
+    let star = last(&mut session, "SELECT * FROM notes WHERE xmin <> 0 ORDER BY body");
+    assert_eq!(rows_of(&star), ["b", "c"]);
+    assert!(last(&mut session, "SELECT pg_typeof(ctid), pg_typeof(xmin), pg_typeof(cmin) FROM notes LIMIT 1").contains("tid|xid|cid"));
+}

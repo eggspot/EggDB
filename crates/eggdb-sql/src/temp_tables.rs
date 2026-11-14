@@ -74,7 +74,7 @@ pub(crate) fn is_hidden_column(name: &str) -> bool {
 }
 
 pub(crate) fn system_column(name: &str) -> Option<&'static str> {
-    (name == "tableoid").then_some(TABLE_OID_COLUMN)
+    crate::system_columns::hidden_name(name)
 }
 
 pub(crate) fn display_name(name: &str) -> &str {

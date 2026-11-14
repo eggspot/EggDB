@@ -2962,6 +2962,9 @@ fn prepare_generated(
             name,
             env.columns_only,
         )?),
+        GeneratedTable::SystemColumns(name) => Filling::Rows(
+            crate::system_columns::generated_rows(env.reader, tables, name, env.columns_only)?,
+        ),
         GeneratedTable::Sequence(name) => Filling::Rows(crate::sequences::relation_rows(
             env.reader,
             name,
@@ -3031,7 +3034,8 @@ fn prepare_generated(
                 GeneratedTable::Expansion(_)
                 | GeneratedTable::Catalog(_)
                 | GeneratedTable::Variable(_)
-                | GeneratedTable::Sequence(_) => {
+                | GeneratedTable::Sequence(_)
+                | GeneratedTable::SystemColumns(_) => {
                     Filling::Rows(crate::set_returning::GeneratedRows::empty(Vec::new()))
                 }
             }
@@ -3043,7 +3047,8 @@ fn prepare_generated(
         GeneratedTable::Expansion(_)
         | GeneratedTable::Catalog(_)
         | GeneratedTable::Variable(_)
-        | GeneratedTable::Sequence(_) => Vec::new(),
+        | GeneratedTable::Sequence(_)
+        | GeneratedTable::SystemColumns(_) => Vec::new(),
     };
     let (columns, rows, streamed, charge) = match built {
         Filling::Rows(built) => (built.columns, built.rows, None, Some(built.charge)),

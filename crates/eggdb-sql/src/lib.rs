@@ -266,6 +266,7 @@ mod sqlite_json;
 mod string_functions;
 mod subquery;
 mod table_variables;
+mod system_columns;
 mod temp_tables;
 mod temporal;
 mod tdigest;

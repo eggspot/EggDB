@@ -48,6 +48,7 @@ pub(crate) struct Resolver<'a> {
     resolution: Resolution,
     target_privilege: Option<crate::roles::Privilege>,
     columns: ColumnScopes,
+    system_columns_named: bool,
 }
 
 fn nested_too_deep(position: usize) -> SqlError {
@@ -124,6 +125,7 @@ impl<'a> Resolver<'a> {
             resolution: Resolution::default(),
             target_privilege: None,
             columns: ColumnScopes::default(),
+            system_columns_named: false,
         })
     }
 
@@ -619,14 +621,12 @@ impl<'a> Resolver<'a> {
             return Err(too_many_queries(0));
         }
         {
-            let Select { from, filter, .. } = &mut *select;
-            if let Some(from) = from {
-                let filter = filter.as_ref();
-                self.walk_reference(&mut from.first, ctes, filter)?;
-                for join in &mut from.joins {
-                    self.walk_reference(&mut join.table, ctes, filter)?;
-                }
-            }
+            let named = crate::constraints::current_dialect() == Dialect::PostgreSql
+                && crate::system_columns::named_in(select, query_order);
+            let outer = std::mem::replace(&mut self.system_columns_named, named);
+            let walked = self.walk_from(select, ctes);
+            self.system_columns_named = outer;
+            walked?;
         }
         let checks_columns = self.columns.has_unreadable();
         if !self.walk_expressions && !checks_columns {
@@ -659,6 +659,18 @@ impl<'a> Resolver<'a> {
         }
         for expr in others {
             self.walk_expr(expr, ctes)?;
+        }
+        Ok(())
+    }
+
+    fn walk_from(&mut self, select: &mut Select, ctes: &mut Vec<String>) -> SqlResult<()> {
+        let Select { from, filter, .. } = select;
+        if let Some(from) = from {
+            let filter = filter.as_ref();
+            self.walk_reference(&mut from.first, ctes, filter)?;
+            for join in &mut from.joins {
+                self.walk_reference(&mut join.table, ctes, filter)?;
+            }
         }
         Ok(())
     }
@@ -889,6 +901,21 @@ impl<'a> Resolver<'a> {
                         .at(reference.name.position));
                 }
                 self.expand(reference, view)?
+            }
+            Some(Relation::Table(table))
+                if self.system_columns_named
+                    && reference.partition_selection.is_none()
+                    && crate::system_columns::wanted_for(&table)
+                    && crate::partitions::catalog(self.reader, self.tables)?
+                        .key_of(&table.name)
+                        .is_none() =>
+            {
+                if reference.alias.is_none() {
+                    reference.alias = Some(base_name(&reference.name.text).to_owned());
+                }
+                reference.generated = Some(Box::new(GeneratedTable::SystemColumns(
+                    reference.name.text.clone(),
+                )));
             }
             Some(Relation::Table(table)) => self.expand_partitioned(reference, &table, filter)?,
             None => self.sequence_reference(reference)?,

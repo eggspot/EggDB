@@ -18,6 +18,10 @@ pub enum CatalogType {
     NodeTree,
     /// `xid`: a transaction identifier, an unsigned 32-bit number.
     Xid,
+    /// `cid`: a command identifier within a transaction, an unsigned 32-bit number.
+    Cid,
+    /// `tid`: a tuple identifier, shown as `(block,offset)`.
+    Tid,
     /// `aclitem`: one item of an access control list, held as PostgreSQL's
     /// `grantee=privileges/grantor` text.
     AclItem,
@@ -146,6 +150,8 @@ impl CatalogType {
             Self::InternalChar => "\"char\"",
             Self::NodeTree => "pg_node_tree",
             Self::Xid => "xid",
+            Self::Cid => "cid",
+            Self::Tid => "tid",
             Self::AclItem => "aclitem",
             Self::AnyArray => "anyarray",
             Self::Void => "void",
@@ -170,7 +176,7 @@ impl CatalogType {
     }
 
     pub(crate) fn is_identifier(self) -> bool {
-        matches!(self, Self::Oid | Self::Xid | Self::Reg(_))
+        matches!(self, Self::Oid | Self::Xid | Self::Cid | Self::Reg(_))
     }
 }
 
@@ -180,6 +186,8 @@ pub(crate) fn cast_type_named(word: &str) -> Option<SqlType> {
         "name" => SqlType::Catalog(CatalogType::Name),
         "pg_node_tree" => SqlType::Catalog(CatalogType::NodeTree),
         "xid" => SqlType::Catalog(CatalogType::Xid),
+        "cid" => SqlType::Catalog(CatalogType::Cid),
+        "tid" => SqlType::Catalog(CatalogType::Tid),
         "aclitem" => SqlType::Catalog(CatalogType::AclItem),
         "void" => SqlType::Catalog(CatalogType::Void),
         "regclass" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
@@ -290,6 +298,8 @@ pub(crate) fn parse_input(text: &str, kind: CatalogType) -> SqlResult<Value> {
     match kind {
         CatalogType::Oid => parse_identifier(text, "oid").map(Value::Oid),
         CatalogType::Xid => parse_identifier(text, "xid").map(Value::Oid),
+        CatalogType::Cid => parse_identifier(text, "cid").map(Value::Oid),
+        CatalogType::Tid => crate::system_columns::parse_tid(text),
         CatalogType::Name => Ok(Value::Text(truncated_name(text.to_owned()))),
         CatalogType::RefCursor => Ok(Value::Text(text.to_owned())),
         CatalogType::InternalChar => Ok(Value::Text(first_character(text))),
@@ -409,7 +419,11 @@ pub(crate) fn convert(value: Value, kind: CatalogType, conversion: Conversion) -
                 )),
             }
         }
-        CatalogType::Oid | CatalogType::Xid => match value {
+        CatalogType::Tid => match value {
+            Value::Text(text) | Value::Bpchar(text) => crate::system_columns::parse_tid(&text),
+            other => Err(cannot_cast(&other, kind.name())),
+        },
+        CatalogType::Oid | CatalogType::Xid | CatalogType::Cid => match value {
             Value::Text(text) | Value::Bpchar(text) if conversion == Conversion::Explicit => {
                 parse_input(&text, kind)
             }

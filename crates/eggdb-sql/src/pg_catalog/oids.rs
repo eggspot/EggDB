@@ -1404,6 +1404,8 @@ fn catalog_type_oid(kind: CatalogType) -> u32 {
         CatalogType::InternalChar => 18,
         CatalogType::NodeTree => 194,
         CatalogType::Xid => 28,
+        CatalogType::Cid => 29,
+        CatalogType::Tid => 27,
         CatalogType::AclItem => 1033,
         CatalogType::AnyArray => 2277,
         CatalogType::Pseudo(pseudo) => pseudo.oid(),

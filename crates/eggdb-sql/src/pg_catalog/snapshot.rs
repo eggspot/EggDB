@@ -1119,6 +1119,12 @@ impl CatalogSnapshot {
         self.tables.get(internal).copied()
     }
 
+    pub(crate) fn table_oid(&self, internal: &str) -> Option<u32> {
+        self.table_named(internal)
+            .and_then(|at| self.relations.get(at))
+            .map(|entry| entry.oid)
+    }
+
     pub(crate) fn constraint(&self, oid: u32) -> Option<&ConstraintEntry> {
         self.constraint_oids
             .get(&oid)

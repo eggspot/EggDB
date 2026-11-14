@@ -2071,7 +2071,8 @@ pub(crate) fn expressions(generated: &GeneratedTable) -> Vec<&Expr> {
         GeneratedTable::Expansion(_)
         | GeneratedTable::Catalog(_)
         | GeneratedTable::Variable(_)
-        | GeneratedTable::Sequence(_) => Vec::new(),
+        | GeneratedTable::Sequence(_)
+        | GeneratedTable::SystemColumns(_) => Vec::new(),
     }
 }
 
@@ -2082,7 +2083,8 @@ pub(crate) fn expressions_mut(generated: &mut GeneratedTable) -> Vec<&mut Expr> 
         GeneratedTable::Expansion(_)
         | GeneratedTable::Catalog(_)
         | GeneratedTable::Variable(_)
-        | GeneratedTable::Sequence(_) => Vec::new(),
+        | GeneratedTable::Sequence(_)
+        | GeneratedTable::SystemColumns(_) => Vec::new(),
     }
 }
 
@@ -2112,6 +2114,7 @@ pub(crate) fn generate_rows(
         GeneratedTable::Expansion(_)
         | GeneratedTable::Catalog(_)
         | GeneratedTable::Variable(_)
-        | GeneratedTable::Sequence(_) => Ok(()),
+        | GeneratedTable::Sequence(_)
+        | GeneratedTable::SystemColumns(_) => Ok(()),
     }
 }

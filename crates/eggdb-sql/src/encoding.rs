@@ -2533,7 +2533,9 @@ fn value_tag(sql_type: SqlType) -> u8 {
         }) => RANGE_TAG,
         SqlType::Varchar(_) => type_tag(SqlType::Text),
         SqlType::Catalog(
-            crate::pg_catalog::CatalogType::Oid | crate::pg_catalog::CatalogType::Xid,
+            crate::pg_catalog::CatalogType::Oid
+            | crate::pg_catalog::CatalogType::Xid
+            | crate::pg_catalog::CatalogType::Cid,
         ) => OID_TAG,
         SqlType::Catalog(crate::pg_catalog::CatalogType::Reg(_)) => REG_TAG,
         SqlType::Catalog(_) => type_tag(SqlType::Text),
