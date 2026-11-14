@@ -1,0 +1,10 @@
+name: eggdb_bench
+description: EggDB's Dart driver against the sqlite3 package's binding; a benchmark, never published.
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+dependencies:
+  eggdb:
+    path: ..
+  sqlite3: 2.4.7

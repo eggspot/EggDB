@@ -699,7 +699,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-14, D1149). Dart and .NET: **code written, unbuilt** (code-only mode, 2026-11-14, D1150). Java, Kotlin,
   Android and Swift, completing every driver: **code written, unbuilt** (code-only mode, 2026-11-14, D1151).
 - Each driver benchmarked in embedded mode against SQLite's binding in its language, as D17 lists
-  them (D17, D182). Check: gated in CI.
+  them (D17, D182). Check: gated in CI. **Code written, unbuilt** (code-only mode, 2026-11-14, D1152): `scripts/driver-bench.sh` and CI's
+  `driver-bench` job.
 - JDBC's `DatabaseMetaData`, and a JNI binding for Java before 22 (D16, D182). `DatabaseMetaData`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D791). Left: the JNI binding.
 - The Python driver through the CPython C API with buffer-protocol batches (D16, D17).

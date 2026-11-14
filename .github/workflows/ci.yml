@@ -904,6 +904,53 @@ jobs:
           retention-days: 90
           overwrite: true
 
+  driver-bench:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cargo-v2-driver-bench-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-v2-driver-bench-${{ runner.os }}-
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "24"
+      - name: Install SQLite's bindings for each language (benchmark tools only, never shipped)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsqlite3-dev ruby-sqlite3 php-cli php-sqlite3
+          curl -fsSL -o "$RUNNER_TEMP/sqlite-jdbc.jar" https://repo1.maven.org/maven2/org/xerial/sqlite-jdbc/3.47.1.0/sqlite-jdbc-3.47.1.0.jar
+          echo "SQLITE_JDBC_JAR=$RUNNER_TEMP/sqlite-jdbc.jar" >> "$GITHUB_ENV"
+      - name: Each driver in embedded mode against SQLite's binding in its language, gated at 2x (D17, D182, D1152)
+        env:
+          DRIVER_BENCH_REQUIRED: python node go c++ ruby php dotnet java kotlin
+        run: |
+          cargo build --release -p eggdb-capi
+          mkdir -p driver-bench-results
+          scripts/driver-bench.sh target/release "$RUNNER_TEMP/driver-bench" driver-bench-results/drivers.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Keep the driver benchmark results of this change
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: driver-bench-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'push' }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: driver-bench-results/
+          retention-days: 90
+          overwrite: true
+
   mongo-compare:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -2286,7 +2333,7 @@ jobs:
           PY
 
   check:
-    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, cortex-m, opensearch-compare, mongo-compare, ldbc-compare, tpcc-compare, installers, system-allocator, release-compat, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, android, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
+    needs: [changes, lint-and-test, platforms, musl, kubernetes, resp-clients, redis-compare, broker-compare, cql-compare, tsdb-compare, cortex-m, opensearch-compare, mongo-compare, ldbc-compare, tpcc-compare, driver-bench, installers, system-allocator, release-compat, cross, bench, compare, pg-restore, pg-catalog, pg-functions, pg-apps, tds-apps, oracle-apps, metrics-senders, syslog-senders, tls-clients, pg-follow, ss-follow, sqlalchemy-suite, unix-vms, browser, mobile, android, apple-mobile, other-cpus, deploy-templates, reproducible, unicode, arrow, compatibility]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

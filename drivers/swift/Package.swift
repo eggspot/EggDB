@@ -14,5 +14,6 @@ let package = Package(
         library,
         .target(name: "EggDB", dependencies: ["CEggDB"]),
         .testTarget(name: "EggDBTests", dependencies: ["EggDB"]),
+        .executableTarget(name: "EggDBBench", dependencies: ["EggDB"]),
     ]
 )
