@@ -366,6 +366,7 @@ pub(crate) fn create_table(
             .map_or(create.name.position, |column| column.name.position);
         indexes::check_orderable(columns[index].sql_type, position)?;
     }
+    let owned_sequences = sequence_backed_columns(create, &mut columns, &primary_key, dialect)?;
     check_auto_increment(create, &columns, &primary_key)?;
     if crate::sequences::relation_exists(writer, &create.name.text)? {
         if create.if_not_exists {
@@ -422,10 +423,11 @@ pub(crate) fn create_table(
         if definition.on_update_current_timestamp {
             table.set_on_update_current_timestamp(index, true);
         }
-        if definition.generated_always && definition.auto_increment {
+        let counted = table.columns[index].auto_increment;
+        if definition.generated_always && counted {
             table.set_identity(index, Some(IdentityGeneration::Always));
         }
-        if definition.auto_increment {
+        if counted {
             table.identity_seed = definition.identity_seed;
         } else if definition.default.is_some() {
             table.set_default_dialect(index, definition.default_dialect);
@@ -525,7 +527,75 @@ pub(crate) fn create_table(
         writer.store_prefix_in_lsm_tree(&rows_prefix(table.id))?;
     }
     constraints::register_references(writer, tables, &table)?;
+    for (index, options, identity) in owned_sequences {
+        crate::alter::attach_owned_sequence(
+            writer,
+            tables,
+            &table.name,
+            crate::alter::OwnedSequence {
+                column: &create.columns[index].name,
+                sequence: None,
+                options: &options,
+                identity,
+            },
+            dialect,
+        )?;
+    }
     Ok(QueryResult::command("CREATE TABLE"))
+}
+
+fn sequence_backed_columns(
+    create: &CreateTable,
+    columns: &mut [Column],
+    primary_key: &[usize],
+    dialect: Dialect,
+) -> SqlResult<Vec<(usize, crate::ast::SequenceOptions, Option<IdentityGeneration>)>> {
+    let generation = |definition: &crate::ast::ColumnDefinition| {
+        Some(if definition.generated_always {
+            IdentityGeneration::Always
+        } else {
+            IdentityGeneration::ByDefault
+        })
+    };
+    let mut owned = Vec::new();
+    for (index, definition) in create.columns.iter().enumerate() {
+        if let Some(options) = &definition.sequence_identity {
+            owned.push((index, options.clone(), generation(definition)));
+        }
+    }
+    if crate::temporary::is_temporary_name(&create.name.text) {
+        if let Some(&(index, _, _)) = owned.first() {
+            return Err(SqlError::not_supported(
+                "identity options with MAXVALUE, MINVALUE or CYCLE on a temporary table",
+            )
+            .at(create.columns[index].name.position));
+        }
+        return Ok(owned);
+    }
+    if dialect != Dialect::PostgreSql {
+        return Ok(owned);
+    }
+    let counted = (0..columns.len())
+        .find(|&index| columns[index].auto_increment && primary_key.contains(&index));
+    for (index, definition) in create.columns.iter().enumerate() {
+        if !columns[index].auto_increment || Some(index) == counted {
+            continue;
+        }
+        columns[index].auto_increment = false;
+        let options = crate::ast::SequenceOptions {
+            start: definition.identity_seed.map(|seed| seed.seed),
+            increment: definition.identity_seed.map(|seed| seed.increment),
+            ..crate::ast::SequenceOptions::default()
+        };
+        let identity = if definition.serial {
+            None
+        } else {
+            generation(definition)
+        };
+        owned.push((index, options, identity));
+    }
+    owned.sort_by_key(|(index, _, _)| *index);
+    Ok(owned)
 }
 
 fn unique_columns(create: &CreateTable) -> impl Iterator<Item = crate::ast::IndexSpec> + '_ {
@@ -705,6 +775,7 @@ pub(crate) fn drop_tables(
         indexes::delete_every_index_entry(writer, &table)?;
         constraints::unregister_references(writer, tables, &table)?;
         crate::sequences::drop_owned_by(writer, tables, &table.name, None)?;
+        crate::sequences::forget_identity_mark(writer, table.id)?;
         crate::comments::forget_owner(writer, &table.name)?;
         crate::triggers::remove_table_triggers(writer, &table.name)?;
         crate::partitions::forget(writer, &table.name)?;
@@ -2192,6 +2263,15 @@ impl<'a> StoredRows<'a> {
     }
 
     fn furthest_auto_value(
+        &self,
+        reader: &dyn KeyValueRead,
+        index: usize,
+    ) -> SqlResult<Option<i64>> {
+        let stored = self.furthest_stored_auto_value(reader, index)?;
+        crate::sequences::further_than_drawn(reader, self.table, self.identity_seed, stored)
+    }
+
+    fn furthest_stored_auto_value(
         &self,
         reader: &dyn KeyValueRead,
         index: usize,

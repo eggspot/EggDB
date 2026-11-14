@@ -1522,6 +1522,7 @@ pub(crate) struct ColumnDefinition {
     pub(crate) serial: bool,
     pub(crate) identity_seed: Option<crate::encoding::IdentitySeed>,
     pub(crate) generated_always: bool,
+    pub(crate) sequence_identity: Option<SequenceOptions>,
     pub(crate) on_update_current_timestamp: bool,
     pub(crate) unique: Option<Option<Name>>,
     pub(crate) constraints: Vec<ConstraintSpec>,

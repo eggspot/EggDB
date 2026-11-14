@@ -154,8 +154,9 @@ impl ParentIdentity {
         column: &Column,
     ) -> SqlResult<Value> {
         if !self.read_stored {
+            let stored = furthest_identity_value(reader, catalog, table, self.column, self.seed)?;
             if let Some(stored) =
-                furthest_identity_value(reader, catalog, table, self.column, self.seed)?
+                crate::sequences::further_than_drawn(reader, table, self.seed, stored)?
             {
                 self.reach(stored);
             }
@@ -331,8 +332,9 @@ pub(crate) fn next_identity_value(
         return Ok(None);
     };
     let seed = table.identity_seed();
-    Ok(seed.next_after(furthest_identity_value(
-        reader, catalog, table, column, seed,
+    let stored = furthest_identity_value(reader, catalog, table, column, seed)?;
+    Ok(seed.next_after(crate::sequences::further_than_drawn(
+        reader, table, seed, stored,
     )?))
 }
 

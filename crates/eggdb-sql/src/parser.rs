@@ -2337,6 +2337,7 @@ impl<'t> Parser<'t> {
             serial: serial.is_some(),
             identity_seed: None,
             generated_always: false,
+            sequence_identity: None,
             on_update_current_timestamp: false,
             unique: None,
             constraints: Vec::new(),
@@ -2513,9 +2514,17 @@ impl<'t> Parser<'t> {
             )
             .at(position));
         }
-        column.identity_seed = constraints::postgresql_identity_seed(&options, column.sql_type)
-            .map_err(|error| error.at(options_position))?;
-        column.auto_increment = true;
+        match constraints::postgresql_identity(&options, column.sql_type)
+            .map_err(|error| error.at(options_position))?
+        {
+            constraints::PostgresqlIdentity::Counted(seed) => {
+                column.identity_seed = seed;
+                column.auto_increment = true;
+            }
+            constraints::PostgresqlIdentity::OwnedSequence => {
+                column.sequence_identity = Some(options);
+            }
+        }
         column.generated_always = always;
         column.not_null = true;
         Ok(())

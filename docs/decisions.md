@@ -1197,3 +1197,4 @@ its full title with its status.
 - [D1170](decisions/D1170.md) Code-only batch 821 (M6a): User tables answer tableoid, ctid, xmin and PostgreSQL's other system columns
 - [D1171](decisions/D1171.md) Code-only batch 823 (M6a): Composite types get their pg_class row and tables their row type
 - [D1172](decisions/D1172.md) Code-only batch 824 (M6a): pgAdmin, DBeaver and SSMS checked in CI through pgAdmin's server mode, CloudBeaver and SMO
+- [D1173](decisions/D1173.md) Code-only batch 825 (M6a): Identity and serial sequences answer nextval and setval, any number of identities with any options, bound frame offsets

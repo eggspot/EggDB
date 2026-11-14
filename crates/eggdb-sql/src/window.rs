@@ -855,6 +855,18 @@ fn is_negative(value: &Value) -> bool {
     value.as_float().is_some_and(|number| number < 0.0)
 }
 
+fn untyped_offset_as_bigint(value: Value) -> SqlResult<Value> {
+    match value {
+        Value::Text(text) => text.trim().parse::<i64>().map(Value::BigInt).map_err(|_| {
+            SqlError::new(
+                SqlState::INVALID_TEXT_REPRESENTATION,
+                format!("invalid input syntax for type bigint: \"{text}\""),
+            )
+        }),
+        other => Ok(other),
+    }
+}
+
 fn checked_offset(value: Option<&Value>, which: &str, units: FrameUnits) -> SqlResult<()> {
     match value {
         None | Some(Value::Null) => Err(SqlError::new(
@@ -886,16 +898,19 @@ impl Offsets {
             row: &[],
             correlation: None,
         };
-        let start = spec
-            .start_offset
-            .as_ref()
-            .map(|expr| evaluator.eval(expr, None))
-            .transpose()?;
-        let end = spec
-            .end_offset
-            .as_ref()
-            .map(|expr| evaluator.eval(expr, None))
-            .transpose()?;
+        let counted = spec
+            .frame
+            .is_some_and(|frame| frame.units != FrameUnits::Range);
+        let offset = |expr: &Expr| -> SqlResult<Value> {
+            let value = evaluator.eval(expr, None)?;
+            if counted {
+                untyped_offset_as_bigint(value)
+            } else {
+                Ok(value)
+            }
+        };
+        let start = spec.start_offset.as_ref().map(offset).transpose()?;
+        let end = spec.end_offset.as_ref().map(offset).transpose()?;
         if let Some(frame) = spec.frame {
             if frame.start.has_offset() {
                 checked_offset(start.as_ref(), "starting", frame.units)

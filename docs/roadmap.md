@@ -804,7 +804,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   The requested level in `SHOW transaction_isolation`: **code written, unbuilt** (code-only mode,
   2026-11-11, D555); `relkind` `m`: **code written, unbuilt** (code-only mode, 2026-11-11, D556);
   zero-column tables: **code written, unbuilt** (code-only mode, 2026-11-11, D557); psycopg's named
-  cursors: **code written, unbuilt** (code-only mode, 2026-11-11, D558).
+  cursors: **code written, unbuilt** (code-only mode, 2026-11-11, D558); `nextval` of a `SERIAL` column's sequence,
+  two identity columns, identity `MAXVALUE`/`MINVALUE`/`CYCLE` and a bound frame offset: **code written, unbuilt**
+  (code-only mode, 2026-11-15, D1173). Left: the 272 failures, measured on the built suite.
 - Temporary tables and session locks carried across `USE` instead of refusing it (D294).
 - PostgreSQL's regression suite run from outside the repo, with its pass rate published and a
   stated minimum, as for every protocol and dialect (D10, D45). **Code written, unbuilt** (code-only mode, 2026-11-14, D1147):

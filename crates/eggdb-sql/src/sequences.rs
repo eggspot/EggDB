@@ -44,8 +44,49 @@ struct StatementSequences {
 }
 
 struct IdentityCounter {
+    table_id: u32,
     next: Option<i64>,
     increment: i64,
+    drawn: Option<i64>,
+}
+
+const IDENTITY_MARK_SPACE: u8 = 0x1B;
+
+fn identity_mark_key(table_id: u32) -> Vec<u8> {
+    let mut key = crate::encoding::NAMESPACE.to_vec();
+    key.push(IDENTITY_MARK_SPACE);
+    key.extend_from_slice(&table_id.to_be_bytes());
+    key
+}
+
+fn drawn_identity(reader: &dyn KeyValueRead, table_id: u32) -> SqlResult<Option<i64>> {
+    let mut found = None;
+    reader.get_with(&identity_mark_key(table_id), &mut |bytes| {
+        found = <[u8; 8]>::try_from(bytes).ok().map(i64::from_be_bytes);
+        Ok(())
+    })?;
+    Ok(found)
+}
+
+/// The furthest identity value of `table`: the furthest stored in its rows or the last one
+/// `nextval` or `setval` handed out on the identity's sequence, whichever lies further along.
+pub(crate) fn further_than_drawn(
+    reader: &dyn KeyValueRead,
+    table: &TableDefinition,
+    seed: crate::encoding::IdentitySeed,
+    furthest_stored: Option<i64>,
+) -> SqlResult<Option<i64>> {
+    let Some(drawn) = drawn_identity(reader, table.id)? else {
+        return Ok(furthest_stored);
+    };
+    Ok(Some(match furthest_stored {
+        Some(stored) if seed.is_beyond(stored, drawn) => stored,
+        _ => drawn,
+    }))
+}
+
+pub(crate) fn forget_identity_mark(writer: &mut dyn KeyValueWrite, table_id: u32) -> SqlResult<()> {
+    writer.delete(&identity_mark_key(table_id)).map(drop)
 }
 
 /// The name PostgreSQL gives the sequence behind `table`'s identity or serial `column`.
@@ -153,8 +194,10 @@ fn load_identity_counters(reader: &dyn KeyValueRead) -> SqlResult<()> {
             found.push((
                 name,
                 IdentityCounter {
+                    table_id: table.id,
                     next,
                     increment: table.identity_seed().increment,
+                    drawn: None,
                 },
             ));
         }
@@ -178,11 +221,11 @@ fn identity_counter<'s>(state: &'s StatementSequences, name: &str) -> Option<&'s
         .and_then(|identities| identities.get(name))
 }
 
-fn drawn_by_inserts(name: &str) -> SqlError {
-    SqlError::not_supported(format!(
-        "nextval and currval of \"{name}\", the sequence an identity column owns"
-    ))
-    .with_hint("Insert a row to take the column's next value; setval may set it to the value it already has.")
+fn identity_exhausted(name: &str) -> SqlError {
+    SqlError::new(
+        SqlState::SEQUENCE_GENERATOR_LIMIT_EXCEEDED,
+        format!("nextval: reached maximum value of sequence \"{name}\""),
+    )
 }
 
 pub(crate) fn load_all(reader: &dyn KeyValueRead) -> SqlResult<()> {
@@ -251,7 +294,26 @@ pub(crate) fn save_changed(writer: &mut dyn KeyValueWrite) -> SqlResult<()> {
             writer.put(&sequence_key(&name), &sequence.encode())?;
         }
     }
+    let marks: Vec<(u32, i64)> = STATEMENT.with(|state| {
+        state.borrow().last().map_or_else(Vec::new, |state| {
+            state
+                .identities
+                .iter()
+                .flat_map(HashMap::values)
+                .filter_map(|counter| counter.drawn.map(|drawn| (counter.table_id, drawn)))
+                .collect()
+        })
+    });
+    for (table_id, drawn) in marks {
+        writer.put(&identity_mark_key(table_id), &drawn.to_be_bytes())?;
+    }
     Ok(())
+}
+
+fn forget_drawn_identities(state: &mut StatementSequences) {
+    for counter in state.identities.iter_mut().flat_map(HashMap::values_mut) {
+        counter.drawn = None;
+    }
 }
 
 pub(crate) fn first_changing_function() -> &'static str {
@@ -267,6 +329,7 @@ pub(crate) fn forget_changes() {
     STATEMENT.with(|state| {
         if let Some(state) = state.borrow_mut().last_mut() {
             state.changed.clear();
+            forget_drawn_identities(state);
         }
     });
 }
@@ -275,6 +338,7 @@ pub(crate) fn mark_changes_committed() {
     STATEMENT.with(|state| {
         if let Some(state) = state.borrow_mut().last_mut() {
             state.changed.clear();
+            forget_drawn_identities(state);
             for (name, sequence) in &state.loaded {
                 if let Some(sequence) = sequence {
                     state
@@ -1345,8 +1409,18 @@ fn next_value(name: &str, sequence: &mut SequenceDefinition, dialect: Dialect) -
 
 fn nextval(name: &str) -> SqlResult<Value> {
     with_state(|state| {
-        if identity_counter(state, name).is_some() {
-            return Err(drawn_by_inserts(name));
+        if let Some(counter) = state
+            .identities
+            .as_mut()
+            .and_then(|identities| identities.get_mut(name))
+        {
+            let value = counter.next.ok_or_else(|| identity_exhausted(name))?;
+            counter.next = value.checked_add(counter.increment);
+            counter.drawn = Some(value);
+            mark_changed(state, name, NEXTVAL);
+            state.session.currval.insert(name.to_owned(), value);
+            state.session.lastval = Some(name.to_owned());
+            return Ok(Value::BigInt(value));
         }
         let dialect = state.dialect;
         let sequence = loaded(state, name)?;
@@ -1360,11 +1434,10 @@ fn nextval(name: &str) -> SqlResult<Value> {
 
 fn currval(name: &str) -> SqlResult<Value> {
     with_state(|state| {
-        if identity_counter(state, name).is_some() {
-            return Err(drawn_by_inserts(name));
-        }
         let dialect = state.dialect;
-        loaded(state, name)?;
+        if identity_counter(state, name).is_none() {
+            loaded(state, name)?;
+        }
         match state.session.currval.get(name) {
             Some(&value) => Ok(Value::BigInt(value)),
             None => Err(match dialect {
@@ -1437,19 +1510,27 @@ fn setval(name: &str, value: &Value, is_called: &Value) -> SqlResult<Value> {
         }
     };
     with_state(|state| {
-        if let Some(counter) = identity_counter(state, name) {
-            let next = if called {
+        if let Some(counter) = state
+            .identities
+            .as_mut()
+            .and_then(|identities| identities.get_mut(name))
+        {
+            let drawn = if called {
+                Some(number)
+            } else {
+                number.checked_sub(counter.increment)
+            };
+            counter.next = if called {
                 number.checked_add(counter.increment)
             } else {
                 Some(number)
             };
-            if counter.next.is_some() && next == counter.next {
-                return Ok(Value::BigInt(number));
+            counter.drawn = drawn;
+            mark_changed(state, name, "setval()");
+            if called {
+                state.session.currval.insert(name.to_owned(), number);
             }
-            return Err(SqlError::not_supported(format!(
-                "setval of \"{name}\", the sequence an identity column owns, to a value other than the one it holds"
-            ))
-            .with_hint("The column's next value follows its largest value; delete or insert rows to move it."));
+            return Ok(Value::BigInt(number));
         }
         let sequence = loaded(state, name)?;
         if number < sequence.min || number > sequence.max {

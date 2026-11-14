@@ -1737,6 +1737,43 @@ fn add_identity(
         )
         .at(column.position));
     }
+    attach_owned_sequence(
+        writer,
+        tables,
+        name,
+        OwnedSequence {
+            column,
+            sequence,
+            options,
+            identity: Some(generation),
+        },
+        dialect,
+    )
+}
+
+pub(crate) struct OwnedSequence<'a> {
+    pub(crate) column: &'a Name,
+    pub(crate) sequence: Option<&'a Name>,
+    pub(crate) options: &'a SequenceOptions,
+    pub(crate) identity: Option<IdentityGeneration>,
+}
+
+pub(crate) fn attach_owned_sequence(
+    writer: &mut dyn KeyValueWrite,
+    tables: &mut TableCache,
+    name: &str,
+    request: OwnedSequence<'_>,
+    dialect: Dialect,
+) -> SqlResult<()> {
+    let OwnedSequence {
+        column,
+        sequence,
+        options,
+        identity,
+    } = request;
+    let table = current(writer, tables, name)?;
+    let index = column_index(&table, column, dialect)?;
+    let target = &table.columns[index];
     let schema = crate::schemas::schema_of(name);
     let sequence_name = match sequence {
         Some(given) if crate::schemas::is_qualified(&given.text) => {
@@ -1791,7 +1828,7 @@ fn add_identity(
     target.default = Some(default);
     target.auto_increment = false;
     table.set_default_dialect(index, Dialect::PostgreSql);
-    table.set_identity(index, Some(generation));
+    table.set_identity(index, identity);
     save(writer, &table)
 }
 

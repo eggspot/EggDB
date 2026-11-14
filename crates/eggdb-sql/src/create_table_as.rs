@@ -368,6 +368,7 @@ fn table_definition(
             serial: false,
             identity_seed: None,
             generated_always: false,
+            sequence_identity: None,
             on_update_current_timestamp: false,
             unique: None,
             constraints: Vec::new(),

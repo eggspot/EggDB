@@ -31,10 +31,15 @@ impl ConstraintTail {
     }
 }
 
-pub(super) fn postgresql_identity_seed(
+pub(super) enum PostgresqlIdentity {
+    Counted(Option<IdentitySeed>),
+    OwnedSequence,
+}
+
+pub(super) fn postgresql_identity(
     options: &SequenceOptions,
     sql_type: SqlType,
-) -> SqlResult<Option<IdentitySeed>> {
+) -> SqlResult<PostgresqlIdentity> {
     let invalid = |message: String| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message);
     let (low, high) = integer_type_range(sql_type).unwrap_or((i64::MIN, i64::MAX));
     let increment = options.increment.unwrap_or(1);
@@ -91,15 +96,15 @@ pub(super) fn postgresql_identity_seed(
         min.is_some_and(|min| min > low)
     };
     if limited || options.cycle == Some(true) || options.restart.is_some() {
-        return Err(SqlError::not_supported(
-            "identity options that end or cycle the identity before its type's range (MAXVALUE, MINVALUE, CYCLE) are not supported yet",
-        ));
+        return Ok(PostgresqlIdentity::OwnedSequence);
     }
     let seed = IdentitySeed {
         seed: start,
         increment,
     };
-    Ok((seed != IdentitySeed::ONE_BY_ONE).then_some(seed))
+    Ok(PostgresqlIdentity::Counted(
+        (seed != IdentitySeed::ONE_BY_ONE).then_some(seed),
+    ))
 }
 
 const MAX_ALTER_ACTIONS: usize = 1024;

@@ -247,3 +247,23 @@ fn qualify_keeps_rows_after_window_functions() {
         "r\ne\nSELECT 1"
     );
 }
+
+#[test]
+fn an_untyped_rows_offset_is_read_as_bigint_as_a_bound_parameter_is() {
+    let store = MemoryStore::default();
+    let mut session = with_sales(&store);
+    assert_eq!(
+        answer(
+            &mut session,
+            "SELECT id, sum(a) OVER (ORDER BY id ROWS BETWEEN '1' PRECEDING AND CURRENT ROW) AS t FROM s ORDER BY id"
+        ),
+        "id|t\n1|10\n2|30\n3|40\n4|25\n5|20\nSELECT 5"
+    );
+    assert_eq!(
+        state(
+            &mut session,
+            "SELECT sum(a) OVER (ORDER BY id ROWS BETWEEN 'one' PRECEDING AND CURRENT ROW) FROM s"
+        ),
+        "22P02"
+    );
+}
