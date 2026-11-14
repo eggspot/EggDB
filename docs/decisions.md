@@ -1164,3 +1164,4 @@ its full title with its status.
 - [D1137](decisions/D1137.md) Code-only batch 786 (M5): extended statistics with CREATE STATISTICS, ndistinct and dependencies
 - [D1138](decisions/D1138.md) Code-only batch 787 (M5): the top-N heap keeps ties for WITH TIES limits
 - [D1139](decisions/D1139.md) Code-only batch 788 (M5): set-returning functions bounded by a parameter or fixed-expression LIMIT
+- [D1140](decisions/D1140.md) Code-only batch 789 (M5): TPC-C's five transactions measured against PostgreSQL and MySQL

@@ -559,7 +559,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `TABLESAMPLE`, t-digest and the other `APPROX_*` functions (D40). `TABLESAMPLE`: **code written, unbuilt** (code-only
   mode, 2026-11-11, D541); the `APPROX_PERCENTILE` family, exact: **code written, unbuilt** (D542); t-digest
   sketches for `APPROX_PERCENTILE_CONT`: **code written, unbuilt** (code-only mode, 2026-11-12, D620).
-- TPC-C against PostgreSQL and MySQL (D7).
+- TPC-C against PostgreSQL and MySQL (D7). **Code written, unbuilt** (code-only mode, 2026-11-14, D1140): `crates/eggdb-tpcc-compare` and
+  CI's `tpcc-compare` job; an audited run stays with the owner (cost).
 - Partial, expression and covering (`INCLUDE`) indexes, `CREATE INDEX CONCURRENTLY` and `NULLS NOT
   DISTINCT` (D32).
   `CONCURRENTLY` and storage parameters: **code written, unbuilt** (code-only mode, 2026-11-11, D543).
