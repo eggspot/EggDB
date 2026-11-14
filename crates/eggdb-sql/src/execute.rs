@@ -4156,7 +4156,7 @@ struct Window {
 }
 
 fn top_n_wanted(window: Window, distinct_on: &[SortKey<'_>]) -> Option<usize> {
-    if window.limit.with_ties || window.limit.percent.is_some() || !distinct_on.is_empty() {
+    if window.limit.percent.is_some() || !distinct_on.is_empty() {
         return None;
     }
     let count = usize::try_from(window.limit.count?).ok()?;
@@ -4450,8 +4450,13 @@ fn sorted_rows(
     let correlation = source.correlation;
     let mut rows = Vec::new();
     let mut seen = window.distinct.then(HashSet::new);
-    let mut top = top_n_wanted(window, keys_of.distinct_on)
-        .map(|wanted| crate::top_n::TopRows::new(order_by, wanted));
+    let mut top = top_n_wanted(window, keys_of.distinct_on).map(|wanted| {
+        if window.limit.with_ties {
+            crate::top_n::TopRows::with_ties(order_by, wanted)
+        } else {
+            crate::top_n::TopRows::new(order_by, wanted)
+        }
+    });
     let mut sortable = crate::top_n::SortabilityCheck::new(order_by.len());
     source.for_each_row(&mut |row| {
         let output = projection.project(&row)?;
@@ -4496,7 +4501,15 @@ fn sorted_rows(
         sortable.finish()?;
         let kept = top.into_sorted();
         let take = window.limit.rows_to_take(kept.len());
-        return Ok(rows_within_limit(kept.into_iter(), window.skip, take, None));
+        let tied = |left: &Vec<Value>, right: &Vec<Value>| {
+            compare_sort_keys(order_by, left, right) == Ordering::Equal
+        };
+        let ties: TieCheck<'_, Vec<Value>> = if window.limit.with_ties {
+            Some(&tied)
+        } else {
+            None
+        };
+        return Ok(rows_within_limit(kept.into_iter(), window.skip, take, ties));
     }
     check_sortable(order_by, &rows)?;
     rows.sort_by(|(left, _), (right, _)| compare_sort_keys(order_by, left, right));

@@ -545,7 +545,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `benchmarks/baseline.txt`, with the Linux join's `perf` profiles (item 19e, D7, D100).
 - The 1.0 check of every compare line on Linux and macOS in CI's `compare` job (item 19e, D7).
 - Sorts, joins and groups that spill to disk instead of failing at 1 GiB, and a top-N for
-  `WITH TIES`, `PERCENT` and `DISTINCT ON` limits, which still sort every row (D100, D341).
+  `WITH TIES`, `PERCENT` and `DISTINCT ON` limits, which still sort every row (D100, D341). The top-N for `WITH TIES`: **code written, unbuilt** (code-only mode, 2026-11-14, D1138);
+  left: spilling to disk, and `PERCENT` and `DISTINCT ON`.
 - A resumable executor that streams rows, so portals, the C API and `COPY TO` send rows as they
   come (D284, D287, D293).
 - Set-returning functions stopped by a `LIMIT` given as a parameter or an expression, joined with

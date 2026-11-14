@@ -1162,3 +1162,4 @@ its full title with its status.
 - [D1135](decisions/D1135.md) Code-only batch 784 (M4): joules per query, idle wake-ups and serve's time to its first line in the footprint pass
 - [D1136](decisions/D1136.md) Code-only batch 785 (M5): inner joins ordered by estimated size from ANALYZE statistics, with histograms for ranges
 - [D1137](decisions/D1137.md) Code-only batch 786 (M5): extended statistics with CREATE STATISTICS, ndistinct and dependencies
+- [D1138](decisions/D1138.md) Code-only batch 787 (M5): the top-N heap keeps ties for WITH TIES limits
