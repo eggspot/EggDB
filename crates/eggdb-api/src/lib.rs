@@ -21,6 +21,7 @@ mod grpc;
 mod live;
 mod live_ws;
 mod realtime_channels;
+mod saml_pages;
 mod odata;
 mod ogc;
 mod ogc_tiles;
@@ -394,6 +395,9 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     /// Answers one HTTP request; the rows of a `GET` are a [`StreamedResponse`], written as
     /// they are sent.
     pub fn reply(&self, request: &Request) -> Reply<'s> {
+        if let Some(page) = self.saml_page(request.path.trim_matches('/'), request) {
+            return page.into();
+        }
         match self.caller(request) {
             Caller::Server => self.serve(request),
             Caller::Role(role, claims) => self.acting_as(role, claims).serve(request),

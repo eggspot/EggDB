@@ -64,6 +64,8 @@ pub enum AuthMethod {
     /// The stored password and a one-time code from the role's authenticator app, sent in clear
     /// text as `password:code` (D1187).
     PasswordTotp,
+    /// A one-time ticket from a SAML sign-in through the REST listener (D1188).
+    Saml(crate::saml::SamlConfig),
     /// An API key of the role, sent as the password and checked against the hashes
     /// `CREATE EXTENSION eggdb_api_keys` keeps.
     ApiKey,
@@ -73,7 +75,7 @@ pub enum AuthMethod {
 
 impl AuthMethod {
     /// The method's name as a rule file writes it: `scram-sha-256`, `ldap`, `jwt`, `oauth`,
-    /// `cert`, `gss`, `password+totp`, `apikey` or `reject`.
+    /// `cert`, `gss`, `password+totp`, `saml`, `apikey` or `reject`.
     pub fn name(&self) -> &'static str {
         match self {
             Self::ScramSha256 => "scram-sha-256",
@@ -83,6 +85,7 @@ impl AuthMethod {
             Self::Certificate => "cert",
             Self::Gss(_) => "gss",
             Self::PasswordTotp => "password+totp",
+            Self::Saml(_) => "saml",
             Self::ApiKey => "apikey",
             Self::Reject => "reject",
         }
@@ -109,6 +112,16 @@ impl AuthMethod {
                     Err(error) => Err(error.to_string()),
                 }
             }
+            Self::Saml(config) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+                if config.redeem_ticket(user, secret, now) {
+                    Ok(())
+                } else {
+                    Err("the SAML ticket is not a live ticket of this user".to_owned())
+                }
+            }
             Self::ApiKey if api_key_ok(secret) => Ok(()),
             Self::ApiKey => Err("the API key is not a live key of this role".to_owned()),
             _ => Err(format!("{} takes no password", self.name())),
@@ -118,7 +131,7 @@ impl AuthMethod {
     /// Whether the method has the client send its password or token in clear text, so it is
     /// allowed only over TLS or a local socket.
     pub fn sends_secret_in_clear(&self) -> bool {
-        matches!(self, Self::Ldap(_) | Self::Jwt { .. } | Self::OAuthBearer { .. } | Self::ApiKey | Self::PasswordTotp)
+        matches!(self, Self::Ldap(_) | Self::Jwt { .. } | Self::OAuthBearer { .. } | Self::ApiKey | Self::PasswordTotp | Self::Saml(_))
     }
 }
 
@@ -274,6 +287,29 @@ impl AuthRules {
                 "reject" => AuthMethod::Reject,
                 "apikey" => AuthMethod::ApiKey,
                 "password+totp" => AuthMethod::PasswordTotp,
+                "saml" => {
+                    let path = required(&found, "idp_certificate", line)?;
+                    let pem = read_key_set(Path::new(path)).map_err(|error| RulesError {
+                        line,
+                        message: format!("cannot read {path}: {error}"),
+                    })?;
+                    let certificate = eggdb_tls::pem::pem_decode_all(&pem)
+                        .ok()
+                        .and_then(|blocks| blocks.into_iter().find(|block| block.label == "CERTIFICATE"))
+                        .and_then(|block| eggdb_tls::x509::Certificate::from_der(&block.contents).ok())
+                        .ok_or_else(|| RulesError {
+                            line,
+                            message: format!("{path} holds no certificate"),
+                        })?;
+                    AuthMethod::Saml(crate::saml::SamlConfig::new(
+                        required(&found, "idp_entity", line)?.to_owned(),
+                        required(&found, "idp_sso", line)?.to_owned(),
+                        certificate,
+                        required(&found, "sp_entity", line)?.to_owned(),
+                        required(&found, "acs", line)?.to_owned(),
+                        found.get("name_attribute").map(|name| (*name).to_owned()),
+                    ))
+                }
                 "ldap" => {
                     let written = required(&found, "server", line)?;
                     let (server, mut security) = if let Some(rest) = written.strip_prefix("ldaps://") {
@@ -386,7 +422,7 @@ impl AuthRules {
                     return Err(RulesError {
                         line,
                         message: format!(
-                            "unknown method {other}; use scram-sha-256, password+totp, ldap, jwt, oauth, cert, gss, apikey or reject"
+                            "unknown method {other}; use scram-sha-256, password+totp, ldap, jwt, oauth, saml, cert, gss, apikey or reject"
                         ),
                     });
                 }
@@ -418,6 +454,15 @@ impl AuthRules {
         let folder = path.parent().unwrap_or(Path::new("."));
         Self::parse(&text, &|key_set| {
             std::fs::read_to_string(folder.join(key_set))
+        })
+    }
+
+    /// The SAML identity provider the first `saml` rule names, which the REST listener's sign-in
+    /// pages use.
+    pub fn saml(&self) -> Option<&crate::saml::SamlConfig> {
+        self.rules.iter().find_map(|rule| match &rule.method {
+            AuthMethod::Saml(config) => Some(config),
+            _ => None,
         })
     }
 

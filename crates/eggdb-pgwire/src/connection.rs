@@ -705,6 +705,7 @@ fn authenticate_externally<S: KeyValueStore>(
         | eggdb_auth::AuthMethod::Certificate
         | eggdb_auth::AuthMethod::Gss(_)
         | eggdb_auth::AuthMethod::OAuthBearer { .. } => Err("no external method".to_owned()),
+        eggdb_auth::AuthMethod::Saml(_) => method.check_secret(user, &secret, &|_| false),
     };
     if let Err(why) = checked {
         return refuse_login(wire, shared, user, &why);

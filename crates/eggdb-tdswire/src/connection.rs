@@ -522,7 +522,10 @@ fn check_login<D: DatabaseDirectory>(
                     && may_log_in()
             }
             (
-                eggdb_auth::AuthMethod::Ldap(_) | eggdb_auth::AuthMethod::Jwt { .. } | eggdb_auth::AuthMethod::ApiKey,
+                eggdb_auth::AuthMethod::Ldap(_)
+                | eggdb_auth::AuthMethod::Jwt { .. }
+                | eggdb_auth::AuthMethod::ApiKey
+                | eggdb_auth::AuthMethod::Saml(_),
                 Some(password),
             ) => {
                 let api_key_ok = |key: &str| {

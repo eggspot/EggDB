@@ -864,7 +864,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   libpq's device flow checked against EggDB in CI: **code written, unbuilt** (code-only mode, 2026-11-15, D1186).
 - SAML, API keys and multi-factor sign-in for interactive tools (D22). API keys (`CREATE EXTENSION eggdb_api_keys`, the `apikey` rule): **code written,
   unbuilt** (code-only mode, 2026-11-12, D820); multi-factor sign-in with one-time codes (`eggdb_mfa`, `password+totp`): **code
-  written, unbuilt** (code-only mode, 2026-11-15, D1187). Left: SAML.
+  written, unbuilt** (code-only mode, 2026-11-15, D1187); SAML sign-in with one-time tickets: **code written, unbuilt**
+  (code-only mode, 2026-11-15, D1188).
 - External authentication rules on the MySQL and TDS listeners, and rules by address or database
   (D185). Rules by address or database (`database=`, `address=`) on the PostgreSQL listener: **code written,
   unbuilt** (code-only mode, 2026-11-12, D821); the rule file on the MySQL listener: **code written, unbuilt**
