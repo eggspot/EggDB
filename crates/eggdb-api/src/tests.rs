@@ -920,3 +920,32 @@ fn grpc_reflection_lists_services_and_describes_them() {
     let missing = api.stream_message(&headers, &elsewhere).concat();
     assert!(contains(&missing, b"is not one of EggDB's gRPC symbols"));
 }
+
+#[test]
+fn realtime_channels_join_postgres_changes_and_answer_heartbeats() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session
+        .execute("CREATE TABLE books (id integer PRIMARY KEY, title text)", &mut |_| {})
+        .unwrap();
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let answered = websocket_session(
+        &endpoint,
+        "/realtime/v1/websocket",
+        "",
+        &[
+            "{\"topic\":\"phoenix\",\"event\":\"heartbeat\",\"payload\":{},\"ref\":\"1\"}",
+            "{\"topic\":\"realtime:books-feed\",\"event\":\"phx_join\",\"payload\":{\"config\":{\"broadcast\":{\"self\":true},\"postgres_changes\":[{\"event\":\"INSERT\",\"schema\":\"public\",\"table\":\"books\",\"filter\":\"id=gt.10\"}]}},\"ref\":\"2\",\"join_ref\":\"2\"}",
+            "{\"topic\":\"realtime:books-feed\",\"event\":\"broadcast\",\"payload\":{\"event\":\"cursor\",\"x\":1},\"ref\":\"3\",\"join_ref\":\"2\"}",
+            "{\"topic\":\"realtime:missing\",\"event\":\"phx_join\",\"payload\":{\"config\":{\"postgres_changes\":[{\"event\":\"*\",\"schema\":\"public\",\"table\":\"nothing\"}]}},\"ref\":\"4\"}",
+        ],
+    );
+    assert!(answered.contains("{\"topic\":\"phoenix\",\"event\":\"phx_reply\",\"payload\":{\"status\":\"ok\",\"response\":{}},\"ref\":\"1\"}"), "{answered}");
+    assert!(
+        answered.contains("\"response\":{\"postgres_changes\":[{\"id\":1,\"event\":\"INSERT\",\"schema\":\"public\",\"table\":\"books\",\"filter\":\"id=gt.10\"}]}"),
+        "{answered}"
+    );
+    assert!(answered.contains("\"message\":\"Subscribed to PostgreSQL\""), "{answered}");
+    assert!(answered.contains("\"event\":\"broadcast\",\"payload\":{\"event\":\"cursor\",\"x\":1}"), "{answered}");
+    assert!(answered.contains("\"topic\":\"realtime:missing\",\"event\":\"phx_reply\",\"payload\":{\"status\":\"error\""), "{answered}");
+}

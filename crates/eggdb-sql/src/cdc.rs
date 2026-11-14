@@ -721,6 +721,104 @@ fn captured_events(
     Ok(events)
 }
 
+/// One row change the engine captured without triggers (D1030), for a follower that reads
+/// changes without moving the delivery position, such as a realtime subscription (D1182).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedChange {
+    /// The capture sequence of the commit that made it.
+    pub sequence: u64,
+    /// The table's schema.
+    pub schema: String,
+    /// The table's name.
+    pub table: String,
+    /// `INSERT`, `UPDATE` or `DELETE`.
+    pub kind: &'static str,
+    /// The row before the commit, as a JSON object, unless it was inserted.
+    pub before: Option<String>,
+    /// The row after the commit, as a JSON object, unless it was deleted.
+    pub after: Option<String>,
+}
+
+/// The newest capture sequence, where a follower that wants only new changes starts; 0 when
+/// nothing was captured.
+pub fn latest_capture_sequence<S: KeyValueStore>(store: &S) -> SqlResult<u64> {
+    let read = store.begin_read()?;
+    let end = crate::encoding::prefix_end(CAPTURE_PREFIX);
+    let mut latest = 0;
+    read.scan(CAPTURE_PREFIX, &end, crate::store::ScanDirection::Backward, &mut |key, _| {
+        latest = key
+            .get(CAPTURE_PREFIX.len()..)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_be_bytes)
+            .unwrap_or_default();
+        Ok(false)
+    })?;
+    Ok(latest)
+}
+
+/// The last capture sequence read and the row changes of the captured commits after
+/// `after_sequence`, at most `limit` commits, in commit order, without moving any consumer's
+/// position. Records already removed because every consumer passed them are not seen, so a
+/// follower is best-effort where a consumer is at-least-once.
+pub fn captured_changes_after<S: KeyValueStore>(
+    store: &S,
+    after_sequence: u64,
+    limit: u64,
+) -> SqlResult<(u64, Vec<CapturedChange>)> {
+    let read = store.begin_read()?;
+    let mut start = CAPTURE_PREFIX.to_vec();
+    start.extend_from_slice(&after_sequence.saturating_add(1).to_be_bytes());
+    let end = crate::encoding::prefix_end(CAPTURE_PREFIX);
+    let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
+    read.scan(&start, &end, crate::store::ScanDirection::Forward, &mut |key, value| {
+        let sequence = key
+            .get(CAPTURE_PREFIX.len()..)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_be_bytes)
+            .unwrap_or_default();
+        records.push((sequence, value.to_vec()));
+        Ok((records.len() as u64) < limit)
+    })?;
+    let Some(&(last, _)) = records.last() else {
+        return Ok((after_sequence, Vec::new()));
+    };
+    let tables = table_definitions(&read)?;
+    drop(read);
+    let id_at = crate::encoding::NAMESPACE.len() + 1;
+    let mut changes = Vec::new();
+    for (sequence, value) in records {
+        let keys = decode_capture_record(&value).ok_or_else(|| crate::encoding::corrupt("captured changes"))?;
+        for (key, before, after) in &keys {
+            let Some(id) = key.get(id_at..id_at + 4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_be_bytes) else {
+                continue;
+            };
+            let Some(definition) = tables.get(&id) else {
+                continue;
+            };
+            let schema = crate::schemas::schema_of(&definition.name);
+            let schema = if schema.is_empty() { crate::schemas::DEFAULT_SCHEMA } else { schema };
+            if schema == "eggdb_cdc" {
+                continue;
+            }
+            let kind = match (before, after) {
+                (None, Some(_)) => "INSERT",
+                (Some(_), Some(_)) => "UPDATE",
+                (Some(_), None) => "DELETE",
+                (None, None) => continue,
+            };
+            changes.push(CapturedChange {
+                sequence,
+                schema: schema.to_owned(),
+                table: crate::schemas::base_name(&definition.name).to_owned(),
+                kind,
+                before: before.as_deref().map(|stored| row_json(definition, stored)).transpose()?,
+                after: after.as_deref().map(|stored| row_json(definition, stored)).transpose()?,
+            });
+        }
+    }
+    Ok((last, changes))
+}
+
 /// Hands the row changes the engine captured without triggers (D1030), commit by commit and
 /// in commit order, to `deliver` as Debezium-style JSON events with full `before` and `after`
 /// rows, and moves its position past each commit once every event of it was accepted, removing

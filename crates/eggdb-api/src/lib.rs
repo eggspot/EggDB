@@ -20,6 +20,7 @@ mod graphql_schema;
 mod grpc;
 mod live;
 mod live_ws;
+mod realtime_channels;
 mod odata;
 mod ogc;
 mod ogc_tiles;
@@ -153,6 +154,18 @@ fn row_json(names: &[String], row: &[Value]) -> String {
     format!("{{{}}}", fields.join(","))
 }
 
+fn websocket_token(request: &Request) -> Option<String> {
+    request
+        .query
+        .as_deref()
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| matches!(*name, "apikey" | "access_token"))
+        .map(|(_, value)| request::percent_decode(value))
+        .filter(|token| token.contains('.'))
+}
+
 fn rows_json(result: &QueryResult) -> String {
     let names = column_names(result);
     let rows: Vec<String> = result
@@ -238,9 +251,13 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
     }
 
     fn caller(&self, request: &Request) -> Caller {
+        let query_token = (eggdb_http::wants_websocket(request) && request.header("authorization").is_none())
+            .then(|| websocket_token(request))
+            .flatten();
         let Some(token) = request
             .header("authorization")
             .and_then(|header| header.strip_prefix("Bearer "))
+            .or(query_token.as_deref())
         else {
             return if self.authorized(request) {
                 Caller::Server
@@ -416,7 +433,8 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
             return match path {
                 "graphql" | "v1/graphql" => self.graphql_websocket(request),
                 "realtime" => self.live_websocket(request),
-                _ => failure(404, "PGRST125", "WebSockets are served at /graphql and /realtime").into(),
+                "realtime/v1/websocket" => self.realtime_channels(request),
+                _ => failure(404, "PGRST125", "WebSockets are served at /graphql, /realtime and /realtime/v1/websocket").into(),
             };
         }
         if path == "graphql" || path == "v1/graphql" {
