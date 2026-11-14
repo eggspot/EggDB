@@ -885,3 +885,38 @@ fn graphql_and_live_rows_subscribe_over_websockets() {
         "{rows}"
     );
 }
+
+#[test]
+fn grpc_reflection_lists_services_and_describes_them() {
+    use eggdb_http2::Handler;
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session
+        .execute("CREATE TABLE books (id integer PRIMARY KEY, title text)", &mut |_| {})
+        .unwrap();
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let api = crate::GrpcApi::new(&endpoint);
+    let headers = vec![
+        (":method".to_owned(), "POST".to_owned()),
+        (":path".to_owned(), "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo".to_owned()),
+        ("content-type".to_owned(), "application/grpc".to_owned()),
+        (
+            "authorization".to_owned(),
+            format!("Basic {}", eggdb_crypto::base64_encode(b"eggdb:secret")),
+        ),
+    ];
+    assert!(api.streams(&headers));
+    let listed = api.stream_message(&headers, &[0x3a, 0x01, b'*']).concat();
+    assert!(contains(&listed, b"eggdb.v1.BooksService"));
+    assert!(contains(&listed, b"grpc.reflection.v1.ServerReflection"));
+    let mut symbol = vec![0x22, 21];
+    symbol.extend_from_slice(b"eggdb.v1.BooksService");
+    let described = api.stream_message(&headers, &symbol).concat();
+    for expected in [&b"eggdb/v1/eggdb.proto"[..], b"BooksListRequest", b".eggdb.v1.BooksKey", b"proto3"] {
+        assert!(contains(&described, expected), "{expected:?}");
+    }
+    let mut elsewhere = vec![0x22, 11];
+    elsewhere.extend_from_slice(b"other.Thing");
+    let missing = api.stream_message(&headers, &elsewhere).concat();
+    assert!(contains(&missing, b"is not one of EggDB's gRPC symbols"));
+}

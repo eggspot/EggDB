@@ -2,7 +2,9 @@
 //! `eggdb.v1.<Table>Service` with `List` (server streaming), `Get`, `Insert`, `Update` and
 //! `Delete`, over messages whose fields are the table's columns, numbered by their position.
 //! The `.proto` file is served at `GET /grpc/eggdb.proto` on the REST listener and printed by
-//! [`Endpoint::grpc_proto`]. Calls run as SQL in the caller's session, signed in with the same
+//! [`Endpoint::grpc_proto`], and the same descriptor answers gRPC server reflection
+//! (`grpc.reflection.v1` and `v1alpha`, D1181), so `grpcurl` and Postman find the services
+//! without it. Calls run as SQL in the caller's session, signed in with the same
 //! `authorization` metadata the REST API takes. gRPC is a trademark of The Linux Foundation;
 //! EggDB is compatible with its protocol.
 
@@ -14,6 +16,15 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const PACKAGE: &str = "eggdb.v1";
+const FILE_NAME: &str = "eggdb/v1/eggdb.proto";
+const REFLECTION_PATHS: [&str; 2] = [
+    "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+    "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+];
+const REFLECTION_SERVICES: [&str; 2] = ["grpc.reflection.v1.ServerReflection", "grpc.reflection.v1alpha.ServerReflection"];
+const LABEL_OPTIONAL: u64 = 1;
+const LABEL_REPEATED: u64 = 3;
+const TYPE_MESSAGE: u64 = 11;
 const MOST_ROWS: u64 = 100_000;
 const ACCEPT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const LIMIT_FIELD: u32 = 1;
@@ -42,6 +53,18 @@ impl ProtoKind {
             "boolean" => Self::Bool,
             "bytea" => Self::Bytes,
             _ => Self::Text,
+        }
+    }
+
+    fn descriptor_type(self) -> u64 {
+        match self {
+            Self::Double => 1,
+            Self::Float => 2,
+            Self::Int64 => 3,
+            Self::Int32 => 5,
+            Self::Bool => 8,
+            Self::Text => 9,
+            Self::Bytes => 12,
         }
     }
 
@@ -325,6 +348,157 @@ fn proto_text(tables: &[Table]) -> String {
     text
 }
 
+fn put_bytes(out: &mut Vec<u8>, number: u32, bytes: &[u8]) {
+    put_tag(out, number, 2);
+    put_varint(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+fn put_number(out: &mut Vec<u8>, number: u32, value: u64) {
+    put_tag(out, number, 0);
+    put_varint(out, value);
+}
+
+struct FieldDescriptor<'n> {
+    name: &'n str,
+    number: u64,
+    kind: Option<ProtoKind>,
+    message: Option<String>,
+    optional_at: Option<u64>,
+    repeated: bool,
+}
+
+fn field_descriptor(field: &FieldDescriptor<'_>) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, 1, field.name.as_bytes());
+    put_number(&mut out, 3, field.number);
+    put_number(&mut out, 4, if field.repeated { LABEL_REPEATED } else { LABEL_OPTIONAL });
+    match (&field.message, field.kind) {
+        (Some(message), _) => {
+            put_number(&mut out, 5, TYPE_MESSAGE);
+            put_bytes(&mut out, 6, format!(".{PACKAGE}.{message}").as_bytes());
+        }
+        (None, Some(kind)) => put_number(&mut out, 5, kind.descriptor_type()),
+        (None, None) => {}
+    }
+    if let Some(oneof) = field.optional_at {
+        put_number(&mut out, 9, oneof);
+    }
+    put_bytes(&mut out, 10, field.name.as_bytes());
+    if field.optional_at.is_some() {
+        put_number(&mut out, 17, 1);
+    }
+    out
+}
+
+fn message_descriptor(name: &str, fields: &[FieldDescriptor<'_>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, 1, name.as_bytes());
+    for field in fields {
+        put_bytes(&mut out, 2, &field_descriptor(field));
+    }
+    for field in fields.iter().filter(|field| field.optional_at.is_some()) {
+        let mut oneof = Vec::new();
+        put_bytes(&mut oneof, 1, format!("_{}", field.name).as_bytes());
+        put_bytes(&mut out, 8, &oneof);
+    }
+    out
+}
+
+fn method_descriptor(name: &str, input: &str, output: &str, server_streaming: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, 1, name.as_bytes());
+    put_bytes(&mut out, 2, format!(".{PACKAGE}.{input}").as_bytes());
+    put_bytes(&mut out, 3, format!(".{PACKAGE}.{output}").as_bytes());
+    if server_streaming {
+        put_number(&mut out, 6, 1);
+    }
+    out
+}
+
+fn file_descriptor(tables: &[Table]) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, 1, FILE_NAME.as_bytes());
+    put_bytes(&mut out, 2, PACKAGE.as_bytes());
+    let plain = |name: &'static str, number: u64, kind: ProtoKind| FieldDescriptor {
+        name,
+        number,
+        kind: Some(kind),
+        message: None,
+        optional_at: None,
+        repeated: false,
+    };
+    put_bytes(&mut out, 4, &message_descriptor("DeleteResult", &[plain("deleted", 1, ProtoKind::Int64)]));
+    for table in tables {
+        let message = &table.message;
+        let mut optional = 0u64;
+        let row: Vec<FieldDescriptor<'_>> = table
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(at, column)| {
+                let field = FieldDescriptor {
+                    name: &column.name,
+                    number: (at + 1) as u64,
+                    kind: Some(column.kind),
+                    message: None,
+                    optional_at: Some(optional),
+                    repeated: false,
+                };
+                optional += 1;
+                field
+            })
+            .collect();
+        put_bytes(&mut out, 4, &message_descriptor(message, &row));
+        let key: Vec<FieldDescriptor<'_>> = table
+            .keys()
+            .map(|(at, column)| FieldDescriptor {
+                name: &column.name,
+                number: (at + 1) as u64,
+                kind: Some(column.kind),
+                message: None,
+                optional_at: None,
+                repeated: false,
+            })
+            .collect();
+        put_bytes(&mut out, 4, &message_descriptor(&format!("{message}Key"), &key));
+        let list = [
+            FieldDescriptor { optional_at: Some(0), ..plain("limit", u64::from(LIMIT_FIELD), ProtoKind::Int64) },
+            FieldDescriptor { optional_at: Some(1), ..plain("offset", u64::from(OFFSET_FIELD), ProtoKind::Int64) },
+            FieldDescriptor { optional_at: Some(2), ..plain("order_by", u64::from(ORDER_BY_FIELD), ProtoKind::Text) },
+            FieldDescriptor {
+                name: "where",
+                number: u64::from(WHERE_FIELD),
+                kind: None,
+                message: Some(message.clone()),
+                optional_at: None,
+                repeated: false,
+            },
+        ];
+        put_bytes(&mut out, 4, &message_descriptor(&format!("{message}ListRequest"), &list));
+    }
+    for table in tables {
+        let message = &table.message;
+        let mut service = Vec::new();
+        put_bytes(&mut service, 1, format!("{message}Service").as_bytes());
+        put_bytes(&mut service, 2, &method_descriptor("List", &format!("{message}ListRequest"), message, true));
+        put_bytes(&mut service, 2, &method_descriptor("Get", &format!("{message}Key"), message, false));
+        put_bytes(&mut service, 2, &method_descriptor("Insert", message, message, false));
+        put_bytes(&mut service, 2, &method_descriptor("Update", message, message, false));
+        put_bytes(&mut service, 2, &method_descriptor("Delete", &format!("{message}Key"), "DeleteResult", false));
+        put_bytes(&mut out, 6, &service);
+    }
+    put_bytes(&mut out, 12, b"proto3");
+    out
+}
+
+fn reflection_error(code: GrpcStatus, message: &str) -> Vec<u8> {
+    let mut error = Vec::new();
+    put_number(&mut error, 1, code as u64);
+    put_bytes(&mut error, 2, message.as_bytes());
+    error
+}
+
 fn rows_of(results: &[QueryResult]) -> Vec<Vec<Value>> {
     results
         .iter()
@@ -567,6 +741,75 @@ impl<S: KeyValueStore> Endpoint<'_, S> {
         Ok(rows.iter().map(|row| encoded_row(table, row)).collect())
     }
 
+    fn grpc_reflection(&self, headers: &[(String, String)], request: &[u8]) -> Vec<u8> {
+        let caller = self.grpc_caller(&Http2Request {
+            headers: headers.to_vec(),
+            body: Vec::new(),
+        });
+        let mut host = String::new();
+        let mut answer_field = 7u32;
+        let mut answer = reflection_error(GrpcStatus::Unimplemented, "this reflection request is not supported");
+        match (caller, fields(request)) {
+            (Err(failure), _) => answer = reflection_error(failure.status, &failure.message),
+            (_, Err(failure)) => answer = reflection_error(failure.status, &failure.message),
+            (Ok(caller), Ok(parts)) => {
+                for (number, wire) in parts {
+                    let Wire::Bytes(bytes) = wire else {
+                        continue;
+                    };
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    match number {
+                        1 => host = text,
+                        7 => match caller.grpc_tables() {
+                            Ok(tables) => {
+                                let mut list = Vec::new();
+                                let names = tables
+                                    .iter()
+                                    .map(|table| format!("{PACKAGE}.{}Service", table.message))
+                                    .chain(REFLECTION_SERVICES.iter().map(|name| (*name).to_owned()));
+                                for name in names {
+                                    let mut service = Vec::new();
+                                    put_bytes(&mut service, 1, name.as_bytes());
+                                    put_bytes(&mut list, 1, &service);
+                                }
+                                answer_field = 6;
+                                answer = list;
+                            }
+                            Err(failure) => answer = reflection_error(failure.status, &failure.message),
+                        },
+                        3 | 4 => {
+                            let ours = if number == 3 {
+                                text == FILE_NAME
+                            } else {
+                                text.strip_prefix(PACKAGE).is_some_and(|rest| rest.starts_with('.'))
+                            };
+                            if !ours {
+                                answer = reflection_error(GrpcStatus::NotFound, &format!("'{text}' is not one of EggDB's gRPC symbols"));
+                                continue;
+                            }
+                            match caller.grpc_tables() {
+                                Ok(tables) => {
+                                    let mut files = Vec::new();
+                                    put_bytes(&mut files, 1, &file_descriptor(&tables));
+                                    answer_field = 4;
+                                    answer = files;
+                                }
+                                Err(failure) => answer = reflection_error(failure.status, &failure.message),
+                            }
+                        }
+                        5 | 6 => answer = reflection_error(GrpcStatus::NotFound, "EggDB's messages have no extensions"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        put_bytes(&mut out, 1, host.as_bytes());
+        put_bytes(&mut out, 2, request);
+        put_bytes(&mut out, answer_field, &answer);
+        out
+    }
+
     fn grpc_caller(&self, request: &Http2Request) -> Result<Self, Failure> {
         let http = eggdb_http::Request {
             method: "POST".to_owned(),
@@ -619,6 +862,16 @@ impl<'e, 's, S: KeyValueStore> GrpcApi<'e, 's, S> {
 impl<S: KeyValueStore> eggdb_http2::Handler for GrpcApi<'_, '_, S> {
     fn handle(&self, request: &Http2Request) -> Http2Response {
         self.endpoint.grpc_handle(request)
+    }
+
+    fn streams(&self, headers: &[(String, String)]) -> bool {
+        headers
+            .iter()
+            .any(|(name, value)| name == ":path" && REFLECTION_PATHS.contains(&value.as_str()))
+    }
+
+    fn stream_message(&self, headers: &[(String, String)], message: &[u8]) -> Vec<Vec<u8>> {
+        vec![self.endpoint.grpc_reflection(headers, message)]
     }
 }
 

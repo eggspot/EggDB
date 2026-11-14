@@ -53,6 +53,46 @@ pub struct Http2Response {
 pub trait Handler {
     /// The response to `request`.
     fn handle(&self, request: &Http2Request) -> Http2Response;
+
+    /// Whether the request whose header fields just arrived is answered message by message as
+    /// its gRPC messages arrive (a bidirectional or client-streaming call), rather than once its
+    /// body has ended. None is, by default.
+    fn streams(&self, headers: &[(String, String)]) -> bool {
+        let _ = headers;
+        false
+    }
+
+    /// The response header fields of a streamed call, sent as soon as it opens.
+    fn stream_headers(&self, headers: &[(String, String)]) -> Vec<(String, String)> {
+        let _ = headers;
+        vec![
+            (":status".to_owned(), "200".to_owned()),
+            ("content-type".to_owned(), "application/grpc".to_owned()),
+        ]
+    }
+
+    /// The gRPC messages a streamed call answers one of the client's messages with.
+    fn stream_message(&self, headers: &[(String, String)], message: &[u8]) -> Vec<Vec<u8>> {
+        let _ = (headers, message);
+        Vec::new()
+    }
+
+    /// The trailer fields a streamed call ends with once the client has sent all it will.
+    fn stream_trailers(&self, headers: &[(String, String)]) -> Vec<(String, String)> {
+        let _ = headers;
+        vec![("grpc-status".to_owned(), "0".to_owned())]
+    }
+}
+
+enum StreamEvent {
+    Opened(Vec<(String, String)>),
+    Message(Vec<u8>),
+    Ended,
+}
+
+struct StreamingCall {
+    headers: Vec<(String, String)>,
+    pending: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -68,6 +108,8 @@ struct Connection<'s, S: Read + Write> {
     decoder: HeaderDecoder,
     open: HashMap<u32, OpenStream>,
     ready: VecDeque<(u32, Http2Request)>,
+    events: VecDeque<(u32, StreamEvent)>,
+    streaming: HashMap<u32, StreamingCall>,
     continuing: Option<u32>,
     send_window: i64,
     stream_windows: HashMap<u32, i64>,
@@ -104,10 +146,42 @@ impl<S: Read + Write> Connection<'_, S> {
         let fields = self.decoder.decode(&block)?;
         let open = self.open.entry(stream).or_default();
         if open.headers.is_none() {
-            open.headers = Some(fields);
+            open.headers = Some(fields.clone());
         }
         if end_stream {
             self.complete(stream);
+        } else {
+            self.events.push_back((stream, StreamEvent::Opened(fields)));
+        }
+        Ok(())
+    }
+
+    fn streamed_data(&mut self, stream: u32, content: &[u8], end_stream: bool) -> Result<(), Http2Error> {
+        let Some(call) = self.streaming.get_mut(&stream) else {
+            return Ok(());
+        };
+        if call.pending.len() + content.len() > MOST_REQUEST_BYTES {
+            return Err(Http2Error::protocol("a streamed message larger than 64 MiB"));
+        }
+        call.pending.extend_from_slice(content);
+        loop {
+            let Some(prefix) = call.pending.get(..5) else {
+                break;
+            };
+            if prefix[0] != 0 {
+                return Err(Http2Error::protocol("a compressed gRPC message, though none was offered"));
+            }
+            let length = u32::from_be_bytes([prefix[1], prefix[2], prefix[3], prefix[4]]) as usize;
+            if call.pending.len() < 5 + length {
+                break;
+            }
+            let message = call.pending[5..5 + length].to_vec();
+            call.pending.drain(..5 + length);
+            self.events.push_back((stream, StreamEvent::Message(message)));
+        }
+        if end_stream {
+            self.open.remove(&stream);
+            self.events.push_back((stream, StreamEvent::Ended));
         }
         Ok(())
     }
@@ -190,6 +264,16 @@ impl<S: Read + Write> Connection<'_, S> {
                     self.continuing = Some(frame.stream);
                 }
             }
+            FrameKind::Data if self.streaming.contains_key(&frame.stream) => {
+                let content = frame.content()?.to_vec();
+                let received = frame.payload.len();
+                self.window_update(0, received)?;
+                let end_stream = frame.flags & END_STREAM != 0;
+                if !end_stream {
+                    self.window_update(frame.stream, received)?;
+                }
+                self.streamed_data(frame.stream, &content, end_stream)?;
+            }
             FrameKind::Data => {
                 let content = frame.content()?.to_vec();
                 let received = frame.payload.len();
@@ -233,7 +317,9 @@ impl<S: Read + Write> Connection<'_, S> {
             }
             FrameKind::ResetStream => {
                 self.open.remove(&frame.stream);
+                self.streaming.remove(&frame.stream);
                 self.ready.retain(|(stream, _)| *stream != frame.stream);
+                self.events.retain(|(stream, _)| *stream != frame.stream);
             }
             FrameKind::GoAway => self.closed = true,
             FrameKind::PushPromise => return Err(Http2Error::protocol("a client sent PUSH_PROMISE")),
@@ -291,6 +377,48 @@ impl<S: Read + Write> Connection<'_, S> {
         }
     }
 
+    fn stream_event(&mut self, handler: &dyn Handler, stream: u32, event: StreamEvent) -> Result<(), Http2Error> {
+        match event {
+            StreamEvent::Opened(headers) => {
+                if !self.open.contains_key(&stream) || !handler.streams(&headers) {
+                    return Ok(());
+                }
+                let pending = self
+                    .open
+                    .get_mut(&stream)
+                    .map(|open| std::mem::take(&mut open.body))
+                    .unwrap_or_default();
+                let response_headers = handler.stream_headers(&headers);
+                self.streaming.insert(
+                    stream,
+                    StreamingCall {
+                        headers,
+                        pending: Vec::new(),
+                    },
+                );
+                self.send_headers(stream, &response_headers, false)?;
+                self.streamed_data(stream, &pending, false)?;
+            }
+            StreamEvent::Message(message) => {
+                let Some(headers) = self.streaming.get(&stream).map(|call| call.headers.clone()) else {
+                    return Ok(());
+                };
+                for reply in handler.stream_message(&headers, &message) {
+                    self.send_data(stream, &crate::grpc_message(&reply), false)?;
+                }
+            }
+            StreamEvent::Ended => {
+                if let Some(call) = self.streaming.remove(&stream) {
+                    let trailers = handler.stream_trailers(&call.headers);
+                    self.send_headers(stream, &trailers, true)?;
+                    self.stream_windows.remove(&stream);
+                }
+            }
+        }
+        self.stream.flush()?;
+        Ok(())
+    }
+
     fn respond(&mut self, stream: u32, response: Http2Response) -> Result<(), Http2Error> {
         let has_trailers = !response.trailers.is_empty();
         let body: Vec<Vec<u8>> = response.body.into_iter().filter(|chunk| !chunk.is_empty()).collect();
@@ -321,6 +449,8 @@ pub fn serve_connection<S: Read + Write>(stream: &mut S, handler: &dyn Handler) 
         decoder: HeaderDecoder::default(),
         open: HashMap::new(),
         ready: VecDeque::new(),
+        events: VecDeque::new(),
+        streaming: HashMap::new(),
         continuing: None,
         send_window: DEFAULT_WINDOW,
         stream_windows: HashMap::new(),
@@ -336,6 +466,9 @@ pub fn serve_connection<S: Read + Write>(stream: &mut S, handler: &dyn Handler) 
     connection.window_update(0, (RECEIVE_WINDOW as usize).saturating_sub(DEFAULT_WINDOW as usize))?;
     connection.stream.flush()?;
     loop {
+        while let Some((stream_id, event)) = connection.events.pop_front() {
+            connection.stream_event(handler, stream_id, event)?;
+        }
         while let Some((stream_id, request)) = connection.ready.pop_front() {
             let response = handler.handle(&request);
             connection.respond(stream_id, response)?;
@@ -413,6 +546,47 @@ mod tests {
         let data: Vec<&Frame> = frames.iter().filter(|frame| frame.kind == FrameKind::Data).collect();
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].payload, b"hello");
+        let last = frames.last().unwrap();
+        assert_eq!((last.kind, last.flags & END_STREAM), (FrameKind::Headers, END_STREAM));
+    }
+
+    struct Reversing;
+
+    impl Handler for Reversing {
+        fn handle(&self, _request: &Http2Request) -> Http2Response {
+            Http2Response::default()
+        }
+
+        fn streams(&self, _headers: &[(String, String)]) -> bool {
+            true
+        }
+
+        fn stream_message(&self, _headers: &[(String, String)], message: &[u8]) -> Vec<Vec<u8>> {
+            vec![message.iter().rev().copied().collect()]
+        }
+    }
+
+    #[test]
+    fn a_streamed_call_answers_each_message_as_it_arrives() {
+        let mut input = PREFACE.to_vec();
+        Frame::new(FrameKind::Settings, 0, 0, Vec::new()).write(&mut input).unwrap();
+        let block = encode_headers(&[(":method", "POST"), (":path", "/reflect")]);
+        Frame::new(FrameKind::Headers, END_HEADERS, 1, block).write(&mut input).unwrap();
+        let first = crate::grpc_message(b"ab");
+        Frame::new(FrameKind::Data, 0, 1, first[..3].to_vec()).write(&mut input).unwrap();
+        Frame::new(FrameKind::Data, 0, 1, first[3..].to_vec()).write(&mut input).unwrap();
+        Frame::new(FrameKind::Data, END_STREAM, 1, crate::grpc_message(b"cd")).write(&mut input).unwrap();
+        let mut duplex = Duplex { input: Cursor::new(input), output: Vec::new() };
+        serve_connection(&mut duplex, &Reversing).unwrap();
+        let mut output = duplex.output.as_slice();
+        let mut frames = Vec::new();
+        while !output.is_empty() {
+            frames.push(Frame::read(&mut output, MAX_FRAME_PAYLOAD).unwrap());
+        }
+        let data: Vec<&Frame> = frames.iter().filter(|frame| frame.kind == FrameKind::Data).collect();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0].payload, crate::grpc_message(b"ba"));
+        assert_eq!(data[1].payload, crate::grpc_message(b"dc"));
         let last = frames.last().unwrap();
         assert_eq!((last.kind, last.flags & END_STREAM), (FrameKind::Headers, END_STREAM));
     }
