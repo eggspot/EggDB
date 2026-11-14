@@ -21,12 +21,37 @@ int eggdb_sql_open(eggdb_db *db, const char *dialect, eggdb_sql **sql);
 int eggdb_sql_connect(const char *url, eggdb_sql **sql);
 int eggdb_sql_execute_with_parameters(eggdb_sql *sql, const char *text, const eggdb_parameter *parameters, size_t parameter_count, const eggdb_result **results, size_t *count);
 int eggdb_sql_close(eggdb_sql *sql);
+typedef struct eggdb_stmt eggdb_stmt;
+typedef struct eggdb_copy eggdb_copy;
+int eggdb_sql_prepare(eggdb_sql *sql, const char *text, size_t len, eggdb_stmt **stmt);
+int eggdb_stmt_parameter_count(eggdb_stmt *stmt, size_t *count);
+int eggdb_stmt_bind_null(eggdb_stmt *stmt, size_t index);
+int eggdb_stmt_bind_int64(eggdb_stmt *stmt, size_t index, int64_t value);
+int eggdb_stmt_bind_double(eggdb_stmt *stmt, size_t index, double value);
+int eggdb_stmt_bind_bool(eggdb_stmt *stmt, size_t index, int value);
+int eggdb_stmt_bind_text(eggdb_stmt *stmt, size_t index, const char *text, size_t len);
+int eggdb_stmt_bind_blob(eggdb_stmt *stmt, size_t index, const uint8_t *data, size_t len);
+int eggdb_stmt_clear_bindings(eggdb_stmt *stmt);
+int eggdb_stmt_execute(eggdb_stmt *stmt, const eggdb_result **results, size_t *count);
+int eggdb_stmt_reset(eggdb_stmt *stmt);
+int eggdb_stmt_column_count(eggdb_stmt *stmt, size_t *count);
+int eggdb_stmt_column_name(eggdb_stmt *stmt, size_t column, const char **name);
+int eggdb_stmt_step(eggdb_stmt *stmt, int *has_row);
+int eggdb_stmt_row(eggdb_stmt *stmt, const eggdb_value **values, size_t *count);
+int eggdb_stmt_finalize(eggdb_stmt *stmt);
+int eggdb_sql_copy_in_begin(eggdb_sql *sql, const char *text, eggdb_copy **copy);
+int eggdb_sql_copy_out_begin(eggdb_sql *sql, const char *text, eggdb_copy **copy);
+int eggdb_copy_put(eggdb_copy *copy, const uint8_t *data, size_t len);
+int eggdb_copy_read(eggdb_copy *copy, const uint8_t **data, size_t *len);
+int eggdb_copy_end(eggdb_copy *copy, const eggdb_result **results, size_t *count);
+void eggdb_copy_free(eggdb_copy *copy);
 C;
 
     private \FFI $ffi;
     private $database = null;
     private $session;
     private string $dialect;
+    private array $statements = [];
 
     public function __construct(string $pathOrUrl, string $dialect = 'sqlite', ?string $library = null)
     {
@@ -120,8 +145,13 @@ C;
             \FFI::free($buffer);
         }
         $this->check($status);
+        return self::gathered($results, (int) $resultCount->cdata);
+    }
+
+    public static function gathered($results, int $count): array
+    {
         $gathered = [];
-        for ($index = 0; $index < $resultCount->cdata; $index++) {
+        for ($index = 0; $index < $count; $index++) {
             $result = $results[$index];
             $columns = [];
             for ($column = 0; $column < $result->column_count; $column++) {
@@ -131,19 +161,125 @@ C;
             for ($row = 0; $row < $result->row_count; $row++) {
                 $cells = [];
                 for ($column = 0; $column < $result->column_count; $column++) {
-                    $cell = $result->values[$row * $result->column_count + $column];
-                    $cells[$columns[$column]] = match ($cell->kind) {
-                        1 => $cell->integer,
-                        2 => $cell->real,
-                        3, 4 => \FFI::string($cell->data, $cell->len),
-                        default => null,
-                    };
+                    $cells[$columns[$column]] = self::cell($result->values[$row * $result->column_count + $column]);
                 }
                 $rows[] = $cells;
             }
             $gathered[] = ['tag' => \FFI::string($result->tag), 'columns' => $columns, 'rows' => $rows];
         }
         return $gathered;
+    }
+
+    public static function cell($cell): mixed
+    {
+        return match ($cell->kind) {
+            1 => $cell->integer,
+            2 => $cell->real,
+            3, 4 => \FFI::string($cell->data, $cell->len),
+            default => null,
+        };
+    }
+
+    public function prepare(string $sql): Statement
+    {
+        $this->live();
+        $text = $this->numbered($sql);
+        $handle = $this->ffi->new('eggdb_stmt*');
+        $this->check($this->ffi->eggdb_sql_prepare($this->session, $text, strlen($text), \FFI::addr($handle)));
+        $statement = new Statement($this->ffi, $handle, fn (int $status) => $this->check($status), $this->dialect);
+        $this->statements[] = \WeakReference::create($statement);
+        return $statement;
+    }
+
+    public function iterate(string $sql, array $parameters = []): \Generator
+    {
+        $statement = $this->prepare($sql);
+        try {
+            yield from $statement->iterate($parameters);
+        } finally {
+            $statement->finalize();
+        }
+    }
+
+    public function copyFrom(string $sql, string|iterable $data): int
+    {
+        $copy = $this->beginCopy('eggdb_sql_copy_in_begin', $sql);
+        try {
+            foreach (is_string($data) ? [$data] : $data as $piece) {
+                $piece = (string) $piece;
+                if ($piece === '') {
+                    continue;
+                }
+                $buffer = \FFI::new('uint8_t[' . strlen($piece) . ']', false);
+                \FFI::memcpy($buffer, $piece, strlen($piece));
+                $status = $this->ffi->eggdb_copy_put($copy, \FFI::cast('const uint8_t*', \FFI::addr($buffer[0])), strlen($piece));
+                \FFI::free($buffer);
+                $this->check($status);
+            }
+            return self::copiedRows($this->endCopy($copy));
+        } finally {
+            $this->ffi->eggdb_copy_free($copy);
+        }
+    }
+
+    public function copyTo(string $sql, ?callable $onPiece = null): ?string
+    {
+        $gathered = $onPiece === null ? '' : null;
+        $copy = $this->beginCopy('eggdb_sql_copy_out_begin', $sql);
+        try {
+            $data = $this->ffi->new('const uint8_t*');
+            $length = $this->ffi->new('size_t');
+            while (true) {
+                $this->check($this->ffi->eggdb_copy_read($copy, \FFI::addr($data), \FFI::addr($length)));
+                if ($length->cdata === 0) {
+                    break;
+                }
+                $piece = \FFI::string($data, $length->cdata);
+                if ($onPiece === null) {
+                    $gathered .= $piece;
+                } else {
+                    $onPiece($piece);
+                }
+            }
+            $this->endCopy($copy);
+        } finally {
+            $this->ffi->eggdb_copy_free($copy);
+        }
+        return $gathered;
+    }
+
+    private function live(): void
+    {
+        if ($this->session === null) {
+            throw new EggDbException('the connection is closed', '08003', 0);
+        }
+    }
+
+    private function beginCopy(string $call, string $sql)
+    {
+        $this->live();
+        $copy = $this->ffi->new('eggdb_copy*');
+        $this->check($this->ffi->$call($this->session, $sql, \FFI::addr($copy)));
+        return $copy;
+    }
+
+    private function endCopy($copy): array
+    {
+        $results = $this->ffi->new('const eggdb_result*');
+        $count = $this->ffi->new('size_t');
+        $this->check($this->ffi->eggdb_copy_end($copy, \FFI::addr($results), \FFI::addr($count)));
+        return self::gathered($results, (int) $count->cdata);
+    }
+
+    private static function copiedRows(array $results): int
+    {
+        foreach (array_reverse($results) as $result) {
+            $words = explode(' ', $result['tag']);
+            if (count($words) === 2 && $words[0] === 'COPY' && ctype_digit($words[1])) {
+                return (int) $words[1];
+            }
+        }
+        return -1;
     }
 
     public function query(string $sql, array $parameters = []): array
@@ -161,6 +297,10 @@ C;
         if ($this->session === null) {
             return;
         }
+        foreach ($this->statements as $reference) {
+            $reference->get()?->finalize();
+        }
+        $this->statements = [];
         $this->ffi->eggdb_sql_close($this->session);
         if ($this->database !== null) {
             $this->ffi->eggdb_close($this->database);

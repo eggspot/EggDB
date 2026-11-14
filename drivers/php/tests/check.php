@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/../src/EggDbException.php';
 require __DIR__ . '/../src/Connection.php';
+require __DIR__ . '/../src/Statement.php';
 require __DIR__ . '/../src/KeyValue.php';
 require __DIR__ . '/../src/Transaction.php';
 
@@ -28,6 +29,22 @@ try {
 } catch (EggDB\EggDbException $error) {
     check(strlen($error->sqlState) === 5, 'the error has a SQLSTATE');
 }
+
+$insert = $db->prepare('INSERT INTO people (name, score) VALUES (?, ?)');
+check($insert->parameterCount === 2, 'two parameters');
+$insert->execute(['Grace', 3.25]);
+$insert->execute(['Edsger', 4]);
+$insert->finalize();
+$names = [];
+foreach ($db->iterate('SELECT name FROM people WHERE score > ? ORDER BY id', [3]) as $row) {
+    $names[] = $row['name'];
+}
+check($names === ['Grace', 'Edsger'], 'stepped rows');
+$pg = new EggDB\Connection(':memory:', 'postgresql');
+$pg->execute('CREATE TABLE t (id integer, name text)');
+check($pg->copyFrom('COPY t FROM STDIN', ["1\tad", "a\n2\tgrace\n"]) === 2, 'COPY loads two rows');
+check($pg->copyTo('COPY t TO STDOUT') === "1\tada\n2\tgrace\n", 'COPY reads the rows back');
+$pg->close();
 $db->close();
 
 $path = sys_get_temp_dir() . '/eggdb-php-kv-' . getmypid() . '.eggdb';

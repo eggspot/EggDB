@@ -79,3 +79,22 @@ test('collections hold keys apart, rename and count', () => {
   store.read((txn) => assert.deepEqual(txn.collections(), ['logins']));
   store.close();
 });
+
+test('prepared statements bind typed values, step through rows and COPY moves data', () => {
+  const db = new Database(':memory:', { dialect: 'postgresql' });
+  db.run('CREATE TABLE t (id integer, name text, score double precision)');
+  const insert = db.prepare('INSERT INTO t VALUES (?, ?, ?)');
+  assert.equal(insert.parameterCount, 3);
+  for (const [id, name, score] of [[1, 'ada', 1.5], [2, 'grace', 2.25]]) {
+    assert.equal(insert.run([id, name, score]).changes, 1);
+  }
+  insert.finalize();
+  assert.equal(db.copyFrom('COPY t FROM STDIN', ['3\tedsger\t', '4\n']), 1);
+  assert.deepEqual([...db.iterate('SELECT name FROM t WHERE id > ? ORDER BY id', [1])], [['grace'], ['edsger']]);
+  const select = db.prepare('SELECT id, score FROM t WHERE id = ?');
+  assert.deepEqual(select.columns(), ['id', 'score']);
+  assert.deepEqual(select.all([2]), [{ id: 2, score: 2.25 }]);
+  select.finalize();
+  assert.equal(db.copyTo('COPY (SELECT id FROM t ORDER BY id) TO STDOUT').toString(), '1\n2\n3\n');
+  db.close();
+});

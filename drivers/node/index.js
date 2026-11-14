@@ -114,6 +114,7 @@ class Database {
     this.dialect = dialect;
     this.readOnly = Boolean(options.readOnly);
     this.inTransaction = false;
+    this.statements = new Set();
     try {
       this.handle = addon.open(String(file), dialect, this.readOnly);
     } catch (error) {
@@ -168,10 +169,127 @@ class Database {
     }
   }
 
+  live() {
+    if (!this.handle) {
+      throw new EggDbError({ message: 'the database is closed', code: '08003' });
+    }
+    return this.handle;
+  }
+
+  prepare(sql) {
+    const numbered = bound(sql, this.dialect, []).sql;
+    const statement = new Statement(this, native(() => addon.prepare(this.live(), numbered)));
+    this.statements.add(statement);
+    return statement;
+  }
+
+  *iterate(sql, parameters = []) {
+    const statement = this.prepare(sql);
+    try {
+      yield* statement.iterate(parameters);
+    } finally {
+      statement.finalize();
+    }
+  }
+
+  copyFrom(sql, data) {
+    const pieces = typeof data === 'string' || data instanceof Uint8Array ? [data] : Array.from(data);
+    const results = native(() => addon.copyIn(this.live(), sql, pieces));
+    return copiedRows(results);
+  }
+
+  copyTo(sql, onPiece) {
+    if (onPiece) {
+      native(() => addon.copyOut(this.live(), sql, onPiece));
+      return undefined;
+    }
+    const pieces = [];
+    native(() => addon.copyOut(this.live(), sql, (piece) => pieces.push(piece)));
+    return Buffer.concat(pieces);
+  }
+
   close() {
     if (this.handle) {
+      for (const statement of this.statements) {
+        statement.finalize();
+      }
       addon.close(this.handle);
       this.handle = null;
+    }
+  }
+}
+
+function copiedRows(results) {
+  for (let index = results.length - 1; index >= 0; index -= 1) {
+    const words = results[index].tag.split(' ');
+    if (words.length === 2 && words[0] === 'COPY') {
+      return Number(words[1]);
+    }
+  }
+  return -1;
+}
+
+class Statement {
+  constructor(database, handle) {
+    this.database = database;
+    this.handle = handle;
+    this.parameterCount = native(() => addon.stmtParameterCount(handle));
+  }
+
+  live() {
+    if (!this.handle) {
+      throw new EggDbError({ message: 'the statement is finalized', code: '26000' });
+    }
+    return this.handle;
+  }
+
+  bind(parameters = []) {
+    const values = parameters.map((value) => (value instanceof Date ? parameterText(value, this.database.dialect) : value));
+    native(() => addon.stmtBind(this.live(), values));
+    return this;
+  }
+
+  execute(parameters = []) {
+    this.bind(parameters);
+    return native(() => addon.stmtExecute(this.handle));
+  }
+
+  run(parameters = []) {
+    const results = this.execute(parameters);
+    return { changes: results.reduce((total, result) => total + changedRows(result.tag), 0) };
+  }
+
+  columns() {
+    return native(() => addon.stmtColumns(this.live()));
+  }
+
+  *iterate(parameters = []) {
+    this.bind(parameters);
+    try {
+      for (;;) {
+        const row = native(() => addon.stmtStep(this.live()));
+        if (row === null) {
+          return;
+        }
+        yield row;
+      }
+    } finally {
+      if (this.handle) {
+        native(() => addon.stmtReset(this.handle));
+      }
+    }
+  }
+
+  all(parameters = []) {
+    const columns = this.columns();
+    return Array.from(this.iterate(parameters), (cells) => Object.fromEntries(columns.map((column, at) => [column, cells[at]])));
+  }
+
+  finalize() {
+    if (this.handle) {
+      addon.stmtFinalize(this.handle);
+      this.handle = null;
+      this.database.statements.delete(this);
     }
   }
 }
@@ -304,4 +422,4 @@ class KeyValue {
   }
 }
 
-module.exports = { Database, EggDbError, KeyValue, Transaction };
+module.exports = { Database, EggDbError, KeyValue, Statement, Transaction };

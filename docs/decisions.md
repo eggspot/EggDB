@@ -1173,3 +1173,4 @@ its full title with its status.
 - [D1146](decisions/D1146.md) Code-only batch 795 (M5): the C API's check, stats and the remaining open options through eggdb_open_v2
 - [D1147](decisions/D1147.md) Code-only batch 796 (M6a): PostgreSQL's regression suite run from outside the repo, with its pass rate and minimum
 - [D1148](decisions/D1148.md) Code-only batch 797 (M5): the Python, Go and C++ drivers on prepared statements, stepping and COPY
+- [D1149](decisions/D1149.md) Code-only batch 798 (M5): the Node.js, Ruby and PHP drivers on prepared statements, stepping and COPY

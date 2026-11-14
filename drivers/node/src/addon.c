@@ -251,6 +251,378 @@ static napi_value execute(napi_env env, napi_callback_info info) {
     return gathered(env, results, result_count);
 }
 
+static napi_value undefined_value(napi_env env);
+
+typedef struct prepared {
+    eggdb_stmt *stmt;
+    napi_ref owner;
+} prepared;
+
+static void finalize_prepared(napi_env env, void *data, void *hint) {
+    (void)hint;
+    prepared *open = data;
+    if (open->stmt != NULL) {
+        eggdb_stmt_finalize(open->stmt);
+    }
+    if (open->owner != NULL) {
+        napi_delete_reference(env, open->owner);
+    }
+    free(open);
+}
+
+static prepared *prepared_of(napi_env env, napi_value handle) {
+    void *data = NULL;
+    if (napi_get_value_external(env, handle, &data) != napi_ok || data == NULL) {
+        return NULL;
+    }
+    prepared *open = data;
+    return open->stmt != NULL ? open : NULL;
+}
+
+static napi_value prepare(napi_env env, napi_callback_info info) {
+    size_t count = 2;
+    napi_value arguments[2];
+    napi_get_cb_info(env, info, &count, arguments, NULL, NULL);
+    connection *open = count == 2 ? connection_of(env, arguments[0]) : NULL;
+    if (open == NULL || open->session == NULL) {
+        return throw_message(env, "the connection is closed");
+    }
+    size_t length = 0;
+    char *sql = string_argument(env, arguments[1], &length);
+    if (sql == NULL) {
+        return throw_message(env, "the SQL must be a string");
+    }
+    prepared *made = calloc(1, sizeof(prepared));
+    if (made == NULL) {
+        free(sql);
+        return throw_message(env, "out of memory");
+    }
+    int status = eggdb_sql_prepare(open->session, sql, length, &made->stmt);
+    free(sql);
+    if (status != EGGDB_OK) {
+        free(made);
+        return throw_last(env, status);
+    }
+    napi_create_reference(env, arguments[0], 1, &made->owner);
+    napi_value handle;
+    napi_create_external(env, made, finalize_prepared, NULL, &handle);
+    return handle;
+}
+
+static int bind_one(napi_env env, eggdb_stmt *stmt, size_t index, napi_value element) {
+    napi_valuetype type;
+    napi_typeof(env, element, &type);
+    if (type == napi_null || type == napi_undefined) {
+        return eggdb_stmt_bind_null(stmt, index);
+    }
+    if (type == napi_boolean) {
+        bool flag = false;
+        napi_get_value_bool(env, element, &flag);
+        return eggdb_stmt_bind_bool(stmt, index, flag ? 1 : 0);
+    }
+    if (type == napi_number) {
+        double number = 0;
+        napi_get_value_double(env, element, &number);
+        if (number >= -9007199254740991.0 && number <= 9007199254740991.0 && number == (double)(int64_t)number) {
+            return eggdb_stmt_bind_int64(stmt, index, (int64_t)number);
+        }
+        return eggdb_stmt_bind_double(stmt, index, number);
+    }
+    if (type == napi_bigint) {
+        int64_t integer = 0;
+        bool lossless = false;
+        napi_get_value_bigint_int64(env, element, &integer, &lossless);
+        if (lossless) {
+            return eggdb_stmt_bind_int64(stmt, index, integer);
+        }
+    }
+    bool typed = false;
+    napi_is_typedarray(env, element, &typed);
+    if (typed) {
+        napi_typedarray_type kind;
+        size_t length = 0;
+        void *data = NULL;
+        napi_get_typedarray_info(env, element, &kind, &length, &data, NULL, NULL);
+        if (kind == napi_uint8_array) {
+            return eggdb_stmt_bind_blob(stmt, index, data, length);
+        }
+    }
+    napi_value text_value = element;
+    if (type != napi_string) {
+        napi_coerce_to_string(env, element, &text_value);
+    }
+    size_t length = 0;
+    char *text = string_argument(env, text_value, &length);
+    if (text == NULL) {
+        return EGGDB_ERR_INVALID_ARGUMENT;
+    }
+    int status = eggdb_stmt_bind_text(stmt, index, text, length);
+    free(text);
+    return status;
+}
+
+static napi_value stmt_bind(napi_env env, napi_callback_info info) {
+    size_t count = 2;
+    napi_value arguments[2];
+    napi_get_cb_info(env, info, &count, arguments, NULL, NULL);
+    prepared *open = count == 2 ? prepared_of(env, arguments[0]) : NULL;
+    if (open == NULL) {
+        return throw_message(env, "the statement is finalized");
+    }
+    int status = eggdb_stmt_reset(open->stmt);
+    if (status == EGGDB_OK) {
+        status = eggdb_stmt_clear_bindings(open->stmt);
+    }
+    uint32_t length = 0;
+    napi_get_array_length(env, arguments[1], &length);
+    for (uint32_t index = 0; status == EGGDB_OK && index < length; index++) {
+        napi_value element;
+        napi_get_element(env, arguments[1], index, &element);
+        status = bind_one(env, open->stmt, (size_t)index + 1, element);
+    }
+    if (status != EGGDB_OK) {
+        return throw_last(env, status);
+    }
+    return undefined_value(env);
+}
+
+static napi_value stmt_parameter_count(napi_env env, napi_callback_info info) {
+    size_t count = 1;
+    napi_value handle;
+    napi_get_cb_info(env, info, &count, &handle, NULL, NULL);
+    prepared *open = count == 1 ? prepared_of(env, handle) : NULL;
+    if (open == NULL) {
+        return throw_message(env, "the statement is finalized");
+    }
+    size_t parameters = 0;
+    int status = eggdb_stmt_parameter_count(open->stmt, &parameters);
+    if (status != EGGDB_OK) {
+        return throw_last(env, status);
+    }
+    napi_value out;
+    napi_create_uint32(env, (uint32_t)parameters, &out);
+    return out;
+}
+
+static napi_value stmt_execute(napi_env env, napi_callback_info info) {
+    size_t count = 1;
+    napi_value handle;
+    napi_get_cb_info(env, info, &count, &handle, NULL, NULL);
+    prepared *open = count == 1 ? prepared_of(env, handle) : NULL;
+    if (open == NULL) {
+        return throw_message(env, "the statement is finalized");
+    }
+    const eggdb_result *results = NULL;
+    size_t result_count = 0;
+    int status = eggdb_stmt_execute(open->stmt, &results, &result_count);
+    if (status != EGGDB_OK) {
+        return throw_last(env, status);
+    }
+    return gathered(env, results, result_count);
+}
+
+static napi_value stmt_columns(napi_env env, napi_callback_info info) {
+    size_t count = 1;
+    napi_value handle;
+    napi_get_cb_info(env, info, &count, &handle, NULL, NULL);
+    prepared *open = count == 1 ? prepared_of(env, handle) : NULL;
+    if (open == NULL) {
+        return throw_message(env, "the statement is finalized");
+    }
+    size_t columns = 0;
+    int status = eggdb_stmt_column_count(open->stmt, &columns);
+    if (status != EGGDB_OK) {
+        return throw_last(env, status);
+    }
+    napi_value list;
+    napi_create_array_with_length(env, columns, &list);
+    for (size_t column = 0; column < columns; column++) {
+        const char *name = NULL;
+        status = eggdb_stmt_column_name(open->stmt, column, &name);
+        if (status != EGGDB_OK) {
+            return throw_last(env, status);
+        }
+        napi_value text;
+        napi_create_string_utf8(env, name ? name : "", NAPI_AUTO_LENGTH, &text);
+        napi_set_element(env, list, (uint32_t)column, text);
+    }
+    return list;
+}
+
+static napi_value stmt_step(napi_env env, napi_callback_info info) {
+    size_t count = 1;
+    napi_value handle;
+    napi_get_cb_info(env, info, &count, &handle, NULL, NULL);
+    prepared *open = count == 1 ? prepared_of(env, handle) : NULL;
+    if (open == NULL) {
+        return throw_message(env, "the statement is finalized");
+    }
+    int has_row = 0;
+    int status = eggdb_stmt_step(open->stmt, &has_row);
+    if (status != EGGDB_OK) {
+        return throw_last(env, status);
+    }
+    napi_value out;
+    if (!has_row) {
+        napi_get_null(env, &out);
+        return out;
+    }
+    const eggdb_value *values = NULL;
+    size_t columns = 0;
+    status = eggdb_stmt_row(open->stmt, &values, &columns);
+    if (status != EGGDB_OK) {
+        return throw_last(env, status);
+    }
+    napi_create_array_with_length(env, columns, &out);
+    for (size_t column = 0; column < columns; column++) {
+        napi_set_element(env, out, (uint32_t)column, converted(env, &values[column]));
+    }
+    return out;
+}
+
+static napi_value stmt_reset(napi_env env, napi_callback_info info) {
+    size_t count = 1;
+    napi_value handle;
+    napi_get_cb_info(env, info, &count, &handle, NULL, NULL);
+    prepared *open = count == 1 ? prepared_of(env, handle) : NULL;
+    if (open != NULL) {
+        int status = eggdb_stmt_reset(open->stmt);
+        if (status != EGGDB_OK) {
+            return throw_last(env, status);
+        }
+    }
+    return undefined_value(env);
+}
+
+static napi_value stmt_finalize(napi_env env, napi_callback_info info) {
+    size_t count = 1;
+    napi_value handle;
+    napi_get_cb_info(env, info, &count, &handle, NULL, NULL);
+    prepared *open = count == 1 ? prepared_of(env, handle) : NULL;
+    if (open != NULL) {
+        eggdb_stmt_finalize(open->stmt);
+        open->stmt = NULL;
+        if (open->owner != NULL) {
+            napi_delete_reference(env, open->owner);
+            open->owner = NULL;
+        }
+    }
+    return undefined_value(env);
+}
+
+static napi_value copy_finished(napi_env env, eggdb_copy *copy) {
+    const eggdb_result *results = NULL;
+    size_t result_count = 0;
+    int status = eggdb_copy_end(copy, &results, &result_count);
+    if (status != EGGDB_OK) {
+        napi_value thrown = throw_last(env, status);
+        eggdb_copy_free(copy);
+        return thrown;
+    }
+    napi_value out = gathered(env, results, result_count);
+    eggdb_copy_free(copy);
+    return out;
+}
+
+static int put_piece(napi_env env, eggdb_copy *copy, napi_value piece) {
+    bool typed = false;
+    napi_is_typedarray(env, piece, &typed);
+    if (typed) {
+        napi_typedarray_type kind;
+        size_t length = 0;
+        void *data = NULL;
+        napi_get_typedarray_info(env, piece, &kind, &length, &data, NULL, NULL);
+        if (kind != napi_uint8_array) {
+            return EGGDB_ERR_INVALID_ARGUMENT;
+        }
+        return eggdb_copy_put(copy, data, length);
+    }
+    size_t length = 0;
+    char *text = string_argument(env, piece, &length);
+    if (text == NULL) {
+        return EGGDB_ERR_INVALID_ARGUMENT;
+    }
+    int status = eggdb_copy_put(copy, (const uint8_t *)text, length);
+    free(text);
+    return status;
+}
+
+static napi_value copy_in(napi_env env, napi_callback_info info) {
+    size_t count = 3;
+    napi_value arguments[3];
+    napi_get_cb_info(env, info, &count, arguments, NULL, NULL);
+    connection *open = count == 3 ? connection_of(env, arguments[0]) : NULL;
+    if (open == NULL || open->session == NULL) {
+        return throw_message(env, "the connection is closed");
+    }
+    char *sql = string_argument(env, arguments[1], NULL);
+    if (sql == NULL) {
+        return throw_message(env, "the SQL must be a string");
+    }
+    eggdb_copy *copy = NULL;
+    int status = eggdb_sql_copy_in_begin(open->session, sql, &copy);
+    free(sql);
+    if (status != EGGDB_OK) {
+        return throw_last(env, status);
+    }
+    uint32_t pieces = 0;
+    napi_get_array_length(env, arguments[2], &pieces);
+    for (uint32_t index = 0; index < pieces; index++) {
+        napi_value piece;
+        napi_get_element(env, arguments[2], index, &piece);
+        status = put_piece(env, copy, piece);
+        if (status != EGGDB_OK) {
+            napi_value thrown = throw_last(env, status);
+            eggdb_copy_free(copy);
+            return thrown;
+        }
+    }
+    return copy_finished(env, copy);
+}
+
+static napi_value copy_out(napi_env env, napi_callback_info info) {
+    size_t count = 3;
+    napi_value arguments[3];
+    napi_get_cb_info(env, info, &count, arguments, NULL, NULL);
+    connection *open = count == 3 ? connection_of(env, arguments[0]) : NULL;
+    if (open == NULL || open->session == NULL) {
+        return throw_message(env, "the connection is closed");
+    }
+    char *sql = string_argument(env, arguments[1], NULL);
+    if (sql == NULL) {
+        return throw_message(env, "the SQL must be a string");
+    }
+    eggdb_copy *copy = NULL;
+    int status = eggdb_sql_copy_out_begin(open->session, sql, &copy);
+    free(sql);
+    if (status != EGGDB_OK) {
+        return throw_last(env, status);
+    }
+    napi_value receiver;
+    napi_get_undefined(env, &receiver);
+    for (;;) {
+        const uint8_t *data = NULL;
+        size_t length = 0;
+        status = eggdb_copy_read(copy, &data, &length);
+        if (status != EGGDB_OK) {
+            napi_value thrown = throw_last(env, status);
+            eggdb_copy_free(copy);
+            return thrown;
+        }
+        if (length == 0) {
+            break;
+        }
+        napi_value piece;
+        napi_create_buffer_copy(env, length, data, NULL, &piece);
+        napi_value ignored;
+        if (napi_call_function(env, receiver, arguments[2], 1, &piece, &ignored) != napi_ok) {
+            eggdb_copy_free(copy);
+            return NULL;
+        }
+    }
+    return copy_finished(env, copy);
+}
+
 typedef struct store {
     eggdb_db *database;
 } store;
@@ -688,6 +1060,16 @@ static napi_value init(napi_env env, napi_value exports) {
         {"kvScan", kv_scan},
         {"kvCollection", kv_collection},
         {"kvCollections", kv_collections},
+        {"prepare", prepare},
+        {"stmtBind", stmt_bind},
+        {"stmtParameterCount", stmt_parameter_count},
+        {"stmtExecute", stmt_execute},
+        {"stmtColumns", stmt_columns},
+        {"stmtStep", stmt_step},
+        {"stmtReset", stmt_reset},
+        {"stmtFinalize", stmt_finalize},
+        {"copyIn", copy_in},
+        {"copyOut", copy_out},
     };
     for (size_t index = 0; index < sizeof key_value / sizeof key_value[0]; index++) {
         napi_create_function(env, key_value[index].name, NAPI_AUTO_LENGTH, key_value[index].callback, NULL, &function);

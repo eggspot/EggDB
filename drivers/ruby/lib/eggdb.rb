@@ -41,6 +41,28 @@ module EggDB
     extern "int eggdb_rename_collection(void*, const char*, const char*)"
     extern "int eggdb_collection_names(void*, void*, void*, void*)"
     extern "int eggdb_collection_stats(void*, const char*, void*)"
+    extern "int eggdb_sql_prepare(void*, const char*, size_t, void*)"
+    extern "int eggdb_stmt_parameter_count(void*, void*)"
+    extern "int eggdb_stmt_bind_null(void*, size_t)"
+    extern "int eggdb_stmt_bind_int64(void*, size_t, long long)"
+    extern "int eggdb_stmt_bind_double(void*, size_t, double)"
+    extern "int eggdb_stmt_bind_bool(void*, size_t, int)"
+    extern "int eggdb_stmt_bind_text(void*, size_t, const char*, size_t)"
+    extern "int eggdb_stmt_bind_blob(void*, size_t, void*, size_t)"
+    extern "int eggdb_stmt_clear_bindings(void*)"
+    extern "int eggdb_stmt_execute(void*, void*, void*)"
+    extern "int eggdb_stmt_reset(void*)"
+    extern "int eggdb_stmt_column_count(void*, void*)"
+    extern "int eggdb_stmt_column_name(void*, size_t, void*)"
+    extern "int eggdb_stmt_step(void*, void*)"
+    extern "int eggdb_stmt_row(void*, void*, void*)"
+    extern "int eggdb_stmt_finalize(void*)"
+    extern "int eggdb_sql_copy_in_begin(void*, const char*, void*)"
+    extern "int eggdb_sql_copy_out_begin(void*, const char*, void*)"
+    extern "int eggdb_copy_put(void*, void*, size_t)"
+    extern "int eggdb_copy_read(void*, void*, void*)"
+    extern "int eggdb_copy_end(void*, void*, void*)"
+    extern "void eggdb_copy_free(void*)"
   end
 
   VALUE_BYTES = 40
@@ -85,6 +107,7 @@ module EggDB
         @dialect = dialect
       end
       @session = Fiddle::Pointer.new(out[0, POINTER].unpack1("J"))
+      @statements = []
     end
 
     def execute(sql, parameters = [])
@@ -108,12 +131,179 @@ module EggDB
       last[:rows].map { |row| last[:columns].zip(row).to_h }
     end
 
+    def prepare(sql)
+      raise Error.new("the database is closed", "08003", nil) unless @session
+
+      statement = Statement.new(@session, EggDB.numbered(sql, @dialect), @dialect)
+      @statements << statement
+      return statement unless block_given?
+
+      begin
+        yield statement
+      ensure
+        statement.finalize
+      end
+    end
+
+    def each_row(sql, parameters = [], &block)
+      return enum_for(:each_row, sql, parameters) unless block
+
+      prepare(sql) { |statement| statement.each_row(parameters, &block) }
+    end
+
+    def copy_from(sql, data)
+      copy = begin_copy(:eggdb_sql_copy_in_begin, sql)
+      begin
+        pieces = data.is_a?(String) ? [data] : data
+        pieces.each do |piece|
+          bytes = piece.to_s.b
+          EggDB.check(Native.eggdb_copy_put(copy, Fiddle::Pointer[bytes], bytes.bytesize)) unless bytes.empty?
+        end
+        EggDB.copied_rows(EggDB.end_copy(copy))
+      ensure
+        Native.eggdb_copy_free(copy)
+      end
+    end
+
+    def copy_to(sql)
+      gathered = block_given? ? nil : +""
+      copy = begin_copy(:eggdb_sql_copy_out_begin, sql)
+      begin
+        data = Fiddle::Pointer.malloc(POINTER)
+        length = Fiddle::Pointer.malloc(8)
+        loop do
+          EggDB.check(Native.eggdb_copy_read(copy, data, length))
+          size = length[0, 8].unpack1("J")
+          break if size.zero?
+
+          piece = Fiddle::Pointer.new(data[0, POINTER].unpack1("J"))[0, size].b
+          gathered ? gathered << piece : yield(piece)
+        end
+        EggDB.end_copy(copy)
+      ensure
+        Native.eggdb_copy_free(copy)
+      end
+      gathered
+    end
+
     def close
       return unless @session
 
+      @statements.each(&:finalize)
       Native.eggdb_sql_close(@session)
       Native.eggdb_close(@database) if @database
       @session = nil
+    end
+
+    private
+
+    def begin_copy(call, sql)
+      raise Error.new("the database is closed", "08003", nil) unless @session
+
+      out = Fiddle::Pointer.malloc(POINTER)
+      EggDB.check(Native.public_send(call, @session, sql, out))
+      Fiddle::Pointer.new(out[0, POINTER].unpack1("J"))
+    end
+  end
+
+  class Statement
+    INT64_RANGE = (-(2**63)..(2**63 - 1)).freeze
+
+    attr_reader :parameter_count
+
+    def initialize(session, sql, dialect)
+      @dialect = dialect
+      out = Fiddle::Pointer.malloc(POINTER)
+      EggDB.check(Native.eggdb_sql_prepare(session, sql, sql.bytesize, out))
+      @handle = Fiddle::Pointer.new(out[0, POINTER].unpack1("J"))
+      count = Fiddle::Pointer.malloc(8)
+      EggDB.check(Native.eggdb_stmt_parameter_count(@handle, count))
+      @parameter_count = count[0, 8].unpack1("J")
+    end
+
+    def bind(parameters)
+      EggDB.check(Native.eggdb_stmt_reset(live))
+      EggDB.check(Native.eggdb_stmt_clear_bindings(@handle))
+      parameters.each_with_index { |value, index| EggDB.check(bind_one(index + 1, value)) }
+      self
+    end
+
+    def execute(parameters = [])
+      bind(parameters)
+      results = Fiddle::Pointer.malloc(POINTER)
+      count = Fiddle::Pointer.malloc(8)
+      EggDB.check(Native.eggdb_stmt_execute(@handle, results, count))
+      EggDB.gathered(Fiddle::Pointer.new(results[0, POINTER].unpack1("J")), count[0, 8].unpack1("J"))
+    end
+
+    def columns
+      count = Fiddle::Pointer.malloc(8)
+      EggDB.check(Native.eggdb_stmt_column_count(live, count))
+      name = Fiddle::Pointer.malloc(POINTER)
+      (0...count[0, 8].unpack1("J")).map do |column|
+        EggDB.check(Native.eggdb_stmt_column_name(@handle, column, name))
+        Fiddle::Pointer.new(name[0, POINTER].unpack1("J")).to_s
+      end
+    end
+
+    def each_row(parameters = [])
+      return enum_for(:each_row, parameters) unless block_given?
+
+      bind(parameters)
+      has_row = Fiddle::Pointer.malloc(4)
+      values = Fiddle::Pointer.malloc(POINTER)
+      count = Fiddle::Pointer.malloc(8)
+      begin
+        loop do
+          EggDB.check(Native.eggdb_stmt_step(@handle, has_row))
+          break if has_row[0, 4].unpack1("l<").zero?
+
+          EggDB.check(Native.eggdb_stmt_row(@handle, values, count))
+          row = Fiddle::Pointer.new(values[0, POINTER].unpack1("J"))
+          yield((0...count[0, 8].unpack1("J")).map { |column| EggDB.value_of(row[column * VALUE_BYTES, VALUE_BYTES]) })
+        end
+      ensure
+        Native.eggdb_stmt_reset(@handle) if @handle
+      end
+      self
+    end
+
+    def finalize
+      return unless @handle
+
+      Native.eggdb_stmt_finalize(@handle)
+      @handle = nil
+    end
+
+    private
+
+    def live
+      raise Error.new("the statement is finalized", "26000", nil) unless @handle
+
+      @handle
+    end
+
+    def bind_one(index, value)
+      case value
+      when nil then Native.eggdb_stmt_bind_null(@handle, index)
+      when true then Native.eggdb_stmt_bind_bool(@handle, index, 1)
+      when false then Native.eggdb_stmt_bind_bool(@handle, index, 0)
+      when Integer
+        return Native.eggdb_stmt_bind_int64(@handle, index, value) if INT64_RANGE.cover?(value)
+
+        bind_text(index, value.to_s)
+      when Float then Native.eggdb_stmt_bind_double(@handle, index, value)
+      when String
+        return bind_text(index, value) unless value.encoding == Encoding::BINARY
+
+        Native.eggdb_stmt_bind_blob(@handle, index, Fiddle::Pointer[value], value.bytesize)
+      else bind_text(index, EggDB.text_of(value, @dialect))
+      end
+    end
+
+    def bind_text(index, text)
+      text = text.encode("UTF-8")
+      Native.eggdb_stmt_bind_text(@handle, index, text, text.bytesize)
     end
   end
 
@@ -372,16 +562,35 @@ module EggDB
       values = Fiddle::Pointer.new(values_address)
       rows = (0...row_count).map do |row|
         (0...column_count).map do |column|
-          kind, integer, real, data, length = values[(row * column_count + column) * VALUE_BYTES, VALUE_BYTES].unpack("l<x4q<EJJ")
-          case kind
-          when 1 then integer
-          when 2 then real
-          when 3 then Fiddle::Pointer.new(data)[0, length].force_encoding("UTF-8")
-          when 4 then Fiddle::Pointer.new(data)[0, length].b
-          end
+          value_of(values[(row * column_count + column) * VALUE_BYTES, VALUE_BYTES])
         end
       end
       { tag: Fiddle::Pointer.new(tag_address).to_s, columns: columns, rows: rows }
     end
+  end
+
+  def self.value_of(record)
+    kind, integer, real, data, length = record.unpack("l<x4q<EJJ")
+    case kind
+    when 1 then integer
+    when 2 then real
+    when 3 then Fiddle::Pointer.new(data)[0, length].force_encoding("UTF-8")
+    when 4 then Fiddle::Pointer.new(data)[0, length].b
+    end
+  end
+
+  def self.end_copy(copy)
+    results = Fiddle::Pointer.malloc(POINTER)
+    count = Fiddle::Pointer.malloc(8)
+    check(Native.eggdb_copy_end(copy, results, count))
+    gathered(Fiddle::Pointer.new(results[0, POINTER].unpack1("J")), count[0, 8].unpack1("J"))
+  end
+
+  def self.copied_rows(results)
+    results.reverse_each do |result|
+      words = result[:tag].split
+      return Integer(words[1], exception: false) || -1 if words.size == 2 && words[0] == "COPY"
+    end
+    -1
   end
 end

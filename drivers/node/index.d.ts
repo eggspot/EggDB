@@ -28,7 +28,23 @@ export class Database {
   query<Row = Record<string, Value>>(sql: string, parameters?: Parameter[]): Row[];
   run(sql: string, parameters?: Parameter[]): { changes: number };
   transaction<T>(body: (database: Database) => T): T;
+  prepare(sql: string): Statement;
+  iterate(sql: string, parameters?: Parameter[]): IterableIterator<Value[]>;
+  copyFrom(sql: string, data: Bytes | Iterable<Bytes>): number;
+  copyTo(sql: string): Buffer;
+  copyTo(sql: string, onPiece: (piece: Buffer) => void): undefined;
   close(): void;
+}
+
+export class Statement {
+  readonly parameterCount: number;
+  bind(parameters?: Parameter[]): this;
+  execute(parameters?: Parameter[]): StatementResult[];
+  run(parameters?: Parameter[]): { changes: number };
+  columns(): string[];
+  iterate(parameters?: Parameter[]): IterableIterator<Value[]>;
+  all<Row = Record<string, Value>>(parameters?: Parameter[]): Row[];
+  finalize(): void;
 }
 
 export type Bytes = string | Buffer | Uint8Array;
