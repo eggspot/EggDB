@@ -39,6 +39,7 @@ pub mod oid;
 pub mod pem;
 pub mod private_key;
 pub mod record;
+pub mod resumption;
 mod record_layer;
 pub mod self_signed;
 mod server;

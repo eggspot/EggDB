@@ -14,7 +14,8 @@ with each protocol's own client over TLS:
   through SSL_CERT_FILE).
 Then it serves the RESP, REST and MQTT listeners on a non-loopback address, where serve ends TLS in
 front of each protocol (D1155), and connects with redis-cli --tls, curl over HTTPS and an
-openssl s_client handshake, all checking the chain against the authority. Then it serves with
+openssl s_client handshake, all checking the chain against the authority, and resumes a TLS 1.3
+session from the server's ticket with openssl s_client -sess_out and -sess_in (D1159). Then it serves with
 --tls-self-signed and checks psql with sslmode=require. Fails on the first
 client that cannot connect over TLS or prints the wrong answer.
 
@@ -120,6 +121,15 @@ grep -qx 'PONG' "$work/redis.out" || fail "redis-cli over TLS printed $(cat "$wo
 es_status=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/ca.pem" "https://localhost:$RELAY_ES_PORT/") \
   || fail "curl could not reach the REST API over TLS"
 case "$es_status" in 2?? | 401) ;; *) fail "the REST API over TLS answered HTTP $es_status" ;; esac
+openssl s_client -connect "127.0.0.1:$RELAY_RESP_PORT" -servername localhost -CAfile "$work/ca.pem" \
+  -tls1_3 -sess_out "$work/tls-session.pem" < /dev/null > "$work/first-session.out" 2>&1 \
+  || fail "the first TLS 1.3 handshake failed: $(tail -n 5 "$work/first-session.out")"
+[ -s "$work/tls-session.pem" ] || fail "the server sent no TLS 1.3 session ticket"
+openssl s_client -connect "127.0.0.1:$RELAY_RESP_PORT" -servername localhost -CAfile "$work/ca.pem" \
+  -tls1_3 -sess_in "$work/tls-session.pem" < /dev/null > "$work/resumed-session.out" 2>&1 \
+  || fail "the resumed TLS 1.3 handshake failed: $(tail -n 5 "$work/resumed-session.out")"
+grep -q '^Reused, TLSv1.3' "$work/resumed-session.out" \
+  || fail "the second handshake did not resume the session: $(grep -E '^(New|Reused)' "$work/resumed-session.out")"
 openssl s_client -connect "127.0.0.1:$RELAY_MQTT_PORT" -servername localhost -CAfile "$work/ca.pem" \
   -verify_return_error < /dev/null > "$work/mqtt-tls.out" 2>&1 || fail "the MQTT listener's TLS handshake failed: $(tail -n 5 "$work/mqtt-tls.out")"
 stop_server

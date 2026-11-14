@@ -359,3 +359,18 @@ fn tls12_exports_the_same_keying_material_on_both_sides() {
         client.info().tls_server_end_point()
     );
 }
+
+#[test]
+fn a_server_that_issues_tickets_still_serves_a_client_that_offers_no_resumption() {
+    let (mut server_config, certificate) = server_setup("db.example.com");
+    server_config.session_tickets = Some(std::sync::Arc::new(
+        eggdb_tls::resumption::SessionTickets::new(&mut eggdb_platform::secure_random::fill)
+            .expect("a ticket key"),
+    ));
+    let client_config = full_verification(&certificate, "db.example.com");
+    let (server, client) = run_handshake(server_config, client_config);
+    let server = server.expect("server handshake");
+    let client = client.expect("client handshake");
+    assert!(!server.info().resumed);
+    assert!(!client.info().resumed);
+}

@@ -1183,3 +1183,4 @@ its full title with its status.
 - [D1156](decisions/D1156.md) Code-only batch 805 (M6a): replies measured before they are built: RESP EXEC and large values, Bolt records and pending rows, HTTP response room
 - [D1157](decisions/D1157.md) Code-only batch 806 (M6a): one shared listener crate for the protocol servers
 - [D1158](decisions/D1158.md) Code-only batch 807 (M6a): AES on the processor's AES instructions (AES-NI, Armv8)
+- [D1159](decisions/D1159.md) Code-only batch 808 (M6a): TLS 1.3 session resumption with tickets on the server

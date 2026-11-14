@@ -224,6 +224,7 @@ pub(crate) fn handshake<S: Read + Write>(
             server_certificate: chain.first().cloned(),
             peer_certificates: chain,
             key_exchange_group: key_exchange.group,
+            resumed: false,
         },
         traffic: Traffic::Tls12(Tls12Traffic {
             hash,

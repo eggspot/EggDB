@@ -266,6 +266,7 @@ pub(crate) fn handshake<S: Read + Write>(
             peer_certificates: Vec::new(),
             server_certificate: config.chain().first().cloned(),
             key_exchange_group: group,
+            resumed: false,
         },
         traffic: Traffic::Tls12(Tls12Traffic {
             hash,

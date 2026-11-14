@@ -24,6 +24,8 @@ pub struct SessionInfo {
     /// The key exchange group, a [`crate::handshake::named_group`] value; `X25519MLKEM768`
     /// marks a post-quantum hybrid key exchange.
     pub key_exchange_group: u16,
+    /// Whether the handshake resumed an earlier session from a ticket, skipping the certificate.
+    pub resumed: bool,
 }
 
 impl SessionInfo {

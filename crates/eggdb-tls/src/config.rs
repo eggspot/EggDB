@@ -65,6 +65,10 @@ pub struct ServerConfig {
     /// Only FIPS-approved algorithms: AES-GCM suites, and P-256 or the ML-KEM hybrid for key
     /// exchange.
     pub fips_only: bool,
+    /// The key TLS 1.3 session tickets are sealed with: with one, every full handshake ends with
+    /// a NewSessionTicket and a client that offers it back resumes without the certificate and
+    /// signature. `None` issues and accepts no tickets.
+    pub session_tickets: Option<std::sync::Arc<crate::resumption::SessionTickets>>,
 }
 
 /// Whether a server asks clients for certificates (TLS 1.3's CertificateRequest).
@@ -112,6 +116,7 @@ impl ServerConfig {
             maximum_version: MaximumVersion::default(),
             client_authentication: ClientAuthentication::None,
             fips_only: false,
+            session_tickets: None,
         })
     }
 

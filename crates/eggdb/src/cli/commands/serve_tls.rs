@@ -263,6 +263,9 @@ pub(super) fn tls_setup(
         config.client_authentication = eggdb_tls::ClientAuthentication::Optional { trust };
     }
     config.fips_only = fips_requested(options);
+    let tickets = eggdb_tls::resumption::SessionTickets::new(&mut eggdb_platform::secure_random::fill)
+        .map_err(|error| usage(format!("cannot make the TLS session ticket key: {error}")))?;
+    config.session_tickets = Some(Arc::new(tickets));
     let with_protocol = |protocol: Option<&[u8]>| {
         let mut config = config.clone();
         config.application_protocols = protocol.map(|name| vec![name.to_vec()]).unwrap_or_default();

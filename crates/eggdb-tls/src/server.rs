@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 
 use crate::alert::AlertDescription;
-use crate::cipher_suite::{CipherSuite, version};
+use crate::cipher_suite::{CipherSuite, TranscriptHash, version};
 use crate::config::{ClientAuthentication, MaximumVersion, MinimumVersion, ServerConfig};
 use crate::error::TlsError;
 use crate::handshake::{
@@ -23,6 +23,11 @@ use crate::x509::Certificate;
 use crate::private_key::FillRandom;
 use crate::record::{Tls13RecordProtection, content_type};
 use crate::record_layer::{Protection, RecordLayer};
+use crate::resumption::{
+    OfferedPsks, PSK_DHE_KE, TicketState, binder_matches, new_session_ticket_message,
+    now_unix_milliseconds, partial_client_hello, resumption_master_secret, selected_identity,
+    ticket_is_fresh, ticket_psk,
+};
 use crate::session::{Established, SessionInfo, Tls13Traffic, Traffic};
 use eggdb_crypto::constant_time_eq;
 
@@ -81,6 +86,60 @@ fn preferred_share(hello: &ClientHello, fips_only: bool) -> Result<Option<KeySha
     Ok(tls13_groups(fips_only)
         .iter()
         .find_map(|group| shares.iter().find(|share| share.group == *group).cloned()))
+}
+
+fn resumable_psk(
+    config: &ServerConfig,
+    hello: &ClientHello,
+    hello_message: &[u8],
+    transcript_before_hello: &TranscriptHash,
+    suite: CipherSuite,
+) -> Result<Option<Vec<u8>>, TlsError> {
+    let Some(tickets) = &config.session_tickets else {
+        return Ok(None);
+    };
+    if !matches!(config.client_authentication, ClientAuthentication::None) {
+        return Ok(None);
+    }
+    let Some(data) = hello.extension(extension_type::PRE_SHARED_KEY) else {
+        return Ok(None);
+    };
+    if hello.extensions.last().map(|extension| extension.extension_type) != Some(extension_type::PRE_SHARED_KEY) {
+        return Err(TlsError::protocol(
+            AlertDescription::IllegalParameter,
+            "pre_shared_key is not the ClientHello's last extension",
+        ));
+    }
+    if !hello.psk_key_exchange_modes()?.contains(&PSK_DHE_KE) {
+        return Ok(None);
+    }
+    let offered = OfferedPsks::decode(data)?;
+    let (Some(identity), Some(binder)) = (offered.identities.first(), offered.binders.first()) else {
+        return Ok(None);
+    };
+    let Some(state) = tickets.open(&identity.identity) else {
+        return Ok(None);
+    };
+    let same_name = hello.server_name()?.unwrap_or_default() == state.server_name;
+    if state.cipher_suite != suite.id()
+        || !same_name
+        || !ticket_is_fresh(&state, identity.obfuscated_ticket_age, now_unix_milliseconds())
+    {
+        return Ok(None);
+    }
+    let partial = partial_client_hello(hello_message, &offered).ok_or(TlsError::protocol(
+        AlertDescription::DecodeError,
+        "the PSK binders are longer than the ClientHello",
+    ))?;
+    let mut partial_transcript = transcript_before_hello.clone();
+    partial_transcript.update(partial);
+    if !binder_matches(suite.hash(), &state.psk, &partial_transcript.current(), binder) {
+        return Err(TlsError::protocol(
+            AlertDescription::DecryptError,
+            "the PSK binder does not verify",
+        ));
+    }
+    Ok(Some(state.psk))
 }
 
 fn tls13<S: Read + Write>(
@@ -154,19 +213,24 @@ fn tls13<S: Read + Write>(
             (second_hello, second_message, share)
         }
     };
+    let resumed_psk = resumable_psk(config, &hello, &hello_message, &transcript, suite)?;
     transcript.update(&hello_message);
 
-    let scheme =
-        choose_signature_scheme(config.private_key(), &hello.signature_algorithms()?, true).ok_or(
-            TlsError::protocol(
-                AlertDescription::HandshakeFailure,
-                "no signature scheme in common",
-            ),
-        )?;
-    let algorithm = scheme_algorithm(scheme, true).ok_or(TlsError::protocol(
-        AlertDescription::InternalError,
-        "the chosen signature scheme has no algorithm",
-    ))?;
+    let signing = match resumed_psk {
+        Some(_) => None,
+        None => {
+            let scheme = choose_signature_scheme(config.private_key(), &hello.signature_algorithms()?, true)
+                .ok_or(TlsError::protocol(
+                    AlertDescription::HandshakeFailure,
+                    "no signature scheme in common",
+                ))?;
+            let algorithm = scheme_algorithm(scheme, true).ok_or(TlsError::protocol(
+                AlertDescription::InternalError,
+                "the chosen signature scheme has no algorithm",
+            ))?;
+            Some((scheme, algorithm))
+        }
+    };
     let application_protocol = choose_application_protocol(
         &config.application_protocols,
         &hello.application_protocols()?,
@@ -190,19 +254,26 @@ fn tls13<S: Read + Write>(
     )?;
     let mut random = [0u8; 32];
     fill_random(&mut random)?;
+    let mut server_extensions = vec![
+        Extension::server_supported_version(version::TLS13),
+        Extension::server_key_share(&KeyShareEntry {
+            group: share.group,
+            key_exchange: server_share,
+        }),
+    ];
+    if resumed_psk.is_some() {
+        server_extensions.push(Extension {
+            extension_type: extension_type::PRE_SHARED_KEY,
+            data: selected_identity(0),
+        });
+    }
     let server_hello = ServerHello {
         legacy_version: version::TLS12,
         random,
         legacy_session_id_echo: hello.legacy_session_id.clone(),
         cipher_suite: suite.id(),
         compression_method: 0,
-        extensions: vec![
-            Extension::server_supported_version(version::TLS13),
-            Extension::server_key_share(&KeyShareEntry {
-                group: share.group,
-                key_exchange: server_share,
-            }),
-        ],
+        extensions: server_extensions,
     }
     .encode();
     transcript.update(&server_hello);
@@ -211,7 +282,7 @@ fn tls13<S: Read + Write>(
         layer.queue_change_cipher_spec();
     }
 
-    let mut schedule = KeySchedule::new(hash, None);
+    let mut schedule = KeySchedule::new(hash, resumed_psk.as_deref());
     let handshake_secrets = schedule.enter_handshake(&shared_secret, &transcript.current());
     let protection = |secret: &[u8]| {
         Tls13RecordProtection::new(suite.aead(), &traffic_keys(hash, suite.aead(), secret))
@@ -237,6 +308,7 @@ fn tls13<S: Read + Write>(
     layer.queue(content_type::HANDSHAKE, &encrypted_extensions)?;
 
     let client_trust = match &config.client_authentication {
+        _ if resumed_psk.is_some() => None,
         ClientAuthentication::None => None,
         ClientAuthentication::Optional { trust } => Some((trust, false)),
         ClientAuthentication::Required { trust } => Some((trust, true)),
@@ -251,28 +323,30 @@ fn tls13<S: Read + Write>(
         layer.queue(content_type::HANDSHAKE, &request)?;
     }
 
-    let chain: Vec<&[u8]> = config
-        .chain()
-        .iter()
-        .map(|certificate| certificate.der())
-        .collect();
-    let certificate = CertificateMessage::from_chain(&chain).encode_tls13();
-    transcript.update(&certificate);
-    layer.queue(content_type::HANDSHAKE, &certificate)?;
+    if let Some((scheme, algorithm)) = signing {
+        let chain: Vec<&[u8]> = config
+            .chain()
+            .iter()
+            .map(|certificate| certificate.der())
+            .collect();
+        let certificate = CertificateMessage::from_chain(&chain).encode_tls13();
+        transcript.update(&certificate);
+        layer.queue(content_type::HANDSHAKE, &certificate)?;
 
-    let content = certificate_verify_content(true, &transcript.current());
-    let signature = config
-        .private_key()
-        .sign(algorithm, &content, &mut *fill_random)
-        .map_err(|_| {
-            TlsError::protocol(
-                AlertDescription::InternalError,
-                "signing the handshake failed",
-            )
-        })?;
-    let certificate_verify = DigitallySigned { scheme, signature }.encode_certificate_verify();
-    transcript.update(&certificate_verify);
-    layer.queue(content_type::HANDSHAKE, &certificate_verify)?;
+        let content = certificate_verify_content(true, &transcript.current());
+        let signature = config
+            .private_key()
+            .sign(algorithm, &content, &mut *fill_random)
+            .map_err(|_| {
+                TlsError::protocol(
+                    AlertDescription::InternalError,
+                    "signing the handshake failed",
+                )
+            })?;
+        let certificate_verify = DigitallySigned { scheme, signature }.encode_certificate_verify();
+        transcript.update(&certificate_verify);
+        layer.queue(content_type::HANDSHAKE, &certificate_verify)?;
+    }
 
     let finished = finished_message(&finished_verify_data(
         hash,
@@ -307,6 +381,29 @@ fn tls13<S: Read + Write>(
     }
     layer.set_read_protection(protection(&application_secrets.client)?)?;
     layer.ignore_change_cipher_spec = false;
+    transcript.update(&client_finished);
+
+    if let Some(tickets) = &config.session_tickets
+        && matches!(config.client_authentication, ClientAuthentication::None)
+        && hello.psk_key_exchange_modes()?.contains(&PSK_DHE_KE)
+    {
+        let resumption = resumption_master_secret(hash, schedule.stage_secret(), &transcript.current());
+        let mut age_add = [0u8; 4];
+        fill_random(&mut age_add)?;
+        let state = TicketState {
+            cipher_suite: suite.id(),
+            issued_unix_milliseconds: now_unix_milliseconds(),
+            age_add: u32::from_be_bytes(age_add),
+            server_name: server_name.clone().unwrap_or_default(),
+            psk: ticket_psk(hash, &resumption),
+        };
+        let ticket = tickets.seal(&state, &mut *fill_random)?;
+        layer.queue(
+            content_type::HANDSHAKE,
+            &new_session_ticket_message(state.age_add, &ticket),
+        )?;
+        layer.flush()?;
+    }
 
     Ok(Established {
         info: SessionInfo {
@@ -317,6 +414,7 @@ fn tls13<S: Read + Write>(
             peer_certificates,
             server_certificate: config.chain().first().cloned(),
             key_exchange_group: share.group,
+            resumed: resumed_psk.is_some(),
         },
         traffic: Traffic::Tls13(Tls13Traffic {
             hash,
