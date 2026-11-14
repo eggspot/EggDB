@@ -811,8 +811,152 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
                     .done(),
             ]
         }
+        MonitoringRelation::Cast => cast_rows(row),
         _ => Vec::new(),
     }
+}
+
+mod type_oid {
+    pub(super) const BOOL: u32 = 16;
+    pub(super) const BYTEA: u32 = 17;
+    pub(super) const NAME: u32 = 19;
+    pub(super) const INT8: u32 = 20;
+    pub(super) const INT2: u32 = 21;
+    pub(super) const INT4: u32 = 23;
+    pub(super) const TEXT: u32 = 25;
+    pub(super) const OID: u32 = 26;
+    pub(super) const JSON: u32 = 114;
+    pub(super) const FLOAT4: u32 = 700;
+    pub(super) const FLOAT8: u32 = 701;
+    pub(super) const BPCHAR: u32 = 1042;
+    pub(super) const VARCHAR: u32 = 1043;
+    pub(super) const DATE: u32 = 1082;
+    pub(super) const TIME: u32 = 1083;
+    pub(super) const TIMESTAMP: u32 = 1114;
+    pub(super) const TIMESTAMPTZ: u32 = 1184;
+    pub(super) const INTERVAL: u32 = 1186;
+    pub(super) const TIMETZ: u32 = 1266;
+    pub(super) const NUMERIC: u32 = 1700;
+    pub(super) const UUID: u32 = 2950;
+    pub(super) const JSONB: u32 = 3802;
+}
+
+const FIRST_CAST_OID: u32 = 11_000;
+
+#[derive(Clone, Copy)]
+enum CastContext {
+    Implicit,
+    Assignment,
+    Explicit,
+}
+
+#[derive(Clone, Copy)]
+enum CastMethod {
+    Function,
+    Binary,
+    InputOutput,
+}
+
+const BUILT_IN_CASTS: [(u32, u32, CastContext, CastMethod); 52] = {
+    use CastContext::{Assignment as A, Explicit as E, Implicit as I};
+    use CastMethod::{Binary as B, Function as F, InputOutput as O};
+    use type_oid::*;
+    [
+        (INT2, INT4, I, F),
+        (INT2, INT8, I, F),
+        (INT2, FLOAT4, I, F),
+        (INT2, FLOAT8, I, F),
+        (INT2, NUMERIC, I, F),
+        (INT4, INT2, A, F),
+        (INT4, INT8, I, F),
+        (INT4, FLOAT4, I, F),
+        (INT4, FLOAT8, I, F),
+        (INT4, NUMERIC, I, F),
+        (INT4, BOOL, E, F),
+        (INT4, OID, I, B),
+        (INT8, INT2, A, F),
+        (INT8, INT4, A, F),
+        (INT8, FLOAT4, I, F),
+        (INT8, FLOAT8, I, F),
+        (INT8, NUMERIC, I, F),
+        (INT8, OID, I, F),
+        (FLOAT4, INT2, A, F),
+        (FLOAT4, INT4, A, F),
+        (FLOAT4, INT8, A, F),
+        (FLOAT4, FLOAT8, I, F),
+        (FLOAT4, NUMERIC, A, F),
+        (FLOAT8, INT2, A, F),
+        (FLOAT8, INT4, A, F),
+        (FLOAT8, INT8, A, F),
+        (FLOAT8, FLOAT4, A, F),
+        (FLOAT8, NUMERIC, A, F),
+        (NUMERIC, INT2, A, F),
+        (NUMERIC, INT4, A, F),
+        (NUMERIC, INT8, A, F),
+        (NUMERIC, FLOAT4, I, F),
+        (NUMERIC, FLOAT8, I, F),
+        (BOOL, INT4, E, F),
+        (OID, INT4, A, B),
+        (OID, INT8, A, F),
+        (TEXT, BPCHAR, I, B),
+        (TEXT, VARCHAR, I, B),
+        (TEXT, NAME, I, F),
+        (VARCHAR, TEXT, I, B),
+        (VARCHAR, BPCHAR, I, B),
+        (VARCHAR, NAME, I, F),
+        (BPCHAR, TEXT, I, F),
+        (BPCHAR, VARCHAR, I, F),
+        (NAME, TEXT, I, F),
+        (DATE, TIMESTAMP, I, F),
+        (DATE, TIMESTAMPTZ, I, F),
+        (TIMESTAMP, DATE, A, F),
+        (TIMESTAMP, TIMESTAMPTZ, I, F),
+        (TIMESTAMPTZ, TIMESTAMP, A, F),
+        (TIME, TIMETZ, I, F),
+        (JSON, JSONB, A, O),
+    ]
+};
+
+const MORE_BUILT_IN_CASTS: [(u32, u32, CastContext, CastMethod); 6] = {
+    use CastContext::{Assignment as A, Implicit as I};
+    use CastMethod::{Function as F, InputOutput as O};
+    use type_oid::*;
+    [
+        (JSONB, JSON, A, O),
+        (TIMESTAMPTZ, DATE, A, F),
+        (TIMESTAMP, TIME, A, F),
+        (INTERVAL, TIME, A, F),
+        (TIME, INTERVAL, I, F),
+        (UUID, BYTEA, A, O),
+    ]
+};
+
+fn cast_rows(row: impl Fn() -> CatalogRow) -> Vec<Vec<Value>> {
+    BUILT_IN_CASTS
+        .iter()
+        .chain(MORE_BUILT_IN_CASTS.iter())
+        .enumerate()
+        .map(|(index, (source, target, context, method))| {
+            let context = match context {
+                CastContext::Implicit => "i",
+                CastContext::Assignment => "a",
+                CastContext::Explicit => "e",
+            };
+            let method = match method {
+                CastMethod::Function => "f",
+                CastMethod::Binary => "b",
+                CastMethod::InputOutput => "i",
+            };
+            row()
+                .set("oid", Value::Oid(FIRST_CAST_OID + index as u32))
+                .set("castsource", Value::Oid(*source))
+                .set("casttarget", Value::Oid(*target))
+                .set("castfunc", Value::Oid(0))
+                .set("castcontext", Value::Text(context.to_owned()))
+                .set("castmethod", Value::Text(method.to_owned()))
+                .done()
+        })
+        .collect()
 }
 
 const STATISTICS_READER_ROLES: [&str; 2] = ["pg_read_all_stats", "pg_monitor"];

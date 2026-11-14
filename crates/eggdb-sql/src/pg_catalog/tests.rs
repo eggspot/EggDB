@@ -1381,3 +1381,31 @@ fn a_materialized_view_is_relkind_m_and_a_table_stays_r() {
     );
     assert_eq!(rows_of(&kinds), ["order_totals|m", "orders|r"]);
 }
+
+#[test]
+fn pg_cast_lists_the_built_in_casts_with_their_contexts() {
+    let store = MemoryStore::default();
+    let mut session = session(&store);
+    assert!(
+        last(
+            &mut session,
+            "SELECT castcontext FROM pg_cast WHERE castsource = 'integer'::regtype AND casttarget = 'bigint'::regtype"
+        )
+        .contains('i')
+    );
+    assert!(
+        last(
+            &mut session,
+            "SELECT castcontext, castmethod FROM pg_cast WHERE castsource = 'bigint'::regtype AND casttarget = 'integer'::regtype"
+        )
+        .contains("a|f")
+    );
+    assert!(
+        last(
+            &mut session,
+            "SELECT castmethod FROM pg_cast WHERE castsource = 'text'::regtype AND casttarget = 'character varying'::regtype"
+        )
+        .contains('b')
+    );
+    assert!(last(&mut session, "SELECT count(DISTINCT oid) = count(*) FROM pg_cast").contains('t'));
+}
