@@ -3343,6 +3343,7 @@ impl<'s> Session<'s> {
                 return Ok(began);
             }
             Statement::Commit => return self.commit(),
+            Statement::TwoPhase(command) => return self.two_phase(command),
             Statement::Rollback => return self.rollback(),
             Statement::Savepoint(command @ crate::ast::SavepointCommand::RollbackTo(_)) => {
                 return self.savepoint_command(command);
@@ -4048,6 +4049,7 @@ impl<'s> Session<'s> {
             | Statement::SetTransaction(_)
             | Statement::Commit
             | Statement::Rollback
+            | Statement::TwoPhase(_)
             | Statement::Savepoint(_)
             | Statement::InstallExtension { .. }
             | Statement::MaterializedView(_)
@@ -4712,6 +4714,117 @@ impl<'s> Session<'s> {
                 Ok(QueryResult::command("BEGIN"))
             }
         }
+    }
+
+    fn two_phase(&mut self, command: &crate::ast::TwoPhase) -> SqlResult<QueryResult> {
+        use crate::ast::TwoPhase;
+        let store = self.store;
+        let tag = command.tag();
+        let outside_block = |verb: &str| {
+            SqlError::new(
+                SqlState::ACTIVE_SQL_TRANSACTION,
+                format!("{verb} cannot run inside a transaction block"),
+            )
+            .with_vendor_code(1399)
+        };
+        let unknown = |gid: &str| {
+            SqlError::new(
+                SqlState::UNDEFINED_OBJECT,
+                format!("prepared transaction with identifier \"{gid}\" does not exist"),
+            )
+            .with_vendor_code(1397)
+        };
+        match command {
+            TwoPhase::Prepare(gid) => self.prepare_transaction(gid),
+            TwoPhase::CommitPrepared(_) | TwoPhase::RollbackPrepared(_)
+                if self.in_block() && !self.block_is_implicit =>
+            {
+                Err(outside_block(tag))
+            }
+            TwoPhase::CommitPrepared(gid) => {
+                if store.erased_commit_prepared(gid)? {
+                    Ok(QueryResult::command(tag))
+                } else {
+                    Err(unknown(gid))
+                }
+            }
+            TwoPhase::RollbackPrepared(gid) => {
+                if store.erased_rollback_prepared(gid)? {
+                    Ok(QueryResult::command(tag))
+                } else {
+                    Err(unknown(gid))
+                }
+            }
+            TwoPhase::XaStart(_) => {
+                self.begin(false)?;
+                self.transaction_mode.isolation = Some("repeatable read".to_owned());
+                self.reopen_writer_for_isolation()?;
+                Ok(QueryResult::command(tag))
+            }
+            TwoPhase::XaEnd(_) => Ok(QueryResult::command(tag)),
+            TwoPhase::XaCommitOnePhase(_) => self.commit().map(|_| QueryResult::command(tag)),
+            TwoPhase::XaRollback(_) if self.in_block() => {
+                self.rollback().map(|_| QueryResult::command(tag))
+            }
+            TwoPhase::XaRollback(gid) => {
+                if store.erased_rollback_prepared(gid)? {
+                    Ok(QueryResult::command(tag))
+                } else {
+                    Err(unknown(gid))
+                }
+            }
+            TwoPhase::Recover => {
+                let columns = [
+                    ("formatID", SqlType::BigInt),
+                    ("gtrid_length", SqlType::BigInt),
+                    ("bqual_length", SqlType::BigInt),
+                    ("data", SqlType::Text),
+                ]
+                .into_iter()
+                .map(|(name, sql_type)| OutputColumn {
+                    name: name.to_owned(),
+                    sql_type: Some(sql_type),
+                })
+                .collect();
+                let rows = store
+                    .erased_prepared_transactions()?
+                    .into_iter()
+                    .map(|prepared| {
+                        let length = i64::try_from(prepared.gid.len()).unwrap_or(i64::MAX);
+                        vec![
+                            Value::BigInt(1),
+                            Value::BigInt(length),
+                            Value::BigInt(0),
+                            Value::Text(prepared.gid),
+                        ]
+                    })
+                    .collect();
+                Ok(QueryResult::rows(tag.to_owned(), columns, rows))
+            }
+        }
+    }
+
+    fn prepare_transaction(&mut self, gid: &str) -> SqlResult<QueryResult> {
+        if !matches!(self.block, Block::Writing(_)) || self.block_is_implicit {
+            return Err(SqlError::new(
+                SqlState::NO_ACTIVE_SQL_TRANSACTION,
+                "PREPARE TRANSACTION can only be used in transaction blocks",
+            )
+            .with_vendor_code(1399));
+        }
+        self.writer_snapshot = None;
+        self.save_points.clear();
+        self.savepoints.clear();
+        self.advisory_locks.release_transaction_locks();
+        self.deferred.clear();
+        let Block::Writing(writer) = std::mem::replace(&mut self.block, Block::None) else {
+            return Err(SqlError::new(SqlState::INTERNAL_ERROR, "no transaction to prepare"));
+        };
+        let prepared = writer.prepare_boxed(gid);
+        self.temporary.rollback();
+        self.tables = TableCache::default();
+        self.end_transaction_settings(prepared.is_ok());
+        prepared.map(|()| QueryResult::command("PREPARE TRANSACTION"))
     }
 
     fn commit(&mut self) -> SqlResult<QueryResult> {

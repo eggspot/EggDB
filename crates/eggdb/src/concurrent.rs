@@ -9,6 +9,9 @@ use std::ops::Bound;
 use std::time::Duration;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const PREPARED_TAG: u8 = 0x09;
+const PREPARED_RECORD_VERSION: u8 = 1;
+const MAX_GID_BYTES: usize = 200;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
 
 /// How a [`ConcurrentTransaction`] checks, when it commits, the transactions that committed
@@ -336,6 +339,40 @@ impl<'db> ConcurrentTransaction<'db> {
     /// [`ErrorKind::Conflict`](crate::ErrorKind::Conflict) and writes nothing.
     pub fn commit(self) -> Result<CommitStamp> {
         let mut writer = self.database.begin_write()?;
+        self.check(&mut writer)?;
+        self.apply(&mut writer)?;
+        writer.commit()
+    }
+
+    /// The first phase of a two-phase commit (D1127): checks the transaction as
+    /// [`commit`](Self::commit) does and, when it passes, stores its changes durably under
+    /// `gid` instead of applying them. [`Database::commit_prepared`] applies them later, from
+    /// any connection and after a restart, and [`Database::rollback_prepared`] drops them. A
+    /// `gid` already prepared, or longer than 200 bytes, fails with
+    /// [`ErrorKind::Conflict`](crate::ErrorKind::Conflict) or
+    /// [`ErrorKind::TooLarge`](crate::ErrorKind::TooLarge).
+    pub fn prepare(self, gid: &str) -> Result<CommitStamp> {
+        if gid.len() > MAX_GID_BYTES {
+            return Err(Error::new(
+                ErrorKind::TooLarge,
+                format!("a transaction identifier is at most {MAX_GID_BYTES} bytes"),
+            ));
+        }
+        let mut writer = self.database.begin_write()?;
+        self.check(&mut writer)?;
+        let key = prepared_key(gid);
+        if writer.get_raw(&key)?.is_some() {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                format!("transaction identifier \"{gid}\" is already in use"),
+            ));
+        }
+        let record = self.prepared_record(writer.now().unix_micros());
+        writer.put_raw(&key, &record)?;
+        writer.commit()
+    }
+
+    fn check(&self, writer: &mut crate::WriteTransaction<'_>) -> Result<()> {
         match self.isolation {
             Isolation::Serializable => {
                 for (key, seen) in &self.reads {
@@ -377,28 +414,310 @@ impl<'db> ConcurrentTransaction<'db> {
                 }
             }
         }
-        for (key, written) in self.writes {
-            match (written, self.expiring.get(&key)) {
-                (Some(value), Some(ttl)) => writer.put_with_expiry(&key, &value, *ttl)?,
-                (Some(value), None) => writer.put(&key, &value)?,
-                (None, _) => {
-                    writer.delete(&key)?;
-                }
-            }
+        Ok(())
+    }
+
+    fn changes(&self) -> Vec<Change> {
+        let mut changes = Vec::with_capacity(self.writes.len() + self.collection_writes.len());
+        for (key, written) in &self.writes {
+            changes.push(match written {
+                Some(value) => Change::Put {
+                    key: key.clone(),
+                    value: value.clone(),
+                    ttl: self.expiring.get(key).copied(),
+                },
+                None => Change::Delete { key: key.clone() },
+            });
         }
-        for ((name, key), written) in self.collection_writes {
-            let mut collection = writer.collection(&name)?;
-            match written {
-                Some((value, Some(ttl))) => collection.put_with_expiry(&key, &value, ttl)?,
-                Some((value, None)) => collection.put(&key, &value)?,
-                None => {
-                    collection.delete(&key)?;
-                }
-            }
+        for ((name, key), written) in &self.collection_writes {
+            changes.push(match written {
+                Some((value, ttl)) => Change::CollectionPut {
+                    name: name.clone(),
+                    key: key.clone(),
+                    value: value.clone(),
+                    ttl: *ttl,
+                },
+                None => Change::CollectionDelete {
+                    name: name.clone(),
+                    key: key.clone(),
+                },
+            });
         }
-        writer.commit()
+        changes
+    }
+
+    fn apply(&self, writer: &mut crate::WriteTransaction<'_>) -> Result<()> {
+        apply_changes(writer, &self.changes())
+    }
+
+    fn prepared_record(&self, prepared_at_micros: i64) -> Vec<u8> {
+        encode_prepared(prepared_at_micros, &self.changes())
     }
 
     /// Gives up the transaction's changes. Dropping it does the same.
     pub fn rollback(self) {}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Change {
+    Put {
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<Duration>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
+    CollectionPut {
+        name: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl: Option<Duration>,
+    },
+    CollectionDelete {
+        name: String,
+        key: Vec<u8>,
+    },
+}
+
+fn apply_changes(writer: &mut crate::WriteTransaction<'_>, changes: &[Change]) -> Result<()> {
+    for change in changes {
+        match change {
+            Change::Put { key, value, ttl: Some(ttl) } => writer.put_with_expiry(key, value, *ttl)?,
+            Change::Put { key, value, ttl: None } => writer.put(key, value)?,
+            Change::Delete { key } => {
+                writer.delete(key)?;
+            }
+            Change::CollectionPut { name, key, value, ttl } => {
+                let mut collection = writer.collection(name)?;
+                match ttl {
+                    Some(ttl) => collection.put_with_expiry(key, value, *ttl)?,
+                    None => collection.put(key, value)?,
+                }
+            }
+            Change::CollectionDelete { name, key } => {
+                writer.collection(name)?.delete(key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepared_prefix() -> Vec<u8> {
+    let mut key = crate::collection::COLLECTIONS_PREFIX.to_vec();
+    key.push(PREPARED_TAG);
+    key
+}
+
+fn prepared_key(gid: &str) -> Vec<u8> {
+    let mut key = prepared_prefix();
+    key.extend_from_slice(gid.as_bytes());
+    key
+}
+
+fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn put_ttl(out: &mut Vec<u8>, ttl: Option<Duration>) {
+    let millis = ttl.map_or(u64::MAX, |ttl| u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX - 1));
+    out.extend_from_slice(&millis.to_be_bytes());
+}
+
+fn encode_prepared(prepared_at_micros: i64, changes: &[Change]) -> Vec<u8> {
+    let mut out = vec![PREPARED_RECORD_VERSION];
+    out.extend_from_slice(&prepared_at_micros.to_be_bytes());
+    out.extend_from_slice(&u32::try_from(changes.len()).unwrap_or(u32::MAX).to_be_bytes());
+    for change in changes {
+        match change {
+            Change::Put { key, value, ttl } => {
+                out.push(0);
+                put_bytes(&mut out, key);
+                put_bytes(&mut out, value);
+                put_ttl(&mut out, *ttl);
+            }
+            Change::Delete { key } => {
+                out.push(1);
+                put_bytes(&mut out, key);
+            }
+            Change::CollectionPut { name, key, value, ttl } => {
+                out.push(2);
+                put_bytes(&mut out, name.as_bytes());
+                put_bytes(&mut out, key);
+                put_bytes(&mut out, value);
+                put_ttl(&mut out, *ttl);
+            }
+            Change::CollectionDelete { name, key } => {
+                out.push(3);
+                put_bytes(&mut out, name.as_bytes());
+                put_bytes(&mut out, key);
+            }
+        }
+    }
+    out
+}
+
+struct RecordReader<'r> {
+    bytes: &'r [u8],
+}
+
+impl<'r> RecordReader<'r> {
+    fn damaged() -> Error {
+        Error::new(ErrorKind::Corrupt, "a prepared transaction's record is damaged")
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'r [u8]> {
+        if self.bytes.len() < count {
+            return Err(Self::damaged());
+        }
+        let (taken, rest) = self.bytes.split_at(count);
+        self.bytes = rest;
+        Ok(taken)
+    }
+
+    fn byte(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn word(&mut self) -> Result<u32> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| Self::damaged())?;
+        Ok(u32::from_be_bytes(bytes))
+    }
+
+    fn long(&mut self) -> Result<u64> {
+        let bytes: [u8; 8] = self.take(8)?.try_into().map_err(|_| Self::damaged())?;
+        Ok(u64::from_be_bytes(bytes))
+    }
+
+    fn bytes(&mut self) -> Result<Vec<u8>> {
+        let length = usize::try_from(self.word()?).map_err(|_| Self::damaged())?;
+        Ok(self.take(length)?.to_vec())
+    }
+
+    fn text(&mut self) -> Result<String> {
+        String::from_utf8(self.bytes()?).map_err(|_| Self::damaged())
+    }
+
+    fn ttl(&mut self) -> Result<Option<Duration>> {
+        let millis = self.long()?;
+        Ok((millis != u64::MAX).then(|| Duration::from_millis(millis)))
+    }
+}
+
+fn decode_prepared(bytes: &[u8]) -> Result<(i64, Vec<Change>)> {
+    let mut reader = RecordReader { bytes };
+    if reader.byte()? != PREPARED_RECORD_VERSION {
+        return Err(RecordReader::damaged());
+    }
+    let prepared_at = reader.long()? as i64;
+    let count = reader.word()?;
+    let mut changes = Vec::new();
+    for _ in 0..count {
+        changes.push(match reader.byte()? {
+            0 => Change::Put {
+                key: reader.bytes()?,
+                value: reader.bytes()?,
+                ttl: reader.ttl()?,
+            },
+            1 => Change::Delete { key: reader.bytes()? },
+            2 => Change::CollectionPut {
+                name: reader.text()?,
+                key: reader.bytes()?,
+                value: reader.bytes()?,
+                ttl: reader.ttl()?,
+            },
+            3 => Change::CollectionDelete {
+                name: reader.text()?,
+                key: reader.bytes()?,
+            },
+            _ => return Err(RecordReader::damaged()),
+        });
+    }
+    if !reader.bytes.is_empty() {
+        return Err(RecordReader::damaged());
+    }
+    Ok((prepared_at, changes))
+}
+
+/// A transaction prepared for a two-phase commit and not yet committed or rolled back (D1127).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedTransaction {
+    /// The identifier it was prepared under.
+    pub gid: String,
+    /// When it was prepared, in microseconds since the Unix epoch.
+    pub prepared_at_micros: i64,
+    /// How many changes it holds.
+    pub changes: usize,
+}
+
+impl Database {
+    /// The second phase of a two-phase commit (D1127): applies the changes prepared under
+    /// `gid` (see [`ConcurrentTransaction::prepare`]) and forgets them, in one commit. `false`
+    /// when no transaction is prepared under that identifier.
+    pub fn commit_prepared(&self, gid: &str) -> Result<bool> {
+        let mut writer = self.begin_write()?;
+        let key = prepared_key(gid);
+        let Some(record) = writer.get_raw(&key)? else {
+            return Ok(false);
+        };
+        let (_, changes) = decode_prepared(&record)?;
+        apply_changes(&mut writer, &changes)?;
+        writer.delete_raw(&key)?;
+        writer.commit()?;
+        Ok(true)
+    }
+
+    /// Drops the changes prepared under `gid`; `false` when none are.
+    pub fn rollback_prepared(&self, gid: &str) -> Result<bool> {
+        let mut writer = self.begin_write()?;
+        if !writer.delete_raw(&prepared_key(gid))? {
+            return Ok(false);
+        }
+        writer.commit()?;
+        Ok(true)
+    }
+
+    /// The transactions prepared and not yet resolved, in identifier order, as PostgreSQL's
+    /// `pg_prepared_xacts` and MySQL's `XA RECOVER` list them.
+    pub fn prepared_transactions(&self) -> Result<Vec<PreparedTransaction>> {
+        let read = self.begin_read()?;
+        let prefix = prepared_prefix();
+        let mut end = prefix.clone();
+        if let Some(last) = end.last_mut() {
+            *last += 1;
+        }
+        let mut prepared = Vec::new();
+        let mut scan = crate::scan::Scan::within_between(read.reader(), read.tree(), b"", &(prefix.clone()..end));
+        while let Some((key, value)) = scan.next_entry()? {
+            let gid = String::from_utf8_lossy(key.get(prefix.len()..).unwrap_or_default()).into_owned();
+            let (prepared_at_micros, changes) = decode_prepared(value)?;
+            prepared.push(PreparedTransaction {
+                gid,
+                prepared_at_micros,
+                changes: changes.len(),
+            });
+        }
+        Ok(prepared)
+    }
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::{Change, decode_prepared, encode_prepared};
+    use std::time::Duration;
+
+    #[test]
+    fn a_prepared_record_reads_back_every_kind_of_change() {
+        let changes = vec![
+            Change::Put { key: b"a".to_vec(), value: b"1".to_vec(), ttl: None },
+            Change::Put { key: b"b".to_vec(), value: Vec::new(), ttl: Some(Duration::from_secs(5)) },
+            Change::Delete { key: b"c".to_vec() },
+            Change::CollectionPut { name: "carts".into(), key: b"k".to_vec(), value: b"v".to_vec(), ttl: None },
+            Change::CollectionDelete { name: "carts".into(), key: b"gone".to_vec() },
+        ];
+        let record = encode_prepared(1_700_000_000_000_000, &changes);
+        assert_eq!(decode_prepared(&record).unwrap(), (1_700_000_000_000_000, changes));
+        assert!(decode_prepared(&record[..record.len() - 1]).is_err());
+    }
 }

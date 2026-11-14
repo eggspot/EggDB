@@ -1,4 +1,5 @@
 mod asof;
+mod two_phase;
 mod match_recognize;
 mod foreign_tables;
 mod sqlserver_security;
@@ -1024,6 +1025,9 @@ impl<'t> Parser<'t> {
         let TokenKind::Word(word) = self.peek_kind() else {
             return Err(self.unexpected());
         };
+        if self.at_two_phase() {
+            return self.two_phase();
+        }
         match word.as_ref() {
             "refresh" if self.postgresql() && self.is_word_at(1, "materialized") => {
                 self.refresh_materialized_view()

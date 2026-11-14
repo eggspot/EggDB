@@ -200,6 +200,7 @@ pub(crate) fn refused_in_function(
         Statement::Listen(_) => "LISTEN",
         Statement::Unlisten(_) => "UNLISTEN",
         Statement::Notify { .. } => "NOTIFY",
+        Statement::TwoPhase(command) => command.tag(),
         Statement::Set { .. } | Statement::Reset { .. } => "SET ON/OFF",
         Statement::CreateTable(_) => "CREATE TABLE",
         Statement::DropTable { .. } => "DROP TABLE",

@@ -23,6 +23,7 @@ pub(crate) enum Statement {
     SetTransaction(TransactionCharacteristics),
     Commit,
     Rollback,
+    TwoPhase(TwoPhase),
     Savepoint(SavepointCommand),
     Analyze(Vec<Name>),
     Role(crate::roles::RoleStatement),
@@ -2086,6 +2087,33 @@ pub(crate) struct Select {
     pub(crate) offset: Option<Expr>,
     pub(crate) source_row_limit: Option<u64>,
     pub(crate) locking: Option<RowLocking>,
+}
+
+/// A two-phase commit statement (D1127): PostgreSQL's `PREPARE TRANSACTION`, `COMMIT PREPARED`
+/// and `ROLLBACK PREPARED`, and MySQL's `XA`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TwoPhase {
+    Prepare(String),
+    CommitPrepared(String),
+    RollbackPrepared(String),
+    XaStart(String),
+    XaEnd(String),
+    XaCommitOnePhase(String),
+    XaRollback(String),
+    Recover,
+}
+
+impl TwoPhase {
+    pub(crate) fn tag(&self) -> &'static str {
+        match self {
+            Self::Prepare(_) => "PREPARE TRANSACTION",
+            Self::CommitPrepared(_) | Self::XaCommitOnePhase(_) => "COMMIT PREPARED",
+            Self::RollbackPrepared(_) | Self::XaRollback(_) => "ROLLBACK PREPARED",
+            Self::XaStart(_) => "XA START",
+            Self::XaEnd(_) => "XA END",
+            Self::Recover => "XA RECOVER",
+        }
+    }
 }
 
 /// A query's `FOR UPDATE` or `FOR SHARE` clause (D1126): the rows it returns are locked until

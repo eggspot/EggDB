@@ -452,7 +452,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Server's application locks already detect cycles among themselves (D291), the start to build on. **Code
   written, unbuilt** (code-only mode, 2026-11-13, D1126).
 - Two-phase commit and XA: `PREPARE TRANSACTION`, `COMMIT PREPARED`, MySQL's `XA` and TDS's
-  distributed transactions (D32, D173).
+  distributed transactions (D32, D173). PostgreSQL's and MySQL's: **code written, unbuilt** (code-only mode, 2026-11-14,
+  D1127); left: TDS's distributed transactions (MS DTC enlistment).
 - A failing Oracle statement trigger or SQL Server `AFTER` trigger undoes only its own
   statement, as those databases do (D317). Oracle's: **code written, unbuilt** (code-only mode,
   2026-11-10, D372); SQL Server keeps rolling the transaction back, as it does (D372).

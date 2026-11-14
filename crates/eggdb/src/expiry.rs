@@ -26,6 +26,10 @@ impl Moment {
         Self(micros)
     }
 
+    pub(crate) fn unix_micros(self) -> i64 {
+        i64::try_from(self.0).unwrap_or(i64::MAX)
+    }
+
     pub(crate) fn after(self, ttl: Duration) -> Self {
         let micros = u64::try_from(ttl.as_micros()).unwrap_or(u64::MAX).max(1);
         Self(self.0.saturating_add(micros))

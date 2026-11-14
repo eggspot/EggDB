@@ -697,3 +697,55 @@ fn snapshot_sql_blocks_on_different_rows_both_commit() {
         .unwrap();
     assert_eq!(taken, vec![vec![eggdb::sql::Value::BigInt(2)]]);
 }
+
+#[test]
+fn a_prepared_transaction_survives_a_reopen_and_commits_from_another_session() {
+    use eggdb::sql::Dialect;
+    let file = TempPath::new("two-phase");
+    {
+        let db = Database::open(file.path()).unwrap();
+        let store = db.sql_store();
+        let mut session = store.session(Dialect::PostgreSql);
+        session
+            .execute("CREATE TABLE ledger (id integer PRIMARY KEY, amount integer)", &mut |_| {})
+            .unwrap();
+        session
+            .execute("BEGIN ISOLATION LEVEL SERIALIZABLE", &mut |_| {})
+            .unwrap();
+        session
+            .execute("INSERT INTO ledger VALUES (1, 25)", &mut |_| {})
+            .unwrap();
+        session
+            .execute("PREPARE TRANSACTION 'payment-1'", &mut |_| {})
+            .unwrap();
+        let mut counted = Vec::new();
+        session
+            .execute("SELECT count(*) FROM ledger", &mut |result| counted.extend(result.rows))
+            .unwrap();
+        assert_eq!(counted, vec![vec![eggdb::sql::Value::BigInt(0)]]);
+        session.execute("BEGIN", &mut |_| {}).unwrap();
+        session.execute("INSERT INTO ledger VALUES (2, 5)", &mut |_| {}).unwrap();
+        let refused = session
+            .execute("PREPARE TRANSACTION 'payment-2'", &mut |_| {})
+            .unwrap_err();
+        assert_eq!(refused.state().code(), "0A000");
+    }
+    let db = Database::open(file.path()).unwrap();
+    let prepared = db.prepared_transactions().unwrap();
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0].gid, "payment-1");
+    let store = db.sql_store();
+    let mut other = store.session(Dialect::PostgreSql);
+    other
+        .execute("COMMIT PREPARED 'payment-1'", &mut |_| {})
+        .unwrap();
+    let missing = other
+        .execute("ROLLBACK PREPARED 'payment-1'", &mut |_| {})
+        .unwrap_err();
+    assert_eq!(missing.state().code(), "42704");
+    let mut rows = Vec::new();
+    other
+        .execute("SELECT amount FROM ledger", &mut |result| rows.extend(result.rows))
+        .unwrap();
+    assert_eq!(rows, vec![vec![eggdb::sql::Value::Integer(25)]]);
+}

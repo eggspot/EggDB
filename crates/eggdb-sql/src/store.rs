@@ -262,6 +262,20 @@ pub trait KeyValueWrite: KeyValueRead {
     fn rollback(self) -> SqlResult<()>
     where
         Self: Sized;
+
+    /// The first phase of a two-phase commit (D1127): stores the changes durably under `gid`
+    /// for [`KeyValueStore::commit_prepared`] to apply later. A writer that cannot, the
+    /// default, rolls its changes back and refuses with `0A000`.
+    fn prepare_transaction(self, gid: &str) -> SqlResult<()>
+    where
+        Self: Sized,
+    {
+        let _ = gid;
+        self.rollback()?;
+        Err(SqlError::not_supported(
+            "PREPARE TRANSACTION outside a REPEATABLE READ or SERIALIZABLE transaction; EggDB prepares only transactions that run beside the one writer",
+        ))
+    }
 }
 
 /// A snapshot of a store that another session may open while a read of it is still open,
@@ -307,6 +321,19 @@ pub trait ConcurrentWrite: KeyValueWrite {
 
     /// Discards every change.
     fn rollback_concurrent(self: Box<Self>) -> SqlResult<()>;
+
+    /// Checks the transaction and stores its changes durably under `gid` instead of applying
+    /// them (D1127).
+    fn prepare_concurrent(self: Box<Self>, gid: &str) -> SqlResult<()>;
+}
+
+/// A transaction prepared for a two-phase commit and not yet resolved (D1127).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedTransactionInfo {
+    /// The identifier it was prepared under.
+    pub gid: String,
+    /// When it was prepared, in microseconds since the Unix epoch.
+    pub prepared_at_micros: i64,
 }
 
 /// An ordered byte-string key-value store that SQL keeps its catalog and tables in: one writer
@@ -343,6 +370,25 @@ pub trait KeyValueStore {
     fn begin_write_waiting(&self, limit: std::time::Duration) -> SqlResult<Self::Write<'_>> {
         let _ = limit;
         self.begin_write()
+    }
+
+    /// The second phase of a two-phase commit (D1127): applies the changes prepared under
+    /// `gid`; `false` when none are. A store without prepared transactions, the default, has
+    /// none.
+    fn commit_prepared(&self, gid: &str) -> SqlResult<bool> {
+        let _ = gid;
+        Ok(false)
+    }
+
+    /// Drops the changes prepared under `gid`; `false` when none are.
+    fn rollback_prepared(&self, gid: &str) -> SqlResult<bool> {
+        let _ = gid;
+        Ok(false)
+    }
+
+    /// The prepared transactions not yet resolved, in identifier order.
+    fn prepared_transactions(&self) -> SqlResult<Vec<PreparedTransactionInfo>> {
+        Ok(Vec::new())
     }
 
     /// Begins a read of the snapshot `handle` names, while a read of it is still open; `None`
@@ -423,6 +469,18 @@ impl<S: KeyValueStore> KeyValueStore for &S {
         (**self).begin_write()
     }
 
+    fn commit_prepared(&self, gid: &str) -> SqlResult<bool> {
+        (**self).commit_prepared(gid)
+    }
+
+    fn rollback_prepared(&self, gid: &str) -> SqlResult<bool> {
+        (**self).rollback_prepared(gid)
+    }
+
+    fn prepared_transactions(&self) -> SqlResult<Vec<PreparedTransactionInfo>> {
+        (**self).prepared_transactions()
+    }
+
     fn begin_concurrent_write(
         &self,
         isolation: ConcurrentIsolation,
@@ -469,6 +527,18 @@ impl<S: KeyValueStore> KeyValueStore for std::sync::Arc<S> {
         (**self).begin_write()
     }
 
+    fn commit_prepared(&self, gid: &str) -> SqlResult<bool> {
+        (**self).commit_prepared(gid)
+    }
+
+    fn rollback_prepared(&self, gid: &str) -> SqlResult<bool> {
+        (**self).rollback_prepared(gid)
+    }
+
+    fn prepared_transactions(&self) -> SqlResult<Vec<PreparedTransactionInfo>> {
+        (**self).prepared_transactions()
+    }
+
     fn begin_concurrent_write(
         &self,
         isolation: ConcurrentIsolation,
@@ -501,6 +571,8 @@ pub(crate) trait BoxedWrite: KeyValueWrite {
     fn commit_boxed(self: Box<Self>) -> SqlResult<()>;
 
     fn rollback_boxed(self: Box<Self>) -> SqlResult<()>;
+
+    fn prepare_boxed(self: Box<Self>, gid: &str) -> SqlResult<()>;
 }
 
 impl<W: KeyValueWrite> BoxedWrite for W {
@@ -510,6 +582,10 @@ impl<W: KeyValueWrite> BoxedWrite for W {
 
     fn rollback_boxed(self: Box<Self>) -> SqlResult<()> {
         (*self).rollback()
+    }
+
+    fn prepare_boxed(self: Box<Self>, gid: &str) -> SqlResult<()> {
+        (*self).prepare_transaction(gid)
     }
 }
 
@@ -610,6 +686,10 @@ impl KeyValueWrite for Box<dyn BoxedWrite + '_> {
 
     fn commit(self) -> SqlResult<()> {
         self.commit_boxed()
+    }
+
+    fn prepare_transaction(self, gid: &str) -> SqlResult<()> {
+        self.prepare_boxed(gid)
     }
 
     fn rollback(self) -> SqlResult<()> {
@@ -747,6 +827,10 @@ impl KeyValueWrite for ConcurrentBoxed<'_> {
         self.0.commit_concurrent()
     }
 
+    fn prepare_transaction(self, gid: &str) -> SqlResult<()> {
+        self.0.prepare_concurrent(gid)
+    }
+
     fn rollback(self) -> SqlResult<()> {
         self.0.rollback_concurrent()
     }
@@ -770,6 +854,12 @@ pub(crate) trait ErasedStore {
     ) -> SqlResult<Option<Box<dyn KeyValueRead + '_>>>;
 
     fn erased_store_id(&self) -> usize;
+
+    fn erased_commit_prepared(&self, gid: &str) -> SqlResult<bool>;
+
+    fn erased_rollback_prepared(&self, gid: &str) -> SqlResult<bool>;
+
+    fn erased_prepared_transactions(&self) -> SqlResult<Vec<PreparedTransactionInfo>>;
 
     fn erased_backup_to(&self, path: &std::path::Path, clone: bool) -> SqlResult<Option<StoreBackup>>;
 }
@@ -823,6 +913,18 @@ impl<S: KeyValueStore> ErasedStore for S {
 
     fn erased_store_id(&self) -> usize {
         self.store_id()
+    }
+
+    fn erased_commit_prepared(&self, gid: &str) -> SqlResult<bool> {
+        self.commit_prepared(gid)
+    }
+
+    fn erased_rollback_prepared(&self, gid: &str) -> SqlResult<bool> {
+        self.rollback_prepared(gid)
+    }
+
+    fn erased_prepared_transactions(&self) -> SqlResult<Vec<PreparedTransactionInfo>> {
+        self.prepared_transactions()
     }
 }
 

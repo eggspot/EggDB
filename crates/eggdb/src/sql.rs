@@ -536,6 +536,27 @@ impl KeyValueStore for Store<'_> {
         concurrent_writer(&self.0, isolation)
     }
 
+    fn commit_prepared(&self, gid: &str) -> SqlResult<bool> {
+        self.0.commit_prepared(gid).map_err(store_error)
+    }
+
+    fn rollback_prepared(&self, gid: &str) -> SqlResult<bool> {
+        self.0.rollback_prepared(gid).map_err(store_error)
+    }
+
+    fn prepared_transactions(&self) -> SqlResult<Vec<eggdb_sql::PreparedTransactionInfo>> {
+        Ok(self
+            .0
+            .prepared_transactions()
+            .map_err(store_error)?
+            .into_iter()
+            .map(|prepared| eggdb_sql::PreparedTransactionInfo {
+                gid: prepared.gid,
+                prepared_at_micros: prepared.prepared_at_micros,
+            })
+            .collect())
+    }
+
     fn begin_write_waiting(&self, limit: Duration) -> SqlResult<SqlWriter<'_>> {
         self.0
             .begin_write_within(limit)
@@ -681,6 +702,10 @@ impl eggdb_sql::ConcurrentWrite for SqlConcurrentWriter<'_> {
         (*self).commit()
     }
 
+    fn prepare_concurrent(self: Box<Self>, gid: &str) -> SqlResult<()> {
+        self.0.into_inner().prepare(gid).map(|_| ()).map_err(store_error)
+    }
+
     fn rollback_concurrent(self: Box<Self>) -> SqlResult<()> {
         (*self).rollback()
     }
@@ -729,6 +754,27 @@ impl KeyValueStore for OwnedStore {
         isolation: eggdb_sql::ConcurrentIsolation,
     ) -> SqlResult<Option<Box<dyn eggdb_sql::ConcurrentWrite + '_>>> {
         concurrent_writer(&self.0, isolation)
+    }
+
+    fn commit_prepared(&self, gid: &str) -> SqlResult<bool> {
+        self.0.commit_prepared(gid).map_err(store_error)
+    }
+
+    fn rollback_prepared(&self, gid: &str) -> SqlResult<bool> {
+        self.0.rollback_prepared(gid).map_err(store_error)
+    }
+
+    fn prepared_transactions(&self) -> SqlResult<Vec<eggdb_sql::PreparedTransactionInfo>> {
+        Ok(self
+            .0
+            .prepared_transactions()
+            .map_err(store_error)?
+            .into_iter()
+            .map(|prepared| eggdb_sql::PreparedTransactionInfo {
+                gid: prepared.gid,
+                prepared_at_micros: prepared.prepared_at_micros,
+            })
+            .collect())
     }
 
     fn begin_write_waiting(&self, limit: Duration) -> SqlResult<SqlWriter<'_>> {
