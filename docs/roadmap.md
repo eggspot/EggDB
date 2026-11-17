@@ -1041,7 +1041,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M6d The built-in MCP server
 - OAuth for MCP over HTTP, as the MCP specification describes for remote servers; TLS comes with
   the M6a item for every listener (D189). OAuth access tokens (JWTs) and the protected-resource metadata: **code written, unbuilt**
-  (code-only mode, 2026-11-12, D841). Left: TLS on the MCP listener.
+  (code-only mode, 2026-11-12, D841); TLS on the MCP listener, through the TLS relay every listener has: **code
+  written, unbuilt** (code-only mode, D1155).
 - Writes with confirmation over HTTP (D189, D190). **Code written, unbuilt** (code-only mode, 2026-11-11, D522); the user
   is asked over HTTP once event streams carry server requests.
 - Server-sent event streams (D189). Answers as SSE when the client asks: **code written, unbuilt**
