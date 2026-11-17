@@ -92,8 +92,9 @@ pub(crate) fn shows_subplans(style: ExplainStyle, dialect: Dialect) -> bool {
         | ExplainStyle::PostgresJson
         | ExplainStyle::PostgresYaml
         | ExplainStyle::PostgresXml => true,
-        ExplainStyle::Plan => dialect == Dialect::PostgreSql,
-        ExplainStyle::QueryPlan | ExplainStyle::Json => false,
+        ExplainStyle::Plan => matches!(dialect, Dialect::PostgreSql | Dialect::Sqlite),
+        ExplainStyle::QueryPlan => true,
+        ExplainStyle::Json => false,
     }
 }
 
@@ -995,23 +996,45 @@ pub(crate) fn render_scan_stats(query: &ExplainedQuery, selects: &[MeasuredSelec
     QueryResult::rows(tag, columns(ExplainStyle::QueryPlan, Dialect::Sqlite), rows)
 }
 
-fn sqlite_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
-    let mut details: Vec<String> = query.sources.iter().map(sqlite_detail).collect();
-    if query.sorted {
-        details.push("USE TEMP B-TREE FOR ORDER BY".to_owned());
+fn sqlite_subquery_label(subplan: &Subplan) -> String {
+    let kind = match subplan.role {
+        subplans::SubplanRole::Sub { hashed: true } => "LIST SUBQUERY",
+        _ => "SCALAR SUBQUERY",
+    };
+    let correlated = if subplan.correlated { "CORRELATED " } else { "" };
+    format!("{correlated}{kind} {}", subplan.number)
+}
+
+fn sqlite_row(detail: String, parent: i64, next: &mut i64, rows: &mut Vec<Vec<Value>>) -> i64 {
+    let id = *next;
+    *next += 1;
+    rows.push(vec![
+        Value::BigInt(id),
+        Value::BigInt(parent),
+        Value::BigInt(0),
+        Value::Text(detail),
+    ]);
+    id
+}
+
+fn sqlite_plan_rows(query: &ExplainedQuery, parent: i64, next: &mut i64, rows: &mut Vec<Vec<Value>>) {
+    for source in &query.sources {
+        sqlite_row(sqlite_detail(source), parent, next, rows);
     }
-    details
-        .into_iter()
-        .enumerate()
-        .map(|(position, detail)| {
-            vec![
-                Value::BigInt(position as i64 + 2),
-                Value::BigInt(0),
-                Value::BigInt(0),
-                Value::Text(detail),
-            ]
-        })
-        .collect()
+    if query.sorted {
+        sqlite_row("USE TEMP B-TREE FOR ORDER BY".to_owned(), parent, next, rows);
+    }
+    for subplan in &query.subplans {
+        let id = sqlite_row(sqlite_subquery_label(subplan), parent, next, rows);
+        sqlite_plan_rows(&subplan.plan, id, next, rows);
+    }
+}
+
+fn sqlite_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    let mut next = 2;
+    sqlite_plan_rows(query, 0, &mut next, &mut rows);
+    rows
 }
 
 #[cfg(test)]

@@ -1333,3 +1333,25 @@ fn a_correlated_row_in_subquery_matches_by_key_with_the_same_answers() {
         "id\n2\n3\n5\nSELECT 3"
     );
 }
+
+#[test]
+fn sqlite_query_plans_list_subqueries_under_their_own_rows() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Sqlite);
+    last(&mut session, "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT)");
+    last(&mut session, "CREATE TABLE u (id INTEGER PRIMARY KEY, t_id INTEGER, b TEXT)");
+    assert_eq!(
+        last(
+            &mut session,
+            "EXPLAIN QUERY PLAN SELECT a FROM t WHERE id IN (SELECT t_id FROM u)"
+        ),
+        "id|parent|notused|detail\n2|0|0|SCAN t\n3|0|0|LIST SUBQUERY 1\n4|3|0|SCAN u\nSELECT 3"
+    );
+    assert_eq!(
+        last(
+            &mut session,
+            "EXPLAIN QUERY PLAN SELECT a, (SELECT count(*) FROM u WHERE u.t_id = t.id) FROM t"
+        ),
+        "id|parent|notused|detail\n2|0|0|SCAN t\n3|0|0|CORRELATED SCALAR SUBQUERY 1\n4|3|0|SCAN u\nSELECT 3"
+    );
+}
