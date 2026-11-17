@@ -1,3 +1,4 @@
+use super::subplans::{Subplan, SubplanPlace};
 use super::{PlannedStatement, Step, key_name, steps_without_hashes};
 use crate::dialect::Dialect;
 use crate::encoding::TableDefinition;
@@ -120,6 +121,15 @@ fn change(statement: PlannedStatement, source: &ExplainedSource) -> Option<Opera
     })
 }
 
+fn plain(depth: usize, physical: &'static str, logical: &'static str) -> Operator {
+    Operator {
+        depth,
+        physical,
+        logical,
+        argument: None,
+    }
+}
+
 fn operators(query: &ExplainedQuery, statement: PlannedStatement) -> Vec<Operator> {
     let mut out: Vec<Operator> = query
         .sources
@@ -128,12 +138,30 @@ fn operators(query: &ExplainedQuery, statement: PlannedStatement) -> Vec<Operato
         .into_iter()
         .collect();
     let base = out.len();
-    let plain = |depth, physical, logical| Operator {
-        depth,
-        physical,
-        logical,
-        argument: None,
-    };
+    query_operators(query, base, &mut out);
+    out
+}
+
+fn subquery_operators(subplan: &Subplan, depth: usize, out: &mut Vec<Operator>) {
+    let mut depth = depth;
+    if subplan.plan.grouping.is_some() {
+        out.push(plain(depth, "Stream Aggregate", "Aggregate"));
+        depth += 1;
+    }
+    query_operators(&subplan.plan, depth, out);
+}
+
+fn query_operators(query: &ExplainedQuery, base: usize, out: &mut Vec<Operator>) {
+    let joined: Vec<&Subplan> = query.subplans.iter().collect();
+    let mut base = base;
+    for subplan in joined.iter().rev() {
+        let logical = match subplan.place {
+            SubplanPlace::Condition => "Left Semi Join",
+            SubplanPlace::Projection => "Left Outer Join",
+        };
+        out.push(plain(base, "Nested Loops", logical));
+        base += 1;
+    }
     for (level, step) in steps_without_hashes(query) {
         let depth = base + level;
         out.push(match step {
@@ -151,7 +179,10 @@ fn operators(query: &ExplainedQuery, statement: PlannedStatement) -> Vec<Operato
             Step::KeyLookup(source, key) => seek(depth, source, key, false),
         });
     }
-    out
+    for subplan in joined {
+        base -= 1;
+        subquery_operators(subplan, base + 1, out);
+    }
 }
 
 fn operator_text(operator: &Operator) -> String {

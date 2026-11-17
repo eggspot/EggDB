@@ -1253,3 +1253,4 @@ its full title with its status.
 - [D1226](decisions/D1226.md) Code-only batch 878 (M6c): Subqueries in SQLite's EXPLAIN QUERY PLAN
 - [D1227](decisions/D1227.md) Code-only batch 879 (M6c): Subqueries in MySQL's tabular EXPLAIN
 - [D1228](decisions/D1228.md) Code-only batch 880 (M6c): Subqueries in Oracle's EXPLAIN PLAN
+- [D1229](decisions/D1229.md) Code-only batch 881 (M6c): Subqueries in SQL Server's showplan

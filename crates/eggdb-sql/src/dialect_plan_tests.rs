@@ -540,3 +540,18 @@ fn explain_plan_puts_subqueries_under_a_filter_or_beside_the_scan() {
         "DEPTH|OPERATION|OPTIONS\n0|SELECT STATEMENT|NULL\n1|SORT|AGGREGATE\n2|TABLE ACCESS|FULL\n1|TABLE ACCESS|FULL\nSELECT 4"
     );
 }
+
+#[test]
+fn showplan_text_joins_subqueries_with_nested_loops() {
+    let store = MemoryStore::default();
+    let mut session = sqlserver_t(&store);
+    last(&mut session, "CREATE TABLE u (id INT PRIMARY KEY, t_id INT)");
+    all(&mut session, "SET SHOWPLAN_TEXT ON");
+    let outputs = all(&mut session, "SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.t_id = t.id)");
+    assert!(outputs[1].contains("  |--Nested Loops(Left Semi Join)\n"), "{outputs:?}");
+    assert!(outputs[1].matches("Clustered Index").count() >= 2, "{outputs:?}");
+    let outputs = all(&mut session, "SELECT id, (SELECT COUNT(*) FROM u) AS n FROM t");
+    assert!(outputs[1].contains("Nested Loops(Left Outer Join)"), "{outputs:?}");
+    assert!(outputs[1].contains("Stream Aggregate(Aggregate)"), "{outputs:?}");
+    all(&mut session, "SET SHOWPLAN_TEXT OFF");
+}

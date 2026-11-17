@@ -916,7 +916,7 @@ impl Session<'_> {
         let mut bound = statement.clone();
         let query = self.read(|reader, tables| {
             binding.statement(reader, tables, &mut bound)?;
-            crate::execute::explain(reader, tables, &bound)
+            crate::execute::explain_with_subplans(reader, tables, &bound)
         })?;
         Ok(Some((query, planned)))
     }
