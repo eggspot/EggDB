@@ -10,7 +10,7 @@
 /// `pgr_depthFirstSearch`, `pgr_breadthFirstSearch` and `pgr_KSP`, Yen's k shortest paths (D969);
 /// and `pgr_strongComponents`, `pgr_articulationPoints`, `pgr_bridges`, `pgr_topologicalSort`,
 /// `pgr_floydWarshall` and `pgr_johnson` (D1215); and `pgr_bellmanFord`, `pgr_dagShortestPath` and
-/// `pgr_biconnectedComponents` (D1216).
+/// `pgr_biconnectedComponents` (D1216); and `pgr_dijkstraNear` and `pgr_dijkstraNearCost` (D1244).
 pub(crate) const PGROUTING_SCRIPT: &str = r#"
 CREATE SCHEMA pgrouting;
 CREATE FUNCTION public.pgr_edges_json(edges_sql text) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -140,6 +140,32 @@ CREATE FUNCTION public.pgr_dijkstra(edges_sql text, start_vids bigint[], end_vid
 $$;
 CREATE FUNCTION public.pgr_dijkstracost(edges_sql text, start_vids bigint[], end_vids bigint[], directed boolean DEFAULT true) RETURNS TABLE (start_vid bigint, end_vid bigint, agg_cost double precision) LANGUAGE sql AS $$
     SELECT p.start_vid, p.end_vid, p.agg_cost FROM public.pgr_dijkstra(edges_sql, start_vids, end_vids, directed) p WHERE p.edge = -1 ORDER BY 1, 2
+$$;
+CREATE FUNCTION public.pgr_dijkstranearcost(edges_sql text, start_vid bigint, end_vids bigint[], directed boolean DEFAULT true, cap bigint DEFAULT 1) RETURNS TABLE (start_vid bigint, end_vid bigint, agg_cost double precision) LANGUAGE sql AS $$
+    SELECT c.start_vid, c.end_vid, c.agg_cost FROM public.pgr_dijkstracost(edges_sql, ARRAY[start_vid], end_vids, directed) c ORDER BY c.agg_cost, c.end_vid LIMIT greatest(cap, 0)
+$$;
+CREATE FUNCTION public.pgr_dijkstranear(edges_sql text, start_vid bigint, end_vids bigint[], directed boolean DEFAULT true, cap bigint DEFAULT 1) RETURNS TABLE (seq integer, path_seq integer, start_vid bigint, end_vid bigint, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE plpgsql AS $$
+DECLARE
+    nearest record;
+    step record;
+    counted integer := 0;
+    origin bigint := start_vid;
+BEGIN
+    FOR nearest IN SELECT n.end_vid AS target FROM public.pgr_dijkstranearcost(edges_sql, origin, end_vids, directed, cap) n LOOP
+        FOR step IN SELECT p.path_seq AS along, p.node AS at, p.edge AS via, p.cost AS spent, p.agg_cost AS total FROM public.pgr_dijkstra(edges_sql, origin, nearest.target, directed) p ORDER BY p.path_seq LOOP
+            counted := counted + 1;
+            seq := counted;
+            path_seq := step.along;
+            start_vid := origin;
+            end_vid := nearest.target;
+            node := step.at;
+            edge := step.via;
+            cost := step.spent;
+            agg_cost := step.total;
+            RETURN NEXT;
+        END LOOP;
+    END LOOP;
+END
 $$;
 CREATE FUNCTION public.pgr_dijkstracostmatrix(edges_sql text, vids bigint[], directed boolean DEFAULT true) RETURNS TABLE (start_vid bigint, end_vid bigint, agg_cost double precision) LANGUAGE sql AS $$
     SELECT c.start_vid, c.end_vid, c.agg_cost FROM public.pgr_dijkstracost(edges_sql, vids, vids, directed) c
@@ -623,6 +649,14 @@ mod tests {
         assert_eq!(
             run(&mut session, "SELECT max(agg_cost) AS total FROM pgr_dagShortestPath('SELECT id, source, target, cost FROM links WHERE id <> 3', 1, 5)").unwrap(),
             "total\n5\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, &format!("SELECT end_vid, agg_cost FROM pgr_dijkstraNearCost({edges}, 1, ARRAY[4, 5, 3], true, 2)")).unwrap(),
+            "end_vid|agg_cost\n3|2\n4|4\nSELECT 2"
+        );
+        assert_eq!(
+            run(&mut session, &format!("SELECT end_vid, node FROM pgr_dijkstraNear({edges}, 1, ARRAY[4, 5, 3]) ORDER BY seq")).unwrap(),
+            "end_vid|node\n3|1\n3|2\n3|3\nSELECT 3"
         );
         assert_eq!(
             run(&mut session, "SELECT sorted_v FROM pgr_topologicalSort('SELECT id, source, target, cost FROM links WHERE id <> 3')").unwrap(),
