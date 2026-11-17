@@ -1013,6 +1013,7 @@ pub extern "C" fn sqlite3_libversion_number() -> c_int {
 }
 
 mod backup;
+mod compatibility;
 mod functions;
 mod interface;
 
@@ -1028,5 +1029,10 @@ pub use functions::{
 pub use backup::{
     Sqlite3Backup, sqlite3_backup_finish, sqlite3_backup_init, sqlite3_backup_pagecount,
     sqlite3_backup_remaining, sqlite3_backup_step,
+};
+pub use compatibility::{
+    sqlite3_bind_blob64, sqlite3_bind_text64, sqlite3_bind_zeroblob, sqlite3_busy_handler,
+    sqlite3_expanded_sql, sqlite3_initialize, sqlite3_limit, sqlite3_prepare, sqlite3_prepare_v3,
+    sqlite3_progress_handler, sqlite3_shutdown, sqlite3_stmt_status,
 };
 pub use interface::*;

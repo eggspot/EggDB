@@ -364,3 +364,35 @@ fn an_online_backup_copies_one_connections_database_into_anothers() {
         sqlite3_close(target);
     }
 }
+
+#[test]
+fn newer_entry_points_prepare_bind_and_expand_statements() {
+    let mut db = ptr::null_mut();
+    let name = CString::new(":memory:").unwrap();
+    // SAFETY: a NUL-terminated name and memory for one pointer.
+    assert_eq!(unsafe { sqlite3_open(name.as_ptr(), &mut db) }, SQLITE_OK);
+    assert_eq!(sqlite3_initialize(), SQLITE_OK);
+    assert_eq!(sqlite3_limit(db, 9, -1), 32_766);
+    assert_eq!(sqlite3_limit(db, 99, -1), -1);
+    let select = CString::new("SELECT ?, ?2, 'it''s ?'").unwrap();
+    let mut statement = ptr::null_mut();
+    // SAFETY: a live connection, NUL-terminated text and memory for one pointer.
+    let prepared = unsafe { sqlite3_prepare_v3(db, select.as_ptr(), -1, 0, &mut statement, ptr::null_mut()) };
+    assert_eq!(prepared, SQLITE_OK);
+    let word = b"O'Brien";
+    // SAFETY: a live statement and seven readable bytes.
+    assert_eq!(unsafe { sqlite3_bind_text64(statement, 1, word.as_ptr().cast(), 7, None, 1) }, SQLITE_OK);
+    // SAFETY: a live statement.
+    assert_eq!(unsafe { sqlite3_bind_zeroblob(statement, 2, 2) }, SQLITE_OK);
+    // SAFETY: a live statement and seven readable bytes, in an encoding this library refuses.
+    assert_eq!(unsafe { sqlite3_bind_text64(statement, 1, word.as_ptr().cast(), 7, None, 2) }, SQLITE_MISUSE);
+    // SAFETY: a live statement.
+    let expanded = unsafe { sqlite3_expanded_sql(statement) };
+    assert_eq!(text(expanded.cast()), "SELECT 'O''Brien', X'0000', 'it''s ?'");
+    // SAFETY: memory from sqlite3_expanded_sql, freed once.
+    unsafe { sqlite3_free(expanded.cast()) };
+    // SAFETY: a live statement, finalized once.
+    assert_eq!(unsafe { sqlite3_finalize(statement) }, SQLITE_OK);
+    // SAFETY: a live connection, closed once.
+    assert_eq!(unsafe { sqlite3_close(db) }, SQLITE_OK);
+}
