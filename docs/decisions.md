@@ -1233,3 +1233,4 @@ its full title with its status.
 - [D1206](decisions/D1206.md) Code-only batch 858 (M6f): Airflow operators: airflow-provider-eggdb
 - [D1207](decisions/D1207.md) Code-only batch 859 (M6f): Metabase, Superset and Power BI connectors in their own plugin systems
 - [D1208](decisions/D1208.md) Code-only batch 860 (M6f): An Airbyte source and destination
+- [D1209](decisions/D1209.md) Code-only batch 861 (M6f): Spark and Trino connectors

@@ -1189,7 +1189,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (D46, D239). The dbt adapter (`dbt-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1205); Airflow operators
   (`airflow-provider-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1206); the Airbyte source and
   destination: **code written, unbuilt** (code-only mode, 2026-11-17, D1208). Left: the Debezium connector.
-- Spark, Flink, Trino and Presto connectors (D46, D239).
+- Spark, Flink, Trino and Presto connectors (D46, D239). Spark and Trino: **code written, unbuilt** (code-only mode, 2026-11-17, D1209). Left:
+  Flink and Presto.
 
 ### M7 Caching and Redis
 - Per-element storage for large lists, sets, hashes and sorted sets (D193).
