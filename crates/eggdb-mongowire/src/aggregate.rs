@@ -48,7 +48,8 @@ pub(crate) fn aggregate(
         Some(filter) => (filter.clone(), &stages[1..]),
         None => (parse_filter(&Document::new())?, &stages[..]),
     };
-    let input = match crate::commands::collation_of(body)? {
+    let collation = crate::commands::collation_of(body)?;
+    let input = match &collation {
         Some(collation) => {
             let first_match = match stages.first().and_then(Stage::as_match) {
                 Some(_) => bound
@@ -72,7 +73,10 @@ pub(crate) fn aggregate(
             .store
             .find(database, name, &everything, &SortSpec::default())
     };
-    let mut output = run_pipeline(rest, input, &load)?;
+    let mut output = match &collation {
+        Some(collation) => eggdb_documents::run_pipeline_collated(rest, input, &load, collation)?,
+        None => run_pipeline(rest, input, &load)?,
+    };
     if let Some(written_to) = written_to {
         write_output(shared, database, written_to, std::mem::take(&mut output))?;
     }

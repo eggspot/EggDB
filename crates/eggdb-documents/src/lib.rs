@@ -34,7 +34,7 @@ pub use filter::{Condition, Filter, has_text, matched_array_index, matches, only
 pub use text_search::TextSearch;
 pub use where_script::WhereScript;
 pub use output::{PipelineOutput, WhenMatched, WhenNotMatched, split_output};
-pub use pipeline::{Stage, parse_pipeline, run_pipeline};
+pub use pipeline::{Stage, parse_pipeline, run_pipeline, run_pipeline_collated};
 pub use projection::{Projection, parse_projection};
 pub use restore::{
     ArchivedCollection, MAX_GUNZIPPED_DUMP_BYTES, MONGODUMP_ARCHIVE_MAGIC, RestoredCollection,

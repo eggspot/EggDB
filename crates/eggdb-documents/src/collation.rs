@@ -294,4 +294,26 @@ mod tests {
         assert!(collation(3, false).key("apple") < collation(3, false).key("Banana"));
         assert!(collation(3, true).key("item 9") < collation(3, true).key("item 10"));
     }
+
+    #[test]
+    fn collated_pipelines_sort_strings_by_their_keys() {
+        let named = |name: &str| {
+            let mut document = Document::new();
+            document.insert("name", Bson::String(name.to_owned()));
+            document
+        };
+        let mut by_name = Document::new();
+        by_name.insert("name", Bson::Int32(1));
+        let stages = vec![crate::Stage::Sort(crate::sort::parse_sort(&by_name).unwrap())];
+        let load = |_: &str| Ok(Vec::new());
+        let input = vec![named("banana"), named("Apple"), named("cherry")];
+        let binary = crate::run_pipeline(&stages, input.clone(), &load).unwrap();
+        assert_eq!(binary[0].get_str("name"), Some("Apple"));
+        let collated = crate::run_pipeline_collated(&stages, input, &load, &collation(2, false)).unwrap();
+        let names: Vec<&str> = collated.iter().filter_map(|document| document.get_str("name")).collect();
+        assert_eq!(names, ["Apple", "banana", "cherry"]);
+        let numbered = vec![named("item 10"), named("item 9")];
+        let sorted = crate::run_pipeline_collated(&stages, numbered, &load, &collation(3, true)).unwrap();
+        assert_eq!(sorted[0].get_str("name"), Some("item 9"));
+    }
 }

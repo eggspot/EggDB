@@ -599,6 +599,42 @@ fn lookup_values(document: &Document, path: &str) -> Vec<Bson> {
     }
 }
 
+/// [`run_pipeline`] with `collation`: every `$sort` stage orders documents by their strings'
+/// collation keys, as MongoDB's `aggregate` does under a `collation` option.
+///
+/// # Errors
+///
+/// What [`run_pipeline`] refuses.
+pub fn run_pipeline_collated(
+    stages: &[Stage],
+    input: Vec<Document>,
+    load: &dyn Fn(&str) -> DocumentResult<Vec<Document>>,
+    collation: &crate::Collation,
+) -> DocumentResult<Vec<Document>> {
+    let mut documents = input;
+    let mut start = 0;
+    for (at, stage) in stages.iter().enumerate() {
+        let Stage::Sort(spec) = stage else {
+            continue;
+        };
+        documents = run_pipeline(stages.get(start..at).unwrap_or_default(), documents, load)?;
+        let mut keyed: Vec<(Document, Document)> = documents
+            .into_iter()
+            .map(|document| {
+                let key = match collation.collated(&Bson::Document(document.clone())) {
+                    Bson::Document(collated) => collated,
+                    _ => Document::new(),
+                };
+                (key, document)
+            })
+            .collect();
+        keyed.sort_by(|left, right| compare_by(spec, &left.0, &right.0));
+        documents = keyed.into_iter().map(|(_, document)| document).collect();
+        start = at + 1;
+    }
+    run_pipeline(stages.get(start..).unwrap_or_default(), documents, load)
+}
+
 /// Runs `stages` over `input`; `load` reads another collection of the same database for
 /// `$lookup`.
 pub fn run_pipeline(
