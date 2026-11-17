@@ -43,12 +43,15 @@ pub(crate) fn aggregate(
     }
     let bound = pipeline_with_time(pipeline, crate::commands::now_ms());
     let (bound, written_to) = split_output(&bound)?;
-    let stages = parse_pipeline(bound)?;
+    let collation = crate::commands::collation_of(body)?;
+    let stages = match &collation {
+        Some(collation) => parse_pipeline(&collated_matches(bound, collation))?,
+        None => parse_pipeline(bound)?,
+    };
     let (first_filter, rest) = match stages.first().and_then(Stage::as_match) {
         Some(filter) => (filter.clone(), &stages[1..]),
         None => (parse_filter(&Document::new())?, &stages[..]),
     };
-    let collation = crate::commands::collation_of(body)?;
     let input = match &collation {
         Some(collation) => {
             let first_match = match stages.first().and_then(Stage::as_match) {
@@ -92,6 +95,20 @@ pub(crate) fn aggregate(
         first_batch,
         false,
     ))
+}
+
+fn collated_matches(stages: &[Bson], collation: &eggdb_documents::Collation) -> Vec<Bson> {
+    stages
+        .iter()
+        .enumerate()
+        .map(|(at, stage)| match stage.as_document().and_then(|stage| stage.get_document("$match")) {
+            Some(filter) if at > 0 => Bson::Document(Document::from_entries(vec![(
+                "$match".to_owned(),
+                Bson::Document(collation.collated_filter(filter)),
+            )])),
+            _ => stage.clone(),
+        })
+        .collect()
 }
 
 fn write_output(

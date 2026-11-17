@@ -321,5 +321,9 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].get_str("_id"), Some("Pho"));
         assert_eq!(crate::run_pipeline(&grouped_stages, cased, &load).unwrap().len(), 4);
+        let wanted = collation(2, false).collated_filter(&named("PHO"));
+        let matching = vec![crate::Stage::Match(crate::filter::parse_filter(&wanted).unwrap())];
+        let cased = vec![named("Pho"), named("pho"), named("bun")];
+        assert_eq!(crate::run_pipeline_collated(&matching, cased, &load, &collation(2, false)).unwrap().len(), 2);
     }
 }

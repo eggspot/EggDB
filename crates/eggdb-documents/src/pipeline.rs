@@ -607,8 +607,10 @@ fn lookup_values(document: &Document, path: &str) -> Vec<Bson> {
 }
 
 /// [`run_pipeline`] with `collation`: every `$sort` stage orders documents by their strings'
-/// collation keys, and every `$group` puts together keys equal under the collation (the first
-/// one met names the group), as MongoDB's `aggregate` does under a `collation` option.
+/// collation keys, every `$group` puts together keys equal under the collation (the first one
+/// met names the group), and every `$match`, whose filter the caller has collated
+/// (`Collation::collated_filter`), matches the documents' collated forms, as MongoDB's
+/// `aggregate` does under a `collation` option.
 ///
 /// # Errors
 ///
@@ -621,7 +623,17 @@ pub fn run_pipeline_collated(
 ) -> DocumentResult<Vec<Document>> {
     let mut documents = input;
     let mut start = 0;
+    let collated = |document: &Document| match collation.collated(&Bson::Document(document.clone())) {
+        Bson::Document(collated) => collated,
+        _ => Document::new(),
+    };
     for (at, stage) in stages.iter().enumerate() {
+        if let Stage::Match(filter) = stage {
+            documents = run_pipeline(stages.get(start..at).unwrap_or_default(), documents, load)?;
+            documents.retain(|document| matches(filter, &collated(document)));
+            start = at + 1;
+            continue;
+        }
         if let Stage::Group(key, accumulators) = stage {
             documents = run_pipeline(stages.get(start..at).unwrap_or_default(), documents, load)?;
             documents = run_group(documents, key, accumulators, Some(collation))?;
@@ -634,13 +646,7 @@ pub fn run_pipeline_collated(
         documents = run_pipeline(stages.get(start..at).unwrap_or_default(), documents, load)?;
         let mut keyed: Vec<(Document, Document)> = documents
             .into_iter()
-            .map(|document| {
-                let key = match collation.collated(&Bson::Document(document.clone())) {
-                    Bson::Document(collated) => collated,
-                    _ => Document::new(),
-                };
-                (key, document)
-            })
+            .map(|document| (collated(&document), document))
             .collect();
         keyed.sort_by(|left, right| compare_by(spec, &left.0, &right.0));
         documents = keyed.into_iter().map(|(_, document)| document).collect();
