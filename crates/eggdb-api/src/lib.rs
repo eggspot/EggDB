@@ -13,6 +13,7 @@
 //! PostgREST and Hasura are trademarks of their owners; EggDB is compatible with their
 //! conventions.
 
+mod atlas;
 mod cql2;
 mod graphql;
 mod graphql_execute;
@@ -466,6 +467,9 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 .into(),
                 Err(error) => failure(500, error.state().code(), &error.to_string()).into(),
             };
+        }
+        if let Some(rest) = path.strip_prefix("atlas/") {
+            return self.atlas(rest, request).into();
         }
         if let Some(rest) = path.strip_prefix("openmetadata/") {
             return self.openmetadata(rest, request).into();

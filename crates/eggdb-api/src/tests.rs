@@ -1013,3 +1013,20 @@ fn openmetadata_lists_tables_with_columns_and_finds_one_by_name() {
     assert_eq!(call(&endpoint, "GET", "/openmetadata/api/v1/tables/name/eggdb.eggdb.public.nothing", "", None).status, 404);
     assert_eq!(call(&endpoint, "POST", "/openmetadata/api/v1/tables", "{}", None).status, 405);
 }
+
+#[test]
+fn atlas_search_finds_a_table_and_its_entity_lists_columns() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session
+        .execute("CREATE TABLE orders (id integer PRIMARY KEY, total numeric)", &mut |_| {})
+        .unwrap();
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let found = call(&endpoint, "GET", "/atlas/api/atlas/v2/search/basic?typeName=rdbms_table&query=ord", "", None);
+    assert_eq!(found.status, 200, "{}", text(&found));
+    let guid = crate::openmetadata::entity_id("eggdb.public.orders@eggdb");
+    assert!(text(&found).contains(&guid), "{}", text(&found));
+    let entity = call(&endpoint, "GET", &format!("/atlas/api/atlas/v2/entity/guid/{guid}"), "", None);
+    assert!(text(&entity).contains("\"name\":\"total\",\"data_type\":\"numeric\""), "{}", text(&entity));
+    assert_eq!(call(&endpoint, "GET", "/atlas/api/atlas/v2/entity/guid/nothing", "", None).status, 404);
+}
