@@ -315,5 +315,11 @@ mod tests {
         let numbered = vec![named("item 10"), named("item 9")];
         let sorted = crate::run_pipeline_collated(&stages, numbered, &load, &collation(3, true)).unwrap();
         assert_eq!(sorted[0].get_str("name"), Some("item 9"));
+        let grouped_stages = vec![crate::Stage::Group(Bson::String("$name".to_owned()), Vec::new())];
+        let cased = vec![named("Pho"), named("pho"), named("PHO"), named("bun")];
+        let groups = crate::run_pipeline_collated(&grouped_stages, cased.clone(), &load, &collation(2, false)).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].get_str("_id"), Some("Pho"));
+        assert_eq!(crate::run_pipeline(&grouped_stages, cased, &load).unwrap().len(), 4);
     }
 }

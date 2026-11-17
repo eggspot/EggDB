@@ -1337,9 +1337,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Indexes used by queries, unique indexes and collations (D197). Unique indexes (by scanning): **code written,
   unbuilt** (code-only mode, 2026-11-11, D529); collations in `find`, `count` and `distinct`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D738); collations in `update`, `delete`, `findAndModify` and `aggregate`'s
-  input: **code written, unbuilt** (code-only mode, 2026-11-13, D989); later `$sort` stages under the collation: **code
-  written, unbuilt** (code-only mode, 2026-11-17, D1241). Left: indexes in the file used by queries, and
-  collations in `aggregate`'s later `$group` and `$match` stages.
+  input: **code written, unbuilt** (code-only mode, 2026-11-13, D989); later `$sort` and `$group` stages under the
+  collation: **code written, unbuilt** (code-only mode, 2026-11-17, D1241). Left: indexes in the file used by queries,
+  and collations in `aggregate`'s later `$match` stages.
 - `$$NOW` and `$$CLUSTER_TIME` in `aggregate`, and `$$CLUSTER_TIME` in pipeline-style updates
   (D349). **Code written, unbuilt** (code-only mode, 2026-11-10, D404).
 - `$text`, `$expr`, `$jsonSchema`, `$where` and the projection operators (D197). `$expr`: **code

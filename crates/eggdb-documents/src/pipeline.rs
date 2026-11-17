@@ -482,6 +482,7 @@ fn group_key(value: Option<Bson>) -> Bson {
 
 struct Group {
     key: Bson,
+    matched: Bson,
     inputs: Vec<Vec<Option<Bson>>>,
 }
 
@@ -489,18 +490,24 @@ fn run_group(
     documents: Vec<Document>,
     key: &Bson,
     accumulators: &[(String, String, Bson)],
+    collation: Option<&crate::Collation>,
 ) -> DocumentResult<Vec<Document>> {
     let mut groups: Vec<Group> = Vec::new();
     for document in &documents {
         let value = group_key(evaluate(key, document)?);
+        let matched = match collation {
+            Some(collation) => collation.collated(&value),
+            None => value.clone(),
+        };
         let at = match groups
             .iter()
-            .position(|group| compare(&group.key, &value) == Ordering::Equal)
+            .position(|group| compare(&group.matched, &matched) == Ordering::Equal)
         {
             Some(at) => at,
             None => {
                 groups.push(Group {
                     key: value,
+                    matched,
                     inputs: vec![Vec::new(); accumulators.len()],
                 });
                 groups.len() - 1
@@ -600,7 +607,8 @@ fn lookup_values(document: &Document, path: &str) -> Vec<Bson> {
 }
 
 /// [`run_pipeline`] with `collation`: every `$sort` stage orders documents by their strings'
-/// collation keys, as MongoDB's `aggregate` does under a `collation` option.
+/// collation keys, and every `$group` puts together keys equal under the collation (the first
+/// one met names the group), as MongoDB's `aggregate` does under a `collation` option.
 ///
 /// # Errors
 ///
@@ -614,6 +622,12 @@ pub fn run_pipeline_collated(
     let mut documents = input;
     let mut start = 0;
     for (at, stage) in stages.iter().enumerate() {
+        if let Stage::Group(key, accumulators) = stage {
+            documents = run_pipeline(stages.get(start..at).unwrap_or_default(), documents, load)?;
+            documents = run_group(documents, key, accumulators, Some(collation))?;
+            start = at + 1;
+            continue;
+        }
         let Stage::Sort(spec) = stage else {
             continue;
         };
@@ -704,7 +718,7 @@ pub fn run_pipeline(
                     vec![Document::from_entries(vec![(field.clone(), Bson::Int32(documents.len() as i32))])]
                 }
             }
-            Stage::Group(key, accumulators) => run_group(documents, key, accumulators)?,
+            Stage::Group(key, accumulators) => run_group(documents, key, accumulators, None)?,
             Stage::Facet(facets) => {
                 let mut output = Vec::with_capacity(facets.len());
                 for (field, stages) in facets {
