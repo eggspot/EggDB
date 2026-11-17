@@ -1247,3 +1247,4 @@ its full title with its status.
 - [D1220](decisions/D1220.md) Code-only batch 872 (M16): Pattern exclusion in MATCH_RECOGNIZE
 - [D1221](decisions/D1221.md) Code-only batch 873 (M16): ALL ROWS PER MATCH WITH UNMATCHED ROWS
 - [D1222](decisions/D1222.md) Code-only batch 874 (M16): Flux's array.from
+- [D1223](decisions/D1223.md) Code-only batch 875 (M6c): Subplans in EXPLAIN of UPDATE and DELETE

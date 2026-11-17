@@ -751,3 +751,30 @@ fn postgresql_explains_a_table_statement_as_its_select() {
         ["Seq Scan on onek", "EXPLAIN"]
     );
 }
+
+#[test]
+fn update_and_delete_show_the_subplans_of_their_conditions_and_assignments() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_tables(&store);
+    assert_eq!(
+        plan(
+            &mut session,
+            "EXPLAIN DELETE FROM tenk1 WHERE hundred IN (SELECT ten FROM onek)"
+        )[..3],
+        [
+            "Seq Scan on tenk1",
+            "  Filter: (hashed SubPlan 1)",
+            "  SubPlan 1",
+        ]
+    );
+    assert_eq!(
+        plan(
+            &mut session,
+            "EXPLAIN UPDATE tenk1 t SET ten = (SELECT max(o.ten) FROM onek o WHERE o.four = t.four) WHERE t.unique1 < 10"
+        )
+        .iter()
+        .filter(|line| line.trim_start().starts_with("SubPlan"))
+        .count(),
+        1
+    );
+}

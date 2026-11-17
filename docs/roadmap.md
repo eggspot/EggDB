@@ -990,7 +990,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `EXPLAIN FORMAT=TREE|JSON` of `INSERT` and `REPLACE`; measured steps under a multi-table
   write's `Update`/`Delete` iterator (D345).
 - Subqueries in `EXPLAIN` of `UPDATE` and `DELETE`, and of derived tables, `WITH` and set
-  operations (D327).
+  operations (D327). `UPDATE` and `DELETE` without `FROM` or `USING`: **code written, unbuilt** (code-only mode,
+  2026-11-17, D1223). Left: joined writes, derived tables, `WITH` and set operations.
 - Subqueries in Oracle's, SQL Server's, SQLite's and MySQL's tabular plans (D327).
 - An index used for a comparison with an `InitPlan`'s `$k` (D327).
 - Times on each iterator inside a subplan in `EXPLAIN ANALYZE` (D327).

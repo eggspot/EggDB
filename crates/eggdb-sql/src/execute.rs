@@ -3815,8 +3815,50 @@ pub(crate) fn explain_with_subplans(
         {
             crate::explain::explain_subplans(reader, tables, query)
         }
+        crate::ast::Statement::Update(update) if update.from.is_none() => {
+            let assigned = update.assignments.iter().filter_map(|(_, value)| match value {
+                crate::ast::InsertValue::Expr(expr) => Some(expr.clone()),
+                crate::ast::InsertValue::Default => None,
+            });
+            match write_with_subqueries(&update.table, assigned.collect(), update.filter.as_ref()) {
+                Some(select) => crate::explain::explain_subplans(reader, tables, &select),
+                None => explain(reader, tables, statement),
+            }
+        }
+        crate::ast::Statement::Delete(delete) if delete.using.is_none() => {
+            match write_with_subqueries(&delete.table, Vec::new(), delete.filter.as_ref()) {
+                Some(select) => crate::explain::explain_subplans(reader, tables, &select),
+                None => explain(reader, tables, statement),
+            }
+        }
         _ => explain(reader, tables, statement),
     }
+}
+
+fn write_with_subqueries(
+    table: &crate::ast::TableReference,
+    assigned: Vec<Expr>,
+    filter: Option<&Expr>,
+) -> Option<Select> {
+    let mut items: Vec<SelectItem> = assigned
+        .into_iter()
+        .map(|expr| SelectItem::Expr { expr, alias: None })
+        .collect();
+    if items.is_empty() {
+        items.push(SelectItem::Wildcard {
+            qualifier: None,
+            position: table.name.position,
+        });
+    }
+    let select = crate::joined_dml::every_column_select(
+        crate::ast::FromClause {
+            first: table.clone(),
+            joins: Vec::new(),
+        },
+        items,
+        filter.cloned(),
+    );
+    crate::subquery::needs_preparation(&select).then_some(select)
 }
 
 fn union_branches(query: &Select) -> Option<Vec<&Select>> {
