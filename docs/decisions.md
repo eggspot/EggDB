@@ -1221,3 +1221,4 @@ its full title with its status.
 - [D1194](decisions/D1194.md) Code-only batch 846 (M6b): FORCE ROW LEVEL SECURITY with table owners
 - [D1195](decisions/D1195.md) Code-only batch 847 (M6b): SQL Server's column DENY
 - [D1196](decisions/D1196.md) Code-only batch 848 (M6b): Key sources: environment, programs, Vault and AWS KMS
+- [D1197](decisions/D1197.md) Code-only batch 849 (M6b): Key sources on Azure and Google Cloud

@@ -908,8 +908,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Authenticated page encryption, with a tag per page (D187).
 - Encrypting an existing file and rotating keys online (D23, D187).
 - KMS, HSM and Vault-compatible key sources (D23, D187). `--key-source` with environment variables, programs (HSM tools), Vault's
-  key-value store and Transit engine, and AWS KMS: **code written, unbuilt** (code-only mode, 2026-11-17, D1196). Left:
-  Azure Key Vault, Google Cloud KMS and a native PKCS#11 source.
+  key-value store and Transit engine, and AWS KMS: **code written, unbuilt** (code-only mode, 2026-11-17, D1196); Azure
+  Key Vault, Google Secret Manager and Cloud KMS: **code written, unbuilt** (code-only mode, 2026-11-17, D1197). Left: a
+  native PKCS#11 source.
 - Per-column and per-tenant keys (D23, D187, D234).
 - A mode that uses FIPS-approved algorithms only (D23). In TLS (`EGGDB_FIPS=1`, `fips_only`): **code written, unbuilt**
   (code-only mode, 2026-11-12, D812); logins (MySQL's `mysql_native_password` switched to `caching_sha2_password`) and

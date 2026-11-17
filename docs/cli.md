@@ -1655,6 +1655,10 @@ digits from a file; `--key-source <source>` reads the same key from somewhere el
 | `vault-transit:<URL>@<file>` | Vault's Transit engine, which decrypts the wrapped key in the file (`vault:v1:...`) at its decrypt URL (`https://vault:8200/v1/transit/decrypt/eggdb`), so the key never rests unwrapped |
 | `aws-kms:<region>@<file>` | AWS KMS, which decrypts the base64 ciphertext blob in the file (`aws kms encrypt ... --output text --query CiphertextBlob`), signed with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and an optional `AWS_SESSION_TOKEN`; `AWS_ENDPOINT_URL_KMS` points it elsewhere |
 
+| `azure-keyvault:<vault>/<secret>` | an Azure Key Vault secret, with the token in `AZURE_ACCESS_TOKEN` or else from the machine's managed identity |
+| `gcp-secret:projects/<p>/secrets/<s>/versions/<v>` | a Google Cloud Secret Manager secret version |
+| `gcp-kms:<key name>@<file>` | Google Cloud KMS, which decrypts the base64 ciphertext in the file with the named key; both Google sources take the token in `GOOGLE_OAUTH_ACCESS_TOKEN` or else from the machine's service account |
+
 `https://` sources check the server's certificate against `SSL_CERT_FILE` or the system's roots.
 
 ## Exit codes and errors

@@ -15,13 +15,20 @@ const VAULT_NAMESPACE: &str = "VAULT_NAMESPACE";
 const KMS_ENDPOINT: &str = "AWS_ENDPOINT_URL_KMS";
 const KMS_TARGET: &str = "TrentService.Decrypt";
 const KMS_CONTENT_TYPE: &str = "application/x-amz-json-1.1";
+const AZURE_TOKEN: &str = "AZURE_ACCESS_TOKEN";
+const AZURE_IDENTITY_URL: &str = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net";
+const AZURE_SECRET_API: &str = "api-version=7.4";
+const GOOGLE_TOKEN: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
+const GOOGLE_IDENTITY_URL: &str =
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+const KINDS: &str = "file:, env:, command:, vault:, vault-transit:, aws-kms:, azure-keyvault:, gcp-secret: or gcp-kms:";
 
 /// The key `spec` names: `file:<path>`, `env:<NAME>`, `command:<command line>`,
 /// `vault:<URL of a KV secret>#<field>`, `vault-transit:<URL of a decrypt endpoint>@<file
 /// holding the ciphertext>` or `aws-kms:<region>@<file holding the base64 ciphertext blob>`.
 pub(crate) fn read_key(spec: &str) -> Result<[u8; KEY_BYTES], String> {
     let (kind, rest) = spec.split_once(':').ok_or_else(|| {
-        format!("--key-source '{spec}' needs a kind: file:, env:, command:, vault:, vault-transit: or aws-kms:")
+        format!("--key-source '{spec}' needs a kind: {KINDS}")
     })?;
     match kind {
         "file" => super::args::read_key_file(std::ffi::OsStr::new(rest)).map(|key| key.0),
@@ -34,9 +41,10 @@ pub(crate) fn read_key(spec: &str) -> Result<[u8; KEY_BYTES], String> {
         "vault" => from_vault(rest),
         "vault-transit" => from_vault_transit(rest),
         "aws-kms" => from_kms(rest),
-        _ => Err(format!(
-            "--key-source kind '{kind}' is not known: use file:, env:, command:, vault:, vault-transit: or aws-kms:"
-        )),
+        "azure-keyvault" => from_azure(rest),
+        "gcp-secret" => from_google_secret(rest),
+        "gcp-kms" => from_google_kms(rest),
+        _ => Err(format!("--key-source kind '{kind}' is not known: use {KINDS}")),
     }
 }
 
@@ -261,6 +269,103 @@ fn from_kms(rest: &str) -> Result<[u8; KEY_BYTES], String> {
     key_from_text(&plaintext).ok_or_else(|| shape_error("aws-kms:"))
 }
 
+fn bearer_token(variable: &str, identity_url: &str, identity_header: (&str, &str), kind: &str) -> Result<String, String> {
+    if let Ok(token) = std::env::var(variable) {
+        return Ok(token);
+    }
+    let target = parse_http_url(identity_url).map_err(|error| format!("--key-source {kind}: {error}"))?;
+    let path = identity_url
+        .find(&target.path)
+        .and_then(|at| identity_url.get(at..))
+        .unwrap_or(&target.path)
+        .to_owned();
+    let headers = vec![(identity_header.0.to_owned(), identity_header.1.to_owned())];
+    let response = request(&target, "GET", &path, &headers, &[], TIMEOUT, MOST_RESPONSE_BYTES).map_err(|error| {
+        format!("--key-source {kind}: set {variable}, or run where the cloud's identity service answers ({error})")
+    })?;
+    if response.status != 200 {
+        return Err(format!("--key-source {kind}: the identity service answered HTTP {}", response.status));
+    }
+    json_string(&String::from_utf8_lossy(&response.body), "access_token")
+        .ok_or_else(|| format!("--key-source {kind}: the identity service gave no access_token"))
+}
+
+fn bearer_request(url: &str, method: &str, token: &str, body: &[u8], kind: &str) -> Result<String, String> {
+    let target = parse_http_url(url).map_err(|error| format!("--key-source {kind}: {error}"))?;
+    let path = url
+        .find(&target.path)
+        .and_then(|at| url.get(at..))
+        .unwrap_or(&target.path)
+        .to_owned();
+    let mut headers = vec![("Authorization".to_owned(), format!("Bearer {token}"))];
+    if !body.is_empty() {
+        headers.push(("Content-Type".to_owned(), "application/json".to_owned()));
+    }
+    let response = request(&target, method, &path, &headers, body, TIMEOUT, MOST_RESPONSE_BYTES)
+        .map_err(|error| format!("--key-source {kind}: cannot reach {}: {error}", host_header(&target)))?;
+    if response.status != 200 {
+        return Err(format!("--key-source {kind}: the server answered HTTP {}", response.status));
+    }
+    Ok(String::from_utf8_lossy(&response.body).into_owned())
+}
+
+fn checked_name(name: &str, kind: &str) -> Result<(), String> {
+    match !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+    {
+        true => Ok(()),
+        false => Err(format!("--key-source {kind}: '{name}' is not a resource name")),
+    }
+}
+
+fn from_azure(rest: &str) -> Result<[u8; KEY_BYTES], String> {
+    let (vault, secret) = rest.split_once('/').ok_or(
+        "--key-source azure-keyvault: give the vault and the secret, as azure-keyvault:myvault/eggdb-key",
+    )?;
+    checked_name(vault, "azure-keyvault")?;
+    checked_name(secret, "azure-keyvault")?;
+    let token = bearer_token(AZURE_TOKEN, AZURE_IDENTITY_URL, ("Metadata", "true"), "azure-keyvault")?;
+    let url = format!("https://{vault}.vault.azure.net/secrets/{secret}?{AZURE_SECRET_API}");
+    let text = bearer_request(&url, "GET", &token, &[], "azure-keyvault")?;
+    let value = json_string(&text, "value").ok_or("--key-source azure-keyvault: the secret has no value")?;
+    key_from_text(&value).ok_or_else(|| shape_error("azure-keyvault:"))
+}
+
+fn google_token() -> Result<String, String> {
+    bearer_token(GOOGLE_TOKEN, GOOGLE_IDENTITY_URL, ("Metadata-Flavor", "Google"), "gcp")
+}
+
+fn from_google_secret(rest: &str) -> Result<[u8; KEY_BYTES], String> {
+    checked_name(rest, "gcp-secret")?;
+    if !rest.starts_with("projects/") || !rest.contains("/secrets/") {
+        return Err("--key-source gcp-secret: give the secret version, as gcp-secret:projects/p/secrets/eggdb-key/versions/latest".to_owned());
+    }
+    let url = format!("https://secretmanager.googleapis.com/v1/{rest}:access");
+    let text = bearer_request(&url, "GET", &google_token()?, &[], "gcp-secret")?;
+    let data = json_string(&text, "data").ok_or("--key-source gcp-secret: the answer has no payload")?;
+    let payload = eggdb_crypto::base64_decode(&data).map_err(|_| "--key-source gcp-secret: the payload is not base64".to_owned())?;
+    let payload = String::from_utf8(payload).map_err(|_| shape_error("gcp-secret:"))?;
+    key_from_text(&payload).ok_or_else(|| shape_error("gcp-secret:"))
+}
+
+fn from_google_kms(rest: &str) -> Result<[u8; KEY_BYTES], String> {
+    let (key_name, path) = rest.rsplit_once('@').ok_or(
+        "--key-source gcp-kms: give the key and the file holding the base64 ciphertext, as gcp-kms:projects/p/locations/global/keyRings/r/cryptoKeys/k@/etc/eggdb/key.blob",
+    )?;
+    checked_name(key_name, "gcp-kms")?;
+    let ciphertext = ciphertext_file(path, "gcp-kms")?;
+    if eggdb_crypto::base64_decode(&ciphertext).is_err() {
+        return Err(format!("--key-source gcp-kms: {path} does not hold base64"));
+    }
+    let url = format!("https://cloudkms.googleapis.com/v1/{key_name}:decrypt");
+    let body = format!("{{\"ciphertext\":\"{ciphertext}\"}}");
+    let text = bearer_request(&url, "POST", &google_token()?, body.as_bytes(), "gcp-kms")?;
+    let plaintext = json_string(&text, "plaintext").ok_or("--key-source gcp-kms: the answer has no plaintext")?;
+    key_from_text(&plaintext).ok_or_else(|| shape_error("gcp-kms:"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +391,8 @@ mod tests {
     #[test]
     fn an_environment_variable_and_a_program_give_a_key() {
         assert!(read_key("nowhere:x").is_err());
+        assert!(read_key("azure-keyvault:my vault/key").is_err());
+        assert!(read_key("gcp-secret:secrets/x").is_err());
         assert!(read_key("env:EGGDB_TEST_KEY_SOURCE_UNSET").is_err());
         if cfg!(unix) {
             let key = read_key(&format!("command:printf {}", "ab".repeat(32))).unwrap();
