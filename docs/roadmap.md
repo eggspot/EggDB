@@ -1476,9 +1476,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D689); database links to PostgreSQL, MySQL and SQL Server sources: **code
   written, unbuilt** (code-only mode, 2026-11-13, D997). Left: `ROWID`, and links to Oracle databases.
 - `CONNECT BY` over a join (the join's conditions in `WHERE` applied first): **code written, unbuilt**
-  (code-only mode, 2026-11-17, D1213). `PRIOR` beside a
-  subquery, `ORDER SIBLINGS BY` a pseudo-column, and a sequence's `NEXTVAL` advancing once per
-  source row of `INSERT ALL`; `CONNECT BY`, `INSERT ALL` and `INSERT FIRST` are built (D304).
+  (code-only mode, 2026-11-17, D1213); a sequence's `NEXTVAL` advancing once per source row of
+  `INSERT ALL`: **code written, unbuilt** (code-only mode, 2026-11-17, D1214). Left: `PRIOR` beside a
+  subquery and `ORDER SIBLINGS BY` a pseudo-column; `CONNECT BY`, `INSERT ALL` and `INSERT FIRST` are built (D304).
   Check: a deep hierarchy against a recursive `WITH` on SQLite.
 - Oracle's XML functions (the SQL/XML publishing functions: **code written, unbuilt**, D454;
   `EXTRACTVALUE` and `EXISTSNODE`: **code written, unbuilt**, D690; `XMLTABLE`: **code written, unbuilt**, D692;

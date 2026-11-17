@@ -1,6 +1,6 @@
 use super::Parser;
 use crate::ast::{
-    DerivedTable, Expr, FromClause, InsertBranch, InsertTarget, InsertValue, MultitableInsert,
+    DerivedTable, Expr, ExprKind, FromClause, Literal, InsertBranch, InsertTarget, InsertValue, MultitableInsert,
     MultitableInsertKind, Name, Query, Select, SelectItem, Statement, TableReference, TargetValue,
 };
 use crate::dialect::Dialect;
@@ -8,6 +8,36 @@ use crate::error::SqlResult;
 use crate::lexer::TokenKind;
 
 const SOURCE_LABEL: &str = "unnamed_subquery";
+const NEXT_VALUE: &str = "oracle_nextval";
+const CURRENT_VALUE: &str = "oracle_currval";
+
+fn advance_once(expr: &mut Expr, advanced: &mut Vec<String>) {
+    if let ExprKind::Function { name, arguments } = &mut expr.kind
+        && name == NEXT_VALUE
+        && let [Expr {
+            kind: ExprKind::Literal(Literal::String(sequence)),
+            ..
+        }] = arguments.as_slice()
+    {
+        let sequence = sequence.to_ascii_lowercase();
+        if advanced.contains(&sequence) {
+            *name = CURRENT_VALUE.to_owned();
+        } else {
+            advanced.push(sequence);
+        }
+        return;
+    }
+    for child in crate::eval::children_mut(expr) {
+        advance_once(child, advanced);
+    }
+}
+
+fn sequences_advance_once_per_row(computed: &mut [Expr]) {
+    let mut advanced = Vec::new();
+    for expr in computed {
+        advance_once(expr, &mut advanced);
+    }
+}
 
 fn source_select(computed: Vec<Expr>, query: Query, position: usize) -> Select {
     let mut items: Vec<SelectItem> = computed
@@ -95,6 +125,7 @@ impl Parser<'_> {
             return Err(self.unexpected());
         }
         let query = self.insert_query()?;
+        sequences_advance_once_per_row(&mut computed);
         let width = computed.len();
         Ok(Statement::MultitableInsert(Box::new(MultitableInsert {
             kind,

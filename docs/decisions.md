@@ -1238,3 +1238,4 @@ its full title with its status.
 - [D1211](decisions/D1211.md) Code-only batch 863 (M8): The text search objects in pg_catalog
 - [D1212](decisions/D1212.md) Code-only batch 864 (M8): The ispell text search template
 - [D1213](decisions/D1213.md) Code-only batch 865 (M10): CONNECT BY over a join
+- [D1214](decisions/D1214.md) Code-only batch 866 (M10): NEXTVAL once per source row of a multitable insert

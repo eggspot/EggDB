@@ -219,3 +219,31 @@ fn an_into_clause_that_gets_no_rows_is_still_checked() {
         "INSERT 0 0"
     );
 }
+
+#[test]
+fn nextval_advances_once_per_source_row_across_into_clauses() {
+    let store = MemoryStore::default();
+    let mut session = sales(&store);
+    results(&mut session, "CREATE SEQUENCE sale_seq START WITH 10");
+    assert_eq!(
+        tag(
+            &mut session,
+            "INSERT ALL INTO small_sales VALUES (sale_seq.NEXTVAL, amount) \
+             INTO sale_ids (id) VALUES (sale_seq.NEXTVAL + 0) \
+             SELECT amount FROM sales"
+        ),
+        "INSERT 0 6"
+    );
+    assert_eq!(
+        lines(&mut session, "SELECT id FROM small_sales ORDER BY id"),
+        vec!["10", "11", "12"]
+    );
+    assert_eq!(
+        lines(&mut session, "SELECT id FROM sale_ids ORDER BY id"),
+        vec!["10", "11", "12"]
+    );
+    assert_eq!(
+        lines(&mut session, "SELECT sale_seq.NEXTVAL FROM dual"),
+        vec!["13"]
+    );
+}

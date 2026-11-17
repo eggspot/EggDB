@@ -534,7 +534,8 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   `WHEN` that holds) and `INSERT FIRST WHEN ... THEN INTO ... [ELSE INTO ...] subquery` (the first
   that holds). The subquery runs once; `WHEN` and `VALUES` read its columns, `VALUES` takes
   `DEFAULT`, and an `INTO` without `VALUES` takes the subquery's columns in order. It is one
-  statement: a failing target undoes them all, and the result counts every row inserted.
+  statement: a failing target undoes them all, and the result counts every row inserted. A
+  sequence's `NEXTVAL` advances once per row of the subquery, however many `INTO` clauses read it.
 - **Indexes**: `CREATE [UNIQUE] INDEX name ON t (...)` with `TABLESPACE`, `ONLINE`, `LOGGING`
   and `COMPUTE STATISTICS` accepted, `DROP INDEX name`, `UNIQUE` columns and `CONSTRAINT name
   UNIQUE (...)` (an unnamed one is `SYS_C` and seven digits), `USER_INDEXES`/`ALL_INDEXES`
