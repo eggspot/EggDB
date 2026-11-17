@@ -1232,3 +1232,4 @@ its full title with its status.
 - [D1205](decisions/D1205.md) Code-only batch 857 (M6f): A dbt adapter of our own: dbt-eggdb
 - [D1206](decisions/D1206.md) Code-only batch 858 (M6f): Airflow operators: airflow-provider-eggdb
 - [D1207](decisions/D1207.md) Code-only batch 859 (M6f): Metabase, Superset and Power BI connectors in their own plugin systems
+- [D1208](decisions/D1208.md) Code-only batch 860 (M6f): An Airbyte source and destination

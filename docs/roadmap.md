@@ -1187,7 +1187,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-17, D1207). Left: Grafana.
 - A dbt adapter, an Airbyte source and destination, a Debezium connector and Airflow operators
   (D46, D239). The dbt adapter (`dbt-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1205); Airflow operators
-  (`airflow-provider-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1206).
+  (`airflow-provider-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1206); the Airbyte source and
+  destination: **code written, unbuilt** (code-only mode, 2026-11-17, D1208). Left: the Debezium connector.
 - Spark, Flink, Trino and Presto connectors (D46, D239).
 
 ### M7 Caching and Redis

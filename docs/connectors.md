@@ -14,6 +14,7 @@ days (D44, D252).
 | Metabase | our driver plugin (`connectors/metabase-driver`, on Metabase's PostgreSQL driver, with a dialect for native questions, D1207) | not yet in the compatibility job |
 | Apache Superset | our engine spec `superset-eggdb` (`eggdb+psycopg2://` URIs, D1207) | not yet in the compatibility job |
 | Power BI | our Power Query connector `EggDB.pq` (`connectors/powerbi-eggdb`, D1207) | not yet in the compatibility job |
+| Airbyte | our source and destination (`connectors/airbyte-eggdb`, the Airbyte protocol in one image per role, D1208) | not yet in the compatibility job |
 | Grafana | PostgreSQL data source; Prometheus data source on `--observability-listen` (PromQL, D220) | PromQL through influxdb-client and HTTP in CI |
 | Power BI, Tableau, Metabase | their PostgreSQL connectors | not yet |
 | Airbyte | PostgreSQL source and destination connectors | not yet |
