@@ -1236,3 +1236,4 @@ its full title with its status.
 - [D1209](decisions/D1209.md) Code-only batch 861 (M6f): Spark and Trino connectors
 - [D1210](decisions/D1210.md) Code-only batch 862 (M6f): An ActiveRecord adapter for the Ruby driver
 - [D1211](decisions/D1211.md) Code-only batch 863 (M8): The text search objects in pg_catalog
+- [D1212](decisions/D1212.md) Code-only batch 864 (M8): The ispell text search template

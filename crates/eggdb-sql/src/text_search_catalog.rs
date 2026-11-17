@@ -146,6 +146,7 @@ enum Template {
     Simple,
     Snowball,
     Synonym,
+    Ispell,
 }
 
 impl Template {
@@ -154,6 +155,7 @@ impl Template {
             "simple" => Some(Self::Simple),
             "snowball" => Some(Self::Snowball),
             "synonym" => Some(Self::Synonym),
+            "ispell" => Some(Self::Ispell),
             _ => None,
         }
     }
@@ -163,6 +165,7 @@ impl Template {
             Self::Simple => "simple",
             Self::Snowball => "snowball",
             Self::Synonym => "synonym",
+            Self::Ispell => "ispell",
         }
     }
 }
@@ -317,7 +320,12 @@ fn missing_file(name: &str, extension: &str) -> SqlError {
         SqlState::UNDEFINED_OBJECT,
         format!(
             "could not open {extension} file \"{name}.{extension}\": EggDB keeps no tsearch_data files; list the words with the {} option",
-            if extension == "stop" { "StopWordList" } else { "SynonymList" }
+            match extension {
+                "stop" => "StopWordList",
+                "dict" => "DictList",
+                "affix" => "AffixList",
+                _ => "SynonymList",
+            }
         ),
     )
 }
@@ -371,6 +379,24 @@ impl StoredDictionary {
                     }
                 };
                 Dictionary::Synonym { synonyms, case_sensitive }
+            }
+            Template::Ispell => {
+                let listed = |list: &str, file: &str, extension: &str, parameter: &str| match (option(list), option(file)) {
+                    (Some(listed), _) => Ok(listed.clone()),
+                    (None, Some(file)) => Err(missing_file(file, extension)),
+                    (None, None) => Err(SqlError::new(
+                        SqlState::INVALID_PARAMETER_VALUE,
+                        format!("missing {parameter} parameter"),
+                    )),
+                };
+                let words = listed("dictlist", "dictfile", "dict", "DictFile")?;
+                let affixes = listed("affixlist", "afffile", "affix", "AffFile")?;
+                let ispell = eggdb_search::Ispell::parse(&words, &affixes)
+                    .map_err(|message| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message))?;
+                Dictionary::Ispell {
+                    ispell: Box::new(ispell),
+                    stop_words,
+                }
             }
         })
     }
@@ -597,7 +623,7 @@ fn create_dictionary(writer: &mut dyn KeyValueWrite, name: &Name, options: &[(Na
     let template = Template::named(&template_name).ok_or_else(|| {
         SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,
-            format!("text search template \"{template_name}\" is not supported yet: EggDB has the simple, snowball and synonym templates"),
+            format!("text search template \"{template_name}\" is not supported yet: EggDB has the simple, snowball, synonym and ispell templates"),
         )
         .at(name.position)
     })?;
@@ -1045,5 +1071,28 @@ mod tests {
         assert_eq!(configuration.mappings.get("uint").unwrap(), &["simple".to_owned()]);
         assert_eq!(decode_configuration(&encode_configuration(&configuration)).unwrap(), configuration);
         assert!(decode_configuration(&[RECORD_VERSION, 9]).is_err());
+    }
+
+    #[test]
+    fn ispell_dictionaries_need_listed_words_and_affixes() {
+        let ispell = |options: &[(&str, &str)]| StoredDictionary {
+            template: Template::Ispell,
+            options: options
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        };
+        let listed = ispell(&[
+            ("dictlist", "book/S"),
+            ("affixlist", "SFX S Y 1\nSFX S 0 s ."),
+            ("stopwordlist", "the"),
+        ]);
+        let dictionary = listed.dictionary().unwrap();
+        assert_eq!(dictionary.recognize("Books"), eggdb_search::Recognition::Lexeme("book".to_owned()));
+        assert_eq!(dictionary.recognize("the"), eggdb_search::Recognition::Stop);
+        assert_eq!(dictionary.recognize("cars"), eggdb_search::Recognition::Unknown);
+        let from_file = ispell(&[("dictfile", "english"), ("afffile", "english")]).dictionary();
+        assert!(from_file.unwrap_err().to_string().contains("DictList"));
+        assert!(ispell(&[("dictlist", "book/S")]).dictionary().is_err());
     }
 }

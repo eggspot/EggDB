@@ -14,6 +14,7 @@ mod french;
 mod german;
 mod hungarian;
 mod indonesian;
+mod ispell;
 mod italian;
 mod portuguese;
 mod romanian;
@@ -28,6 +29,7 @@ mod rank;
 mod vector;
 
 pub use english::{is_stop_word, stem};
+pub use ispell::Ispell;
 pub use query::TsQuery;
 pub use rank::{DEFAULT_RANK_WEIGHTS, bm25, ts_rank, ts_rank_weighted};
 pub use headline::{HeadlineOptions, headline};

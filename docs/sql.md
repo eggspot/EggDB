@@ -2497,10 +2497,14 @@ prints them; `@@` matches with `&`, `|`, `!`, phrases (`<->`, `<N>`) and prefixe
 full-text index yet, so `@@` reads every row.
 
 `CREATE TEXT SEARCH DICTIONARY` takes the `simple` (`StopWords`, `Accept`), `snowball` (`Language`,
-`StopWords`) and `synonym` (`Synonyms`, `CaseSensitive`) templates. EggDB keeps no `tsearch_data`
-files, so `StopWords` names a built-in language's list and `Synonyms` only `synonym_sample`; EggDB's own
-`StopWordList` and `SynonymList` options give the words inline (`'fat, the'`, `'postgres pgsql,
-postgresql pgsql'`). `CREATE TEXT SEARCH CONFIGURATION ... (COPY = english)` or `(PARSER = default)`,
+`StopWords`), `synonym` (`Synonyms`, `CaseSensitive`) and `ispell` (`DictFile`, `AffFile`, `StopWords`)
+templates. EggDB keeps no `tsearch_data` files, so `StopWords` names a built-in language's list and
+`Synonyms` only `synonym_sample`; EggDB's own `StopWordList`, `SynonymList`, `DictList` and `AffixList`
+options give the words inline (`'fat, the'`, `'postgres pgsql, postgresql pgsql'`, a Hunspell `.dic` and
+`.aff` text). An `ispell` dictionary turns a form of a listed word into its base word (`books` into
+`book`) through the affix rules' `PFX` and `SFX` lines (`FLAG long` and `FLAG num` too). The
+`pg_ts_config`, `pg_ts_dict`, `pg_ts_parser`, `pg_ts_template` and `pg_ts_config_map` catalogs list the
+configurations and dictionaries. `CREATE TEXT SEARCH CONFIGURATION ... (COPY = english)` or `(PARSER = default)`,
 `ALTER TEXT SEARCH CONFIGURATION ... ADD`, `ALTER` (`WITH` or `REPLACE`) and `DROP MAPPING FOR` token
 types, `RENAME TO`, `OWNER TO` and `DROP TEXT SEARCH ...` work as in PostgreSQL; each word is given
 its token type (`asciiword`, `word`, `numword` or `uint`) and the type's dictionaries are asked in

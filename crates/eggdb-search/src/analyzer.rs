@@ -1,3 +1,4 @@
+use crate::ispell::Ispell;
 use crate::segment::segmented_words;
 use crate::vector::{Config, Lexer, words};
 use std::collections::{BTreeMap, BTreeSet};
@@ -111,6 +112,14 @@ pub enum Dictionary {
         /// The stop words dropped.
         stop_words: StopWords,
     },
+    /// The `ispell` template: a form of a listed word becomes its first base word; other
+    /// words are left to the next dictionary.
+    Ispell {
+        /// The word list and affix rules.
+        ispell: Box<Ispell>,
+        /// The stop words dropped.
+        stop_words: StopWords,
+    },
     /// The `synonym` template: a listed word becomes its synonym; other words are left to the
     /// next dictionary.
     Synonym {
@@ -140,6 +149,15 @@ impl Dictionary {
                     Recognition::Stop
                 } else {
                     Recognition::Lexeme(language.stem(&lower))
+                }
+            }
+            Self::Ispell { ispell, stop_words } => {
+                if stop_words.contains(&lower) {
+                    return Recognition::Stop;
+                }
+                match ispell.base_words(&lower).into_iter().next() {
+                    Some(base) => Recognition::Lexeme(base),
+                    None => Recognition::Unknown,
                 }
             }
             Self::Synonym { synonyms, case_sensitive } => {
