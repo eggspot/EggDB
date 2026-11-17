@@ -1267,3 +1267,4 @@ its full title with its status.
 - [D1240](decisions/D1240.md) Code-only batch 892 (M6f): SQLProcedureColumns in the ODBC driver
 - [D1241](decisions/D1241.md) Code-only batch 894 (M9): Collated $sort, $group and $match stages in MongoDB's aggregate
 - [D1242](decisions/D1242.md) Code-only batch 897 (M5): More of libsqlite3's entry points
+- [D1243](decisions/D1243.md) Code-only batch 899 (M14): pgoutput protocol versions 2 to 4 on EggDB's replication protocol

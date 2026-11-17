@@ -20,7 +20,73 @@ pub(crate) enum ReplicationCommand {
     IdentifySystem,
     CreateSlot { name: String, export_snapshot: bool },
     DropSlot { name: String },
-    StartReplication { slot: String, lsn: u64 },
+    StartReplication { slot: String, lsn: u64, options: Vec<(String, String)> },
+}
+
+/// The highest `pgoutput` protocol version a subscriber may ask for. Versions 2 to 4 add
+/// streamed, two-phase and parallel transactions, which a server may always send whole, so
+/// every version gets version 1's messages (D1243).
+pub(crate) const MOST_PROTOCOL_VERSION: u32 = 4;
+
+/// The options in parentheses after `START_REPLICATION ... LOGICAL <lsn>`, as name and value
+/// with their quotes taken off.
+fn replication_options(text: &str) -> Vec<(String, String)> {
+    let Some(open) = text.find('(') else {
+        return Vec::new();
+    };
+    let inside = text[open + 1..].trim_end().trim_end_matches(';').trim_end().trim_end_matches(')');
+    let mut options = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut pieces = Vec::new();
+    for character in inside.chars() {
+        match character {
+            '\'' => {
+                quoted = !quoted;
+                current.push(character);
+            }
+            ',' if !quoted => pieces.push(std::mem::take(&mut current)),
+            other => current.push(other),
+        }
+    }
+    pieces.push(current);
+    for piece in pieces {
+        let piece = piece.trim();
+        let (name, value) = piece.split_once(char::is_whitespace).unwrap_or((piece, ""));
+        if name.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+            .map_or_else(|| value.to_owned(), |inner| inner.replace("''", "'"));
+        options.push((name.trim_matches('"').to_ascii_lowercase(), value));
+    }
+    options
+}
+
+/// The `pgoutput` protocol version `options` ask for.
+///
+/// # Errors
+///
+/// A missing, unreadable or unsupported `proto_version`, with PostgreSQL's messages.
+pub(crate) fn protocol_version(options: &[(String, String)]) -> Result<u32, String> {
+    let written = options
+        .iter()
+        .find(|(name, _)| name == "proto_version")
+        .map(|(_, value)| value.as_str())
+        .ok_or_else(|| "proto_version option missing".to_owned())?;
+    let version: u32 = written
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid proto_version: \"{written}\""))?;
+    if version == 0 || version > MOST_PROTOCOL_VERSION {
+        return Err(format!(
+            "client sent proto_version={version} but server only supports protocol {MOST_PROTOCOL_VERSION} or lower"
+        ));
+    }
+    Ok(version)
 }
 
 fn words(text: &str) -> Vec<String> {
@@ -59,6 +125,7 @@ pub(crate) fn replication_command(text: &str) -> Option<ReplicationCommand> {
         ["START_REPLICATION", "SLOT", _, "LOGICAL", lsn, ..] => Some(ReplicationCommand::StartReplication {
             slot: words[2].clone(),
             lsn: parse_lsn(lsn).unwrap_or(0),
+            options: replication_options(text),
         }),
         _ => None,
     }
@@ -229,9 +296,27 @@ mod tests {
         );
         assert_eq!(
             replication_command("START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '1', publication_names '\"p\"')"),
-            Some(ReplicationCommand::StartReplication { slot: "s".into(), lsn: 16 })
+            Some(ReplicationCommand::StartReplication {
+                slot: "s".into(),
+                lsn: 16,
+                options: vec![("proto_version".into(), "1".into()), ("publication_names".into(), "\"p\"".into())],
+            })
         );
         assert_eq!(replication_command("SELECT 1"), None);
         assert_eq!(flushed_lsn(&[b'r', 0, 0, 0, 0, 0, 0, 0, 0x20, 0, 0, 0, 0, 0, 0, 0, 0x30]), Some(0x30));
+    }
+
+    #[test]
+    fn protocol_versions_one_to_four_are_accepted_and_others_refused() {
+        let options = |text: &str| match replication_command(text) {
+            Some(ReplicationCommand::StartReplication { options, .. }) => options,
+            other => panic!("{other:?}"),
+        };
+        let four = options("START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '4', publication_names '\"p\"', streaming 'parallel', binary 'true')");
+        assert_eq!(protocol_version(&four), Ok(4));
+        assert!(four.contains(&("streaming".to_owned(), "parallel".to_owned())));
+        let five = options("START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '5', publication_names '\"p\"')");
+        assert!(protocol_version(&five).unwrap_err().contains("only supports protocol 4"));
+        assert!(protocol_version(&options("START_REPLICATION SLOT \"s\" LOGICAL 0/10")).is_err());
     }
 }

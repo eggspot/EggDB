@@ -1931,7 +1931,10 @@ impl<'a, 's> Connection<'a, 's> {
             ReplicationCommand::DropSlot { name } => self.session.drop_logical_slot(&name).map(|()| {
                 self.wire.outbox.command_complete("DROP_REPLICATION_SLOT");
             }),
-            ReplicationCommand::StartReplication { slot, lsn } => return self.stream_changes(&slot, lsn),
+            ReplicationCommand::StartReplication { slot, lsn, options } => match crate::walsender::protocol_version(&options) {
+                Ok(_) => return self.stream_changes(&slot, lsn),
+                Err(message) => Err(SqlError::new(SqlState::FEATURE_NOT_SUPPORTED, message)),
+            },
         };
         if let Err(error) = outcome {
             if self.exported_snapshot {
