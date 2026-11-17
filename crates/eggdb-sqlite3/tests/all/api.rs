@@ -393,6 +393,14 @@ fn newer_entry_points_prepare_bind_and_expand_statements() {
     unsafe { sqlite3_free(expanded.cast()) };
     // SAFETY: a live statement, finalized once.
     assert_eq!(unsafe { sqlite3_finalize(statement) }, SQLITE_OK);
+    let main = CString::new("main").unwrap();
+    // SAFETY: a live connection and a NUL-terminated name.
+    assert_eq!(text(unsafe { sqlite3_db_filename(db, main.as_ptr()) }.cast()), "");
+    // SAFETY: a live connection and a NUL-terminated name.
+    assert_eq!(unsafe { sqlite3_db_readonly(db, main.as_ptr()) }, 0);
+    let other = CString::new("temp").unwrap();
+    // SAFETY: a live connection and a NUL-terminated name.
+    assert_eq!(unsafe { sqlite3_db_readonly(db, other.as_ptr()) }, -1);
     // SAFETY: a live connection, closed once.
     assert_eq!(unsafe { sqlite3_close(db) }, SQLITE_OK);
 }

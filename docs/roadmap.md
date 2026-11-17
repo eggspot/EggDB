@@ -692,8 +692,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D790); named `:name`, `@name` and `$name` parameters: **code written,
   unbuilt** (code-only mode, 2026-11-12, D874). Left: user aggregates and window functions, collations,
   `sqlite3_backup_*`, and rows streamed per step. `sqlite3_backup_*`: **code written, unbuilt** (code-only mode, 2026-11-14, D1145).
-  `sqlite3_prepare`/`_v3`, `sqlite3_bind_text64`/`blob64`/`zeroblob`, `sqlite3_expanded_sql`, `sqlite3_limit` and the
-  no-op setup and handler calls: **code written, unbuilt** (code-only mode, 2026-11-17, D1242).
+  `sqlite3_prepare`/`_v3`, `sqlite3_bind_text64`/`blob64`/`zeroblob`, `sqlite3_expanded_sql`, `sqlite3_limit`, `sqlite3_db_filename`/`readonly`
+  and the no-op setup and handler calls: **code written, unbuilt** (code-only mode, 2026-11-17, D1242).
 - The C API: parsed plans kept in prepared statements, binary result formats, typed `Parse` on
   server sessions and the remaining open options, `check` and `stats` (D142, D268, D293). The remaining open options
   (`eggdb_open_v2` settings), `eggdb_check` and `eggdb_stats`: **code written, unbuilt** (code-only mode, 2026-11-14,

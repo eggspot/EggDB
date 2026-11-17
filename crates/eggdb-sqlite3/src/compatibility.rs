@@ -1,6 +1,6 @@
 use crate::{
     Destructor, SQLITE_MISUSE, SQLITE_OK, Sqlite3, Sqlite3Stmt, sqlite3_bind_blob, sqlite3_bind_text,
-    sqlite3_prepare_v2, statement_mut,
+    sqlite3_prepare_v2, statement_mut, text_of,
 };
 use std::ffi::{CString, c_char, c_int, c_uchar, c_uint, c_void};
 
@@ -218,3 +218,37 @@ pub unsafe extern "C" fn sqlite3_expanded_sql(statement: *mut Sqlite3Stmt) -> *m
     };
     CString::new(expanded(statement).replace('\0', "")).map_or(std::ptr::null_mut(), CString::into_raw)
 }
+
+fn names_main(name: *const c_char) -> bool {
+    // SAFETY: the callers pass NULL or a NUL-terminated name.
+    unsafe { text_of(name) }.is_none_or(|name| name.eq_ignore_ascii_case("main"))
+}
+
+/// The full path of the connection's `main` database file, or an empty string for a database
+/// in memory; NULL for another schema name. Valid while the connection is open.
+///
+/// # Safety
+/// `db` is a live connection and `name` is NULL or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sqlite3_db_filename(db: *mut Sqlite3, name: *const c_char) -> *const c_char {
+    // SAFETY: the caller passes NULL or a live connection.
+    let Some(connection) = (unsafe { db.as_ref() }) else {
+        return std::ptr::null();
+    };
+    if names_main(name) { connection.filename.as_ptr() } else { std::ptr::null() }
+}
+
+/// 1 when the connection's `main` database was opened read-only, 0 when not, -1 for another
+/// schema name.
+///
+/// # Safety
+/// `db` is a live connection and `name` is NULL or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sqlite3_db_readonly(db: *mut Sqlite3, name: *const c_char) -> c_int {
+    // SAFETY: the caller passes NULL or a live connection.
+    let Some(connection) = (unsafe { db.as_ref() }) else {
+        return -1;
+    };
+    if names_main(name) { c_int::from(connection.read_only) } else { -1 }
+}
+

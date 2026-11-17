@@ -64,6 +64,8 @@ pub struct Sqlite3 {
     changes: i64,
     total_changes: i64,
     functions: Arc<NativeFunctions>,
+    filename: CString,
+    read_only: bool,
     _store: Arc<Store<'static>>,
     _database: Arc<Database>,
 }
@@ -219,6 +221,13 @@ pub unsafe extern "C" fn sqlite3_open_v2(
         changes: 0,
         total_changes: 0,
         functions: Arc::new(NativeFunctions::default()),
+        filename: if filename == ":memory:" || filename.is_empty() {
+            CString::default()
+        } else {
+            CString::new(std::fs::canonicalize(filename).map_or_else(|_| filename.to_owned(), |path| path.to_string_lossy().into_owned()))
+                .unwrap_or_default()
+        },
+        read_only: flags & SQLITE_OPEN_READONLY != 0,
         _store: store,
         _database: database,
     });
@@ -1033,6 +1042,7 @@ pub use backup::{
 pub use compatibility::{
     sqlite3_bind_blob64, sqlite3_bind_text64, sqlite3_bind_zeroblob, sqlite3_busy_handler,
     sqlite3_expanded_sql, sqlite3_initialize, sqlite3_limit, sqlite3_prepare, sqlite3_prepare_v3,
-    sqlite3_progress_handler, sqlite3_shutdown, sqlite3_stmt_status,
+    sqlite3_db_filename, sqlite3_db_readonly, sqlite3_progress_handler, sqlite3_shutdown,
+    sqlite3_stmt_status,
 };
 pub use interface::*;
