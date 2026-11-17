@@ -1183,7 +1183,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The `compatibility` job with DataGrip, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana,
   Grafana, Metabase, Superset, Power BI, Airbyte, Liquibase and Alembic (D12, D239).
 - Our own connectors in each tool's plugin system: a Power BI connector, and Superset, Metabase
-  and Grafana data source plugins (D46, D239).
+  and Grafana data source plugins (D46, D239). Power BI, Superset and Metabase: **code written, unbuilt** (code-only mode,
+  2026-11-17, D1207). Left: Grafana.
 - A dbt adapter, an Airbyte source and destination, a Debezium connector and Airflow operators
   (D46, D239). The dbt adapter (`dbt-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1205); Airflow operators
   (`airflow-provider-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1206).

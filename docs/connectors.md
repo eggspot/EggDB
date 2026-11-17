@@ -11,6 +11,9 @@ days (D44, D252).
 |------|-----------------------|---------|
 | dbt | our adapter `dbt-eggdb` (`connectors/dbt-eggdb`, `type: eggdb`, with a `dialect` per profile, D1205), or `dbt-postgres`, over the PostgreSQL protocol (`eggdb serve --listen`) | `dbt debug`, `dbt run`, `dbt test` in CI |
 | Apache Airflow | our provider `airflow-provider-eggdb` (`connectors/airflow-provider-eggdb`): `EggDBHook`, `EggDBOperator` with a `dialect`, and `EggDBBackupOperator` (D1206), over the PostgreSQL protocol | not yet in the compatibility job |
+| Metabase | our driver plugin (`connectors/metabase-driver`, on Metabase's PostgreSQL driver, with a dialect for native questions, D1207) | not yet in the compatibility job |
+| Apache Superset | our engine spec `superset-eggdb` (`eggdb+psycopg2://` URIs, D1207) | not yet in the compatibility job |
+| Power BI | our Power Query connector `EggDB.pq` (`connectors/powerbi-eggdb`, D1207) | not yet in the compatibility job |
 | Grafana | PostgreSQL data source; Prometheus data source on `--observability-listen` (PromQL, D220) | PromQL through influxdb-client and HTTP in CI |
 | Power BI, Tableau, Metabase | their PostgreSQL connectors | not yet |
 | Airbyte | PostgreSQL source and destination connectors | not yet |

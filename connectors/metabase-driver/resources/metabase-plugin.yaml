@@ -1,0 +1,44 @@
+info:
+  name: Metabase EggDB Driver
+  version: 0.1.0
+  description: Connects Metabase to EggDB over its PostgreSQL protocol.
+dependencies:
+  - plugin: Metabase Postgres Driver
+driver:
+  name: eggdb
+  display-name: EggDB
+  lazy-load: true
+  parent: postgres
+  connection-properties:
+    - host
+    - merge:
+        - port
+        - default: 5432
+    - merge:
+        - dbname
+        - name: dbname
+          display-name: Database name
+          default: eggdb
+    - user
+    - password
+    - name: dialect
+      display-name: SQL dialect of native questions
+      type: select
+      options:
+        - name: PostgreSQL
+          value: postgresql
+        - name: MySQL
+          value: mysql
+        - name: SQL Server
+          value: sqlserver
+        - name: Oracle
+          value: oracle
+        - name: SQLite
+          value: sqlite
+      default: postgresql
+    - ssl
+    - advanced-options-start
+    - default-advanced-options
+init:
+  - step: load-namespace
+    namespace: metabase.driver.eggdb

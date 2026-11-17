@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superset-eggdb"
+version = "0.1.0"
+description = "Apache Superset's engine spec for EggDB"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = ["apache-superset>=3.0", "psycopg2-binary>=2.9"]
+
+[project.entry-points."superset.db_engine_specs"]
+eggdb = "superset_eggdb:EggDBEngineSpec"
+
+[project.entry-points."sqlalchemy.dialects"]
+"eggdb.psycopg2" = "sqlalchemy.dialects.postgresql.psycopg2:PGDialect_psycopg2"
+
+[tool.setuptools]
+packages = ["superset_eggdb"]
