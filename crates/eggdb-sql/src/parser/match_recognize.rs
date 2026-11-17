@@ -12,6 +12,7 @@ struct Recognition {
     order: String,
     measures: Vec<Measure>,
     all_rows: bool,
+    unmatched_rows: bool,
     skip: String,
     pattern: String,
     subsets: Vec<(String, Vec<String>)>,
@@ -363,6 +364,7 @@ impl Parser<'_> {
             }
         }
         let mut all_rows = false;
+        let mut unmatched_rows = false;
         if self.take_word("one") {
             self.expect_word("row")?;
             self.expect_word("per")?;
@@ -375,8 +377,12 @@ impl Parser<'_> {
             if self.take_word("omit") {
                 self.expect_word("empty")?;
                 self.expect_word("matches")?;
-            } else if self.is_word("show") || self.is_word("with") {
-                return Err(self.not_supported("SHOW EMPTY MATCHES and WITH UNMATCHED ROWS"));
+            } else if self.take_word("with") {
+                self.expect_word("unmatched")?;
+                self.expect_word("rows")?;
+                unmatched_rows = true;
+            } else if self.is_word("show") {
+                return Err(self.not_supported("SHOW EMPTY MATCHES"));
             }
         }
         let mut skip = "past last row".to_owned();
@@ -437,7 +443,10 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(Recognition { partitions, order, measures, all_rows, skip, pattern, subsets, definitions })
+        if unmatched_rows && pattern.contains("{-") {
+            return Err(SqlError::syntax("pattern exclusion cannot be used with ALL ROWS PER MATCH WITH UNMATCHED ROWS", self.position()));
+        }
+        Ok(Recognition { partitions, order, measures, all_rows, unmatched_rows, skip, pattern, subsets, definitions })
     }
 
     /// SQL:2016's `MATCH_RECOGNIZE` after a table or subquery whose SQL is `source`, with
@@ -508,21 +517,26 @@ impl Parser<'_> {
         if selected.is_empty() {
             selected.push("mr_m.mr_match AS match_number".to_owned());
         }
-        let (all_rows_table, all_rows_join) = if recognition.all_rows {
+        let (all_rows_table, from_clause) = if recognition.all_rows {
             let partition_on: String = recognition
                 .partitions
                 .iter()
                 .map(|column| format!(" AND mr_a.{column} IS NOT DISTINCT FROM mr_m.{column}"))
                 .collect();
+            let joined_on = format!(
+                "mr_a.{hidden_row} BETWEEN {START} AND {END}{partition_on} \
+                 AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(mr_m.mr_found -> 'excluded') AS mr_x WHERE mr_x.value::bigint = mr_a.{hidden_row} - {START})"
+            );
             (
                 format!(", mr_all AS (SELECT mr_source.*, row_number() OVER ({window}) - 1 AS {hidden_row} FROM (SELECT * FROM {source}) AS mr_source)"),
-                format!(
-                    " JOIN mr_all AS mr_a ON mr_a.{hidden_row} BETWEEN {START} AND {END}{partition_on} \
-                     AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(mr_m.mr_found -> 'excluded') AS mr_x WHERE mr_x.value::bigint = mr_a.{hidden_row} - {START})"
-                ),
+                if recognition.unmatched_rows {
+                    format!("mr_all AS mr_a LEFT JOIN mr_matches AS mr_m ON {joined_on}")
+                } else {
+                    format!("mr_matches AS mr_m JOIN mr_all AS mr_a ON {joined_on}")
+                },
             )
         } else {
-            (String::new(), String::new())
+            (String::new(), "mr_matches AS mr_m".to_owned())
         };
         let grouped = if partition_list.is_empty() { String::new() } else { format!(" GROUP BY {partition_list}") };
         let group_columns = if partition_list.is_empty() { String::new() } else { format!("{partition_list}, ") };
@@ -537,7 +551,7 @@ impl Parser<'_> {
              mr_matches AS (SELECT {matched_columns}mr_e.value AS mr_found, row_number() OVER ({match_partition}ORDER BY (mr_e.value ->> 'start')::bigint) AS mr_match \
              FROM (SELECT {group_columns}jsonb_agg(mr_flags ORDER BY mr_row) AS mr_flag_list FROM mr_numbered{grouped}) AS mr_g \
              CROSS JOIN LATERAL jsonb_array_elements(row_pattern_matches(mr_g.mr_flag_list, {}, {})) AS mr_e){all_rows_table} \
-             SELECT {} FROM mr_matches AS mr_m{all_rows_join}) AS {}",
+             SELECT {} FROM {from_clause}) AS {}",
             flags.join(", "),
             quoted_literal(&recognition.pattern),
             quoted_literal(&recognition.skip),

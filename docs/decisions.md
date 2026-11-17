@@ -1245,3 +1245,4 @@ its full title with its status.
 - [D1218](decisions/D1218.md) Code-only batch 870 (M16): SUBSET union variables in MATCH_RECOGNIZE
 - [D1219](decisions/D1219.md) Code-only batch 871 (M16): PERMUTE in row patterns
 - [D1220](decisions/D1220.md) Code-only batch 872 (M16): Pattern exclusion in MATCH_RECOGNIZE
+- [D1221](decisions/D1221.md) Code-only batch 873 (M16): ALL ROWS PER MATCH WITH UNMATCHED ROWS
