@@ -518,6 +518,7 @@ fn acl_items_quote_role_names_as_postgresql_does() {
             table: "t".to_owned(),
             grantee: grantee.to_owned(),
             privileges: 1,
+            grantable: 0,
         }
         .acl_item("eggdb")
     };

@@ -390,7 +390,7 @@ pub(crate) struct ColumnGrant {
 impl ColumnGrant {
     /// The grant in PostgreSQL's `aclitem` text form, as `pg_attribute.attacl` lists it.
     pub(crate) fn acl_item(&self, grantor: &str) -> String {
-        acl_text(&self.grantee, self.privileges, grantor)
+        acl_text(&self.grantee, self.privileges, 0, grantor)
     }
 
     pub(crate) fn holds(&self, privilege: Privilege) -> bool {

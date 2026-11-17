@@ -230,12 +230,12 @@ impl Parser<'_> {
             });
         }
         self.at += 1;
-        if !granting {
-            self.take_word("grant");
-            if self.is_word("option") {
-                self.at += 1;
-                self.expect_word("for")?;
-            }
+        let mut grant_option = false;
+        if !granting && self.is_word("grant") {
+            self.at += 1;
+            self.expect_word("option")?;
+            self.expect_word("for")?;
+            grant_option = true;
         }
         let mut privileges = Vec::new();
         let mut columns = Vec::new();
@@ -321,10 +321,12 @@ impl Parser<'_> {
         while self.take(&TokenKind::Comma) {
             grantees.push(self.grantee()?);
         }
-        if granting
-            && self.take_word("with")
-            && (self.take_word("grant") || self.take_word("admin"))
-        {
+        if granting && self.take_word("with") {
+            if self.take_word("grant") {
+                grant_option = true;
+            } else if !self.take_word("admin") {
+                return Err(self.unexpected());
+            }
             self.expect_word("option")?;
         }
         if !granting {
@@ -337,6 +339,7 @@ impl Parser<'_> {
                 columns,
                 tables,
                 grantees,
+                grant_option,
             }
         } else {
             RoleStatement::Membership {

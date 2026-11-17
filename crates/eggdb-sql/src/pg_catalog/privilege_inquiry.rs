@@ -312,12 +312,22 @@ impl Inquiry<'_> {
         let Some(role) = holder.checked_role() else {
             return Ok(true);
         };
-        if wanted.with_option {
-            return Ok(false);
-        }
         let Asked::Table(privilege) = wanted.asked else {
             return Ok(false);
         };
+        if wanted.with_option {
+            return match &entry.source {
+                RelationSource::Table(_) | RelationSource::View(_) | RelationSource::Sequence(_) => {
+                    crate::roles::holds_grant_option(
+                        &self.snapshot.access,
+                        Some(role),
+                        &entry.internal,
+                        privilege,
+                    )
+                }
+                _ => Ok(false),
+            };
+        }
         match &entry.source {
             RelationSource::Catalog(_) => Ok(privilege == Privilege::Select),
             RelationSource::Index { .. } => Ok(false),

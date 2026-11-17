@@ -195,3 +195,44 @@ fn hostile_role_records_are_errors() {
         assert!(decode_role("r", bytes).is_err(), "{bytes:?}");
     }
 }
+
+#[test]
+fn a_grant_option_lets_a_role_grant_on_and_revoking_it_takes_only_that() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE USER auditor WITH PASSWORD 'secret'",
+        "GRANT SELECT ON audit TO clerk WITH GRANT OPTION",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    run(&mut clerk, "GRANT SELECT ON audit TO auditor").unwrap();
+    let error = run(&mut clerk, "GRANT DELETE ON audit TO auditor").expect_err("delete");
+    assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE);
+    assert_eq!(
+        run(
+            &mut clerk,
+            "SELECT has_table_privilege('audit', 'SELECT WITH GRANT OPTION')"
+        )
+        .unwrap(),
+        "has_table_privilege\nt\nSELECT 1"
+    );
+    run(&mut admin, "REVOKE GRANT OPTION FOR SELECT ON audit FROM clerk").unwrap();
+    assert_eq!(
+        run(&mut clerk, "SELECT count(*) FROM audit").unwrap(),
+        "count\n0\nSELECT 1"
+    );
+    let error = run(&mut clerk, "GRANT SELECT ON audit TO auditor").expect_err("again");
+    assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE);
+}
+
+#[test]
+fn an_acl_item_marks_each_grantable_privilege_with_a_star() {
+    assert_eq!(
+        acl_text("clerk", Privilege::Select.bit() | Privilege::Insert.bit(), Privilege::Select.bit(), "ada"),
+        "clerk=ar*/ada"
+    );
+}

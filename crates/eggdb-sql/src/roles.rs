@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 pub(crate) const ROLE_SPACE: u8 = 0x11;
 pub(crate) const GRANT_SPACE: u8 = 0x12;
 pub(crate) const DENY_SPACE: u8 = 0x18;
+pub(crate) const GRANT_OPTION_SPACE: u8 = 0x1C;
 const RECORD_VERSION: u8 = 1;
 const LOGIN: u8 = 1;
 const SUPERUSER: u8 = 2;
@@ -114,6 +115,7 @@ pub(crate) enum RoleStatement {
         columns: Vec<(Privilege, Vec<Name>)>,
         tables: Vec<Name>,
         grantees: Vec<String>,
+        grant_option: bool,
     },
     Deny {
         privileges: Vec<Privilege>,
@@ -213,6 +215,24 @@ fn grant_key(table: &str, grantee: &str) -> Vec<u8> {
     let mut key = grant_prefix(table);
     key.extend_from_slice(grantee.as_bytes());
     key
+}
+
+fn grant_option_key(table: &str, grantee: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(GRANT_OPTION_SPACE);
+    key.extend_from_slice(table.as_bytes());
+    key.push(0);
+    key.extend_from_slice(grantee.as_bytes());
+    key
+}
+
+/// The privileges `grantee` may grant on to others on `table` (`WITH GRANT OPTION`).
+pub(crate) fn grant_option_bits(
+    reader: &dyn KeyValueRead,
+    table: &str,
+    grantee: &str,
+) -> SqlResult<u8> {
+    privilege_bits(reader, &grant_option_key(table, grantee), "grant option")
 }
 
 fn deny_key(table: &str, grantee: &str) -> Vec<u8> {
@@ -454,13 +474,58 @@ fn require_superuser(settings: &Settings, what: &str) -> SqlResult<()> {
     Ok(())
 }
 
+/// Whether `role`, or a role it belongs to, may grant every one of `privileges` on to others on
+/// every one of `tables`: it holds each with `WITH GRANT OPTION` and is not denied it.
+pub(crate) fn may_grant_on(
+    reader: &dyn KeyValueRead,
+    role: &str,
+    privileges: &[Privilege],
+    tables: &[Name],
+) -> SqlResult<bool> {
+    let held = role_closure(reader, role)?;
+    for table in tables {
+        for privilege in privileges {
+            if denied(reader, &held, &table.text, *privilege)? {
+                return Ok(false);
+            }
+            let mut holds = false;
+            for member in &held {
+                if grant_option_bits(reader, &table.text, member)? & privilege.bit() != 0 {
+                    holds = true;
+                    break;
+                }
+            }
+            if !holds {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn run(
     writer: &mut dyn KeyValueWrite,
     settings: &Settings,
     statement: &RoleStatement,
 ) -> SqlResult<QueryResult> {
     let tag = statement.tag();
-    require_superuser(settings, &tag.to_ascii_lowercase())?;
+    let granted_on = match (statement, settings.checked_role.as_deref()) {
+        (
+            RoleStatement::Privileges {
+                privileges,
+                columns,
+                tables,
+                ..
+            },
+            Some(role),
+        ) if columns.is_empty() && !privileges.is_empty() => {
+            may_grant_on(writer, role, privileges, tables)?
+        }
+        _ => false,
+    };
+    if !granted_on {
+        require_superuser(settings, &tag.to_ascii_lowercase())?;
+    }
     match statement {
         RoleStatement::Create {
             name,
@@ -541,8 +606,13 @@ pub(crate) fn run(
             columns: column_privileges,
             tables,
             grantees,
+            grant_option,
         } => {
-            change_privileges(writer, *granting, privileges, tables, grantees)?;
+            let change = PrivilegeChange {
+                granting: *granting,
+                grant_option: *grant_option,
+            };
+            change_privileges(writer, change, privileges, tables, grantees)?;
             columns::change_column_privileges(
                 writer,
                 *granting,
@@ -635,22 +705,24 @@ pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlRe
     for (grantee, _) in table_grant_records(writer, table)? {
         writer.delete(&grant_key(table, &grantee))?;
     }
-    let mut prefix = NAMESPACE.to_vec();
-    prefix.push(DENY_SPACE);
-    prefix.extend_from_slice(table.as_bytes());
-    prefix.push(0);
-    let mut denials = Vec::new();
-    writer.scan(
-        &prefix,
-        &prefix_end(&prefix),
-        ScanDirection::Forward,
-        &mut |key, _| {
-            denials.push(key.to_vec());
-            Ok(true)
-        },
-    )?;
-    for key in denials {
-        writer.delete(&key)?;
+    for space in [DENY_SPACE, GRANT_OPTION_SPACE] {
+        let mut prefix = NAMESPACE.to_vec();
+        prefix.push(space);
+        prefix.extend_from_slice(table.as_bytes());
+        prefix.push(0);
+        let mut keys = Vec::new();
+        writer.scan(
+            &prefix,
+            &prefix_end(&prefix),
+            ScanDirection::Forward,
+            &mut |key, _| {
+                keys.push(key.to_vec());
+                Ok(true)
+            },
+        )?;
+        for key in keys {
+            writer.delete(&key)?;
+        }
     }
     columns::forget_table_columns(writer, table)
 }
@@ -721,22 +793,27 @@ pub(crate) struct TableGrant {
     pub(crate) table: String,
     pub(crate) grantee: String,
     pub(crate) privileges: u8,
+    pub(crate) grantable: u8,
 }
 
 impl TableGrant {
     /// The grant in PostgreSQL's `aclitem` text form, `grantee=privileges/grantor`, with an
     /// empty grantee for `PUBLIC`.
     pub(crate) fn acl_item(&self, grantor: &str) -> String {
-        acl_text(&self.grantee, self.privileges, grantor)
+        acl_text(&self.grantee, self.privileges, self.grantable, grantor)
     }
 }
 
-fn acl_text(grantee: &str, privileges: u8, grantor: &str) -> String {
-    let letters: String = ACL_LETTERS
-        .iter()
-        .filter(|(privilege, _)| privileges & privilege.bit() != 0)
-        .map(|(_, letter)| *letter)
-        .collect();
+fn acl_text(grantee: &str, privileges: u8, grantable: u8, grantor: &str) -> String {
+    let mut letters = String::new();
+    for (privilege, letter) in ACL_LETTERS {
+        if privileges & privilege.bit() != 0 {
+            letters.push(letter);
+            if grantable & privilege.bit() != 0 {
+                letters.push('*');
+            }
+        }
+    }
     let grantee = if grantee == PUBLIC {
         String::new()
     } else {
@@ -785,21 +862,36 @@ pub(crate) fn every_grant(reader: &dyn KeyValueRead) -> SqlResult<Vec<TableGrant
                     table: String::from_utf8_lossy(table).into_owned(),
                     grantee: String::from_utf8_lossy(grantee).into_owned(),
                     privileges: *held,
+                    grantable: 0,
                 });
             }
             Ok(true)
         },
     )?;
+    for grant in &mut grants {
+        grant.grantable =
+            grant_option_bits(reader, &grant.table, &grant.grantee)? & grant.privileges;
+    }
     Ok(grants)
+}
+
+/// What a `GRANT` or `REVOKE` of table privileges does: grants them (with the right to grant
+/// them on when `grant_option`), revokes them, or (`REVOKE GRANT OPTION FOR`) revokes only the
+/// right to grant them on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrivilegeChange {
+    pub(crate) granting: bool,
+    pub(crate) grant_option: bool,
 }
 
 fn change_privileges(
     writer: &mut dyn KeyValueWrite,
-    granting: bool,
+    change: PrivilegeChange,
     privileges: &[Privilege],
     tables: &[Name],
     grantees: &[String],
 ) -> SqlResult<()> {
+    let granting = change.granting;
     let bits = privileges
         .iter()
         .fold(0u8, |bits, privilege| bits | privilege.bit());
@@ -817,6 +909,17 @@ fn change_privileges(
         for grantee in grantees {
             if grantee != PUBLIC && stored_role(writer, grantee)?.is_none() {
                 return Err(missing_role(grantee));
+            }
+            let option_key = grant_option_key(&table.text, grantee);
+            let options = privilege_bits(writer, &option_key, "grant option")?;
+            let options = match (granting, change.grant_option) {
+                (true, true) => options | bits,
+                (true, false) => options,
+                (false, _) => options & !bits,
+            };
+            store_bits(writer, &option_key, options)?;
+            if !granting && change.grant_option {
+                continue;
             }
             let key = grant_key(&table.text, grantee);
             let current = match writer.get(&key)?.as_deref() {
@@ -917,6 +1020,30 @@ pub(crate) fn check_table(
 /// Whether `checked_role` holds `privilege` on the whole of `table`, by the rule every statement
 /// is checked with: always when it is `None` (a superuser session), on temporary tables, and
 /// otherwise when the role, a role it belongs to or `PUBLIC` holds it.
+/// Whether `checked_role` may grant `privilege` on `table` on to others: always for a
+/// superuser session (None), else when it or a role it belongs to holds it `WITH GRANT
+/// OPTION` and none of them is denied it.
+pub(crate) fn holds_grant_option(
+    reader: &dyn KeyValueRead,
+    checked_role: Option<&str>,
+    table: &str,
+    privilege: Privilege,
+) -> SqlResult<bool> {
+    let Some(role) = checked_role else {
+        return Ok(true);
+    };
+    let held = role_closure(reader, role)?;
+    if denied(reader, &held, table, privilege)? {
+        return Ok(false);
+    }
+    for member in &held {
+        if grant_option_bits(reader, table, member)? & privilege.bit() != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn holds_table_privilege(
     reader: &dyn KeyValueRead,
     checked_role: Option<&str>,
