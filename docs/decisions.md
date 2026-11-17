@@ -1258,3 +1258,4 @@ its full title with its status.
 - [D1231](decisions/D1231.md) Code-only batch 883 (M8): ts_token_type, ts_parse and ts_debug
 - [D1232](decisions/D1232.md) Code-only batch 884 (M6c): Per-role connection limits
 - [D1233](decisions/D1233.md) Code-only batch 885 (M10): Oracle's ROWID pseudo-column in queries
+- [D1234](decisions/D1234.md) Code-only batch 886 (M10): DBMS_METADATA.GET_DDL for indexes and sequences

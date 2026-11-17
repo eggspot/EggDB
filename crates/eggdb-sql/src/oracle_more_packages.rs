@@ -291,7 +291,7 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
         return Ok(Value::Null);
     };
     let object_type = object_type.trim().to_ascii_uppercase();
-    if !matches!(object_type.as_str(), "TABLE" | "VIEW") {
+    if !matches!(object_type.as_str(), "TABLE" | "VIEW" | "INDEX" | "SEQUENCE") {
         return Err(metadata_error(
             ORACLE_METADATA_INVALID_INPUT,
             format!("invalid input value {object_type} for parameter OBJECT_TYPE in function GET_DDL"),
@@ -329,6 +329,49 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
                 crate::lexer::swap_uniform_case(&entry.name)
             )
         }
+        (crate::pg_catalog::RelationSource::Index { table, index }, "INDEX") => {
+            let owner = snapshot.relations.get(*table).ok_or_else(not_found)?;
+            let crate::pg_catalog::RelationSource::Table(definition) = &owner.source else {
+                return Err(not_found());
+            };
+            let (unique, columns) = match index {
+                crate::pg_catalog::IndexSource::Primary => (true, definition.primary_key.clone()),
+                crate::pg_catalog::IndexSource::Secondary(at) => {
+                    let found = definition.indexes.get(*at).ok_or_else(not_found)?;
+                    (found.unique, found.columns.clone())
+                }
+            };
+            let names: Vec<String> = columns
+                .iter()
+                .filter_map(|at| definition.columns.get(*at))
+                .map(|column| format!("\"{}\"", crate::lexer::swap_uniform_case(&column.name)))
+                .collect();
+            format!(
+                "CREATE {}INDEX \"{}\" ON \"{}\" ({});",
+                if unique { "UNIQUE " } else { "" },
+                crate::lexer::swap_uniform_case(&entry.name),
+                crate::lexer::swap_uniform_case(&owner.name),
+                names.join(", ")
+            )
+        }
+        (crate::pg_catalog::RelationSource::Sequence(sequence), "SEQUENCE") => format!(
+            "CREATE SEQUENCE \"{}\" MINVALUE {} MAXVALUE {} INCREMENT BY {} START WITH {} {} {};",
+            crate::lexer::swap_uniform_case(&entry.name),
+            sequence.min,
+            sequence.max,
+            sequence.increment,
+            if sequence.is_called {
+                sequence.last_value.saturating_add(sequence.increment)
+            } else {
+                sequence.last_value
+            },
+            if sequence.cache > 1 {
+                format!("CACHE {}", sequence.cache)
+            } else {
+                "NOCACHE".to_owned()
+            },
+            if sequence.cycle { "CYCLE" } else { "NOCYCLE" }
+        ),
         _ => return Err(not_found()),
     };
     crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl))

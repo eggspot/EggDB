@@ -1111,4 +1111,18 @@ fn dbms_metadata_get_ddl_writes_tables_and_views_in_oracle_form() {
     let wrong = failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('SYNONYMISH', 'EMP') FROM dual");
     assert!(wrong.message().starts_with("ORA-31600"), "{wrong}");
     failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('VIEW', 'EMP') FROM dual");
+    values(&mut session, "CREATE UNIQUE INDEX emp_name_ix ON emp (name)");
+    values(&mut session, "CREATE SEQUENCE emp_seq START WITH 10 INCREMENT BY 5 CACHE 20");
+    let index = values(&mut session, "SELECT DBMS_METADATA.GET_DDL('INDEX', 'EMP_NAME_IX') FROM dual");
+    assert_eq!(
+        index[0][0],
+        Value::Text("CREATE UNIQUE INDEX \"EMP_NAME_IX\" ON \"EMP\" (\"NAME\");".to_owned())
+    );
+    let sequence = values(&mut session, "SELECT DBMS_METADATA.GET_DDL('SEQUENCE', 'EMP_SEQ') FROM dual");
+    let Value::Text(sequence) = &sequence[0][0] else {
+        panic!("text DDL: {sequence:?}");
+    };
+    assert!(sequence.starts_with("CREATE SEQUENCE \"EMP_SEQ\" MINVALUE 1 "), "{sequence}");
+    assert!(sequence.contains("INCREMENT BY 5 START WITH 10 CACHE 20 NOCYCLE;"), "{sequence}");
+    failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('INDEX', 'EMP_SEQ') FROM dual");
 }
