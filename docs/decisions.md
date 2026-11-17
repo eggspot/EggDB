@@ -1264,3 +1264,4 @@ its full title with its status.
 - [D1237](decisions/D1237.md) Code-only batch 889 (M6f): SQLStatistics, SQLSpecialColumns and SQLProcedures in the ODBC driver
 - [D1238](decisions/D1238.md) Code-only batch 890 (M6f): SQLGetInfo's fixed answers in the ODBC driver
 - [D1239](decisions/D1239.md) Code-only batch 891 (M6f): SQLTablePrivileges and SQLColumnPrivileges in the ODBC driver
+- [D1240](decisions/D1240.md) Code-only batch 892 (M6f): SQLProcedureColumns in the ODBC driver

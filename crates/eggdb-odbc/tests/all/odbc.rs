@@ -1,7 +1,7 @@
 use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
-    SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLPrepare, SQLPrimaryKeys,
+    SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLProcedureColumns, SQLPrepare, SQLPrimaryKeys,
     SQLRowCount, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use std::ffi::c_void;
@@ -161,6 +161,27 @@ fn primary_keys_foreign_keys_and_type_info_are_listed() {
         listed += 1;
     }
     assert_eq!(listed, 14);
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    SQLDisconnect(dbc);
+    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+}
+
+#[test]
+fn procedure_columns_list_a_function_s_parameters_in_order() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=postgresql\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(run(stmt, "CREATE FUNCTION add_up(a integer, b integer) RETURNS integer LANGUAGE sql AS 'SELECT a + b'"), 0);
+    let name = b"add_up\0";
+    assert_eq!(SQLProcedureColumns(stmt, ptr::null(), 0, ptr::null(), 0, name.as_ptr(), -3, ptr::null(), 0), 0);
+    let mut parameters = Vec::new();
+    while SQLFetch(stmt) == 0 {
+        parameters.push((text_column(stmt, 4).unwrap_or_default(), text_column(stmt, 5).unwrap_or_default()));
+    }
+    assert_eq!(parameters, [("a".to_owned(), "1".to_owned()), ("b".to_owned(), "1".to_owned())]);
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     SQLDisconnect(dbc);
     SQLFreeHandle(SQL_HANDLE_DBC, dbc);
