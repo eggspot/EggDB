@@ -964,7 +964,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Isolation of tenants by schema or by database, beside isolation by row (D32, D234). By schema: **code written,
   unbuilt** (code-only mode, 2026-11-12, D764). Left: by database.
 - SECURITY.md's scope: denial of service from hostile input, sandbox escapes and protocol attacks
-  (D45).
+  (D45). **Written** (2026-11-17): SECURITY.md's Scope section.
 
 ### M6c Operations
 - OTLP export of EggDB's own metrics, logs and traces (D25, D188). Metrics over OTLP/HTTP JSON: **code written,
