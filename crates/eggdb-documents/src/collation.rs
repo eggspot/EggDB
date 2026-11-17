@@ -305,7 +305,7 @@ mod tests {
         let mut by_name = Document::new();
         by_name.insert("name", Bson::Int32(1));
         let stages = vec![crate::Stage::Sort(crate::sort::parse_sort(&by_name).unwrap())];
-        let load = |_: &str| Ok(Vec::new());
+        let load = |_: &str| -> crate::error::DocumentResult<Vec<Document>> { Ok(Vec::new()) };
         let input = vec![named("banana"), named("Apple"), named("cherry")];
         let binary = crate::run_pipeline(&stages, input.clone(), &load).unwrap();
         assert_eq!(binary[0].get_str("name"), Some("Apple"));
