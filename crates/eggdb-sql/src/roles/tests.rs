@@ -361,6 +361,11 @@ fn connection_limits_refuse_logins_past_the_open_sessions_and_free_them_on_close
         .execute("CREATE ROLE limited_login LOGIN CONNECTION LIMIT 1", &mut |_| {})
         .unwrap();
     assert_eq!(role_limits(&store.begin_read().unwrap(), "limited_login").unwrap().connections, 1);
+    let mut shown = Vec::new();
+    admin
+        .execute("SELECT rolconnlimit FROM pg_roles WHERE rolname = 'limited_login'", &mut |result| shown.push(result))
+        .unwrap();
+    assert_eq!(shown.last().map(|result| result.rows.clone()), Some(vec![vec![crate::types::Value::Integer(1)]]));
     let mut first = Session::new(&store);
     first.identify_role("limited_login", "connection-limit-test").unwrap();
     let mut second = Session::new(&store);

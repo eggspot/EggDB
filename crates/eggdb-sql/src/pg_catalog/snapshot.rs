@@ -489,6 +489,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) event_triggers: Vec<Vec<(String, Value)>>,
     pub(crate) oracle_scheduler_jobs: Vec<Vec<(String, Value)>>,
     pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
+    pub(crate) role_connection_limits: HashMap<String, u32>,
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
     pub(crate) access: crate::roles::AccessRecords,
@@ -861,6 +862,16 @@ impl CatalogSnapshot {
             mysql_events,
             event_triggers,
             oracle_scheduler_jobs,
+            role_connection_limits: {
+                let mut limits = HashMap::new();
+                for role in crate::roles::stored_roles(reader)? {
+                    let connections = crate::roles::role_limits(reader, &role.name)?.connections;
+                    if connections > 0 {
+                        limits.insert(role.name, connections);
+                    }
+                }
+                limits
+            },
             stored_roles: crate::roles::stored_roles(reader)?,
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,

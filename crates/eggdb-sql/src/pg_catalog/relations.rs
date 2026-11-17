@@ -1831,7 +1831,13 @@ fn role_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("rolcreatedb", flag(role.superuser || role.create_database))
                 .set("rolcanlogin", flag(role.login))
                 .set("rolreplication", flag(false))
-                .set("rolconnlimit", int(-1))
+                .set(
+                    "rolconnlimit",
+                    snapshot
+                        .role_connection_limits
+                        .get(&role.name)
+                        .map_or(int(-1), |limit| int(i64::from(*limit))),
+                )
                 .set("rolpassword", text("********"))
                 .set("rolbypassrls", flag(role.superuser || role.bypass_row_security))
                 .set("oid", oid(oid_of_role))
