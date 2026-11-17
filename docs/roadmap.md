@@ -1562,7 +1562,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 ### M11 Columnar analytics and time series
 - Columnar table storage: row groups of chunks, deletes as bitmaps, `CREATE TABLE ... USING
   columnar` (D201).
-- Float and string chunks, and compression beyond the encodings (D201).
+- Float and string chunks, and compression beyond the encodings (D201). **Code written, unbuilt** (code-only mode,
+  2026-11-17, D1224): `FloatChunk` (plain or XOR) and `StringChunk` (plain, dictionary or Snappy) in `eggdb-columnar`.
 - ClickBench-style queries and TPC-H against DuckDB and ClickHouse in the compare job (D7, D201).
 - Analytical replicas: columnar copies kept in step with row tables (HTAP) (D18).
 - Gap filling, `first` and `last`, and hypertables partitioned by time automatically (D202,

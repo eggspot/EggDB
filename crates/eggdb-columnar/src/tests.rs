@@ -1,5 +1,5 @@
 use crate::{
-    Dictionary, Encoding, IntegerChunk, bit_width, decode_deltas, decode_hybrid, encode_deltas,
+    Dictionary, Encoding, FloatChunk, FloatEncoding, IntegerChunk, StringChunk, StringEncoding, bit_width, decode_deltas, decode_hybrid, encode_deltas,
     encode_hybrid, pack, unpack,
 };
 
@@ -153,4 +153,55 @@ fn snappy_blocks_decompress_and_literal_blocks_round_trip() {
             "{size}"
         );
     }
+}
+
+#[test]
+fn float_chunks_round_trip_bit_for_bit_and_compress_slow_series() {
+    let series: Vec<f64> = (0..1000).map(|at| 20.0 + f64::from(at % 7) * 0.5).collect();
+    let chunk = FloatChunk::encode(&series);
+    assert_eq!(chunk.encoding(), FloatEncoding::Xor);
+    assert!(chunk.encoded_bytes() < series.len() * 2, "{}", chunk.encoded_bytes());
+    assert_eq!(chunk.decode().unwrap(), series);
+    let odd = [f64::NAN, -0.0, f64::INFINITY, 1.0e-310, f64::MIN, 3.5];
+    let chunk = FloatChunk::encode(&odd);
+    let back = FloatChunk::from_bytes(&chunk.to_bytes()).unwrap().decode().unwrap();
+    assert!(back.iter().zip(odd.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+    let stats = chunk.stats().unwrap();
+    assert_eq!((stats.min, stats.max, stats.count), (f64::MIN, f64::INFINITY, 6));
+    assert!(FloatChunk::encode(&[f64::NAN]).stats().unwrap().min.is_nan());
+    assert_eq!(FloatChunk::encode(&[]).decode().unwrap(), Vec::<f64>::new());
+    let mut bytes = FloatChunk::encode(&series).to_bytes();
+    bytes.truncate(bytes.len() - 3);
+    assert!(FloatChunk::from_bytes(&bytes).is_err());
+    let mut wrong = FloatChunk::encode(&[1.0, 2.0]).to_bytes();
+    let last = wrong.len() - 1;
+    wrong[last] ^= 0x80;
+    assert!(FloatChunk::from_bytes(&wrong).is_err());
+}
+
+#[test]
+fn string_chunks_choose_dictionary_snappy_or_plain() {
+    let names: Vec<Vec<u8>> = (0..10).map(|number| format!("service-number-{number:05}").into_bytes()).collect();
+    let repeated: Vec<&[u8]> = (0..1000u64)
+        .map(|at| names[(at.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 60) as usize % 10].as_slice())
+        .collect();
+    let chunk = StringChunk::encode(&repeated);
+    assert_eq!(chunk.encoding(), StringEncoding::Dictionary);
+    assert_eq!(chunk.decode().unwrap(), repeated.iter().map(|value| value.to_vec()).collect::<Vec<_>>());
+    let stats = chunk.stats().unwrap();
+    assert_eq!(stats.count, 1000);
+    assert!(stats.min <= stats.max);
+    let long = b"the same long sentence repeated over and over again ".repeat(40);
+    let distinct: Vec<Vec<u8>> = (0..20).map(|at| [long.as_slice(), &[at as u8]].concat()).collect();
+    let rows: Vec<&[u8]> = distinct.iter().map(Vec::as_slice).collect();
+    let chunk = StringChunk::encode(&rows);
+    assert_eq!(chunk.encoding(), StringEncoding::SnappyPlain);
+    assert_eq!(StringChunk::from_bytes(&chunk.to_bytes()).unwrap().decode().unwrap(), distinct);
+    let few: Vec<&[u8]> = vec![b"a", b"bc"];
+    let chunk = StringChunk::encode(&few);
+    assert_eq!(chunk.encoding(), StringEncoding::Plain);
+    let mut bytes = chunk.to_bytes();
+    bytes.push(0);
+    assert!(StringChunk::from_bytes(&bytes).is_err());
+    assert!(StringChunk::from_bytes(&[9, 0]).is_err());
 }
