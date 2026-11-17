@@ -1176,7 +1176,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `sqlite3`-compatible module (`eggdb/sqlite3`): **code written, unbuilt** (code-only mode, 2026-11-13, D960).
   Prisma's driver adapter (`eggdb/prisma`): **code written, unbuilt** (code-only mode, 2026-11-13, D961).
 - The GORM dialect, with sqlc checked (D16, D182). `drivers/go/gorm` (`eggdbgorm.Open`): **code written, unbuilt**
-  (code-only mode, 2026-11-13, D962). Left: a dialector of our own that does not link go-sqlite3, and the sqlc check.
+  (code-only mode, 2026-11-13, D962); EggDB's own dialector, linking nothing of SQLite's: **code written, unbuilt**
+  (code-only mode, 2026-11-17, D1246). Left: the sqlc check.
 - A PDO driver with Laravel/Eloquent and Doctrine (D16, D182). A Doctrine DBAL driver (`EggDB\Doctrine\Driver`):
   **code written, unbuilt** (code-only mode, 2026-11-13, D963). Left: the PDO driver, which Laravel needs.
 - ActiveRecord and Sequel for Ruby (D16, D182). The Sequel adapter (`adapter: :eggdb`): **code written, unbuilt** (code-only

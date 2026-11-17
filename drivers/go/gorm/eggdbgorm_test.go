@@ -50,3 +50,41 @@ func TestModelsMigrateCreateQueryUpdateAndDelete(t *testing.T) {
 		t.Fatalf("%d eggs left", count)
 	}
 }
+
+func TestTheMigratorReadsTablesColumnsAndIndexes(t *testing.T) {
+	db, err := gorm.Open(Open(":memory:"), &gorm.Config{TranslateError: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type Box struct {
+		ID    uint
+		Label string `gorm:"uniqueIndex"`
+	}
+	if err := db.AutoMigrate(&Box{}); err != nil {
+		t.Fatal(err)
+	}
+	migrator := db.Migrator()
+	if !migrator.HasTable(&Box{}) || migrator.HasTable("nowhere") {
+		t.Fatal("HasTable does not read the catalog")
+	}
+	if !migrator.HasColumn(&Box{}, "Label") || migrator.HasColumn(&Box{}, "colour") {
+		t.Fatal("HasColumn does not read the table's columns")
+	}
+	if !migrator.HasIndex(&Box{}, "Label") {
+		t.Fatal("HasIndex does not find the unique index")
+	}
+	if err := db.AutoMigrate(&Box{}); err != nil {
+		t.Fatalf("a second AutoMigrate changed something: %v", err)
+	}
+	if err := db.Create(&Box{Label: "eggs"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&Box{Label: "eggs"}).Error; err != gorm.ErrDuplicatedKey {
+		t.Fatalf("a duplicate label gave %v", err)
+	}
+	var page []Box
+	if err := db.Offset(1).Find(&page).Error; err != nil || len(page) != 0 {
+		t.Fatalf("an offset without a limit gave %v, %v", page, err)
+	}
+}
+

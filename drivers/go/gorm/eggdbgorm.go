@@ -1,11 +1,9 @@
-// Package eggdbgorm opens an embedded EggDB file with GORM. EggDB speaks SQLite's SQL, so GORM's
-// own SQLite dialector does the SQL, migrations and schema reflection, and EggDB's database/sql
-// driver runs it in place of SQLite's.
+// Package eggdbgorm opens an embedded EggDB file with GORM, through EggDB's own dialector: GORM's
+// SQL in EggDB's SQLite dialect, run by EggDB's database/sql driver, with nothing of SQLite's
+// linked in.
 package eggdbgorm
 
 import (
-	_ "github.com/eggspot/EggDB/drivers/go"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -15,5 +13,5 @@ const DriverName = "eggdb"
 // Open returns a GORM dialector for the EggDB file at dsn (a path, or ":memory:", with the
 // driver's "?mode=ro" setting), in EggDB's SQLite dialect.
 func Open(dsn string) gorm.Dialector {
-	return sqlite.New(sqlite.Config{DriverName: DriverName, DSN: dsn})
+	return New(dsn)
 }
