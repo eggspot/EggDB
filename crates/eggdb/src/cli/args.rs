@@ -221,6 +221,7 @@ impl CommandName {
             OptionName::Cache
             | OptionName::BusyTimeout
             | OptionName::KeyFile
+            | OptionName::KeySource
             | OptionName::Help
             | OptionName::Version => true,
             OptionName::Color => true,
@@ -520,6 +521,7 @@ enum OptionName {
     Cache,
     BusyTimeout,
     KeyFile,
+    KeySource,
     Help,
     Version,
     PageSize,
@@ -719,6 +721,7 @@ impl OptionName {
             b"cache" => Self::Cache,
             b"busy-timeout" => Self::BusyTimeout,
             b"key-file" => Self::KeyFile,
+            b"key-source" => Self::KeySource,
             b"help" => Self::Help,
             b"version" => Self::Version,
             b"page-size" => Self::PageSize,
@@ -984,7 +987,7 @@ impl std::fmt::Debug for EncryptionKey {
     }
 }
 
-fn read_key_file(value: &OsStr) -> Result<EncryptionKey, String> {
+pub(crate) fn read_key_file(value: &OsStr) -> Result<EncryptionKey, String> {
     let path = std::path::Path::new(value).display();
     let text = std::fs::read_to_string(value)
         .map_err(|error| format!("cannot read --key-file {path}: {error}"))?;
@@ -1627,6 +1630,11 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::KeyFile => {
                 request.encryption_key = Some(read_key_file(value).map_err(usage)?);
+            }
+            OptionName::KeySource => {
+                let spec = value.to_str().ok_or_else(|| usage("--key-source must be UTF-8 text".to_owned()))?;
+                let key = super::key_sources::read_key(spec).map_err(usage)?;
+                request.encryption_key = Some(EncryptionKey(key));
             }
             OptionName::ArchiveChanges => request.archive_changes = Some(PathBuf::from(value)),
             OptionName::Differential => request.differential = true,

@@ -1640,6 +1640,23 @@ last 3 of 41 calls, 2 errors, by claude-code 2.1.0 (the name the client gave)
 - No audit file: `no MCP calls yet` on stderr, exit 0. A line that is not a record is reported
   and skipped.
 
+## Where the database key comes from: `--key-source`
+
+An encrypted database (D187) opens with its 32-byte key. `--key-file <file>` reads 64 hexadecimal
+digits from a file; `--key-source <source>` reads the same key from somewhere else (D1196), as
+64 hexadecimal digits or the base64 of 32 bytes:
+
+| Source | Reads the key from |
+|--------|--------------------|
+| `file:<path>` | a file, as `--key-file` |
+| `env:<NAME>` | an environment variable |
+| `command:<command line>` | what a program prints (run by `sh -c`, or `cmd /C` on Windows), such as an HSM vendor's tool or `pkcs11-tool`, or any secret manager's CLI |
+| `vault:<URL>#<field>` | a field of a HashiCorp Vault key-value secret (`https://vault:8200/v1/secret/data/eggdb#key`), with the token in `VAULT_TOKEN` and an optional `VAULT_NAMESPACE` |
+| `vault-transit:<URL>@<file>` | Vault's Transit engine, which decrypts the wrapped key in the file (`vault:v1:...`) at its decrypt URL (`https://vault:8200/v1/transit/decrypt/eggdb`), so the key never rests unwrapped |
+| `aws-kms:<region>@<file>` | AWS KMS, which decrypts the base64 ciphertext blob in the file (`aws kms encrypt ... --output text --query CiphertextBlob`), signed with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and an optional `AWS_SESSION_TOKEN`; `AWS_ENDPOINT_URL_KMS` points it elsewhere |
+
+`https://` sources check the server's certificate against `SSL_CERT_FILE` or the system's roots.
+
 ## Exit codes and errors
 
 | Code | Meaning |

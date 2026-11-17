@@ -4,6 +4,7 @@ mod commands;
 mod failure;
 mod help;
 mod jsonl;
+mod key_sources;
 mod output;
 mod progress;
 mod render;
