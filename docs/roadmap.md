@@ -887,8 +887,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   functions and `nspacl`: **code written, unbuilt** (code-only mode, 2026-11-17, D1190); `role_routine_grants`
   and `role_udt_grants`, with routine grants stored: **code written, unbuilt** (code-only mode, 2026-11-17, D1191).
 - `FORCE ROW LEVEL SECURITY` taking effect once object owners land, and roles with `BYPASSRLS`
-  (D326). Roles with `BYPASSRLS`: **code written, unbuilt** (code-only mode, 2026-11-13, D979). Left: `FORCE ROW LEVEL
-  SECURITY` with object owners.
+  (D326). Roles with `BYPASSRLS`: **code written, unbuilt** (code-only mode, 2026-11-13, D979); `FORCE ROW LEVEL
+  SECURITY` with table owners: **code written, unbuilt** (code-only mode, 2026-11-17, D1194).
 - SQL Server's column `GRANT` and `DENY`, column privileges on sequences, `MERGE` and `ON CONFLICT
   DO UPDATE` under row security, and row security through updatable views (D285). `GRANT` and `REVOKE` with columns: **code written,
   unbuilt** (code-only mode, 2026-11-12, D586); `DENY` on tables: **code written, unbuilt** (code-only mode,

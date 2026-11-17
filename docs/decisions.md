@@ -1218,3 +1218,4 @@ its full title with its status.
 - [D1191](decisions/D1191.md) Code-only batch 843 (M6b): Routine grants stored, and role_routine_grants and role_udt_grants
 - [D1192](decisions/D1192.md) Code-only batch 844 (M6b): Table owners
 - [D1193](decisions/D1193.md) Code-only batch 845 (M6b): Tables made by roles that hold CREATE on a schema, and dropped or changed by their owners
+- [D1194](decisions/D1194.md) Code-only batch 846 (M6b): FORCE ROW LEVEL SECURITY with table owners

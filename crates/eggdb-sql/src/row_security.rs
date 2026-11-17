@@ -404,6 +404,10 @@ fn applicable(
         return Ok(None);
     }
     let held = crate::roles::role_closure(reader, user)?;
+    let owner = crate::roles::owner_of(reader, table)?;
+    if owner.is_some_and(|owner| held.contains(&owner)) && !switch_state(reader, table)?.forced {
+        return Ok(None);
+    }
     let applying: Vec<Policy> = policies(reader, table)?
         .into_iter()
         .filter(|policy| policy.command.covers(command))

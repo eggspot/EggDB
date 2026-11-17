@@ -796,3 +796,26 @@ fn a_role_with_bypassrls_reads_every_row_and_loses_it_with_nobypassrls() {
     let mut auditor = as_role(&store, "auditor");
     assert_eq!(run(&mut auditor, "SELECT count(*) FROM notes").unwrap(), "count\n0\nSELECT 1");
 }
+
+#[test]
+fn a_table_s_owner_skips_its_policies_until_they_are_forced() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    run(&mut admin, "ALTER TABLE notes OWNER TO grace").unwrap();
+    let mut grace = as_role(&store, "grace");
+    assert_eq!(
+        run(&mut grace, "SELECT count(*) FROM notes").unwrap(),
+        "count\n3\nSELECT 1"
+    );
+    run(&mut admin, "ALTER TABLE notes FORCE ROW LEVEL SECURITY").unwrap();
+    assert_eq!(
+        run(&mut grace, "SELECT count(*) FROM notes").unwrap(),
+        "count\n1\nSELECT 1"
+    );
+    let mut ada = as_role(&store, "ada");
+    assert_eq!(
+        run(&mut ada, "SELECT count(*) FROM notes").unwrap(),
+        "count\n2\nSELECT 1"
+    );
+}
