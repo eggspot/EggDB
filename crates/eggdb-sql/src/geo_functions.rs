@@ -6,7 +6,7 @@ use eggdb_geo::{Coord, Geometry, Spatial};
 const GEOGRAPHY_SRID: i32 = 4326;
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 68] = [
+pub(crate) const FUNCTIONS: [&str; 70] = [
     "sqlserver_stdistance",
     "sqlserver_stgeometrytype",
     "st_linelocatepoint",
@@ -65,6 +65,8 @@ pub(crate) const FUNCTIONS: [&str; 68] = [
     "st_length",
     "st_envelope",
     "st_distancesphere",
+    "st_distancespheroid",
+    "st_lengthspheroid",
     "st_npoints",
     "st_geometrytype",
     "st_isempty",
@@ -84,6 +86,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "s2_cellidfrompoint" => SqlType::BigInt,
         "s2_cellidtotoken" => SqlType::Text,
         "st_x" | "st_y" | "st_distance" | "sqlserver_stdistance" | "st_area" | "st_length" | "st_distancesphere"
+        | "st_distancespheroid" | "st_lengthspheroid"
         | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" | "st_linelocatepoint" => SqlType::Double,
         "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" => {
             SqlType::Integer
@@ -212,6 +215,16 @@ pub(crate) fn mvt_encode(values: &[Value]) -> SqlResult<Value> {
 
 fn geometry_value(spatial: &Spatial) -> Value {
     Value::Text(eggdb_geo::to_wkt(spatial, true))
+}
+
+fn spheroid_argument(value: Option<&Value>) -> SqlResult<eggdb_geo::Spheroid> {
+    match value {
+        None | Some(Value::Null) => Ok(eggdb_geo::Spheroid::WGS84),
+        Some(value) => {
+            let text = value.to_text().unwrap_or_default();
+            eggdb_geo::Spheroid::parse(&text).map_err(argument_error)
+        }
+    }
 }
 
 fn number(value: &Value) -> SqlResult<f64> {
@@ -479,6 +492,15 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
             Value::Double(
                 eggdb_geo::sphere_distance(&left.geometry, &right.geometry).map_err(geo_error)?,
             )
+        }
+        ("st_distancespheroid", [_, _] | [_, _, _]) => {
+            let (left, right) = pair()?;
+            let spheroid = spheroid_argument(arguments.get(2))?;
+            Value::Double(eggdb_geo::spheroid_distance(&left.geometry, &right.geometry, spheroid).map_err(argument_error)?)
+        }
+        ("st_lengthspheroid", [_] | [_, _]) => {
+            let spheroid = spheroid_argument(arguments.get(1))?;
+            Value::Double(eggdb_geo::spheroid_length(&spatial(0)?.geometry, spheroid).map_err(argument_error)?)
         }
         ("st_npoints", [_]) => {
             Value::Integer(i32::try_from(spatial(0)?.geometry.coords().len()).unwrap_or(i32::MAX))

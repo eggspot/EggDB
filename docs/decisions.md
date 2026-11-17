@@ -1249,3 +1249,4 @@ its full title with its status.
 - [D1222](decisions/D1222.md) Code-only batch 874 (M16): Flux's array.from
 - [D1223](decisions/D1223.md) Code-only batch 875 (M6c): Subplans in EXPLAIN of UPDATE and DELETE
 - [D1224](decisions/D1224.md) Code-only batch 876 (M11): Float and string chunks in eggdb-columnar
+- [D1225](decisions/D1225.md) Code-only batch 877 (M12): Distances and lengths on the WGS 84 spheroid

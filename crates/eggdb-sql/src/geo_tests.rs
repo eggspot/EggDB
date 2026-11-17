@@ -188,3 +188,27 @@ fn s2_cell_ids_and_tokens_come_from_points() {
             .is_err()
     );
 }
+
+#[test]
+fn distances_and_lengths_on_the_wgs84_spheroid() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(&mut session, "CREATE EXTENSION IF NOT EXISTS postgis");
+    assert_eq!(
+        run(&mut session, "SELECT round(ST_DistanceSpheroid('SRID=4326;POINT(0 0)', 'SRID=4326;POINT(1 0)')::numeric, 3) AS metres"),
+        "111319.491\nSELECT 1"
+    );
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT round(ST_LengthSpheroid('SRID=4326;LINESTRING(0 0,1 0,2 0)', 'SPHEROID[\"WGS 84\",6378137,298.257223563]')::numeric, 2) AS metres"
+        ),
+        "222638.98\nSELECT 1"
+    );
+    let mut session_error = Vec::new();
+    let failed = session.execute(
+        "SELECT ST_DistanceSpheroid('POINT(0 0)', 'POINT(1 1)', 'ELLIPSOID[1]')",
+        &mut |result| session_error.push(render(&result)),
+    );
+    assert!(failed.is_err());
+}

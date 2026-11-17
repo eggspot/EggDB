@@ -3258,7 +3258,9 @@ Geometries are written as WKT or EWKT text (`'SRID=4326;POINT(-71.06 42.36)'`) o
 - inspecting: `ST_X`, `ST_Y`, `ST_SRID`, `ST_NPoints`, `ST_GeometryType`, `ST_IsEmpty`,
   `ST_Envelope`;
 - measuring (planar, in the coordinates' units): `ST_Distance`, `ST_Area`, `ST_Length`, and
-  `ST_DistanceSphere` in metres for longitude/latitude points;
+  `ST_DistanceSphere` in metres for longitude/latitude points; `ST_DistanceSpheroid(a, b [, spheroid])` and
+  `ST_LengthSpheroid(geom [, spheroid])` in metres on the WGS 84 ellipsoid or a given `SPHEROID["name",a,rf]`, by
+  Vincenty's formula (D1225);
 - predicates: `ST_DWithin`, `ST_Contains`, `ST_Within`, `ST_Intersects`, `ST_Disjoint`,
   `ST_Equals`;
 - web maps (D250): `ST_TileEnvelope(zoom, x, y)` gives an XYZ map tile's square in Web
