@@ -9,7 +9,7 @@ days (D44, D252).
 
 | Tool | How it connects today | Checked |
 |------|-----------------------|---------|
-| dbt | `dbt-postgres` adapter over the PostgreSQL protocol (`eggdb serve --listen`) | `dbt debug`, `dbt run`, `dbt test` in CI |
+| dbt | our adapter `dbt-eggdb` (`connectors/dbt-eggdb`, `type: eggdb`, with a `dialect` per profile, D1205), or `dbt-postgres`, over the PostgreSQL protocol (`eggdb serve --listen`) | `dbt debug`, `dbt run`, `dbt test` in CI |
 | Grafana | PostgreSQL data source; Prometheus data source on `--observability-listen` (PromQL, D220) | PromQL through influxdb-client and HTTP in CI |
 | Power BI, Tableau, Metabase | their PostgreSQL connectors | not yet |
 | Airbyte | PostgreSQL source and destination connectors | not yet |

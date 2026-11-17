@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbt-eggdb"
+version = "0.1.0"
+description = "The dbt adapter for EggDB, over its PostgreSQL protocol"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = ["dbt-core>=1.7,<2", "dbt-postgres>=1.7,<2"]
+
+[tool.setuptools]
+packages = ["dbt.adapters.eggdb", "dbt.include.eggdb"]
+
+[tool.setuptools.package-data]
+"dbt.include.eggdb" = ["dbt_project.yml", "macros/*.sql"]
