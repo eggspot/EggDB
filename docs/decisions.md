@@ -1256,3 +1256,4 @@ its full title with its status.
 - [D1229](decisions/D1229.md) Code-only batch 881 (M6c): Subqueries in SQL Server's showplan
 - [D1230](decisions/D1230.md) Code-only batch 882 (M8): tsvector and tsquery utility functions
 - [D1231](decisions/D1231.md) Code-only batch 883 (M8): ts_token_type, ts_parse and ts_debug
+- [D1232](decisions/D1232.md) Code-only batch 884 (M6c): Per-role connection limits

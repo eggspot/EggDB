@@ -82,6 +82,8 @@ pub(crate) struct RoleOptions {
 pub(crate) struct RoleLimitChanges {
     pub(crate) queries_per_hour: Option<u32>,
     pub(crate) updates_per_hour: Option<u32>,
+    pub(crate) connections: Option<u32>,
+    pub(crate) connections_per_hour: Option<u32>,
 }
 
 /// A role's resource limits; 0 means none.
@@ -89,6 +91,8 @@ pub(crate) struct RoleLimitChanges {
 pub(crate) struct RoleLimits {
     pub(crate) queries_per_hour: u32,
     pub(crate) updates_per_hour: u32,
+    pub(crate) connections: u32,
+    pub(crate) connections_per_hour: u32,
 }
 
 const HIDDEN_SECRET: &str = "***";
@@ -264,10 +268,17 @@ fn role_limit_key(role: &str) -> Vec<u8> {
 
 /// The resource limits stored for `role` (D1204).
 pub(crate) fn role_limits(reader: &dyn KeyValueRead, role: &str) -> SqlResult<RoleLimits> {
+    let count = |rest: &[u8], at: usize| {
+        rest.get(at..at + 4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map_or(0, u32::from_be_bytes)
+    };
     match reader.get(&role_limit_key(role))?.as_deref() {
-        Some([RECORD_VERSION, rest @ ..]) if rest.len() == 8 => Ok(RoleLimits {
-            queries_per_hour: u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]),
-            updates_per_hour: u32::from_be_bytes([rest[4], rest[5], rest[6], rest[7]]),
+        Some([RECORD_VERSION, rest @ ..]) if rest.len() == 8 || rest.len() == 16 => Ok(RoleLimits {
+            queries_per_hour: count(rest, 0),
+            updates_per_hour: count(rest, 4),
+            connections: count(rest, 8),
+            connections_per_hour: count(rest, 12),
         }),
         Some(_) => Err(crate::encoding::corrupt("role limits")),
         None => Ok(RoleLimits::default()),
@@ -289,12 +300,20 @@ fn change_role_limits(
     if let Some(updates) = changes.updates_per_hour {
         limits.updates_per_hour = updates;
     }
+    if let Some(connections) = changes.connections {
+        limits.connections = connections;
+    }
+    if let Some(connections) = changes.connections_per_hour {
+        limits.connections_per_hour = connections;
+    }
     if limits == RoleLimits::default() {
         return writer.delete(&role_limit_key(role)).map(|_| ());
     }
     let mut value = vec![RECORD_VERSION];
     value.extend_from_slice(&limits.queries_per_hour.to_be_bytes());
     value.extend_from_slice(&limits.updates_per_hour.to_be_bytes());
+    value.extend_from_slice(&limits.connections.to_be_bytes());
+    value.extend_from_slice(&limits.connections_per_hour.to_be_bytes());
     writer.put(&role_limit_key(role), &value)
 }
 

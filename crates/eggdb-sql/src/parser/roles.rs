@@ -146,14 +146,19 @@ impl Parser<'_> {
                 options.limits.queries_per_hour = Some(self.limit_count()?);
             } else if self.take_word("max_updates_per_hour") {
                 options.limits.updates_per_hour = Some(self.limit_count()?);
-            } else if self.take_word("max_connections_per_hour")
-                || self.take_word("max_user_connections")
-            {
-                self.limit_count()?;
+            } else if self.take_word("max_connections_per_hour") {
+                options.limits.connections_per_hour = Some(self.limit_count()?);
+            } else if self.take_word("max_user_connections") {
+                options.limits.connections = Some(self.limit_count()?);
             } else if self.mysql() && self.take_word("with") {
             } else if self.take_word("connection") {
                 self.expect_word("limit")?;
-                self.at += 1;
+                options.limits.connections = Some(if self.take_operator("-") {
+                    self.limit_count()?;
+                    0
+                } else {
+                    self.limit_count()?
+                });
             } else if self.take_word("valid") {
                 self.expect_word("until")?;
                 self.at += 1;

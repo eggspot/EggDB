@@ -1161,9 +1161,17 @@ impl<'s> Session<'s> {
                 format!("role \"{user}\" is not permitted to log in"),
             ));
         };
-        self.identify(user, database);
         let limits = self.read(|reader, _| crate::roles::role_limits(reader, &role.name))?;
+        let open_connection = crate::admission::connect(
+            database,
+            &role.name,
+            limits,
+            self.dialect,
+            std::time::Instant::now(),
+        )?;
+        self.identify(user, database);
         let settings = Arc::make_mut(&mut self.settings);
+        settings.open_connection = open_connection.map(Arc::new);
         settings.checked_role = (!role.superuser).then(|| role.name.clone());
         settings.set_superuser(role.superuser);
         settings.login_role = Some(role.name);

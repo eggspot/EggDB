@@ -352,3 +352,33 @@ fn mysql_account_limits_refuse_statements_past_the_hour_s_count() {
         .unwrap();
     assert_eq!(role_limits(&store.begin_read().unwrap(), "hourly_limit_user").unwrap(), RoleLimits::default());
 }
+
+#[test]
+fn connection_limits_refuse_logins_past_the_open_sessions_and_free_them_on_close() {
+    let store = MemoryStore::default();
+    let mut admin = Session::new(&store);
+    admin
+        .execute("CREATE ROLE limited_login LOGIN CONNECTION LIMIT 1", &mut |_| {})
+        .unwrap();
+    assert_eq!(role_limits(&store.begin_read().unwrap(), "limited_login").unwrap().connections, 1);
+    let mut first = Session::new(&store);
+    first.identify_role("limited_login", "connection-limit-test").unwrap();
+    let mut second = Session::new(&store);
+    let error = second.identify_role("limited_login", "connection-limit-test").unwrap_err();
+    assert_eq!(error.state(), SqlState::TOO_MANY_CONNECTIONS);
+    drop(first);
+    second.identify_role("limited_login", "connection-limit-test").unwrap();
+    admin
+        .execute("ALTER ROLE limited_login CONNECTION LIMIT -1", &mut |_| {})
+        .unwrap();
+    assert_eq!(role_limits(&store.begin_read().unwrap(), "limited_login").unwrap(), RoleLimits::default());
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    mysql
+        .execute(
+            "CREATE USER 'few_logins'@'%' IDENTIFIED BY 'secret' WITH MAX_USER_CONNECTIONS 3 MAX_CONNECTIONS_PER_HOUR 5",
+            &mut |_| {},
+        )
+        .unwrap();
+    let limits = role_limits(&store.begin_read().unwrap(), "few_logins").unwrap();
+    assert_eq!((limits.connections, limits.connections_per_hour), (3, 5));
+}

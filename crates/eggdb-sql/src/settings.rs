@@ -473,6 +473,7 @@ pub(crate) struct Settings {
     pub(crate) checked_role: Option<String>,
     pub(crate) login_role: Option<String>,
     pub(crate) role_limits: crate::roles::RoleLimits,
+    pub(crate) open_connection: Option<std::sync::Arc<crate::admission::OpenConnection>>,
     pub(crate) role_before_set_role: Option<(Option<String>, bool)>,
     pub(crate) database_names: Vec<String>,
 }
@@ -535,6 +536,7 @@ impl Default for Settings {
             checked_role: None,
             login_role: None,
             role_limits: crate::roles::RoleLimits::default(),
+            open_connection: None,
             role_before_set_role: None,
             database_names: Vec::new(),
         }
