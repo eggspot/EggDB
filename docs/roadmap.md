@@ -1186,8 +1186,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-13, D972); the `W` entry points: **code written, unbuilt** (code-only mode, 2026-11-13,
   D973); `SQLPrimaryKeys`, `SQLForeignKeys` and `SQLGetTypeInfo`: **code written, unbuilt** (code-only mode, 2026-11-17,
   D1236); `SQLStatistics` (key-backed indexes), `SQLSpecialColumns` and `SQLProcedures`: **code written, unbuilt**
-  (code-only mode, 2026-11-17, D1237). Left: plain indexes in `SQLStatistics`, the privilege catalog functions,
-  `SQLGetInfo`'s full list, server connections and the installer files for driver managers.
+  (code-only mode, 2026-11-17, D1237); `SQLGetInfo`'s fixed answers (identifier lengths, terms, transaction and cursor
+  behaviour, conformance): **code written, unbuilt** (code-only mode, 2026-11-17, D1238). Left: plain indexes in
+  `SQLStatistics`, the privilege catalog functions, `SQLGetInfo`'s function and conversion bitmasks, server connections
+  and the installer files for driver managers.
 - The `compatibility` job with DataGrip, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana,
   Grafana, Metabase, Superset, Power BI, Airbyte, Liquibase and Alembic (D12, D239).
 - Our own connectors in each tool's plugin system: a Power BI connector, and Superset, Metabase

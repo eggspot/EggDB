@@ -49,6 +49,67 @@ const SQL_TC_ALL: u16 = 2;
 const SQL_GD_ANY_COLUMN: u32 = 1;
 const SQL_GD_ANY_ORDER: u32 = 2;
 
+#[derive(Clone, Copy)]
+enum InfoAnswer {
+    Text(&'static str),
+    Short(u16),
+    Long(u32),
+}
+
+const IDENTIFIER_BYTES: u16 = 63;
+
+const FIXED_INFO: [(u16, InfoAnswer); 45] = [
+    (0, InfoAnswer::Short(0)),
+    (8, InfoAnswer::Long(1)),
+    (9, InfoAnswer::Short(1)),
+    (11, InfoAnswer::Text("N")),
+    (14, InfoAnswer::Text("\\")),
+    (19, InfoAnswer::Text("Y")),
+    (20, InfoAnswer::Text("Y")),
+    (21, InfoAnswer::Text("Y")),
+    (22, InfoAnswer::Short(0)),
+    (23, InfoAnswer::Short(2)),
+    (24, InfoAnswer::Short(2)),
+    (26, InfoAnswer::Long(8)),
+    (27, InfoAnswer::Text("Y")),
+    (28, InfoAnswer::Short(2)),
+    (30, InfoAnswer::Short(IDENTIFIER_BYTES)),
+    (31, InfoAnswer::Short(IDENTIFIER_BYTES)),
+    (32, InfoAnswer::Short(IDENTIFIER_BYTES)),
+    (34, InfoAnswer::Short(0)),
+    (35, InfoAnswer::Short(IDENTIFIER_BYTES)),
+    (36, InfoAnswer::Text("Y")),
+    (37, InfoAnswer::Text("Y")),
+    (38, InfoAnswer::Text("Y")),
+    (39, InfoAnswer::Text("schema")),
+    (40, InfoAnswer::Text("procedure")),
+    (41, InfoAnswer::Text("")),
+    (42, InfoAnswer::Text("")),
+    (44, InfoAnswer::Long(1)),
+    (45, InfoAnswer::Text("table")),
+    (72, InfoAnswer::Long(2 | 4 | 8)),
+    (74, InfoAnswer::Short(2)),
+    (75, InfoAnswer::Short(1)),
+    (85, InfoAnswer::Short(0)),
+    (90, InfoAnswer::Text("N")),
+    (94, InfoAnswer::Text("")),
+    (101, InfoAnswer::Short(1600)),
+    (104, InfoAnswer::Long(0)),
+    (105, InfoAnswer::Long(0)),
+    (111, InfoAnswer::Text("N")),
+    (113, InfoAnswer::Text("Y")),
+    (118, InfoAnswer::Long(1)),
+    (152, InfoAnswer::Long(1)),
+    (10001, InfoAnswer::Long(1)),
+    (10002, InfoAnswer::Text("N")),
+    (10003, InfoAnswer::Text("N")),
+    (10005, InfoAnswer::Short(IDENTIFIER_BYTES)),
+];
+
+const SQL_DATABASE_NAME: u16 = 16;
+const SQL_DATA_SOURCE_READ_ONLY: u16 = 25;
+const SQL_USER_NAME: u16 = 47;
+
 const DRIVER_FILE: &str = "eggdb_odbc";
 const ODBC_VERSION: &str = "03.80";
 
@@ -177,6 +238,7 @@ fn connect(dbc: &mut ConnectionHandle, settings: &str) -> SqlReturn {
         Ok(session) => {
             dbc.session = Some(session);
             dbc.database = database;
+            dbc.read_only = read_only;
             SQL_SUCCESS
         }
         Err(failure) => failed(&mut dbc.diagnostics, Failure { sqlstate: "08001".to_owned(), ..failure }),
@@ -696,9 +758,24 @@ pub extern "system" fn SQLGetInfo(dbc: *mut c_void, info: u16, value: *mut c_voi
         SQL_DBMS_NAME => Some("EggDB".to_owned()),
         SQL_DBMS_VER => Some(env!("CARGO_PKG_VERSION").to_owned()),
         SQL_DRIVER_ODBC_VER => Some(ODBC_VERSION.to_owned()),
-        SQL_DATA_SOURCE_NAME | SQL_SERVER_NAME => Some(dbc.database.clone()),
+        SQL_DATA_SOURCE_NAME | SQL_SERVER_NAME | SQL_DATABASE_NAME => Some(dbc.database.clone()),
         SQL_IDENTIFIER_QUOTE_CHAR => Some("\"".to_owned()),
-        _ => None,
+        SQL_DATA_SOURCE_READ_ONLY => Some(if dbc.read_only { "Y" } else { "N" }.to_owned()),
+        SQL_USER_NAME => Some(String::new()),
+        _ => match FIXED_INFO.iter().find(|(known, _)| *known == info).map(|(_, answer)| *answer) {
+            Some(InfoAnswer::Text(text)) => Some(text.to_owned()),
+            Some(InfoAnswer::Short(number)) => {
+                store(value.cast::<u16>(), number);
+                store(written, 2);
+                return SQL_SUCCESS;
+            }
+            Some(InfoAnswer::Long(number)) => {
+                store(value.cast::<u32>(), number);
+                store(written, 4);
+                return SQL_SUCCESS;
+            }
+            None => None,
+        },
     };
     if let Some(text) = text {
         let truncated = write_text(value.cast(), isize::from(capacity), text.as_bytes(), 1);

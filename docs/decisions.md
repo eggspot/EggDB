@@ -1262,3 +1262,4 @@ its full title with its status.
 - [D1235](decisions/D1235.md) Code-only batch 887 (M10): DBMS_METADATA.GET_DDL for triggers, routines and packages
 - [D1236](decisions/D1236.md) Code-only batch 888 (M6f): SQLPrimaryKeys, SQLForeignKeys and SQLGetTypeInfo in the ODBC driver
 - [D1237](decisions/D1237.md) Code-only batch 889 (M6f): SQLStatistics, SQLSpecialColumns and SQLProcedures in the ODBC driver
+- [D1238](decisions/D1238.md) Code-only batch 890 (M6f): SQLGetInfo's fixed answers in the ODBC driver

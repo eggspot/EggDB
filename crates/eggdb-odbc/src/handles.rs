@@ -29,6 +29,7 @@ pub(crate) struct ConnectionHandle {
     pub(crate) autocommit: bool,
     pub(crate) in_transaction: bool,
     pub(crate) database: String,
+    pub(crate) read_only: bool,
     pub(crate) diagnostics: Diagnostics,
 }
 
@@ -39,6 +40,7 @@ impl ConnectionHandle {
             autocommit: true,
             in_transaction: false,
             database: String::new(),
+            read_only: false,
             diagnostics: Diagnostics::default(),
         }
     }

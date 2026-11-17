@@ -1,7 +1,7 @@
 use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
-    SQLColumns, SQLForeignKeys, SQLGetTypeInfo, SQLNumResultCols, SQLPrepare, SQLPrimaryKeys,
+    SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLPrepare, SQLPrimaryKeys,
     SQLRowCount, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTables,
 };
 use std::ffi::c_void;
@@ -114,6 +114,16 @@ fn primary_keys_foreign_keys_and_type_info_are_listed() {
     let stmt = handle(SQL_HANDLE_STMT, dbc);
     assert_eq!(run(stmt, "CREATE TABLE eggs (id INTEGER PRIMARY KEY, colour TEXT)"), 0);
     assert_eq!(run(stmt, "CREATE TABLE boxes (id INTEGER PRIMARY KEY, egg_id INTEGER REFERENCES eggs (id))"), 0);
+    let mut short = 0u16;
+    let mut written = 0i16;
+    assert_eq!(SQLGetInfo(dbc, 30, (&raw mut short).cast(), 2, &raw mut written), 0);
+    assert_eq!((short, written), (63, 2));
+    let mut term = [0u8; 16];
+    assert_eq!(SQLGetInfo(dbc, 39, term.as_mut_ptr().cast(), 16, &raw mut written), 0);
+    assert_eq!(&term[..usize::try_from(written).unwrap_or(0)], b"schema");
+    assert_eq!(SQLGetInfo(dbc, 25, term.as_mut_ptr().cast(), 16, &raw mut written), 0);
+    assert_eq!(&term[..1], b"N");
+    assert_eq!(SQLGetInfo(dbc, 9999, term.as_mut_ptr().cast(), 16, &raw mut written), SQL_ERROR);
     let eggs = b"eggs\0";
     assert_eq!(SQLPrimaryKeys(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3), 0);
     assert_eq!(SQLFetch(stmt), 0);
