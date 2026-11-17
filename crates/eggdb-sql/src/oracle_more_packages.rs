@@ -285,13 +285,69 @@ fn metadata_error(code: u16, message: String) -> SqlError {
     SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("ORA-{code:05}: {message}")).with_oracle_code(code)
 }
 
+fn as_statement(text: &str) -> String {
+    let trimmed = text.trim();
+    let statement = if trimmed.get(..6).is_some_and(|start| start.eq_ignore_ascii_case("create")) {
+        trimmed.to_owned()
+    } else {
+        format!("CREATE OR REPLACE {trimmed}")
+    };
+    if statement.ends_with(';') || statement.ends_with('/') {
+        statement
+    } else {
+        format!("{statement};")
+    }
+}
+
+fn code_ddl(snapshot: &crate::pg_catalog::CatalogSnapshot, object_type: &str, name: &str) -> Option<String> {
+    let base = |full: &str| full.rsplit(crate::schemas::QUALIFIER).next().unwrap_or(full).to_owned();
+    match object_type {
+        "TRIGGER" => snapshot
+            .triggers
+            .iter()
+            .find(|trigger| trigger.definition.name.eq_ignore_ascii_case(name))
+            .map(|trigger| as_statement(&trigger.definition.text)),
+        "FUNCTION" | "PROCEDURE" => {
+            let kind = if object_type == "FUNCTION" {
+                crate::routines::RoutineKind::Function
+            } else {
+                crate::routines::RoutineKind::Procedure
+            };
+            snapshot
+                .routines
+                .iter()
+                .find(|routine| base(&routine.name).eq_ignore_ascii_case(name) && routine.definition.kind == kind)
+                .map(|routine| as_statement(&routine.definition.text))
+        }
+        _ => {
+            let package = snapshot
+                .packages
+                .iter()
+                .find(|package| base(&package.name).eq_ignore_ascii_case(name))?;
+            let specification = as_statement(&package.stored.specification);
+            let body = package.stored.body.as_deref().map(as_statement);
+            match object_type {
+                "PACKAGE_SPEC" => Some(specification),
+                "PACKAGE_BODY" => body,
+                _ => Some(match body {
+                    Some(body) => format!("{specification}\n{body}"),
+                    None => specification,
+                }),
+            }
+        }
+    }
+}
+
 fn get_ddl(values: &[Value]) -> SqlResult<Value> {
     let text = |at: usize| values.get(at).filter(|value| !matches!(value, Value::Null)).and_then(Value::to_text);
     let (Some(object_type), Some(name)) = (text(0), text(1)) else {
         return Ok(Value::Null);
     };
     let object_type = object_type.trim().to_ascii_uppercase();
-    if !matches!(object_type.as_str(), "TABLE" | "VIEW" | "INDEX" | "SEQUENCE") {
+    if !matches!(
+        object_type.as_str(),
+        "TABLE" | "VIEW" | "INDEX" | "SEQUENCE" | "TRIGGER" | "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE_SPEC" | "PACKAGE_BODY"
+    ) {
         return Err(metadata_error(
             ORACLE_METADATA_INVALID_INPUT,
             format!("invalid input value {object_type} for parameter OBJECT_TYPE in function GET_DDL"),
@@ -312,6 +368,13 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
             ),
         )
     };
+    if matches!(
+        object_type.as_str(),
+        "TRIGGER" | "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE_SPEC" | "PACKAGE_BODY"
+    ) {
+        let ddl = code_ddl(&snapshot, &object_type, &internal_name).ok_or_else(not_found)?;
+        return crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl));
+    }
     let entry = snapshot
         .find_relation(internal_schema.as_deref(), &internal_name)
         .and_then(|at| snapshot.relations.get(at))

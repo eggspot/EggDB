@@ -1125,4 +1125,15 @@ fn dbms_metadata_get_ddl_writes_tables_and_views_in_oracle_form() {
     assert!(sequence.starts_with("CREATE SEQUENCE \"EMP_SEQ\" MINVALUE 1 "), "{sequence}");
     assert!(sequence.contains("INCREMENT BY 5 START WITH 10 CACHE 20 NOCYCLE;"), "{sequence}");
     failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('INDEX', 'EMP_SEQ') FROM dual");
+    values(
+        &mut session,
+        "CREATE OR REPLACE FUNCTION double_it(n NUMBER) RETURN NUMBER IS BEGIN RETURN n * 2; END;",
+    );
+    let function = values(&mut session, "SELECT DBMS_METADATA.GET_DDL('FUNCTION', 'DOUBLE_IT') FROM dual");
+    let Value::Text(function) = &function[0][0] else {
+        panic!("text DDL: {function:?}");
+    };
+    assert!(function.to_ascii_uppercase().contains("FUNCTION DOUBLE_IT"), "{function}");
+    assert!(function.contains("RETURN n * 2"), "{function}");
+    failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('PROCEDURE', 'DOUBLE_IT') FROM dual");
 }
