@@ -66,6 +66,43 @@ fn replication_options(text: &str) -> Vec<(String, String)> {
     options
 }
 
+/// The publications `options` name in `publication_names` (a comma-separated list of
+/// identifiers, double-quoted or not).
+///
+/// # Errors
+///
+/// No `publication_names` option, as PostgreSQL refuses it.
+pub(crate) fn publication_names(options: &[(String, String)]) -> Result<Vec<String>, String> {
+    let written = options
+        .iter()
+        .find(|(name, _)| name == "publication_names")
+        .map(|(_, value)| value.as_str())
+        .ok_or_else(|| "publication_names parameter missing".to_owned())?;
+    let names: Vec<String> = written
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| match name.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+            Some(quoted) => quoted.replace("\"\"", "\""),
+            None => name.to_ascii_lowercase(),
+        })
+        .collect();
+    if names.is_empty() {
+        return Err("publication_names parameter missing".to_owned());
+    }
+    Ok(names)
+}
+
+/// `transaction` with only the changes `filter` publishes; `None` when none is left, since
+/// an empty transaction is not sent.
+pub(crate) fn published(transaction: &DecodedTransaction, filter: &eggdb_sql::PublicationFilter) -> Option<DecodedTransaction> {
+    let changes: Vec<_> = transaction.changes.iter().filter(|change| filter.publishes(change)).cloned().collect();
+    (!changes.is_empty()).then(|| DecodedTransaction {
+        lsn: transaction.lsn,
+        changes,
+    })
+}
+
 /// The `pgoutput` protocol version `options` ask for.
 ///
 /// # Errors
@@ -304,6 +341,15 @@ mod tests {
         );
         assert_eq!(replication_command("SELECT 1"), None);
         assert_eq!(flushed_lsn(&[b'r', 0, 0, 0, 0, 0, 0, 0, 0x20, 0, 0, 0, 0, 0, 0, 0, 0x30]), Some(0x30));
+    }
+
+    #[test]
+    fn publication_names_are_read_as_postgresql_writes_them() {
+        let options = |value: &str| vec![("publication_names".to_owned(), value.to_owned())];
+        assert_eq!(publication_names(&options("\"Orders\",audit")), Ok(vec!["Orders".to_owned(), "audit".to_owned()]));
+        assert_eq!(publication_names(&options("FEED")), Ok(vec!["feed".to_owned()]));
+        assert!(publication_names(&[]).is_err());
+        assert!(publication_names(&options("")).is_err());
     }
 
     #[test]

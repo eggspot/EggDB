@@ -490,6 +490,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) oracle_scheduler_jobs: Vec<Vec<(String, Value)>>,
     pub(crate) stored_roles: Vec<crate::roles::StoredRole>,
     pub(crate) role_connection_limits: HashMap<String, u32>,
+    pub(crate) publications: Vec<crate::publications::StoredPublication>,
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
     pub(crate) access: crate::roles::AccessRecords,
@@ -872,6 +873,7 @@ impl CatalogSnapshot {
                 }
                 limits
             },
+            publications: crate::publications::every_publication(reader)?,
             stored_roles: crate::roles::stored_roles(reader)?,
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,

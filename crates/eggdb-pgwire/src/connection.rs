@@ -1932,7 +1932,13 @@ impl<'a, 's> Connection<'a, 's> {
                 self.wire.outbox.command_complete("DROP_REPLICATION_SLOT");
             }),
             ReplicationCommand::StartReplication { slot, lsn, options } => match crate::walsender::protocol_version(&options) {
-                Ok(_) => return self.stream_changes(&slot, lsn),
+                Ok(_) => match crate::walsender::publication_names(&options)
+                    .map_err(|message| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message))
+                    .and_then(|names| self.session.publication_filter(&names))
+                {
+                    Ok(filter) => return self.stream_changes(&slot, lsn, &filter),
+                    Err(error) => Err(error),
+                },
                 Err(message) => Err(SqlError::new(SqlState::FEATURE_NOT_SUPPORTED, message)),
             },
         };
@@ -1946,7 +1952,7 @@ impl<'a, 's> Connection<'a, 's> {
         self.wire.flush().is_ok()
     }
 
-    fn stream_changes(&mut self, slot: &str, start: u64) -> bool {
+    fn stream_changes(&mut self, slot: &str, start: u64, filter: &eggdb_sql::PublicationFilter) -> bool {
         use crate::walsender::{flushed_lsn, keepalive, sequence_of, transaction_messages, xlog_data};
         let confirmed = match self.session.logical_slot_position(slot) {
             Ok(confirmed) => confirmed,
@@ -1967,7 +1973,8 @@ impl<'a, 's> Connection<'a, 's> {
             match self.session.logical_changes_after(sent, REPLICATION_BATCH) {
                 Ok(transactions) => {
                     for transaction in &transactions {
-                        for (lsn, message) in transaction_messages(transaction, &mut described) {
+                        let published = crate::walsender::published(transaction, filter);
+                        for (lsn, message) in published.iter().flat_map(|kept| transaction_messages(kept, &mut described)) {
                             if self.wire.outbox.copy_data(&xlog_data(lsn, &message)).is_err() {
                                 return false;
                             }

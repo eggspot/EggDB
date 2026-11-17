@@ -198,9 +198,9 @@ pub(crate) fn build(
         CatalogRelation::Trigger => trigger_rows(snapshot),
         CatalogRelation::Inherits => inherits_rows(snapshot),
         CatalogRelation::Policy => super::policies::policy_rows(snapshot)?,
+        CatalogRelation::Publication => publication_rows(snapshot),
+        CatalogRelation::PublicationRel => publication_rel_rows(snapshot),
         CatalogRelation::StatisticExt
-        | CatalogRelation::Publication
-        | CatalogRelation::PublicationRel
         | CatalogRelation::PublicationNamespace
         | CatalogRelation::Rewrite
         | CatalogRelation::AuthMembers
@@ -1787,6 +1787,55 @@ fn database_row(name: &str, database: u32) -> Vec<Value> {
         .set("datcollate", text("C"))
         .set("datctype", text("C"))
         .done()
+}
+
+const PUBLICATION_OIDS: u32 = 0x5300_0000;
+const PUBLICATION_REL_OIDS: u32 = 0x5400_0000;
+
+fn hashed_oid(base: u32, text: &str) -> u32 {
+    let hash = text
+        .bytes()
+        .fold(0x811c_9dc5u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193));
+    base + (hash & 0x00ff_ffff)
+}
+
+fn publication_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    snapshot
+        .publications
+        .iter()
+        .map(|publication| {
+            Row::new(CatalogRelation::Publication)
+                .set("oid", oid(hashed_oid(PUBLICATION_OIDS, &publication.name)))
+                .set("pubname", text(&publication.name))
+                .set("pubowner", oid(oids::SESSION_USER))
+                .set("puballtables", flag(publication.all_tables))
+                .set("pubinsert", flag(publication.publishes_insert()))
+                .set("pubupdate", flag(publication.publishes_update()))
+                .set("pubdelete", flag(publication.publishes_delete()))
+                .set("pubtruncate", flag(publication.publishes_truncate()))
+                .set("pubviaroot", flag(false))
+                .done()
+        })
+        .collect()
+}
+
+fn publication_rel_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for publication in &snapshot.publications {
+        for table in &publication.tables {
+            let Some(relation) = snapshot.table_oid(table) else {
+                continue;
+            };
+            rows.push(
+                Row::new(CatalogRelation::PublicationRel)
+                    .set("oid", oid(hashed_oid(PUBLICATION_REL_OIDS, &format!("{}\0{table}", publication.name))))
+                    .set("prpubid", oid(hashed_oid(PUBLICATION_OIDS, &publication.name)))
+                    .set("prrelid", oid(relation))
+                    .done(),
+            );
+        }
+    }
+    rows
 }
 
 fn role_row(name: &str, role: u32, everything: bool) -> Vec<Value> {

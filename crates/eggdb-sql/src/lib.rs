@@ -280,6 +280,7 @@ mod sqlserver_fulltext;
 mod table_sample;
 mod text_search;
 mod text_types;
+mod publications;
 mod text_search_catalog;
 mod time_zones;
 mod top_n;
@@ -432,6 +433,7 @@ pub use bulk_load::{
     BcpTerminators, BcpUnicodeInput, BulkColumn, BulkRows, write_bcp_table,
 };
 pub use cancel::CancelSignal;
+pub use publications::PublicationFilter;
 pub use copy::{CopyChannel, CopyFormat, CopyStart};
 pub use destructive::{
     DestructiveKind, DestructivePart, DestructiveStatement, destructive_statement,

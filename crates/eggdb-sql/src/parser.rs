@@ -43,6 +43,7 @@ mod plsql_routines;
 mod plsql_triggers;
 mod postgresql;
 mod query;
+mod publications;
 mod roles;
 mod routines;
 mod row_security;
@@ -1106,6 +1107,10 @@ impl<'t> Parser<'t> {
                 self.at += 1;
                 self.alter_sequence()
             }
+            "alter" if self.postgresql() && self.is_word_at(1, "publication") => {
+                self.at += 1;
+                self.alter_publication()
+            }
             "alter" if self.postgresql() && self.is_word_at(1, "schema") => {
                 self.at += 1;
                 self.alter_schema()
@@ -1918,6 +1923,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("statistics") {
             return self.create_statistics();
+        }
+        if self.postgresql() && self.is_word("publication") {
+            return self.create_publication();
         }
         if self.postgresql() && self.at_text_search_object() {
             return self.create_text_search();
@@ -3042,6 +3050,9 @@ impl<'t> Parser<'t> {
         }
         if self.postgresql() && self.is_word("statistics") {
             return self.drop_statistics();
+        }
+        if self.postgresql() && self.is_word("publication") {
+            return self.drop_publication();
         }
         if self.postgresql() && self.at_text_search_object() {
             return self.drop_text_search();

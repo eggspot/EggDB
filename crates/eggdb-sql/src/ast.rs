@@ -135,6 +135,7 @@ pub(crate) enum Statement {
     Synonym(SynonymCommand),
     OracleContext(OracleContextCommand),
     TextSearch(crate::text_search_catalog::TextSearchCommand),
+    Publication(crate::publications::PublicationCommand),
     OracleSystemTrigger(Box<crate::oracle_system_triggers::CreateSystemTrigger>),
     ForeignData(Box<crate::foreign_tables::ForeignDataCommand>),
     CreatePackage(Box<CreatePackage>),

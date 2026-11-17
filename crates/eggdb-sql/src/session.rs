@@ -4032,6 +4032,9 @@ impl<'s> Session<'s> {
             Statement::TextSearch(command) => self.write(command.tag(), |writer, _| {
                 crate::text_search_catalog::run(writer, &command)
             }),
+            Statement::Publication(command) => self.write(command.tag(), |writer, tables| {
+                crate::publications::run(writer, tables, &command)
+            }),
             Statement::OracleSystemTrigger(create) => self.create_system_trigger(&create),
             Statement::ForeignData(command) => self.run_foreign_data(&command),
             Statement::Synonym(command) => {

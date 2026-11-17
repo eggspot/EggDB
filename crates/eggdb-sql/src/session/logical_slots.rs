@@ -67,6 +67,16 @@ impl Session<'_> {
         write.commit_boxed()
     }
 
+    /// Which changes the publications `names` send (D1245).
+    ///
+    /// # Errors
+    ///
+    /// A publication that does not exist.
+    pub fn publication_filter(&mut self, names: &[String]) -> SqlResult<crate::publications::PublicationFilter> {
+        let reader = self.store.begin_boxed_read()?;
+        crate::publications::filter(reader.as_ref(), names)
+    }
+
     /// The captured transactions after `lsn`, at most `limit`, decoded (D1031).
     pub fn logical_changes_after(&mut self, lsn: u64, limit: usize) -> SqlResult<Vec<DecodedTransaction>> {
         let reader = self.store.begin_boxed_read()?;
