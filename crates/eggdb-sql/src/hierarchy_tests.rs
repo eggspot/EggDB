@@ -262,12 +262,87 @@ fn hierarchical_operators_are_refused_where_oracle_refuses_them() {
     assert_eq!(
         error(
             &mut session,
-            "SELECT e.last_name FROM employees e JOIN employees m ON e.manager_id = m.employee_id \
+            "SELECT * FROM employees e JOIN departments d ON e.department_id = d.department_id \
              CONNECT BY PRIOR e.employee_id = e.manager_id"
         )
         .state()
         .code(),
         "0A000"
+    );
+}
+
+fn with_departments(session: &mut Session<'_>) {
+    results(
+        session,
+        "CREATE TABLE departments (department_id NUMBER PRIMARY KEY, department_name VARCHAR2(30))",
+    );
+    for (id, name) in [(60, "IT"), (90, "Executive"), (100, "Finance")] {
+        results(session, &format!("INSERT INTO departments VALUES ({id}, '{name}')"));
+    }
+    results(session, "COMMIT");
+}
+
+#[test]
+fn connect_by_over_a_join_walks_the_joined_rows() {
+    let store = MemoryStore::default();
+    let mut session = hr_employees(&store);
+    with_departments(&mut session);
+    let expected = vec![
+        "King|Executive|1",
+        "De Haan|Executive|2",
+        "Hunold|IT|3",
+        "Ernst|IT|4",
+        "Lorentz|IT|4",
+        "Kochhar|Executive|2",
+        "Greenberg|Finance|3",
+        "Faviet|Finance|4",
+    ];
+    assert_eq!(
+        lines(
+            &mut session,
+            "SELECT e.last_name, d.department_name, LEVEL FROM employees e \
+             JOIN departments d ON e.department_id = d.department_id \
+             START WITH e.manager_id IS NULL CONNECT BY PRIOR e.employee_id = e.manager_id \
+             ORDER SIBLINGS BY e.last_name"
+        ),
+        expected
+    );
+    assert_eq!(
+        lines(
+            &mut session,
+            "SELECT e.last_name, d.department_name, LEVEL FROM employees e, departments d \
+             WHERE e.department_id = d.department_id \
+             START WITH e.manager_id IS NULL CONNECT BY PRIOR e.employee_id = e.manager_id \
+             ORDER SIBLINGS BY last_name"
+        ),
+        expected
+    );
+}
+
+#[test]
+fn where_conditions_on_one_table_filter_after_the_walk_over_a_join() {
+    let store = MemoryStore::default();
+    let mut session = hr_employees(&store);
+    with_departments(&mut session);
+    assert_eq!(
+        lines(
+            &mut session,
+            "SELECT e.last_name, LEVEL FROM employees e, departments d \
+             WHERE e.department_id = d.department_id AND d.department_name = 'IT' \
+             START WITH e.manager_id IS NULL CONNECT BY PRIOR e.employee_id = e.manager_id \
+             ORDER BY e.last_name"
+        ),
+        vec!["Ernst|4", "Hunold|3", "Lorentz|4"]
+    );
+    assert_eq!(
+        lines(
+            &mut session,
+            "SELECT d.department_name, COUNT(*) FROM employees e \
+             JOIN departments d ON e.department_id = d.department_id \
+             START WITH e.manager_id IS NULL CONNECT BY PRIOR e.employee_id = e.manager_id \
+             GROUP BY d.department_name ORDER BY 1"
+        ),
+        vec!["Executive|3", "Finance|2", "IT|3"]
     );
 }
 

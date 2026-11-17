@@ -1680,6 +1680,7 @@ pub(crate) enum HierarchyOutput {
     Path { input: usize, separator: String },
     Root(usize),
     Prior(usize),
+    Current(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]

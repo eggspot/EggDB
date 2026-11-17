@@ -400,6 +400,7 @@ impl Walk<'_> {
                     .checked_sub(2)
                     .and_then(|at| path.get(at))
                     .map_or(Value::Null, |parent| self.cell(parent.row, *input)),
+                HierarchyOutput::Current(input) => self.cell(current.row, *input),
             });
         }
         values
@@ -473,7 +474,9 @@ pub(crate) fn expanded(hierarchy: &Hierarchy, inner: QueryResult) -> SqlResult<Q
     for (number, output) in hierarchy.outputs.iter().enumerate() {
         let sql_type = match output {
             HierarchyOutput::Path { .. } => Some(SqlType::Text),
-            HierarchyOutput::Root(input) | HierarchyOutput::Prior(input) => {
+            HierarchyOutput::Root(input)
+            | HierarchyOutput::Prior(input)
+            | HierarchyOutput::Current(input) => {
                 types.get(*input).copied().flatten()
             }
         };

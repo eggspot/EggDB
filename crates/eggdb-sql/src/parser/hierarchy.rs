@@ -201,6 +201,72 @@ fn select_list_expr(items: &[SelectItem], expr: Expr) -> SqlResult<Expr> {
 struct HierarchyBuilder<'b> {
     inner: &'b mut Select,
     hierarchy: &'b mut Hierarchy,
+    passes_columns: bool,
+}
+
+fn reads_a_join(inner: &Select) -> bool {
+    inner.from.as_ref().is_some_and(|from| !from.joins.is_empty())
+}
+
+fn labels_of(from: &FromClause) -> Vec<String> {
+    std::iter::once(&from.first)
+        .chain(from.joins.iter().map(|join| &join.table))
+        .map(|reference| super::joined_dml::label_of(reference).to_ascii_lowercase())
+        .collect()
+}
+
+fn qualifiers_named(expr: &Expr, labels: &[String], named: &mut Vec<String>) {
+    if let ExprKind::Column {
+        qualifier: Some(qualifier),
+        ..
+    } = &expr.kind
+    {
+        let qualifier = qualifier.to_ascii_lowercase();
+        if labels.contains(&qualifier) && !named.contains(&qualifier) {
+            named.push(qualifier);
+        }
+    }
+    for child in children(expr) {
+        qualifiers_named(child, labels, named);
+    }
+}
+
+fn is_join_predicate(expr: &Expr, labels: &[String]) -> bool {
+    let mut named = Vec::new();
+    qualifiers_named(expr, labels, &mut named);
+    named.len() >= 2 && !mentions_hierarchy(expr) && !matches!(expr.kind, ExprKind::Subquery(_))
+}
+
+fn conjuncts(expr: Expr) -> Vec<Expr> {
+    match expr.kind {
+        ExprKind::And(operands) => operands.into_iter().flat_map(conjuncts).collect(),
+        _ => vec![expr],
+    }
+}
+
+fn conjunction(mut operands: Vec<Expr>) -> Option<Expr> {
+    match operands.len() {
+        0 => None,
+        1 => operands.pop(),
+        _ => {
+            let position = operands[0].position;
+            Some(Expr {
+                kind: ExprKind::And(operands),
+                position,
+            })
+        }
+    }
+}
+
+fn split_join_predicates(filter: Option<Expr>, from: &FromClause) -> (Option<Expr>, Option<Expr>) {
+    let Some(filter) = filter else {
+        return (None, None);
+    };
+    let labels = labels_of(from);
+    let (joins, rest): (Vec<Expr>, Vec<Expr>) = conjuncts(filter)
+        .into_iter()
+        .partition(|conjunct| is_join_predicate(conjunct, &labels));
+    (conjunction(joins), conjunction(rest))
 }
 
 impl HierarchyBuilder<'_> {
@@ -274,6 +340,10 @@ impl HierarchyBuilder<'_> {
         let direction = SortDirection::of(&item);
         let position = item.expr.position;
         let key = select_list_expr(items, item.expr)?;
+        if let Some(input) = self.passed_input(&key) {
+            self.hierarchy.siblings.push((input, direction));
+            return Ok(());
+        }
         if mentions_hidden_column(&key) || mentions_hierarchy(&key) {
             return Err(refused_here(
                 "ORDER SIBLINGS BY a hierarchical pseudo-column or operator",
@@ -285,8 +355,40 @@ impl HierarchyBuilder<'_> {
         Ok(())
     }
 
+    fn passed_input(&self, expr: &Expr) -> Option<usize> {
+        let ExprKind::Column { qualifier: None, name } = &expr.kind else {
+            return None;
+        };
+        self.hierarchy
+            .outputs
+            .iter()
+            .enumerate()
+            .find_map(|(number, output)| match output {
+                HierarchyOutput::Current(input) if *name == crate::hierarchy::output_column(number) => Some(*input),
+                _ => None,
+            })
+    }
+
+    fn passed(&mut self, expr: &Expr) -> String {
+        let known = self.hierarchy.outputs.iter().find_map(|output| match output {
+            HierarchyOutput::Current(input) => match self.inner.items.get(*input) {
+                Some(SelectItem::Expr { expr: listed, .. }) if listed.kind == expr.kind => Some(*input),
+                _ => None,
+            },
+            _ => None,
+        });
+        let input = known.unwrap_or_else(|| self.input(expr.clone()));
+        self.output(HierarchyOutput::Current(input))
+    }
+
     fn replaced(&mut self, expr: &Expr) -> SqlResult<Option<String>> {
         let position = expr.position;
+        if self.passes_columns
+            && let ExprKind::Column { name, .. } = &expr.kind
+            && !crate::temp_tables::is_hidden_column(name)
+        {
+            return Ok(Some(self.passed(expr)));
+        }
         let name = match (&expr.kind, hierarchical_operator(expr)) {
             (_, Some(LEVEL)) => crate::hierarchy::level_column(),
             (_, Some(CONNECT_BY_ISLEAF)) => crate::hierarchy::leaf_column(),
@@ -338,8 +440,13 @@ impl HierarchyBuilder<'_> {
 
     fn replace_in_select(&mut self, select: &mut Select) -> SqlResult<()> {
         for item in &mut select.items {
+            if let SelectItem::Wildcard { position, .. } = item
+                && self.passes_columns
+            {
+                return Err(refused_here("* in a CONNECT BY query over a join", *position));
+            }
             if let SelectItem::Expr { expr, alias } = item
-                && mentions_hierarchy(expr)
+                && (self.passes_columns || mentions_hierarchy(expr))
             {
                 if alias.is_none() {
                     *alias = Some(crate::eval::output_name(expr));
@@ -360,6 +467,19 @@ impl HierarchyBuilder<'_> {
     }
 }
 
+fn names_an_alias(items: &[SelectItem], expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Column {
+            qualifier: None,
+            name,
+        } => items.iter().any(|item| {
+            matches!(item, SelectItem::Expr { alias: Some(alias), .. } if alias.eq_ignore_ascii_case(name))
+        }),
+        ExprKind::Literal(Literal::Integer(_)) => true,
+        _ => false,
+    }
+}
+
 fn builder_of(select: &mut Select) -> Option<HierarchyBuilder<'_>> {
     let derived = select.from.as_mut()?.first.derived.as_deref_mut()?;
     let DerivedTable {
@@ -369,7 +489,12 @@ fn builder_of(select: &mut Select) -> Option<HierarchyBuilder<'_>> {
     let SetExpr::Select(inner) = &mut query.body else {
         return None;
     };
-    Some(HierarchyBuilder { inner, hierarchy })
+    let passes_columns = reads_a_join(inner);
+    Some(HierarchyBuilder {
+        inner,
+        hierarchy,
+        passes_columns,
+    })
 }
 
 fn source_tail(from: Option<&FromClause>, position: usize) -> SelectItem {
@@ -399,13 +524,23 @@ pub(super) fn connect_by(mut select: Select, clause: HierarchicalClause) -> SqlR
             super::joined_dml::label_of(&from.first).to_owned(),
             Some(from),
         ),
-        Some(_) => return Err(refused_here("CONNECT BY over a join", position)),
+        Some(from) => (
+            format!("{}connect_by", crate::temp_tables::HIDDEN_COLUMN_MARKER),
+            Some(from),
+        ),
     };
+    let joined = from.as_ref().is_some_and(|from| !from.joins.is_empty());
+    let mut join_filter = None;
+    if let Some(from) = from.as_ref().filter(|_| joined) {
+        let (joins, rest) = split_join_predicates(select.filter.take(), from);
+        join_filter = joins;
+        select.filter = rest;
+    }
     let mut inner = Select {
         distinct: false,
-        items: vec![source_tail(from.as_ref(), position)],
+        items: vec![source_tail(from.as_ref().filter(|_| !joined), position)],
         from,
-        filter: None,
+        filter: join_filter,
         group_by: Vec::new(),
         grouping_sets: None,
         distinct_on: Vec::new(),
@@ -430,6 +565,7 @@ pub(super) fn connect_by(mut select: Select, clause: HierarchicalClause) -> SqlR
         let mut builder = HierarchyBuilder {
             inner: &mut inner,
             hierarchy: &mut hierarchy,
+            passes_columns: joined,
         };
         if let Some(start) = clause.start {
             outside_hierarchy(&start)?;
@@ -487,6 +623,9 @@ pub(super) fn apply_ordering(select: &mut Select, siblings: Vec<OrderItem>) -> S
     match builder_of(select) {
         Some(mut builder) => {
             for item in &mut order_by {
+                if builder.passes_columns && names_an_alias(&items, &item.expr) {
+                    continue;
+                }
                 builder.replace_outer(&mut item.expr)?;
             }
             for item in siblings {

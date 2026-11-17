@@ -525,8 +525,10 @@ eggdb sql hr.db --dialect oracle -c "SELECT ename, NVL(TO_CHAR(sal, 'FM99,999.00
   (and the roots) and keeps the hierarchy; elsewhere it is `ORA-30929`. A loop (a child with the
   `PRIOR` values of one of its ancestors) is `ORA-01436`; with `NOCYCLE` the walk stops there and
   marks the row with `CONNECT_BY_ISCYCLE = 1`. The pseudo-columns without `CONNECT BY` are
-  `ORA-01788`. `CONNECT BY` over a join, `PRIOR` beside a subquery and `ORDER SIBLINGS BY` a
-  pseudo-column answer `0A000` for now.
+  `ORA-01788`. `CONNECT BY` over a join (`JOIN ... ON` or a comma list) walks the joined rows:
+  `WHERE` conditions naming columns of two or more of the joined tables are applied first, as join
+  conditions, and the others after the walk, as Oracle does; `SELECT *` over such a join, `PRIOR`
+  beside a subquery and `ORDER SIBLINGS BY` a pseudo-column answer `0A000` for now.
 - **Multitable inserts** (D304): `INSERT ALL INTO t [(columns)] [VALUES (...)] [INTO ...]
   subquery`, `INSERT ALL WHEN condition THEN INTO ... [WHEN ...] [ELSE INTO ...] subquery` (every
   `WHEN` that holds) and `INSERT FIRST WHEN ... THEN INTO ... [ELSE INTO ...] subquery` (the first
