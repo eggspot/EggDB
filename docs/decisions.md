@@ -1235,3 +1235,4 @@ its full title with its status.
 - [D1208](decisions/D1208.md) Code-only batch 860 (M6f): An Airbyte source and destination
 - [D1209](decisions/D1209.md) Code-only batch 861 (M6f): Spark and Trino connectors
 - [D1210](decisions/D1210.md) Code-only batch 862 (M6f): An ActiveRecord adapter for the Ruby driver
+- [D1211](decisions/D1211.md) Code-only batch 863 (M8): The text search objects in pg_catalog

@@ -56,6 +56,7 @@ pub(crate) enum MonitoringRelation {
     StatUserTables,
     StatUserIndexes,
     TsConfig,
+    TsConfigMap,
     TsDict,
     TsParser,
     TsTemplate,
@@ -427,12 +428,56 @@ const CONVERSION: [CatalogColumn; 8] = [
     column("condefault", SqlType::Boolean),
 ];
 
+const TS_DEFAULT_PARSER: u32 = 3722;
+const TS_TEMPLATES: [(u32, &str); 5] = [
+    (3727, "simple"),
+    (3730, "ispell"),
+    (3733, "synonym"),
+    (3740, "thesaurus"),
+    (13_000, "snowball"),
+];
+const TS_CONFIG_OIDS: (u32, u32) = (13_100, 0x5100_0000);
+const TS_DICT_OIDS: (u32, u32) = (13_200, 0x5200_0000);
+const TS_DEFINED_OID_SPAN: u32 = 0x00ff_ffff;
+
+fn ts_object_oid(
+    (built_in, defined): (u32, u32),
+    object: &crate::text_search_catalog::CatalogObject,
+) -> u32 {
+    if object.built_in {
+        let position = crate::text_search_catalog::BUILT_IN_CONFIGURATIONS
+            .iter()
+            .position(|name| object.name == *name || object.name == format!("{name}_stem"))
+            .unwrap_or(0);
+        return built_in + position as u32;
+    }
+    let hash = object
+        .name
+        .bytes()
+        .fold(0x811c_9dc5u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193));
+    defined + (hash & TS_DEFINED_OID_SPAN)
+}
+
+fn ts_namespace(object: &crate::text_search_catalog::CatalogObject) -> u32 {
+    match object.built_in {
+        true => oids::PG_CATALOG,
+        false => oids::PUBLIC,
+    }
+}
+
 const TS_CONFIG: [CatalogColumn; 5] = [
     column("oid", OID),
     column("cfgname", NAME),
     column("cfgnamespace", OID),
     column("cfgowner", OID),
     column("cfgparser", OID),
+];
+
+const TS_CONFIG_MAP: [CatalogColumn; 4] = [
+    column("mapcfg", OID),
+    column("maptokentype", SqlType::Integer),
+    column("mapseqno", SqlType::Integer),
+    column("mapdict", OID),
 ];
 
 const TS_DICT: [CatalogColumn; 5] = [
@@ -464,7 +509,7 @@ const OPFAMILY: [CatalogColumn; 5] = [
 ];
 
 impl MonitoringRelation {
-    pub(crate) const ALL: [Self; 35] = [
+    pub(crate) const ALL: [Self; 36] = [
         Self::StatActivity,
         Self::StatDatabase,
         Self::Locks,
@@ -500,6 +545,7 @@ impl MonitoringRelation {
         Self::StatStatementsInfo,
         Self::Policies,
         Self::Stats,
+        Self::TsConfigMap,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -526,6 +572,7 @@ impl MonitoringRelation {
             Self::StatUserTables => "pg_stat_user_tables",
             Self::StatUserIndexes => "pg_stat_user_indexes",
             Self::TsConfig => "pg_ts_config",
+            Self::TsConfigMap => "pg_ts_config_map",
             Self::TsDict => "pg_ts_dict",
             Self::TsParser => "pg_ts_parser",
             Self::TsTemplate => "pg_ts_template",
@@ -580,6 +627,7 @@ impl MonitoringRelation {
             Self::StatUserTables => &STAT_USER_TABLES,
             Self::StatUserIndexes => &STAT_USER_INDEXES,
             Self::TsConfig => &TS_CONFIG,
+            Self::TsConfigMap => &TS_CONFIG_MAP,
             Self::TsDict => &TS_DICT,
             Self::TsParser => &TS_PARSER,
             Self::TsTemplate => &TS_TEMPLATE,
@@ -812,6 +860,88 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: MonitoringRelation) -> 
             ]
         }
         MonitoringRelation::Cast => cast_rows(row),
+        MonitoringRelation::TsParser => vec![
+            row()
+                .set("oid", Value::Oid(TS_DEFAULT_PARSER))
+                .set("prsname", Value::Text("default".to_owned()))
+                .set("prsnamespace", Value::Oid(oids::PG_CATALOG))
+                .done(),
+        ],
+        MonitoringRelation::TsTemplate => TS_TEMPLATES
+            .iter()
+            .map(|(oid, name)| {
+                row()
+                    .set("oid", Value::Oid(*oid))
+                    .set("tmplname", Value::Text((*name).to_owned()))
+                    .set("tmplnamespace", Value::Oid(oids::PG_CATALOG))
+                    .done()
+            })
+            .collect(),
+        MonitoringRelation::TsConfig => snapshot
+            .text_search
+            .configurations
+            .iter()
+            .map(|configuration| {
+                row()
+                    .set("oid", Value::Oid(ts_object_oid(TS_CONFIG_OIDS, configuration)))
+                    .set("cfgname", Value::Text(configuration.name.clone()))
+                    .set("cfgnamespace", Value::Oid(ts_namespace(configuration)))
+                    .set("cfgowner", Value::Oid(oids::SESSION_USER))
+                    .set("cfgparser", Value::Oid(TS_DEFAULT_PARSER))
+                    .done()
+            })
+            .collect(),
+        MonitoringRelation::TsDict => snapshot
+            .text_search
+            .dictionaries
+            .iter()
+            .map(|dictionary| {
+                let template = TS_TEMPLATES
+                    .iter()
+                    .find(|(_, name)| *name == dictionary.template)
+                    .map_or(0, |(oid, _)| *oid);
+                row()
+                    .set("oid", Value::Oid(ts_object_oid(TS_DICT_OIDS, dictionary)))
+                    .set("dictname", Value::Text(dictionary.name.clone()))
+                    .set("dictnamespace", Value::Oid(ts_namespace(dictionary)))
+                    .set("dictowner", Value::Oid(oids::SESSION_USER))
+                    .set("dicttemplate", Value::Oid(template))
+                    .done()
+            })
+            .collect(),
+        MonitoringRelation::TsConfigMap => {
+            let entries = &snapshot.text_search;
+            let configuration_oid = |name: &str| {
+                entries
+                    .configurations
+                    .iter()
+                    .find(|object| object.name == name)
+                    .map_or(0, |object| ts_object_oid(TS_CONFIG_OIDS, object))
+            };
+            let dictionary_oid = |name: &str| {
+                entries
+                    .dictionaries
+                    .iter()
+                    .find(|object| object.name == name)
+                    .map_or(0, |object| ts_object_oid(TS_DICT_OIDS, object))
+            };
+            entries
+                .mappings
+                .iter()
+                .map(|mapping| {
+                    let token_type = eggdb_search::TOKEN_TYPES
+                        .iter()
+                        .position(|(name, _)| *name == mapping.token_type)
+                        .map_or(0, |at| at + 1);
+                    row()
+                        .set("mapcfg", Value::Oid(configuration_oid(&mapping.configuration)))
+                        .set("maptokentype", Value::Integer(token_type as i32))
+                        .set("mapseqno", Value::Integer(mapping.position as i32))
+                        .set("mapdict", Value::Oid(dictionary_oid(&mapping.dictionary)))
+                        .done()
+                })
+                .collect()
+        }
         _ => Vec::new(),
     }
 }

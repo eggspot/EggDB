@@ -492,6 +492,7 @@ pub(crate) struct CatalogSnapshot {
     pub(crate) grants: Vec<crate::roles::TableGrant>,
     pub(crate) column_grants: Vec<crate::roles::ColumnGrant>,
     pub(crate) access: crate::roles::AccessRecords,
+    pub(crate) text_search: crate::text_search_catalog::CatalogEntries,
     pub(crate) composite_classes: Vec<CompositeClass>,
     pub(crate) row_types: HashMap<usize, u32>,
 }
@@ -864,6 +865,7 @@ impl CatalogSnapshot {
             grants: crate::roles::every_grant(reader)?,
             column_grants: crate::roles::every_column_grant(reader)?,
             access: crate::roles::AccessRecords::load(reader)?,
+            text_search: crate::text_search_catalog::Catalog::load(reader)?.entries(),
             composite_classes,
             row_types,
         };

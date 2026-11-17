@@ -453,6 +453,93 @@ impl Catalog {
     }
 }
 
+/// The built-in configurations, in the order the catalog lists them.
+pub(crate) const BUILT_IN_CONFIGURATIONS: [&str; 19] = [
+    "simple", "english", "german", "spanish", "swedish", "norwegian", "danish", "italian", "russian", "dutch",
+    "portuguese", "french", "finnish", "hungarian", "indonesian", "romanian", "turkish", "cjk", "thai",
+];
+
+/// A text search configuration or dictionary as the `pg_ts_*` catalogs list it (D1211).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogObject {
+    pub(crate) name: String,
+    pub(crate) built_in: bool,
+    pub(crate) template: &'static str,
+}
+
+/// One dictionary of one token type of one configuration, in `pg_ts_config_map`'s order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogMapping {
+    pub(crate) configuration: String,
+    pub(crate) token_type: String,
+    pub(crate) position: usize,
+    pub(crate) dictionary: String,
+}
+
+/// What the `pg_ts_config`, `pg_ts_dict` and `pg_ts_config_map` catalogs show.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CatalogEntries {
+    pub(crate) configurations: Vec<CatalogObject>,
+    pub(crate) dictionaries: Vec<CatalogObject>,
+    pub(crate) mappings: Vec<CatalogMapping>,
+}
+
+impl Catalog {
+    /// The built-in and defined configurations and dictionaries, with every mapping.
+    pub(crate) fn entries(&self) -> CatalogEntries {
+        let mut entries = CatalogEntries::default();
+        let mut configurations: Vec<(String, bool, StoredConfiguration)> = BUILT_IN_CONFIGURATIONS
+            .iter()
+            .filter_map(|name| Some(((*name).to_owned(), true, built_in_configuration(name)?)))
+            .collect();
+        configurations.extend(
+            self.configurations
+                .iter()
+                .map(|(name, stored)| (name.clone(), false, stored.clone())),
+        );
+        for (name, built_in, stored) in configurations {
+            for (token_type, dictionaries) in &stored.mappings {
+                for (position, dictionary) in dictionaries.iter().enumerate() {
+                    entries.mappings.push(CatalogMapping {
+                        configuration: name.clone(),
+                        token_type: token_type.clone(),
+                        position: position + 1,
+                        dictionary: base(dictionary).to_owned(),
+                    });
+                }
+            }
+            entries.configurations.push(CatalogObject {
+                name,
+                built_in,
+                template: "",
+            });
+        }
+        entries.dictionaries.push(CatalogObject {
+            name: SIMPLE_DICTIONARY.to_owned(),
+            built_in: true,
+            template: "simple",
+        });
+        for name in BUILT_IN_CONFIGURATIONS {
+            if matches!(name, "simple" | "cjk" | "thai") {
+                continue;
+            }
+            entries.dictionaries.push(CatalogObject {
+                name: format!("{name}{STEM_SUFFIX}"),
+                built_in: true,
+                template: "snowball",
+            });
+        }
+        for (name, stored) in &self.dictionaries {
+            entries.dictionaries.push(CatalogObject {
+                name: name.clone(),
+                built_in: false,
+                template: stored.template.name(),
+            });
+        }
+        entries
+    }
+}
+
 fn missing(kind: TextSearchKind, name: &str) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_OBJECT,
@@ -923,6 +1010,26 @@ pub(crate) fn analyzer(name: &str) -> Option<SqlResult<Arc<Analyzer>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_entries_list_built_in_configurations_dictionaries_and_mappings() {
+        let entries = Catalog::default().entries();
+        assert_eq!(entries.configurations.len(), BUILT_IN_CONFIGURATIONS.len());
+        assert!(entries.configurations.iter().all(|object| object.built_in));
+        assert!(entries
+            .dictionaries
+            .iter()
+            .any(|object| object.name == "english_stem" && object.template == "snowball"));
+        assert_eq!(entries.dictionaries[0].name, "simple");
+        assert!(entries.mappings.iter().any(|mapping| mapping.configuration == "english"
+            && mapping.token_type == "asciiword"
+            && mapping.dictionary == "english_stem"
+            && mapping.position == 1));
+        assert!(entries
+            .mappings
+            .iter()
+            .all(|mapping| mapping.token_type != "blank"));
+    }
 
     #[test]
     fn records_round_trip() {
