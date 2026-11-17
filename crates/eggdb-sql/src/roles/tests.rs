@@ -289,3 +289,42 @@ fn a_role_with_create_on_a_schema_makes_tables_it_owns_and_may_drop() {
     }
     run(&mut clerk, "DROP TABLE mine").unwrap();
 }
+
+#[test]
+fn a_column_deny_hides_one_column_until_it_is_granted_again() {
+    let store = MemoryStore::default();
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE TABLE items (id integer PRIMARY KEY, secret text)",
+        "CREATE ROLE reader",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    let mut tsql = Session::with_dialect(&store, crate::Dialect::SqlServer);
+    for sql in [
+        "GRANT SELECT ON items TO reader",
+        "DENY SELECT ON OBJECT::items (secret) TO reader",
+    ] {
+        tsql.execute(sql, &mut |_| {})
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    assert_eq!(
+        run(
+            &mut admin,
+            "SELECT has_column_privilege('reader', 'items', 'id', 'SELECT'), \
+             has_column_privilege('reader', 'items', 'secret', 'SELECT')"
+        )
+        .unwrap(),
+        "has_column_privilege|has_column_privilege\nt|f\nSELECT 1"
+    );
+    tsql.execute("GRANT SELECT ON OBJECT::items (secret) TO reader", &mut |_| {})
+        .expect("the grant clears the deny");
+    assert_eq!(
+        run(
+            &mut admin,
+            "SELECT has_column_privilege('reader', 'items', 'secret', 'SELECT')"
+        )
+        .unwrap(),
+        "has_column_privilege\nt\nSELECT 1"
+    );
+}

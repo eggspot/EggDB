@@ -120,6 +120,7 @@ pub(crate) enum RoleStatement {
     },
     Deny {
         privileges: Vec<Privilege>,
+        columns: Vec<(Privilege, Vec<Name>)>,
         tables: Vec<Name>,
         grantees: Vec<String>,
     },
@@ -664,9 +665,11 @@ pub(crate) fn run(
         RoleStatement::Drop { names, if_exists } => drop_roles(writer, names, *if_exists)?,
         RoleStatement::Deny {
             privileges,
+            columns: denied_columns,
             tables,
             grantees,
         } => {
+            columns::deny_columns(writer, denied_columns, tables, grantees)?;
             let bits = privileges
                 .iter()
                 .fold(0u8, |bits, privilege| bits | privilege.bit());
@@ -1357,7 +1360,7 @@ pub(crate) use object_grants::{
     grants_on as object_grants_on, holds as holds_object_grant,
 };
 pub(crate) use columns::{
-    COLUMN_GRANT_SPACE, COLUMN_PRIVILEGES, ColumnGrant, ColumnReach, check_columns,
+    COLUMN_DENY_SPACE, COLUMN_GRANT_SPACE, COLUMN_PRIVILEGES, ColumnGrant, ColumnReach, check_columns,
     column_grant_target, column_privilege_reach, column_reach, every_column_grant, forget_column,
     move_column, move_table, relation_columns,
 };

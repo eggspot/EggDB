@@ -20,6 +20,147 @@ pub(crate) const COLUMN_PRIVILEGES: [Privilege; 4] = [
 ];
 
 pub(crate) const COLUMN_GRANT_SPACE: u8 = 0x16;
+pub(crate) const COLUMN_DENY_SPACE: u8 = 0x1F;
+
+fn column_deny_prefix(table: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(COLUMN_DENY_SPACE);
+    key.extend_from_slice(&(table.len() as u32).to_be_bytes());
+    key.extend_from_slice(table.as_bytes());
+    key
+}
+
+fn column_deny_key(table: &str, grantee: &str, column: &str) -> Vec<u8> {
+    let mut key = column_deny_prefix(table);
+    key.extend_from_slice(grantee.as_bytes());
+    key.push(0);
+    key.extend_from_slice(column.as_bytes());
+    key
+}
+
+/// Every stored column denial on `table` (SQL Server's `DENY SELECT (column)`, D1195): the
+/// key, the grantee, the column and the denied privileges.
+fn column_denials_of(
+    reader: &dyn KeyValueRead,
+    table: &str,
+) -> SqlResult<Vec<(Vec<u8>, String, String, u8)>> {
+    let prefix = column_deny_prefix(table);
+    let mut found = Vec::new();
+    reader.scan(
+        &prefix,
+        &prefix_end(&prefix),
+        ScanDirection::Forward,
+        &mut |key, value| {
+            let rest = key.get(prefix.len()..).unwrap_or_default();
+            if let Some((grantee, column)) = split_grantee_and_column(rest)
+                && let [COLUMN_RECORD_VERSION, bits] = value
+            {
+                found.push((
+                    key.to_vec(),
+                    String::from_utf8_lossy(grantee).into_owned(),
+                    String::from_utf8_lossy(column).into_owned(),
+                    *bits,
+                ));
+            }
+            Ok(true)
+        },
+    )?;
+    Ok(found)
+}
+
+fn denied_columns(
+    reader: &dyn KeyValueRead,
+    held: &BTreeSet<String>,
+    table: &str,
+    privilege: Privilege,
+) -> SqlResult<BTreeSet<String>> {
+    Ok(column_denials_of(reader, table)?
+        .into_iter()
+        .filter(|(_, grantee, _, bits)| held.contains(grantee) && bits & privilege.bit() != 0)
+        .map(|(_, _, column, _)| column)
+        .collect())
+}
+
+fn store_column_bits(writer: &mut dyn KeyValueWrite, key: &[u8], bits: u8) -> SqlResult<()> {
+    match bits {
+        0 => writer.delete(key).map(|_| ()),
+        bits => writer.put(key, &[COLUMN_RECORD_VERSION, bits]),
+    }
+}
+
+fn column_bits(reader: &dyn KeyValueRead, key: &[u8]) -> SqlResult<u8> {
+    match reader.get(key)?.as_deref() {
+        Some([COLUMN_RECORD_VERSION, bits]) => Ok(*bits),
+        Some(_) => Err(damaged_grant()),
+        None => Ok(0),
+    }
+}
+
+/// SQL Server's `DENY privilege (columns) ON table TO grantees` (D1195): the columns are
+/// refused to the grantees whatever else they hold, and the same column grants are removed.
+pub(super) fn deny_columns(
+    writer: &mut dyn KeyValueWrite,
+    columns: &[(Privilege, Vec<Name>)],
+    tables: &[Name],
+    grantees: &[String],
+) -> SqlResult<()> {
+    check_column_names(writer, columns, tables)?;
+    for table in tables {
+        for grantee in grantees {
+            if grantee != PUBLIC && stored_role(writer, grantee)?.is_none() {
+                return Err(missing_role(grantee));
+            }
+            for (privilege, names) in columns {
+                for name in names {
+                    let key = column_deny_key(&table.text, grantee, &name.text);
+                    let denied = column_bits(writer, &key)?;
+                    store_column_bits(writer, &key, denied | privilege.bit())?;
+                    let grant = column_grant_key(&table.text, grantee, &name.text);
+                    let granted = column_bits(writer, &grant)?;
+                    store_column_bits(writer, &grant, granted & !privilege.bit())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_column_names(
+    reader: &dyn KeyValueRead,
+    columns: &[(Privilege, Vec<Name>)],
+    tables: &[Name],
+) -> SqlResult<()> {
+    for (privilege, _) in columns {
+        if !COLUMN_PRIVILEGES.contains(privilege) {
+            return Err(invalid_column_privilege(*privilege));
+        }
+    }
+    for table in tables {
+        let Some(existing) = relation_columns(reader, &table.text)? else {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_TABLE,
+                format!("relation "{}" does not exist", table.text),
+            )
+            .at(table.position));
+        };
+        for (_, names) in columns {
+            for name in names {
+                if !existing.contains(&name.text) {
+                    return Err(SqlError::new(
+                        SqlState::UNDEFINED_COLUMN,
+                        format!(
+                            "column "{}" of relation "{}" does not exist",
+                            name.text,
+                            crate::schemas::display(&table.text)
+                        ),
+                    )
+                    .at(name.position));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 fn column_grant_prefix(table: &str) -> Vec<u8> {
     let mut key = NAMESPACE.to_vec();
@@ -123,6 +264,7 @@ fn column_grants_of(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Vec<Sto
 pub(crate) enum ColumnReach {
     Every,
     Only(BTreeSet<String>),
+    EveryBut(BTreeSet<String>),
 }
 
 impl ColumnReach {
@@ -130,6 +272,7 @@ impl ColumnReach {
         match self {
             Self::Every => true,
             Self::Only(columns) => columns.contains(column),
+            Self::EveryBut(columns) => !columns.contains(column),
         }
     }
 }
@@ -166,13 +309,18 @@ pub(crate) fn column_privilege_reach(
     if super::denied(reader, &held, table, privilege)? {
         return Ok(None);
     }
+    let denied = denied_columns(reader, &held, table, privilege)?;
     if table_level_held(reader, &held, table, privilege)? {
-        return Ok(Some(ColumnReach::Every));
+        return Ok(Some(match denied.is_empty() {
+            true => ColumnReach::Every,
+            false => ColumnReach::EveryBut(denied),
+        }));
     }
     let granted: BTreeSet<String> = column_grants_of(reader, table)?
         .into_iter()
         .filter(|grant| held.contains(&grant.grantee) && grant.privileges & privilege.bit() != 0)
         .map(|grant| grant.column)
+        .filter(|column| !denied.contains(column))
         .collect();
     if granted.is_empty() {
         return Ok(None);
@@ -289,6 +437,9 @@ pub(super) fn change_column_privileges(
                     } else {
                         writer.put(&key, &[COLUMN_RECORD_VERSION, changed])?;
                     }
+                    let denial = column_deny_key(&table.text, grantee, &name.text);
+                    let denied = column_bits(writer, &denial)?;
+                    store_column_bits(writer, &denial, denied & !privilege.bit())?;
                 }
             }
         }
@@ -327,6 +478,11 @@ pub(crate) fn forget_column(
             writer.delete(&grant.key)?;
         }
     }
+    for (key, _, denied, _) in column_denials_of(writer, table)? {
+        if denied == column {
+            writer.delete(&key)?;
+        }
+    }
     Ok(())
 }
 
@@ -350,6 +506,12 @@ pub(crate) fn move_column(
             )?;
         }
     }
+    for (key, grantee, column, bits) in column_denials_of(writer, table)? {
+        if column == from {
+            writer.delete(&key)?;
+            store_column_bits(writer, &column_deny_key(table, &grantee, to), bits)?;
+        }
+    }
     Ok(())
 }
 
@@ -370,11 +532,16 @@ pub(crate) fn move_table(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -
             &[COLUMN_RECORD_VERSION, grant.privileges],
         )?;
     }
+    for (key, grantee, column, bits) in column_denials_of(writer, from)? {
+        writer.delete(&key)?;
+        store_column_bits(writer, &column_deny_key(to, &grantee, &column), bits)?;
+    }
     super::move_table_records(writer, from, to)
 }
 
 /// Removes every column grant on `table`, when the table is dropped.
 pub(super) fn forget_table_columns(writer: &mut dyn KeyValueWrite, table: &str) -> SqlResult<()> {
+    crate::store::delete_prefix(writer, &column_deny_prefix(table))?;
     crate::store::delete_prefix(writer, &column_grant_prefix(table))
 }
 

@@ -186,8 +186,9 @@ impl Parser<'_> {
                 tables,
                 grantees,
                 ..
-            }) if columns.is_empty() => Ok(Statement::Role(RoleStatement::Deny {
+            }) => Ok(Statement::Role(RoleStatement::Deny {
                 privileges,
+                columns,
                 tables,
                 grantees,
             })),

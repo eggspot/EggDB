@@ -1219,3 +1219,4 @@ its full title with its status.
 - [D1192](decisions/D1192.md) Code-only batch 844 (M6b): Table owners
 - [D1193](decisions/D1193.md) Code-only batch 845 (M6b): Tables made by roles that hold CREATE on a schema, and dropped or changed by their owners
 - [D1194](decisions/D1194.md) Code-only batch 846 (M6b): FORCE ROW LEVEL SECURITY with table owners
+- [D1195](decisions/D1195.md) Code-only batch 847 (M6b): SQL Server's column DENY

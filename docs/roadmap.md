@@ -892,7 +892,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL Server's column `GRANT` and `DENY`, column privileges on sequences, `MERGE` and `ON CONFLICT
   DO UPDATE` under row security, and row security through updatable views (D285). `GRANT` and `REVOKE` with columns: **code written,
   unbuilt** (code-only mode, 2026-11-12, D586); `DENY` on tables: **code written, unbuilt** (code-only mode,
-  2026-11-12, D621).
+  2026-11-12, D621); `DENY` on columns: **code written, unbuilt** (code-only mode, 2026-11-17, D1195).
 - Column grants that follow a column renamed by MySQL's `CHANGE COLUMN` (D285). **Code written,
   unbuilt** (code-only mode, 2026-11-11, D484).
 - Oracle VPD and SQL Server's security predicates (D186). SQL Server's security policies with filter predicates: **code written, unbuilt**

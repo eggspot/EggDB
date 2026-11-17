@@ -1,5 +1,5 @@
 use super::{
-    COLUMN_GRANT_SPACE, DENY_SPACE, GRANT_OPTION_SPACE, GRANT_SPACE, OBJECT_GRANT_SPACE,
+    COLUMN_DENY_SPACE, COLUMN_GRANT_SPACE, DENY_SPACE, GRANT_OPTION_SPACE, GRANT_SPACE, OBJECT_GRANT_SPACE,
     OWNER_SPACE, ROLE_SPACE, decode_role, encode_role,
 };
 use crate::encoding::{NAMESPACE, prefix_end};
@@ -8,7 +8,8 @@ use crate::row_security::{POLICY_SPACE, ROW_SECURITY_SPACE};
 use crate::store::{EntryVisitor, KeyValueRead, ScanDirection};
 use std::collections::BTreeMap;
 
-const ACCESS_SPACES: [u8; 9] = [
+const ACCESS_SPACES: [u8; 10] = [
+    COLUMN_DENY_SPACE,
     OBJECT_GRANT_SPACE,
     OWNER_SPACE,
     ROLE_SPACE,
