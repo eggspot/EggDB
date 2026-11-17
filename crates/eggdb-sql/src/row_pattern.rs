@@ -7,6 +7,7 @@ const MOST_STEPS: usize = 20_000_000;
 const MOST_PATTERN_BYTES: usize = 4096;
 const MOST_NESTING: usize = 50;
 const MOST_REPEAT: u32 = 1000;
+const MOST_PERMUTED: usize = 6;
 
 #[derive(Debug, Clone)]
 enum Pattern {
@@ -144,11 +145,49 @@ impl PatternParser<'_> {
                 while self.at < self.text.len() && (self.text[self.at].is_ascii_alphanumeric() || self.text[self.at] == b'_') {
                     self.at += 1;
                 }
-                let name = std::str::from_utf8(self.text.get(start..self.at)?).ok()?;
-                Some(Pattern::Variable(name.to_ascii_uppercase()))
+                let name = std::str::from_utf8(self.text.get(start..self.at)?).ok()?.to_ascii_uppercase();
+                if name == "PERMUTE" && self.peek() == Some(b'(') {
+                    return self.permutation();
+                }
+                Some(Pattern::Variable(name))
             }
             _ => None,
         }
+    }
+}
+
+fn permutations(items: &[Pattern]) -> Vec<Vec<Pattern>> {
+    if items.len() <= 1 {
+        return vec![items.to_vec()];
+    }
+    let mut all = Vec::new();
+    for (at, first) in items.iter().enumerate() {
+        let mut rest = items.to_vec();
+        rest.remove(at);
+        for mut tail in permutations(&rest) {
+            tail.insert(0, first.clone());
+            all.push(tail);
+        }
+    }
+    all
+}
+
+impl PatternParser<'_> {
+    fn permutation(&mut self) -> Option<Pattern> {
+        self.at += 1;
+        let mut items = vec![self.alternation()?];
+        while self.peek() == Some(b',') {
+            self.at += 1;
+            items.push(self.alternation()?);
+        }
+        if self.peek() != Some(b')') || items.len() > MOST_PERMUTED {
+            return None;
+        }
+        self.at += 1;
+        permutations(&items)
+            .into_iter()
+            .map(Pattern::Sequence)
+            .reduce(|left, right| Pattern::Either(Box::new(left), Box::new(right)))
     }
 }
 
@@ -439,6 +478,18 @@ mod tests {
         );
         assert_eq!(matches(rows, "DOWN{2} UP?").unwrap(), r#"[{"start": 1, "end": 3, "classifiers": ["DOWN", "DOWN", "UP"]}]"#);
         assert_eq!(matches(rows, "(UP | DOWN)+?").unwrap().matches("start").count(), 5);
+    }
+
+    #[test]
+    fn permute_matches_the_variables_in_any_order_preferring_the_listed_one() {
+        let rows = r#"[{"A": false, "B": true}, {"A": true, "B": false}, {"A": true, "B": true}]"#;
+        assert_eq!(
+            matches(rows, "PERMUTE(A, B)").unwrap(),
+            r#"[{"start": 0, "end": 1, "classifiers": ["B", "A"]}]"#
+        );
+        assert_eq!(matches(rows, "PERMUTE(A, B, A)").unwrap().matches("start").count(), 1);
+        assert!(matches(rows, "PERMUTE(A, B, C, D, E, F, G)").is_err());
+        assert!(matches(rows, "PERMUTE(A, B").is_err());
     }
 
     #[test]

@@ -453,7 +453,7 @@ impl Parser<'_> {
         let mut variables: Vec<String> = recognition.definitions.iter().map(|(variable, _)| variable.clone()).collect();
         for named in recognition.pattern.split(|character: char| !(character.is_alphanumeric() || character == '_')) {
             let named = named.to_uppercase();
-            if !named.is_empty() && !named.starts_with(|character: char| character.is_ascii_digit()) && !variables.contains(&named) {
+            if !named.is_empty() && named != "PERMUTE" && !named.starts_with(|character: char| character.is_ascii_digit()) && !variables.contains(&named) {
                 variables.push(named);
             }
         }
