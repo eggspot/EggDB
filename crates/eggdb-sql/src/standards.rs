@@ -583,7 +583,8 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if name == "row_pattern_matches" {
         return Some(match values {
             [Value::Jsonb(rows) | Value::Json(rows) | Value::Text(rows), Value::Text(pattern)] => crate::row_pattern::matches(rows, pattern).and_then(jsonb),
-            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "row_pattern_matches takes the rows as jsonb and the pattern as text")),
+            [Value::Jsonb(rows) | Value::Json(rows) | Value::Text(rows), Value::Text(pattern), Value::Text(skip)] => crate::row_pattern::matches_skipping(rows, pattern, skip).and_then(jsonb),
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "row_pattern_matches takes the rows as jsonb, the pattern as text and optionally how AFTER MATCH SKIP goes on")),
         });
     }
     if name == "spreadsheet_recalculate" {

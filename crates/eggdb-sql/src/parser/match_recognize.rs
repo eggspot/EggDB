@@ -10,10 +10,20 @@ const AGGREGATES: [&str; 5] = ["count", "sum", "avg", "min", "max"];
 struct Recognition {
     partitions: Vec<String>,
     order: String,
-    measures: Vec<(String, String)>,
+    measures: Vec<Measure>,
+    all_rows: bool,
+    skip: String,
     pattern: String,
     definitions: Vec<(String, String)>,
 }
+
+struct Measure {
+    expression: String,
+    name: String,
+    running: Option<bool>,
+}
+
+const HIDDEN_ROW: &str = "\u{2}mr_at";
 
 fn quoted_literal(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
@@ -232,6 +242,7 @@ impl<'r> Rewriter<'r> {
 /// its rows are the rows of `mr_numbered` in its partition from `start` to `end`.
 struct MatchRows {
     partition_join: String,
+    end: String,
 }
 
 const START: &str = "(mr_m.mr_found ->> 'start')::bigint";
@@ -241,10 +252,11 @@ impl MatchRows {
     fn position(&self, first: bool, variable: Option<&str>) -> String {
         match variable {
             None if first => START.to_owned(),
-            None => END.to_owned(),
+            None => self.end.clone(),
             Some(variable) => format!(
-                "SELECT {}(mr_numbered.mr_row) FROM mr_numbered WHERE mr_numbered.mr_row BETWEEN {START} AND {END}{} AND mr_m.mr_found -> 'classifiers' ->> (mr_numbered.mr_row - {START})::integer = {}",
+                "SELECT {}(mr_numbered.mr_row) FROM mr_numbered WHERE mr_numbered.mr_row BETWEEN {START} AND {}{} AND mr_m.mr_found -> 'classifiers' ->> (mr_numbered.mr_row - {START})::integer = {}",
                 if first { "min" } else { "max" },
+                self.end,
                 self.partition_join,
                 quoted_literal(variable)
             ),
@@ -267,7 +279,8 @@ impl MatchRows {
             )
         });
         format!(
-            "SELECT {function}({value}) FROM mr_numbered WHERE mr_numbered.mr_row BETWEEN {START} AND {END}{}{only}",
+            "SELECT {function}({value}) FROM mr_numbered WHERE mr_numbered.mr_row BETWEEN {START} AND {}{}{only}",
+            self.end,
             self.partition_join
         )
     }
@@ -318,30 +331,62 @@ impl Parser<'_> {
         let mut measures = Vec::new();
         if self.take_word("measures") {
             loop {
-                if !self.take_word("final") && self.take_word("running") {
-                    return Err(self.not_supported("RUNNING measures"));
-                }
+                let running = if self.take_word("final") {
+                    Some(false)
+                } else if self.take_word("running") {
+                    Some(true)
+                } else {
+                    None
+                };
                 let expression = self.clause_text(&["as"])?;
                 self.expect_word("as")?;
-                measures.push((expression, self.name()?.text));
+                measures.push(Measure {
+                    expression,
+                    name: self.name()?.text,
+                    running,
+                });
                 if !self.take(&TokenKind::Comma) {
                     break;
                 }
             }
         }
+        let mut all_rows = false;
         if self.take_word("one") {
             self.expect_word("row")?;
             self.expect_word("per")?;
             self.expect_word("match")?;
-        } else if self.is_word("all") {
-            return Err(self.not_supported("ALL ROWS PER MATCH"));
+        } else if self.take_word("all") {
+            self.expect_word("rows")?;
+            self.expect_word("per")?;
+            self.expect_word("match")?;
+            all_rows = true;
+            if self.take_word("omit") {
+                self.expect_word("empty")?;
+                self.expect_word("matches")?;
+            } else if self.is_word("show") || self.is_word("with") {
+                return Err(self.not_supported("SHOW EMPTY MATCHES and WITH UNMATCHED ROWS"));
+            }
         }
+        let mut skip = "past last row".to_owned();
         if self.take_word("after") {
             self.expect_word("match")?;
             self.expect_word("skip")?;
-            if !(self.take_word("past") && self.take_word("last") && self.take_word("row")) {
-                return Err(self.not_supported("AFTER MATCH SKIP other than PAST LAST ROW"));
-            }
+            skip = if self.take_word("past") {
+                self.expect_word("last")?;
+                self.expect_word("row")?;
+                "past last row".to_owned()
+            } else {
+                self.expect_word("to")?;
+                if self.take_word("next") {
+                    self.expect_word("row")?;
+                    "to next row".to_owned()
+                } else if self.take_word("first") {
+                    format!("to first {}", self.name()?.text)
+                } else {
+                    self.take_word("last");
+                    format!("to last {}", self.name()?.text)
+                }
+            };
         }
         self.expect_word("pattern")?;
         self.expect(&TokenKind::LeftParen)?;
@@ -361,7 +406,7 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(Recognition { partitions, order, measures, pattern, definitions })
+        Ok(Recognition { partitions, order, measures, all_rows, skip, pattern, definitions })
     }
 
     /// SQL:2016's `MATCH_RECOGNIZE` after a table or subquery whose SQL is `source`, with
@@ -392,21 +437,47 @@ impl Parser<'_> {
             let rewritten = Rewriter::new(condition, self.dialect, &variables)?.condition(variable, &window)?;
             flags.push(format!("{}, coalesce(({rewritten}), false)", quoted_literal(variable)));
         }
-        let rows = MatchRows {
-            partition_join: recognition
-                .partitions
-                .iter()
-                .map(|column| format!(" AND mr_numbered.{column} IS NOT DISTINCT FROM mr_m.{column}"))
-                .collect(),
+        let partition_join: String = recognition
+            .partitions
+            .iter()
+            .map(|column| format!(" AND mr_numbered.{column} IS NOT DISTINCT FROM mr_m.{column}"))
+            .collect();
+        let hidden_row = Self::quoted_alias(self.dialect, HIDDEN_ROW);
+        let final_rows = MatchRows {
+            partition_join: partition_join.clone(),
+            end: END.to_owned(),
         };
-        let mut selected: Vec<String> = recognition.partitions.iter().map(|column| format!("mr_m.{column}")).collect();
-        for (expression, name) in &recognition.measures {
-            let rewritten = Rewriter::new(expression, self.dialect, &variables)?.measure(&rows)?;
-            selected.push(format!("{rewritten} AS {name}"));
+        let running_rows = MatchRows {
+            partition_join,
+            end: format!("mr_a.{hidden_row}"),
+        };
+        let mut selected: Vec<String> = if recognition.all_rows {
+            vec!["mr_a.*".to_owned()]
+        } else {
+            recognition.partitions.iter().map(|column| format!("mr_m.{column}")).collect()
+        };
+        for measure in &recognition.measures {
+            let running = recognition.all_rows && measure.running.unwrap_or(true);
+            let rows = if running { &running_rows } else { &final_rows };
+            let rewritten = Rewriter::new(&measure.expression, self.dialect, &variables)?.measure(rows)?;
+            selected.push(format!("{rewritten} AS {}", measure.name));
         }
         if selected.is_empty() {
             selected.push("mr_m.mr_match AS match_number".to_owned());
         }
+        let (all_rows_table, all_rows_join) = if recognition.all_rows {
+            let partition_on: String = recognition
+                .partitions
+                .iter()
+                .map(|column| format!(" AND mr_a.{column} IS NOT DISTINCT FROM mr_m.{column}"))
+                .collect();
+            (
+                format!(", mr_all AS (SELECT mr_source.*, row_number() OVER ({window}) - 1 AS {hidden_row} FROM (SELECT * FROM {source}) AS mr_source)"),
+                format!(" JOIN mr_all AS mr_a ON mr_a.{hidden_row} BETWEEN {START} AND {END}{partition_on}"),
+            )
+        } else {
+            (String::new(), String::new())
+        };
         let grouped = if partition_list.is_empty() { String::new() } else { format!(" GROUP BY {partition_list}") };
         let group_columns = if partition_list.is_empty() { String::new() } else { format!("{partition_list}, ") };
         let matched_columns: String = recognition.partitions.iter().map(|column| format!("mr_g.{column}, ")).collect();
@@ -419,10 +490,11 @@ impl Parser<'_> {
             "(WITH mr_numbered AS (SELECT mr_source.*, row_number() OVER ({window}) - 1 AS mr_row, jsonb_build_object({}) AS mr_flags FROM (SELECT * FROM {source}) AS mr_source), \
              mr_matches AS (SELECT {matched_columns}mr_e.value AS mr_found, row_number() OVER ({match_partition}ORDER BY (mr_e.value ->> 'start')::bigint) AS mr_match \
              FROM (SELECT {group_columns}jsonb_agg(mr_flags ORDER BY mr_row) AS mr_flag_list FROM mr_numbered{grouped}) AS mr_g \
-             CROSS JOIN LATERAL jsonb_array_elements(row_pattern_matches(mr_g.mr_flag_list, {})) AS mr_e) \
-             SELECT {} FROM mr_matches AS mr_m) AS {}",
+             CROSS JOIN LATERAL jsonb_array_elements(row_pattern_matches(mr_g.mr_flag_list, {}, {})) AS mr_e){all_rows_table} \
+             SELECT {} FROM mr_matches AS mr_m{all_rows_join}) AS {}",
             flags.join(", "),
             quoted_literal(&recognition.pattern),
+            quoted_literal(&recognition.skip),
             selected.join(", "),
             Self::quoted_alias(self.dialect, &alias)
         );

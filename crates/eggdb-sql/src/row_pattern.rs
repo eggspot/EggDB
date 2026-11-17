@@ -10,6 +10,8 @@ const MOST_REPEAT: u32 = 1000;
 
 #[derive(Debug, Clone)]
 enum Pattern {
+    PartitionStart,
+    PartitionEnd,
     Variable(String),
     Sequence(Vec<Pattern>),
     Either(Box<Pattern>, Box<Pattern>),
@@ -129,6 +131,14 @@ impl PatternParser<'_> {
                 self.at += 1;
                 Some(inner)
             }
+            b'^' => {
+                self.at += 1;
+                Some(Pattern::PartitionStart)
+            }
+            b'$' => {
+                self.at += 1;
+                Some(Pattern::PartitionEnd)
+            }
             byte if byte.is_ascii_alphabetic() || byte == b'_' => {
                 let start = self.at;
                 while self.at < self.text.len() && (self.text[self.at].is_ascii_alphanumeric() || self.text[self.at] == b'_') {
@@ -144,6 +154,8 @@ impl PatternParser<'_> {
 
 #[derive(Debug, Clone, Copy)]
 enum Instruction {
+    PartitionStart,
+    PartitionEnd,
     Row(usize),
     Split(usize, usize),
     Jump(usize),
@@ -185,6 +197,12 @@ impl Compiler {
 
     fn compile(&mut self, pattern: &Pattern) -> Option<()> {
         match pattern {
+            Pattern::PartitionStart => {
+                self.emit(Instruction::PartitionStart)?;
+            }
+            Pattern::PartitionEnd => {
+                self.emit(Instruction::PartitionEnd)?;
+            }
             Pattern::Variable(name) => {
                 let index = self.variable(name);
                 self.emit(Instruction::Row(index))?;
@@ -253,6 +271,18 @@ impl Matcher<'_> {
                     return Err(SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "row_pattern_matches: the pattern takes too many steps on these rows"));
                 }
                 match self.program.get(pc) {
+                    Some(Instruction::PartitionStart) => {
+                        if row != 0 {
+                            break;
+                        }
+                        pc += 1;
+                    }
+                    Some(Instruction::PartitionEnd) => {
+                        if row != self.rows.len() {
+                            break;
+                        }
+                        pc += 1;
+                    }
                     Some(Instruction::Row(variable)) => {
                         if !self.holds(row, *variable) {
                             break;
@@ -286,14 +316,48 @@ impl Matcher<'_> {
     }
 }
 
+/// Where the search for the next match starts after a match, as `AFTER MATCH SKIP` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Skip {
+    PastLastRow,
+    ToNextRow,
+    ToFirst(String),
+    ToLast(String),
+}
+
+impl Skip {
+    fn named(text: &str) -> Option<Self> {
+        let words: Vec<String> = text.split_whitespace().map(str::to_ascii_lowercase).collect();
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        match words.as_slice() {
+            ["past", "last", "row"] => Some(Self::PastLastRow),
+            ["to", "next", "row"] => Some(Self::ToNextRow),
+            ["to", "first", variable] => Some(Self::ToFirst(variable.to_ascii_uppercase())),
+            ["to", "last", variable] | ["to", variable] => Some(Self::ToLast(variable.to_ascii_uppercase())),
+            _ => None,
+        }
+    }
+}
+
 /// Finds the matches of a row pattern (`MATCH_RECOGNIZE`'s `PATTERN`, with variables,
-/// concatenation, `|`, grouping and the `*`, `+`, `?` and `{n,m}` quantifiers, greedy or
-/// reluctant) over `rows`, a JSON array with one object per row saying which variables hold
-/// for it (`{"UP": true, "DOWN": false}`); a variable a row does not mention holds, as an
-/// undefined pattern variable does. Matches don't overlap: after each, the search goes on
+/// concatenation, `|`, grouping, the anchors `^` and `$`, and the `*`, `+`, `?` and `{n,m}`
+/// quantifiers, greedy or reluctant) over `rows`, a JSON array with one object per row saying
+/// which variables hold for it (`{"UP": true, "DOWN": false}`); a variable a row does not
+/// mention holds, as an undefined pattern variable does. After each match the search goes on
 /// past its last row. Returns a JSON array of `{"start", "end", "classifiers"}`, rows counted
 /// from 0.
 pub(crate) fn matches(rows_json: &str, pattern_text: &str) -> SqlResult<String> {
+    matches_skipping(rows_json, pattern_text, "past last row")
+}
+
+/// `matches`, with the search after each match going on where `skip` says: `past last row`,
+/// `to next row`, `to first VAR` or `to last VAR` (`AFTER MATCH SKIP`).
+///
+/// # Errors
+///
+/// An unknown `skip`, or a skip to a variable the match has no row of or to the match's own
+/// first row.
+pub(crate) fn matches_skipping(rows_json: &str, pattern_text: &str, skip: &str) -> SqlResult<String> {
     let invalid = |message: &str| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("row_pattern_matches: {message}"));
     if pattern_text.len() > MOST_PATTERN_BYTES {
         return Err(invalid("the pattern is too long"));
@@ -303,6 +367,7 @@ pub(crate) fn matches(rows_json: &str, pattern_text: &str) -> SqlResult<String> 
     if parser.peek().is_some() {
         return Err(invalid("the pattern is not valid"));
     }
+    let skip = Skip::named(skip).ok_or_else(|| invalid("AFTER MATCH SKIP is PAST LAST ROW, TO NEXT ROW, TO FIRST var or TO LAST var"))?;
     let mut compiler = Compiler { program: Vec::new(), variables: Vec::new() };
     compiler.compile(&pattern).ok_or_else(|| invalid("the pattern is too large"))?;
     compiler.emit(Instruction::Match).ok_or_else(|| invalid("the pattern is too large"))?;
@@ -339,7 +404,20 @@ pub(crate) fn matches(rows_json: &str, pattern_text: &str) -> SqlResult<String> 
                 found += 1;
                 let classifiers: Vec<String> = assigned.iter().map(|variable| format!("\"{}\"", compiler.variables[*variable])).collect();
                 out.push_str(&format!("{{\"start\": {start}, \"end\": {}, \"classifiers\": [{}]}}", end - 1, classifiers.join(", ")));
-                start = end;
+                start = match &skip {
+                    Skip::PastLastRow => end,
+                    Skip::ToNextRow => start + 1,
+                    Skip::ToFirst(variable) | Skip::ToLast(variable) => {
+                        let index = compiler.variables.iter().position(|known| known == variable);
+                        let mut offsets = assigned.iter().enumerate().filter(|(_, assigned)| Some(**assigned) == index).map(|(offset, _)| offset);
+                        let offset = if matches!(skip, Skip::ToFirst(_)) { offsets.next() } else { offsets.last() };
+                        match offset {
+                            Some(offset) if offset > 0 => start + offset,
+                            Some(_) => return Err(invalid(&format!("AFTER MATCH SKIP TO {variable} would start the next match on the first row of this one"))),
+                            None => return Err(invalid(&format!("AFTER MATCH SKIP TO {variable}: the match has no {variable} row"))),
+                        }
+                    }
+                };
             }
             _ => start += 1,
         }
@@ -361,6 +439,19 @@ mod tests {
         );
         assert_eq!(matches(rows, "DOWN{2} UP?").unwrap(), r#"[{"start": 1, "end": 3, "classifiers": ["DOWN", "DOWN", "UP"]}]"#);
         assert_eq!(matches(rows, "(UP | DOWN)+?").unwrap().matches("start").count(), 5);
+    }
+
+    #[test]
+    fn skip_modes_and_anchors() {
+        let rows = r#"[{"A": true}, {"A": true}, {"A": true}]"#;
+        assert_eq!(matches_skipping(rows, "A A", "to next row").unwrap().matches("start").count(), 2);
+        assert_eq!(matches_skipping(rows, "A A", "past last row").unwrap().matches("start").count(), 1);
+        assert_eq!(matches_skipping(rows, "A B", "to last B").unwrap().matches("start").count(), 2);
+        assert!(matches_skipping(rows, "A B?", "to first A").is_err());
+        assert!(matches_skipping(rows, "A", "to last C").is_err());
+        assert!(matches_skipping(rows, "A", "sideways").is_err());
+        assert_eq!(matches(rows, "^ A").unwrap(), r#"[{"start": 0, "end": 0, "classifiers": ["A"]}]"#);
+        assert_eq!(matches(rows, "A $").unwrap(), r#"[{"start": 2, "end": 2, "classifiers": ["A"]}]"#);
     }
 
     #[test]

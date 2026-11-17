@@ -373,6 +373,35 @@ mod tests {
             .unwrap(),
             "symbol|start_at|bottom|end_at|downs|match_no|last_kind|opening|rebound\nEGG|1|7|5|2|1|UP|10|5\nSELECT 1"
         );
-        assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at ALL ROWS PER MATCH PATTERN (A) DEFINE A AS price > 1) AS mr").is_err());
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT symbol, at, price, cls, running_downs, final_end FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at \
+                 MEASURES CLASSIFIER() AS cls, COUNT(DOWN.*) AS running_downs, FINAL LAST(at) AS final_end \
+                 ALL ROWS PER MATCH PATTERN (STRT DOWN+ UP{1,3}) \
+                 DEFINE DOWN AS price < PREV(price), UP AS price > PREV(price)) AS mr ORDER BY at"
+            )
+            .unwrap(),
+            "symbol|at|price|cls|running_downs|final_end\nEGG|1|10|STRT|0|5\nEGG|2|8|DOWN|1|5\nEGG|3|7|DOWN|2|5\nEGG|4|9|UP|2|5\nEGG|5|12|UP|2|5\nSELECT 5"
+        );
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT count(*) AS matches FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at MEASURES MATCH_NUMBER() AS n \
+                 ONE ROW PER MATCH AFTER MATCH SKIP TO NEXT ROW PATTERN (DOWN+) DEFINE DOWN AS price < PREV(price)) AS mr"
+            )
+            .unwrap(),
+            "matches\n2\nSELECT 1"
+        );
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT count(*) AS matches FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at MEASURES FIRST(at) AS first_at \
+                 PATTERN (^ STRT) DEFINE STRT AS price > 0) AS mr"
+            )
+            .unwrap(),
+            "matches\n2\nSELECT 1"
+        );
+        assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at ALL ROWS PER MATCH WITH UNMATCHED ROWS PATTERN (A) DEFINE A AS price > 1) AS mr").is_err());
     }
 }

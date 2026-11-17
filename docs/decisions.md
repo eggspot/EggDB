@@ -1241,3 +1241,4 @@ its full title with its status.
 - [D1214](decisions/D1214.md) Code-only batch 866 (M10): NEXTVAL once per source row of a multitable insert
 - [D1215](decisions/D1215.md) Code-only batch 867 (M12): pgRouting's graph structure and all-pairs functions
 - [D1216](decisions/D1216.md) Code-only batch 868 (M12): pgRouting's Bellman–Ford, DAG shortest path and biconnected components
+- [D1217](decisions/D1217.md) Code-only batch 869 (M16): ALL ROWS PER MATCH, running measures, skip modes and anchors in MATCH_RECOGNIZE

@@ -4117,7 +4117,11 @@ SELECT cron.schedule('* * * * *', 'SELECT eggdb_streams.advance(''clicks'')');
   match returns its partition, first and last row and the variable each row matched. For a V shape in prices:
   `SELECT * FROM eggdb_streams.match_recognize('SELECT symbol, at, price, lag(price) OVER (PARTITION BY symbol ORDER
   BY at) AS previous FROM ticks', 'symbol', 'at', 'strt down+ up+', '{"down": "price < previous", "up": "price >
-  previous"}')`. `row_pattern_matches(rows, pattern)` is the matcher on its own.
+  previous"}')`. `row_pattern_matches(rows, pattern [, skip])` is the matcher on its own.
+- The `MATCH_RECOGNIZE` clause after a table or subquery (D1067) takes `ONE ROW PER MATCH` or `ALL ROWS PER MATCH
+  [OMIT EMPTY MATCHES]` (each row of each match with the source's columns and the measures, `RUNNING` by default,
+  `FINAL` when asked), `AFTER MATCH SKIP PAST LAST ROW`, `TO NEXT ROW`, `TO FIRST var` and `TO [LAST] var`, and `^`
+  for the partition's first row in `PATTERN` (D1217).
 
 ## Sign-in for applications (eggdb_app_auth)
 
