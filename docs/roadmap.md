@@ -993,7 +993,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   operations (D327). `UPDATE` and `DELETE` without `FROM` or `USING`: **code written, unbuilt** (code-only mode,
   2026-11-17, D1223). Left: joined writes, derived tables, `WITH` and set operations.
 - Subqueries in Oracle's, SQL Server's, SQLite's and MySQL's tabular plans (D327). SQLite's `EXPLAIN QUERY PLAN`:
-  **code written, unbuilt** (code-only mode, 2026-11-17, D1226). Left: Oracle's, SQL Server's and MySQL's.
+  **code written, unbuilt** (code-only mode, 2026-11-17, D1226); MySQL's tabular `EXPLAIN`: **code written, unbuilt**
+  (code-only mode, 2026-11-17, D1227). Left: Oracle's and SQL Server's.
 - An index used for a comparison with an `InitPlan`'s `$k` (D327).
 - Times on each iterator inside a subplan in `EXPLAIN ANALYZE` (D327).
 - Times on the steps inside a join (a counter per level in `JoinedRows::extend`, inner `loops` =

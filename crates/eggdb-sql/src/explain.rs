@@ -92,7 +92,7 @@ pub(crate) fn shows_subplans(style: ExplainStyle, dialect: Dialect) -> bool {
         | ExplainStyle::PostgresJson
         | ExplainStyle::PostgresYaml
         | ExplainStyle::PostgresXml => true,
-        ExplainStyle::Plan => matches!(dialect, Dialect::PostgreSql | Dialect::Sqlite),
+        ExplainStyle::Plan => matches!(dialect, Dialect::PostgreSql | Dialect::Sqlite | Dialect::MySql),
         ExplainStyle::QueryPlan => true,
         ExplainStyle::Json => false,
     }
@@ -852,6 +852,24 @@ fn mysql_access(source: &ExplainedSource) -> (&'static str, Option<KeyChoice>) {
 }
 
 fn mysql_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    let select_type = if query.subplans.is_empty() { "SIMPLE" } else { "PRIMARY" };
+    let mut next = 2;
+    mysql_select_rows(query, 1, select_type, &mut next, &mut rows);
+    rows
+}
+
+fn mysql_select_rows(query: &ExplainedQuery, id: i64, select_type: &str, next: &mut i64, rows: &mut Vec<Vec<Value>>) {
+    rows.extend(mysql_source_rows(query, id, select_type));
+    for subplan in &query.subplans {
+        let subquery_id = *next;
+        *next += 1;
+        let kind = if subplan.correlated { "DEPENDENT SUBQUERY" } else { "SUBQUERY" };
+        mysql_select_rows(&subplan.plan, subquery_id, kind, next, rows);
+    }
+}
+
+fn mysql_source_rows(query: &ExplainedQuery, id: i64, select_type: &str) -> Vec<Vec<Value>> {
     let null = || Value::Null;
     let text = |text: &str| Value::Text(text.to_owned());
     query
@@ -876,8 +894,8 @@ fn mysql_rows(query: &ExplainedQuery) -> Vec<Vec<Value>> {
             }
             let key = key.map(|key| key_name(table, key, Dialect::MySql));
             vec![
-                Value::BigInt(1),
-                text("SIMPLE"),
+                Value::BigInt(id),
+                text(select_type),
                 text(&source.label),
                 null(),
                 text(kind),

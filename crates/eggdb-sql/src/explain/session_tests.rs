@@ -778,3 +778,21 @@ fn update_and_delete_show_the_subplans_of_their_conditions_and_assignments() {
         1
     );
 }
+
+#[test]
+fn mysql_tabular_explain_lists_subqueries_as_their_own_selects() {
+    let store = MemoryStore::default();
+    let mut session = mysql_tables(&store);
+    let text = last(
+        &mut session,
+        "EXPLAIN SELECT a FROM t1 WHERE a IN (SELECT c2 FROM t2) AND b > (SELECT min(c1) FROM t2 WHERE t2.c2 = t1.a)",
+    );
+    let lines: Vec<&str> = text.lines().skip(1).collect();
+    assert!(lines[0].starts_with("1|PRIMARY|t1|"), "{text}");
+    assert!(lines.iter().any(|line| line.contains("|SUBQUERY|t2|")), "{text}");
+    assert!(lines.iter().any(|line| line.contains("|DEPENDENT SUBQUERY|t2|")), "{text}");
+    assert!(
+        last(&mut session, "EXPLAIN SELECT a FROM t1").contains("|SIMPLE|t1|"),
+        "a query without subqueries stays SIMPLE"
+    );
+}
