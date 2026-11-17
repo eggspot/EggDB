@@ -299,6 +299,54 @@ impl ServedDatabases for ServedDirectory<'_> {
         Ok(())
     }
 
+    fn create_from(&self, name: &str, template: &str) -> Result<(), ServedDatabaseError> {
+        let directory = self.changing_directory()?;
+        if !is_valid_database_name(name) {
+            return Err(ServedDatabaseError::Failed(format!(
+                "\"{name}\" cannot name a database file"
+            )));
+        }
+        let mut others = self.others();
+        if name.eq_ignore_ascii_case(&self.default_name) || served_key(&others, name).is_some() {
+            return Err(ServedDatabaseError::Exists);
+        }
+        let path = match &self.tenants {
+            Some(tenants) => tenants.path_of(name),
+            None => directory.join(format!("{name}.{DATABASE_EXTENSION}")),
+        };
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Err(ServedDatabaseError::Exists);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ServedDatabaseError::Failed(format!("cannot create {}: {error}", parent.display()))
+            })?;
+        }
+        let copied = if template.eq_ignore_ascii_case(&self.default_name) {
+            self.default.0.backup_to(&path)
+        } else {
+            let store = served_key(&others, template)
+                .and_then(|key| others.get(key))
+                .map(Arc::clone)
+                .ok_or(ServedDatabaseError::Missing)?;
+            store.0.backup_to(&path)
+        };
+        copied.map_err(|error| {
+            ServedDatabaseError::Failed(format!("cannot copy {template} to {}: {error}", path.display()))
+        })?;
+        let options = self.options.clone().create_if_missing(false).read_only(false);
+        let db = Database::open_with(&path, options).map_err(|error| {
+            ServedDatabaseError::Failed(format!("cannot open {}: {error}", path.display()))
+        })?;
+        others.insert(name.to_owned(), Arc::new(OwnedStore(db)));
+        if let Some(tenants) = &self.tenants {
+            tenants.touch(name);
+            self.close_idle_tenants(&mut others);
+        }
+        self.changed_listing();
+        Ok(())
+    }
+
     fn drop_database(&self, name: &str) -> Result<(), ServedDatabaseError> {
         self.changing_directory()?;
         if name.eq_ignore_ascii_case(&self.default_name) {

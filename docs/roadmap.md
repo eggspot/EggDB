@@ -962,7 +962,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   legal check (D54). SCIM 2.0 provisioning of roles at `/scim/v2`: **code written, unbuilt** (code-only mode,
   2026-11-17, D1198). Left: the LDAP v3 server and MS-ADTS.
 - Isolation of tenants by schema or by database, beside isolation by row (D32, D234). By schema: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D764). Left: by database.
+  unbuilt** (code-only mode, 2026-11-12, D764); by database, through `CREATE DATABASE ... TEMPLATE`: **code written,
+  unbuilt** (code-only mode, 2026-11-17, D1199).
 - SECURITY.md's scope: denial of service from hostile input, sandbox escapes and protocol attacks
   (D45). **Written** (2026-11-17): SECURITY.md's Scope section.
 

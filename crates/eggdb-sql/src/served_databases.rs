@@ -40,6 +40,15 @@ pub trait ServedDatabases: Sync {
     /// Creates an empty database named `name`, which [`is_valid_database_name`] accepts.
     fn create(&self, name: &str) -> Result<(), ServedDatabaseError>;
 
+    /// Creates the database named `name` as a copy of the served database `template` at its
+    /// last commit (`CREATE DATABASE ... TEMPLATE`, D1199). Unsupported by default.
+    fn create_from(&self, name: &str, template: &str) -> Result<(), ServedDatabaseError> {
+        let _ = (name, template);
+        Err(ServedDatabaseError::Unsupported(
+            "this server cannot copy a database".to_owned(),
+        ))
+    }
+
     /// Drops the database named `name` and removes its data, unless a session is connected to
     /// it.
     fn drop_database(&self, name: &str) -> Result<(), ServedDatabaseError>;
@@ -173,7 +182,11 @@ fn is_reserved_device_name(name: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DatabaseStatement {
-    Create { name: Name, if_not_exists: bool },
+    Create {
+        name: Name,
+        if_not_exists: bool,
+        template: Option<Name>,
+    },
     Drop { names: Vec<Name>, if_exists: bool },
 }
 
@@ -215,6 +228,7 @@ pub(crate) fn run(
         DatabaseStatement::Create {
             name,
             if_not_exists,
+            template,
         } => {
             if !(context.superuser || context.may_create_databases) {
                 return Err(denied("create database").at(name.position));
@@ -222,10 +236,22 @@ pub(crate) fn run(
             if !is_valid_database_name(&name.text) {
                 return Err(invalid_name(&name.text).at(name.position));
             }
-            match served.create(&name.text) {
+            let created = match template {
+                Some(template) => served.create_from(&name.text, &template.text),
+                None => served.create(&name.text),
+            };
+            match created {
                 Ok(()) => Ok(QueryResult::command(tag)),
                 Err(ServedDatabaseError::Exists) if *if_not_exists => Ok(QueryResult::command(tag)
                     .with_notice(exists_notice(&name.text, context.dialect))),
+                Err(ServedDatabaseError::Missing) if template.is_some() => Err(SqlError::new(
+                    SqlState::INVALID_CATALOG_NAME,
+                    format!(
+                        "template database \"{}\" does not exist",
+                        template.as_ref().map_or("", |template| template.text.as_str())
+                    ),
+                )
+                .at(name.position)),
                 Err(error) => {
                     Err(create_error(&name.text, &error, context.dialect).at(name.position))
                 }
@@ -445,6 +471,13 @@ mod tests {
             Ok(())
         }
 
+        fn create_from(&self, name: &str, template: &str) -> Result<(), ServedDatabaseError> {
+            if !self.databases.lock().unwrap().iter().any(|(known, _)| known == template) {
+                return Err(ServedDatabaseError::Missing);
+            }
+            self.create(name)
+        }
+
         fn drop_database(&self, name: &str) -> Result<(), ServedDatabaseError> {
             let mut databases = self.databases.lock().unwrap();
             let Some(at) = databases.iter().position(|(known, _)| known == name) else {
@@ -483,6 +516,18 @@ mod tests {
         let mut session = Session::new(&store);
         assert_eq!(code(&mut session, "CREATE DATABASE shop"), "0A000");
         assert_eq!(code(&mut session, "DROP DATABASE shop"), "0A000");
+    }
+
+    #[test]
+    fn a_database_is_made_from_a_template_database() {
+        let store = MemoryStore::default();
+        let served = Served::with(&[("main", 1), ("tenant_template", 0)]);
+        let mut session = Session::new(&store);
+        session.identify("eggdb", "main");
+        session.set_served_databases(&served);
+        run(&mut session, "CREATE DATABASE acme TEMPLATE tenant_template").unwrap();
+        assert!(listed(&mut session).contains("acme"));
+        assert_eq!(code(&mut session, "CREATE DATABASE other TEMPLATE = missing"), "3D000");
     }
 
     #[test]

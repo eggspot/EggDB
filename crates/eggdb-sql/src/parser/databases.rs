@@ -14,11 +14,34 @@ impl Parser<'_> {
         self.at += 1;
         let if_not_exists = self.mysql() && self.if_not_exists()?;
         let name = self.name()?;
+        let template = match self.postgresql() {
+            true => self.database_template()?,
+            false => None,
+        };
         self.skip_database_options();
         Ok(Statement::Database(DatabaseStatement::Create {
             name,
             if_not_exists,
+            template,
         }))
+    }
+
+    fn database_template(&mut self) -> SqlResult<Option<crate::ast::Name>> {
+        let mut at = self.at;
+        loop {
+            match &self.tokens.get(at).map(|token| &token.kind) {
+                None | Some(TokenKind::Semicolon | TokenKind::End) => return Ok(None),
+                Some(TokenKind::Word(word)) if word.as_ref() == "template" => break,
+                _ => at += 1,
+            }
+        }
+        self.at = at + 1;
+        self.take_operator("=");
+        let template = self.name()?;
+        Ok(match template.text.as_str() {
+            "template0" | "template1" => None,
+            _ => Some(template),
+        })
     }
 
     pub(super) fn drop_database(&mut self) -> SqlResult<Statement> {
