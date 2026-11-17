@@ -3275,6 +3275,9 @@ it is reached by) and `pgr_connectedComponents(edges_sql)`, where `edges_sql` re
 `source`, `target`, `cost` and optionally `reverse_cost` (a negative cost means no way in that direction). The graph
 code underneath is EggDB's own: `eggdb_route_dijkstra(edges, start, end, directed)`, `eggdb_route_reach(edges, start,
 distance, directed)` and `eggdb_route_components(edges)` take the edges as a JSON array and return JSON.
+`pgr_strongComponents`, `pgr_articulationPoints`, `pgr_bridges`, `pgr_topologicalSort` (an error for a graph with
+a cycle), `pgr_floydWarshall(edges_sql [, directed])` and `pgr_johnson` (the cheapest cost between every two
+connected nodes, up to 4,096 nodes) work as in pgRouting (D1215).
 
 Geometries of two different SRIDs are refused, as in PostGIS. Not yet: a stored geometry type
 (values are text, shown as EWKT rather than hex EWKB), spatial indexes (R-tree/GiST), Z and M

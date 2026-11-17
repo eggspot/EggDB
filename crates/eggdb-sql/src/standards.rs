@@ -1,7 +1,7 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 31] = [
+pub(crate) const FUNCTIONS: [&str; 36] = [
     "eggdb_column_lineage",
     "image_rendition",
     "eggdb_pdf_table",
@@ -18,6 +18,11 @@ pub(crate) const FUNCTIONS: [&str; 31] = [
     "eggdb_route_max_flow",
     "eggdb_route_traversal",
     "eggdb_route_ksp",
+    "eggdb_route_strong_components",
+    "eggdb_route_articulation_points",
+    "eggdb_route_bridges",
+    "eggdb_route_topological_sort",
+    "eggdb_route_all_pairs",
     "modbus_decode",
     "spreadsheet_recalculate",
     "row_pattern_matches",
@@ -489,6 +494,14 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_reach takes edges, a start, a distance and whether the graph is directed")),
             },
             ("eggdb_route_components", Some(edges)) => crate::routing::connected_components(&edges).and_then(jsonb),
+            ("eggdb_route_strong_components", Some(edges)) => crate::routing::strong_components(&edges).and_then(jsonb),
+            ("eggdb_route_articulation_points", Some(edges)) => crate::routing::articulation_points(&edges).and_then(jsonb),
+            ("eggdb_route_bridges", Some(edges)) => crate::routing::bridges(&edges).and_then(jsonb),
+            ("eggdb_route_topological_sort", Some(edges)) => crate::routing::topological_sort(&edges).and_then(jsonb),
+            ("eggdb_route_all_pairs", Some(edges)) => match flag(1) {
+                Some(directed) => crate::routing::all_pairs(&edges, directed).and_then(jsonb),
+                None => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_all_pairs takes edges and whether the graph is directed")),
+            },
             ("eggdb_route_spanning_tree", Some(edges)) => match values.get(1).and_then(Value::to_text).as_deref() {
                 Some("kruskal") | None => crate::routing::spanning_tree(&edges, false).and_then(jsonb),
                 Some("prim") => crate::routing::spanning_tree(&edges, true).and_then(jsonb),

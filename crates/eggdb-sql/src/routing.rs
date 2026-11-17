@@ -3,6 +3,10 @@ use crate::json::{Json, Node, parse_document};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
+mod structure;
+
+pub(crate) use structure::{all_pairs, articulation_points, bridges, strong_components, topological_sort};
+
 const MOST_EDGES: usize = 5_000_000;
 
 #[derive(Debug, Clone, Copy)]

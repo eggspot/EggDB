@@ -1239,3 +1239,4 @@ its full title with its status.
 - [D1212](decisions/D1212.md) Code-only batch 864 (M8): The ispell text search template
 - [D1213](decisions/D1213.md) Code-only batch 865 (M10): CONNECT BY over a join
 - [D1214](decisions/D1214.md) Code-only batch 866 (M10): NEXTVAL once per source row of a multitable insert
+- [D1215](decisions/D1215.md) Code-only batch 867 (M12): pgRouting's graph structure and all-pairs functions

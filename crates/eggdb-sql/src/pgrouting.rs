@@ -7,7 +7,9 @@
 /// nearest-neighbour and 2-opt code, and `pgr_analyzeGraph`, which checks a topology (D882);
 /// `pgr_nodeNetwork`, which cuts edges where they cross (D883); and `pgr_kruskal`, `pgr_prim`,
 /// `pgr_maxFlow`, `pgr_pushRelabel`, `pgr_edmondsKarp` and `pgr_boykovKolmogorov` (D905); and
-/// `pgr_depthFirstSearch`, `pgr_breadthFirstSearch` and `pgr_KSP`, Yen's k shortest paths (D969).
+/// `pgr_depthFirstSearch`, `pgr_breadthFirstSearch` and `pgr_KSP`, Yen's k shortest paths (D969);
+/// and `pgr_strongComponents`, `pgr_articulationPoints`, `pgr_bridges`, `pgr_topologicalSort`,
+/// `pgr_floydWarshall` and `pgr_johnson` (D1215).
 pub(crate) const PGROUTING_SCRIPT: &str = r#"
 CREATE SCHEMA pgrouting;
 CREATE FUNCTION public.pgr_edges_json(edges_sql text) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -175,6 +177,24 @@ CREATE FUNCTION public.pgr_depthfirstsearch(edges_sql text, root_vid bigint, dir
 $$;
 CREATE FUNCTION public.pgr_breadthfirstsearch(edges_sql text, root_vid bigint, directed boolean DEFAULT true, max_depth bigint DEFAULT 9223372036854775807) RETURNS TABLE (seq bigint, depth bigint, start_vid bigint, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE sql AS $$
     SELECT * FROM public.pgr_traversal_rows(eggdb_route_traversal(public.pgr_edges_json(edges_sql), root_vid, directed, max_depth, 'breadth'))
+$$;
+CREATE FUNCTION public.pgr_strongcomponents(edges_sql text) RETURNS TABLE (seq bigint, component bigint, node bigint) LANGUAGE sql AS $$
+    SELECT row_number() OVER ()::bigint, (s.value ->> 'component')::bigint, (s.value ->> 'node')::bigint FROM jsonb_array_elements(eggdb_route_strong_components(public.pgr_edges_json(edges_sql))) s
+$$;
+CREATE FUNCTION public.pgr_articulationpoints(edges_sql text) RETURNS TABLE (node bigint) LANGUAGE sql AS $$
+    SELECT (s.value ->> 'node')::bigint FROM jsonb_array_elements(eggdb_route_articulation_points(public.pgr_edges_json(edges_sql))) s
+$$;
+CREATE FUNCTION public.pgr_bridges(edges_sql text) RETURNS TABLE (edge bigint) LANGUAGE sql AS $$
+    SELECT (s.value ->> 'edge')::bigint FROM jsonb_array_elements(eggdb_route_bridges(public.pgr_edges_json(edges_sql))) s
+$$;
+CREATE FUNCTION public.pgr_topologicalsort(edges_sql text) RETURNS TABLE (seq integer, sorted_v bigint) LANGUAGE sql AS $$
+    SELECT row_number() OVER ()::integer, (s.value ->> 'node')::bigint FROM jsonb_array_elements(eggdb_route_topological_sort(public.pgr_edges_json(edges_sql))) s
+$$;
+CREATE FUNCTION public.pgr_floydwarshall(edges_sql text, directed boolean DEFAULT true) RETURNS TABLE (start_vid bigint, end_vid bigint, agg_cost double precision) LANGUAGE sql AS $$
+    SELECT (s.value ->> 'start_vid')::bigint, (s.value ->> 'end_vid')::bigint, (s.value ->> 'agg_cost')::double precision FROM jsonb_array_elements(eggdb_route_all_pairs(public.pgr_edges_json(edges_sql), directed)) s
+$$;
+CREATE FUNCTION public.pgr_johnson(edges_sql text, directed boolean DEFAULT true) RETURNS TABLE (start_vid bigint, end_vid bigint, agg_cost double precision) LANGUAGE sql AS $$
+    SELECT * FROM public.pgr_floydwarshall(edges_sql, directed)
 $$;
 CREATE FUNCTION public.pgr_ksp(edges_sql text, from_vid bigint, to_vid bigint, k integer, directed boolean DEFAULT true) RETURNS TABLE (seq integer, path_id integer, path_seq integer, start_vid bigint, end_vid bigint, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE plpgsql AS $$
 DECLARE
@@ -546,6 +566,45 @@ mod tests {
         assert_eq!(
             run(&mut session, "SELECT sum(flow) AS into_sink FROM pgr_pushRelabel('SELECT id, source, target, capacity FROM pipes', 1, 4) WHERE end_vid = 4").unwrap(),
             "into_sink\n5\nSELECT 1"
+        );
+    }
+
+    #[test]
+    fn graph_structure_and_all_pairs_costs() {
+        let store = MemoryStore::default();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE EXTENSION pgrouting",
+            "CREATE TABLE links (id bigint, source bigint, target bigint, cost double precision)",
+            "INSERT INTO links VALUES (1, 1, 2, 1), (2, 2, 3, 1), (3, 3, 1, 1), (4, 3, 4, 2), (5, 4, 5, 1)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        let edges = "'SELECT id, source, target, cost FROM links'";
+        assert_eq!(
+            run(&mut session, &format!("SELECT component, node FROM pgr_strongComponents({edges})")).unwrap(),
+            "component|node\n1|1\n1|2\n1|3\n4|4\n5|5\nSELECT 5"
+        );
+        assert_eq!(
+            run(&mut session, &format!("SELECT node FROM pgr_articulationPoints({edges})")).unwrap(),
+            "node\n3\n4\nSELECT 2"
+        );
+        assert_eq!(
+            run(&mut session, &format!("SELECT edge FROM pgr_bridges({edges})")).unwrap(),
+            "edge\n4\n5\nSELECT 2"
+        );
+        assert_eq!(
+            run(&mut session, &format!("SELECT agg_cost FROM pgr_floydWarshall({edges}) WHERE start_vid = 1 AND end_vid = 5")).unwrap(),
+            "agg_cost\n5\nSELECT 1"
+        );
+        assert_eq!(
+            run(&mut session, &format!("SELECT count(*) AS pairs FROM pgr_johnson({edges}, false)")).unwrap(),
+            "pairs\n20\nSELECT 1"
+        );
+        assert!(run(&mut session, &format!("SELECT * FROM pgr_topologicalSort({edges})")).is_err());
+        assert_eq!(
+            run(&mut session, "SELECT sorted_v FROM pgr_topologicalSort('SELECT id, source, target, cost FROM links WHERE id <> 3')").unwrap(),
+            "sorted_v\n1\n2\n3\n4\n5\nSELECT 5"
         );
     }
 }
