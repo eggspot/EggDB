@@ -54,10 +54,12 @@ pub(crate) enum InformationRelation {
     UdtPrivileges,
     EnabledRoles,
     ApplicableRoles,
+    RoleRoutineGrants,
+    RoleUdtGrants,
 }
 
 impl InformationRelation {
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::Schemata,
         Self::Tables,
         Self::Columns,
@@ -80,6 +82,8 @@ impl InformationRelation {
         Self::UdtPrivileges,
         Self::EnabledRoles,
         Self::ApplicableRoles,
+        Self::RoleRoutineGrants,
+        Self::RoleUdtGrants,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -106,6 +110,8 @@ impl InformationRelation {
             Self::UdtPrivileges => "udt_privileges",
             Self::EnabledRoles => "enabled_roles",
             Self::ApplicableRoles => "applicable_roles",
+            Self::RoleRoutineGrants => "role_routine_grants",
+            Self::RoleUdtGrants => "role_udt_grants",
         }
     }
 
@@ -141,8 +147,8 @@ impl InformationRelation {
             Self::ColumnPrivileges | Self::RoleColumnGrants => COLUMN_PRIVILEGES_COLUMNS,
             Self::TablePrivileges | Self::RoleTableGrants => TABLE_PRIVILEGES_COLUMNS,
             Self::UsagePrivileges => USAGE_PRIVILEGES_COLUMNS,
-            Self::RoutinePrivileges => ROUTINE_PRIVILEGES_COLUMNS,
-            Self::UdtPrivileges => UDT_PRIVILEGES_COLUMNS,
+            Self::RoutinePrivileges | Self::RoleRoutineGrants => ROUTINE_PRIVILEGES_COLUMNS,
+            Self::UdtPrivileges | Self::RoleUdtGrants => UDT_PRIVILEGES_COLUMNS,
             Self::EnabledRoles => ENABLED_ROLES_COLUMNS,
             Self::ApplicableRoles => APPLICABLE_ROLES_COLUMNS,
         }
@@ -587,8 +593,18 @@ pub(crate) fn rows(snapshot: &CatalogSnapshot, relation: InformationRelation) ->
             privileges::table_privileges_rows(snapshot, privileges::Shown::RolesOnly)
         }
         InformationRelation::UsagePrivileges => privileges::usage_privileges_rows(snapshot),
-        InformationRelation::RoutinePrivileges => privileges::routine_privileges_rows(snapshot),
-        InformationRelation::UdtPrivileges => privileges::udt_privileges_rows(snapshot),
+        InformationRelation::RoutinePrivileges => {
+            privileges::routine_privileges_rows(snapshot, privileges::Shown::WithPublic)
+        }
+        InformationRelation::RoleRoutineGrants => {
+            privileges::routine_privileges_rows(snapshot, privileges::Shown::RolesOnly)
+        }
+        InformationRelation::UdtPrivileges => {
+            privileges::udt_privileges_rows(snapshot, privileges::Shown::WithPublic)
+        }
+        InformationRelation::RoleUdtGrants => {
+            privileges::udt_privileges_rows(snapshot, privileges::Shown::RolesOnly)
+        }
         InformationRelation::EnabledRoles => privileges::enabled_roles_rows(snapshot),
         InformationRelation::ApplicableRoles => privileges::applicable_roles_rows(snapshot),
     }

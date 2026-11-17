@@ -983,3 +983,43 @@ fn schema_type_parameter_and_tablespace_grants_are_stored_and_answered() {
         SqlState::INVALID_GRANT_OPERATION,
     );
 }
+
+#[test]
+fn role_routine_and_udt_grants_list_what_was_granted_to_enabled_roles() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE TYPE pair AS (a integer, b integer)",
+        "GRANT EXECUTE ON FUNCTION add_one(integer) TO joe WITH GRANT OPTION",
+        "GRANT USAGE ON TYPE pair TO staff",
+    ] {
+        shown(&mut admin, sql);
+    }
+    let mut joe = as_role(&store, "joe");
+    assert_eq!(
+        shown(
+            &mut joe,
+            "SELECT routine_schema, routine_name, grantee, is_grantable \
+             FROM information_schema.role_routine_grants"
+        ),
+        "routine_schema|routine_name|grantee|is_grantable\npublic|add_one|joe|YES\nSELECT 1"
+    );
+    assert_eq!(
+        shown(&mut joe, "SELECT count(*) FROM information_schema.role_udt_grants"),
+        "count\n0\nSELECT 1"
+    );
+    let mut carol = as_role(&store, "carol");
+    assert_eq!(
+        shown(
+            &mut carol,
+            "SELECT udt_name, grantee, privilege_type FROM information_schema.role_udt_grants"
+        ),
+        "udt_name|grantee|privilege_type\npair|staff|TYPE USAGE\nSELECT 1"
+    );
+    shown(&mut admin, "REVOKE EXECUTE ON FUNCTION public.add_one(integer) FROM joe");
+    assert_eq!(
+        shown(&mut joe, "SELECT count(*) FROM information_schema.role_routine_grants"),
+        "count\n0\nSELECT 1"
+    );
+}

@@ -204,6 +204,7 @@ impl Parser<'_> {
             "type" | "domain" => Some(ObjectKind::Type),
             "parameter" => Some(ObjectKind::Parameter),
             "tablespace" => Some(ObjectKind::Tablespace),
+            "function" | "procedure" | "routine" => Some(ObjectKind::Routine),
             _ => None,
         }
     }
@@ -231,6 +232,8 @@ impl Parser<'_> {
             } else if self.take_word("alter") {
                 self.expect_word("system")?;
                 privileges.push(ObjectPrivilege::AlterSystem);
+            } else if self.take_word("execute") {
+                privileges.push(ObjectPrivilege::Execute);
             } else {
                 return Err(self.unexpected());
             }
@@ -240,9 +243,9 @@ impl Parser<'_> {
         }
         self.expect_word("on")?;
         self.at += 1;
-        let mut objects = vec![self.name()?.text];
+        let mut objects = vec![self.granted_object(kind)?];
         while self.take(&TokenKind::Comma) {
-            objects.push(self.name()?.text);
+            objects.push(self.granted_object(kind)?);
         }
         if granting || !self.take_word("from") {
             self.expect_word("to")?;
@@ -267,6 +270,33 @@ impl Parser<'_> {
             objects,
             grantees,
         }))
+    }
+
+    fn granted_object(&mut self, kind: ObjectKind) -> SqlResult<String> {
+        let first = self.name()?.text;
+        if kind != ObjectKind::Routine {
+            return Ok(first);
+        }
+        let qualified = match self.take(&TokenKind::Dot) {
+            true => format!("{first}.{}", self.name()?.text),
+            false => format!("{}.{first}", crate::schemas::DEFAULT_SCHEMA),
+        };
+        if self.peek_kind() == &TokenKind::LeftParen {
+            let mut depth = 0usize;
+            loop {
+                match self.peek_kind() {
+                    TokenKind::LeftParen => depth += 1,
+                    TokenKind::RightParen => depth = depth.saturating_sub(1),
+                    TokenKind::Semicolon | TokenKind::End => return Err(self.unexpected()),
+                    _ => {}
+                }
+                self.at += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        Ok(qualified)
     }
 
     pub(super) fn grant_or_revoke_privileges(&mut self, granting: bool) -> SqlResult<Statement> {

@@ -104,7 +104,10 @@ pub(super) fn table_privileges_rows(snapshot: &CatalogSnapshot, shown: Shown) ->
                     .set("table_schema", identifier(&entry.schema))
                     .set("table_name", identifier(&entry.name))
                     .set("privilege_type", character_data(&privilege_name(privilege)))
-                    .set("is_grantable", yes_or_no(false))
+                    .set(
+                        "is_grantable",
+                        yes_or_no(grant.grantable & privilege.bit() != 0),
+                    )
                     .set("with_hierarchy", yes_or_no(privilege == Privilege::Select))
                     .done(),
             );
@@ -333,20 +336,47 @@ fn default_grants<'a>(snapshot: &'a CatalogSnapshot, viewer: &Viewer) -> Vec<Def
     grants
 }
 
-/// `routine_privileges`: `EXECUTE` on every routine, which `PUBLIC` holds by PostgreSQL's
-/// default and EggDB does not check, and, for a superuser session, the owner's own `EXECUTE`
-/// with its grant option, in the order `aclexplode(acldefault('f', proowner))` lists them.
-pub(super) fn routine_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+/// `routine_privileges` (with `PUBLIC`'s default `EXECUTE` on every routine, which EggDB does
+/// not check, and, for a superuser session, the owner's own `EXECUTE` with its grant option)
+/// and `role_routine_grants` (without them): then each stored `GRANT EXECUTE` (D1191) whose
+/// grantee is an enabled role of the current user.
+pub(super) fn routine_privileges_rows(snapshot: &CatalogSnapshot, shown: Shown) -> Vec<Vec<Value>> {
+    let relation = match shown {
+        Shown::WithPublic => InformationRelation::RoutinePrivileges,
+        Shown::RolesOnly => InformationRelation::RoleRoutineGrants,
+    };
     let viewer = Viewer::of(snapshot);
-    let grants = default_grants(snapshot, &viewer);
+    let defaults = match shown {
+        Shown::WithPublic => default_grants(snapshot, &viewer),
+        Shown::RolesOnly => Vec::new(),
+    };
     let mut rows = Vec::new();
     for routine in &snapshot.routines {
         let specific = super::specific_name(routine);
-        for grant in &grants {
+        let object = format!("{}.{}", routine.schema, routine.name);
+        let stored = crate::roles::object_grants_on(
+            &snapshot.access,
+            crate::roles::ObjectKind::Routine,
+            &object,
+        )
+        .unwrap_or_default();
+        let granted = defaults
+            .iter()
+            .map(|grant| (grant.grantee.to_owned(), grant.is_grantable))
+            .chain(
+                stored
+                    .into_iter()
+                    .filter(|grant| viewer.sees(&grant.grantee, shown))
+                    .map(|grant| {
+                        let grantable = grant.grantable & crate::roles::ObjectPrivilege::Execute.bit() != 0;
+                        (String::from(shown_grantee(&grant.grantee)), grantable)
+                    }),
+            );
+        for (grantee, is_grantable) in granted {
             rows.push(
-                InformationRow::new(InformationRelation::RoutinePrivileges)
+                InformationRow::new(relation)
                     .set("grantor", identifier(&snapshot.user))
-                    .set("grantee", identifier(grant.grantee))
+                    .set("grantee", identifier(&grantee))
                     .set("specific_catalog", identifier(&snapshot.database))
                     .set("specific_schema", identifier(&routine.schema))
                     .set("specific_name", identifier(&specific))
@@ -354,7 +384,7 @@ pub(super) fn routine_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Val
                     .set("routine_schema", identifier(&routine.schema))
                     .set("routine_name", identifier(&routine.name))
                     .set("privilege_type", character_data("EXECUTE"))
-                    .set("is_grantable", yes_or_no(grant.is_grantable))
+                    .set("is_grantable", yes_or_no(is_grantable))
                     .done(),
             );
         }
@@ -362,33 +392,57 @@ pub(super) fn routine_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Val
     rows
 }
 
-/// `udt_privileges`: `TYPE USAGE` on every composite type, held by `PUBLIC` by PostgreSQL's
-/// default and never checked by EggDB, and, for a superuser session, by the owner with its grant
-/// option.
-pub(super) fn udt_privileges_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+/// `udt_privileges` (with `PUBLIC`'s default `TYPE USAGE` on every composite type and, for a
+/// superuser session, the owner's with its grant option) and `role_udt_grants` (without them):
+/// then each stored `GRANT USAGE ON TYPE` (D1190) whose grantee is an enabled role of the
+/// current user.
+pub(super) fn udt_privileges_rows(snapshot: &CatalogSnapshot, shown: Shown) -> Vec<Vec<Value>> {
+    let relation = match shown {
+        Shown::WithPublic => InformationRelation::UdtPrivileges,
+        Shown::RolesOnly => InformationRelation::RoleUdtGrants,
+    };
     let viewer = Viewer::of(snapshot);
-    let grants = default_grants(snapshot, &viewer);
+    let defaults = match shown {
+        Shown::WithPublic => default_grants(snapshot, &viewer),
+        Shown::RolesOnly => Vec::new(),
+    };
     let mut rows = Vec::new();
     for found in snapshot.user_types.types() {
         if !matches!(found.body, crate::user_types::TypeBody::Composite(_)) {
             continue;
         }
-        for grant in &grants {
+        let base = crate::schemas::base_name(&found.name);
+        let stored = crate::roles::object_grants_on(
+            &snapshot.access,
+            crate::roles::ObjectKind::Type,
+            base,
+        )
+        .unwrap_or_default();
+        let granted = defaults
+            .iter()
+            .map(|grant| (grant.grantee.to_owned(), grant.is_grantable))
+            .chain(
+                stored
+                    .into_iter()
+                    .filter(|grant| viewer.sees(&grant.grantee, shown))
+                    .map(|grant| {
+                        let grantable = grant.grantable & crate::roles::ObjectPrivilege::Usage.bit() != 0;
+                        (String::from(shown_grantee(&grant.grantee)), grantable)
+                    }),
+            );
+        for (grantee, is_grantable) in granted {
             rows.push(
-                InformationRow::new(InformationRelation::UdtPrivileges)
+                InformationRow::new(relation)
                     .set("grantor", identifier(&snapshot.user))
-                    .set("grantee", identifier(grant.grantee))
+                    .set("grantee", identifier(&grantee))
                     .set("udt_catalog", identifier(&snapshot.database))
                     .set(
                         "udt_schema",
                         identifier(crate::schemas::schema_of(&found.name)),
                     )
-                    .set(
-                        "udt_name",
-                        identifier(crate::schemas::base_name(&found.name)),
-                    )
+                    .set("udt_name", identifier(base))
                     .set("privilege_type", character_data("TYPE USAGE"))
-                    .set("is_grantable", yes_or_no(grant.is_grantable))
+                    .set("is_grantable", yes_or_no(is_grantable))
                     .done(),
             );
         }

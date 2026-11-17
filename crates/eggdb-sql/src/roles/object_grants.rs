@@ -13,6 +13,7 @@ pub(crate) enum ObjectKind {
     Type,
     Parameter,
     Tablespace,
+    Routine,
 }
 
 impl ObjectKind {
@@ -22,6 +23,7 @@ impl ObjectKind {
             Self::Type => 2,
             Self::Parameter => 3,
             Self::Tablespace => 4,
+            Self::Routine => 5,
         }
     }
 
@@ -32,6 +34,7 @@ impl ObjectKind {
             Self::Type => &[ObjectPrivilege::Usage],
             Self::Parameter => &[ObjectPrivilege::Set, ObjectPrivilege::AlterSystem],
             Self::Tablespace => &[ObjectPrivilege::Create],
+            Self::Routine => &[ObjectPrivilege::Execute],
         }
     }
 
@@ -42,6 +45,7 @@ impl ObjectKind {
             Self::Type => "type",
             Self::Parameter => "parameter",
             Self::Tablespace => "tablespace",
+            Self::Routine => "function",
         }
     }
 }
@@ -53,6 +57,7 @@ pub(crate) enum ObjectPrivilege {
     Create,
     Set,
     AlterSystem,
+    Execute,
 }
 
 impl ObjectPrivilege {
@@ -62,6 +67,7 @@ impl ObjectPrivilege {
             Self::Create => 2,
             Self::Set => 4,
             Self::AlterSystem => 8,
+            Self::Execute => 16,
         }
     }
 
@@ -72,6 +78,7 @@ impl ObjectPrivilege {
             Self::Create => "CREATE",
             Self::Set => "SET",
             Self::AlterSystem => "ALTER SYSTEM",
+            Self::Execute => "EXECUTE",
         }
     }
 }
