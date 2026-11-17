@@ -14,6 +14,7 @@ struct Recognition {
     all_rows: bool,
     skip: String,
     pattern: String,
+    subsets: Vec<(String, Vec<String>)>,
     definitions: Vec<(String, String)>,
 }
 
@@ -243,22 +244,33 @@ impl<'r> Rewriter<'r> {
 struct MatchRows {
     partition_join: String,
     end: String,
+    subsets: Vec<(String, Vec<String>)>,
 }
 
 const START: &str = "(mr_m.mr_found ->> 'start')::bigint";
 const END: &str = "(mr_m.mr_found ->> 'end')::bigint";
 
 impl MatchRows {
+    fn classified_as(&self, variable: &str) -> String {
+        match self.subsets.iter().find(|(name, _)| name == variable) {
+            Some((_, members)) => format!(
+                "IN ({})",
+                members.iter().map(|member| quoted_literal(member)).collect::<Vec<_>>().join(", ")
+            ),
+            None => format!("= {}", quoted_literal(variable)),
+        }
+    }
+
     fn position(&self, first: bool, variable: Option<&str>) -> String {
         match variable {
             None if first => START.to_owned(),
             None => self.end.clone(),
             Some(variable) => format!(
-                "SELECT {}(mr_numbered.mr_row) FROM mr_numbered WHERE mr_numbered.mr_row BETWEEN {START} AND {}{} AND mr_m.mr_found -> 'classifiers' ->> (mr_numbered.mr_row - {START})::integer = {}",
+                "SELECT {}(mr_numbered.mr_row) FROM mr_numbered WHERE mr_numbered.mr_row BETWEEN {START} AND {}{} AND mr_m.mr_found -> 'classifiers' ->> (mr_numbered.mr_row - {START})::integer {}",
                 if first { "min" } else { "max" },
                 self.end,
                 self.partition_join,
-                quoted_literal(variable)
+                self.classified_as(variable)
             ),
         }
     }
@@ -274,8 +286,8 @@ impl MatchRows {
     fn aggregate(&self, function: &str, value: &str, variable: Option<&str>) -> String {
         let only = variable.map_or_else(String::new, |variable| {
             format!(
-                " AND mr_m.mr_found -> 'classifiers' ->> (mr_numbered.mr_row - {START})::integer = {}",
-                quoted_literal(variable)
+                " AND mr_m.mr_found -> 'classifiers' ->> (mr_numbered.mr_row - {START})::integer {}",
+                self.classified_as(variable)
             )
         });
         format!(
@@ -392,8 +404,27 @@ impl Parser<'_> {
         self.expect(&TokenKind::LeftParen)?;
         let pattern = self.clause_text(&[])?;
         self.expect(&TokenKind::RightParen)?;
-        if self.is_word("subset") {
-            return Err(self.not_supported("SUBSET in MATCH_RECOGNIZE"));
+        let mut subsets = Vec::new();
+        if self.take_word("subset") {
+            loop {
+                let name = self.name()?.text.to_uppercase();
+                if !self.take_operator("=") {
+                    return Err(self.unexpected());
+                }
+                self.expect(&TokenKind::LeftParen)?;
+                let mut members = Vec::new();
+                loop {
+                    members.push(self.name()?.text.to_uppercase());
+                    if !self.take(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RightParen)?;
+                subsets.push((name, members));
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
         }
         self.expect_word("define")?;
         let mut definitions = Vec::new();
@@ -406,7 +437,7 @@ impl Parser<'_> {
             }
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(Recognition { partitions, order, measures, all_rows, skip, pattern, definitions })
+        Ok(Recognition { partitions, order, measures, all_rows, skip, pattern, subsets, definitions })
     }
 
     /// SQL:2016's `MATCH_RECOGNIZE` after a table or subquery whose SQL is `source`, with
@@ -426,6 +457,16 @@ impl Parser<'_> {
                 variables.push(named);
             }
         }
+        for (name, members) in &recognition.subsets {
+            if variables.contains(name) {
+                return Err(SqlError::syntax(format!("the union variable {name} is already a pattern variable"), self.position()));
+            }
+            if let Some(unknown) = members.iter().find(|member| !variables.contains(member)) {
+                return Err(SqlError::syntax(format!("{unknown} in SUBSET {name} is not a pattern variable"), self.position()));
+            }
+        }
+        let primary_variables = variables.clone();
+        variables.extend(recognition.subsets.iter().map(|(name, _)| name.clone()));
         let partition_list = recognition.partitions.join(", ");
         let window = if partition_list.is_empty() {
             format!("ORDER BY {}", recognition.order)
@@ -434,7 +475,7 @@ impl Parser<'_> {
         };
         let mut flags = Vec::new();
         for (variable, condition) in &recognition.definitions {
-            let rewritten = Rewriter::new(condition, self.dialect, &variables)?.condition(variable, &window)?;
+            let rewritten = Rewriter::new(condition, self.dialect, &primary_variables)?.condition(variable, &window)?;
             flags.push(format!("{}, coalesce(({rewritten}), false)", quoted_literal(variable)));
         }
         let partition_join: String = recognition
@@ -446,10 +487,12 @@ impl Parser<'_> {
         let final_rows = MatchRows {
             partition_join: partition_join.clone(),
             end: END.to_owned(),
+            subsets: recognition.subsets.clone(),
         };
         let running_rows = MatchRows {
             partition_join,
             end: format!("mr_a.{hidden_row}"),
+            subsets: recognition.subsets.clone(),
         };
         let mut selected: Vec<String> = if recognition.all_rows {
             vec!["mr_a.*".to_owned()]

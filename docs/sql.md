@@ -4121,7 +4121,8 @@ SELECT cron.schedule('* * * * *', 'SELECT eggdb_streams.advance(''clicks'')');
 - The `MATCH_RECOGNIZE` clause after a table or subquery (D1067) takes `ONE ROW PER MATCH` or `ALL ROWS PER MATCH
   [OMIT EMPTY MATCHES]` (each row of each match with the source's columns and the measures, `RUNNING` by default,
   `FINAL` when asked), `AFTER MATCH SKIP PAST LAST ROW`, `TO NEXT ROW`, `TO FIRST var` and `TO [LAST] var`, and `^`
-  for the partition's first row in `PATTERN` (D1217).
+  for the partition's first row in `PATTERN` (D1217), and `SUBSET name = (var, ...)` union variables that
+  `MEASURES` reads like any pattern variable (`COUNT(MOVE.*)`, `LAST(MOVE.price)`, D1218).
 
 ## Sign-in for applications (eggdb_app_auth)
 

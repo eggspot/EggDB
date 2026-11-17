@@ -402,6 +402,18 @@ mod tests {
             .unwrap(),
             "matches\n2\nSELECT 1"
         );
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT moves, low_point FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at \
+                 MEASURES COUNT(MOVE.*) AS moves, MIN(MOVE.price) AS low_point ONE ROW PER MATCH \
+                 PATTERN (STRT DOWN+ UP+) SUBSET MOVE = (DOWN, UP) \
+                 DEFINE DOWN AS price < PREV(price), UP AS price > PREV(price)) AS mr"
+            )
+            .unwrap(),
+            "moves|low_point\n4|7\nSELECT 1"
+        );
+        assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at PATTERN (A) SUBSET S = (B) DEFINE A AS price > 1) AS mr").is_err());
         assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at ALL ROWS PER MATCH WITH UNMATCHED ROWS PATTERN (A) DEFINE A AS price > 1) AS mr").is_err());
     }
 }
