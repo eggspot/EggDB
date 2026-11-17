@@ -1483,7 +1483,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   outer joins in queries: **code written, unbuilt** (code-only mode, 2026-11-11, D432). Synonyms
   for relations: **code written, unbuilt** (D433). `RETURNING ... INTO :bind` in `eggdb shell`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D689); database links to PostgreSQL, MySQL and SQL Server sources: **code
-  written, unbuilt** (code-only mode, 2026-11-13, D997). Left: `ROWID`, and links to Oracle databases.
+  written, unbuilt** (code-only mode, 2026-11-13, D997); `ROWID` in queries: **code written, unbuilt** (code-only mode,
+  2026-11-17, D1233). Left: `ROWID` in `UPDATE` and `DELETE`, the `ROWID` type, and links to Oracle databases.
 - `CONNECT BY` over a join (the join's conditions in `WHERE` applied first): **code written, unbuilt**
   (code-only mode, 2026-11-17, D1213); a sequence's `NEXTVAL` advancing once per source row of
   `INSERT ALL`: **code written, unbuilt** (code-only mode, 2026-11-17, D1214). Left: `PRIOR` beside a

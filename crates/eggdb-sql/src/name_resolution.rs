@@ -621,7 +621,7 @@ impl<'a> Resolver<'a> {
             return Err(too_many_queries(0));
         }
         {
-            let named = crate::constraints::current_dialect() == Dialect::PostgreSql
+            let named = matches!(crate::constraints::current_dialect(), Dialect::PostgreSql | Dialect::Oracle)
                 && crate::system_columns::named_in(select, query_order);
             let outer = std::mem::replace(&mut self.system_columns_named, named);
             let walked = self.walk_from(select, ctes);

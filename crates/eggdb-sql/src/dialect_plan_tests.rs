@@ -555,3 +555,18 @@ fn showplan_text_joins_subqueries_with_nested_loops() {
     assert!(outputs[1].contains("Stream Aggregate(Aggregate)"), "{outputs:?}");
     all(&mut session, "SET SHOWPLAN_TEXT OFF");
 }
+
+#[test]
+fn rowid_is_an_eighteen_character_pseudo_column_that_star_leaves_out() {
+    let store = MemoryStore::default();
+    let mut session = oracle_emp(&store);
+    last(&mut session, "INSERT INTO emp VALUES (2, 20, 'grace')");
+    let shown = last(&mut session, "SELECT ROWID AS r, name FROM emp ORDER BY id");
+    let rowids: Vec<&str> = shown.lines().skip(1).take(2).map(|line| line.split('|').next().unwrap_or_default()).collect();
+    assert_eq!(rowids.len(), 2, "{shown}");
+    assert!(rowids.iter().all(|rowid| rowid.len() == 18 && rowid.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/')), "{shown}");
+    assert_ne!(rowids[0], rowids[1]);
+    let found = last(&mut session, &format!("SELECT name FROM emp WHERE ROWID = '{}'", rowids[1]));
+    assert!(found.contains("\ngrace\n"), "{found}");
+    assert!(!last(&mut session, "SELECT * FROM emp").to_ascii_lowercase().contains("rowid"));
+}

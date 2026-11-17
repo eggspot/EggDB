@@ -23,6 +23,9 @@ const COLUMNS: [(&str, &str, SqlType); 6] = [
     ("cmax", "\u{2}cmax", CID),
 ];
 
+const ORACLE_ROWID: (&str, &str) = ("rowid", "\u{2}rowid");
+const ROWID_DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
 pub(crate) const ROW_VERSION_FUNCTION: &str = "\u{2}row_version";
 pub(crate) const ROW_VERSION_TYPE: SqlType = XID;
 
@@ -30,6 +33,9 @@ const MAX_HEAP_TUPLES_PER_PAGE: u64 = 291;
 const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
 
 pub(crate) fn hidden_name(name: &str) -> Option<&'static str> {
+    if crate::constraints::current_dialect() == crate::Dialect::Oracle {
+        return (name == ORACLE_ROWID.0).then_some(ORACLE_ROWID.1);
+    }
     COLUMNS
         .iter()
         .find(|(written, _, _)| *written == name)
@@ -53,7 +59,11 @@ fn names_a_system_column(expr: &Expr) -> bool {
 
 pub(crate) fn wanted_for(table: &TableDefinition) -> bool {
     !crate::temp_tables::is_temp_table(&table.name)
-        && COLUMNS.iter().all(|(written, hidden, _)| {
+        && COLUMNS
+            .iter()
+            .map(|(written, hidden, _)| (written, hidden))
+            .chain(std::iter::once((&ORACLE_ROWID.0, &ORACLE_ROWID.1)))
+            .all(|(written, hidden)| {
             table
                 .columns
                 .iter()
@@ -88,6 +98,10 @@ pub(crate) fn generated_rows(
         name: (*hidden).to_owned(),
         sql_type: Some(*sql_type),
     }));
+    columns.push(OutputColumn {
+        name: ORACLE_ROWID.1.to_owned(),
+        sql_type: Some(SqlType::Text),
+    });
     if columns_only {
         return Ok(GeneratedRows::empty(columns));
     }
@@ -105,14 +119,15 @@ pub(crate) fn generated_rows(
             crate::cancel::check()?;
             let mut row = decode_row(bytes, &table.columns)?;
             let version = row_version(&row);
-            let tuple = tuple_id(&table, &prefix, key);
+            let (block, offset) = tuple_place(&table, &prefix, key);
             row.extend([
                 Value::Oid(table_oid),
-                Value::Text(tuple),
+                Value::Text(format!("({block},{offset})")),
                 Value::Oid(version),
                 Value::Oid(0),
                 Value::Oid(0),
                 Value::Oid(0),
+                Value::Text(oracle_rowid(table_oid, block, offset)),
             ]);
             charge.charge_row(&row)?;
             rows.push(row);
@@ -126,7 +141,23 @@ pub(crate) fn generated_rows(
     })
 }
 
-fn tuple_id(table: &TableDefinition, prefix: &[u8], key: &[u8]) -> String {
+fn base64_digits(value: u64, digits: usize, out: &mut String) {
+    for at in (0..digits).rev() {
+        let digit = (value >> (6 * at)) & 63;
+        out.push(char::from(ROWID_DIGITS[digit as usize]));
+    }
+}
+
+fn oracle_rowid(object: u32, block: u64, row: u64) -> String {
+    let mut out = String::with_capacity(18);
+    base64_digits(u64::from(object), 6, &mut out);
+    base64_digits(1, 3, &mut out);
+    base64_digits(block, 6, &mut out);
+    base64_digits(row, 3, &mut out);
+    out
+}
+
+fn tuple_place(table: &TableDefinition, prefix: &[u8], key: &[u8]) -> (u64, u64) {
     let suffix = key.get(prefix.len()..).unwrap_or_default();
     let hidden_row_id = <[u8; 8]>::try_from(suffix)
         .ok()
@@ -138,7 +169,7 @@ fn tuple_id(table: &TableDefinition, prefix: &[u8], key: &[u8]) -> String {
     };
     let block = number / MAX_HEAP_TUPLES_PER_PAGE;
     let offset = number % MAX_HEAP_TUPLES_PER_PAGE + 1;
-    format!("({block},{offset})")
+    (block, offset)
 }
 
 fn row_version(row: &[Value]) -> u32 {
