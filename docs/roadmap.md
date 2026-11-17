@@ -1021,7 +1021,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   statements; storage and the other protocols are left.
 - Column-level lineage captured from queries (D51, D244). **Code written, unbuilt** (code-only mode, 2026-11-12, D927): `eggdb_column_lineage` and
   `eggdb_catalog.capture_lineage`, with OpenLineage's column lineage facet.
-- The Apache Atlas and OpenMetadata APIs (D51).
+- The Apache Atlas and OpenMetadata APIs (D51). OpenMetadata's API, read-only, under `/openmetadata/api/v1`: **code written, unbuilt**
+  (code-only mode, 2026-11-17, D1201). Left: Apache Atlas and writes.
 - A schema registry and data contracts (D51). **Code written, unbuilt** (code-only mode, 2026-11-12, D753).
 - Master data: entity resolution, match and merge, and golden records (D51). **Code written, unbuilt** (code-only mode,
   2026-11-12, D749).

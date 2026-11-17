@@ -994,3 +994,22 @@ fn scim_provisions_users_and_groups_as_roles() {
     assert_eq!(call(&endpoint, "DELETE", "/scim/v2/Users/ada@contoso.com", "", None).status, 204);
     assert_eq!(call(&endpoint, "GET", "/scim/v2/Users/ada@contoso.com", "", None).status, 404);
 }
+
+#[test]
+fn openmetadata_lists_tables_with_columns_and_finds_one_by_name() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    session
+        .execute("CREATE TABLE customers (id integer PRIMARY KEY, email text)", &mut |_| {})
+        .unwrap();
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let listed = call(&endpoint, "GET", "/openmetadata/api/v1/tables?databaseSchema=eggdb.eggdb.public", "", None);
+    assert_eq!(listed.status, 200, "{}", text(&listed));
+    assert!(text(&listed).contains("\"fullyQualifiedName\":\"eggdb.eggdb.public.customers\""), "{}", text(&listed));
+    assert!(text(&listed).contains("\"name\":\"id\",\"dataType\":\"INT\""), "{}", text(&listed));
+    let found = call(&endpoint, "GET", "/openmetadata/api/v1/tables/name/eggdb.eggdb.public.customers", "", None);
+    assert_eq!(found.status, 200, "{}", text(&found));
+    assert!(text(&found).contains("\"constraint\":\"NOT_NULL\""), "{}", text(&found));
+    assert_eq!(call(&endpoint, "GET", "/openmetadata/api/v1/tables/name/eggdb.eggdb.public.nothing", "", None).status, 404);
+    assert_eq!(call(&endpoint, "POST", "/openmetadata/api/v1/tables", "{}", None).status, 405);
+}

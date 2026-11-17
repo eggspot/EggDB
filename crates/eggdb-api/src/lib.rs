@@ -25,6 +25,7 @@ mod saml_pages;
 mod scim;
 mod odata;
 mod ogc;
+mod openmetadata;
 mod ogc_tiles;
 mod request;
 
@@ -465,6 +466,9 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
                 .into(),
                 Err(error) => failure(500, error.state().code(), &error.to_string()).into(),
             };
+        }
+        if let Some(rest) = path.strip_prefix("openmetadata/") {
+            return self.openmetadata(rest, request).into();
         }
         if path == "ogc" || path.starts_with("ogc/") {
             return self.ogc(&path[3..], request).into();
