@@ -409,6 +409,13 @@ pub(crate) fn partitioned_table_rows(snapshot: &CatalogSnapshot) -> Vec<(u32, &'
         .collect()
 }
 
+fn relation_owner(snapshot: &CatalogSnapshot, internal: &str) -> u32 {
+    match crate::roles::owner_of(&snapshot.access, internal) {
+        Ok(Some(owner)) => crate::roles::role_oid(&owner),
+        _ => oids::SESSION_USER,
+    }
+}
+
 fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
     let referenced = referenced_tables(snapshot);
     let mut rows = Vec::with_capacity(snapshot.relations.len());
@@ -504,7 +511,7 @@ fn class_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                 .set("relnamespace", oid(entry.namespace))
                 .set("reltype", oid(snapshot.row_types.get(&at).copied().unwrap_or(0)))
                 .set("reloftype", oid(0))
-                .set("relowner", oid(oids::SESSION_USER))
+                .set("relowner", oid(relation_owner(snapshot, &entry.internal)))
                 .set("relam", oid(am))
                 .set("relfilenode", oid(file_node))
                 .set("reltablespace", oid(0))
@@ -598,16 +605,20 @@ fn composite_class_row(snapshot: &CatalogSnapshot, class: &CompositeClass) -> Ve
 }
 
 fn table_acl(snapshot: &CatalogSnapshot, internal: &str) -> Value {
+    let owner = crate::roles::owner_of(&snapshot.access, internal)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| snapshot.user.clone());
     let mut items: Vec<Value> = snapshot
         .grants
         .iter()
         .filter(|grant| grant.table == internal)
-        .map(|grant| Value::Text(grant.acl_item(&snapshot.user)))
+        .map(|grant| Value::Text(grant.acl_item(&owner)))
         .collect();
     if items.is_empty() {
         return Value::Null;
     }
-    items.insert(0, Value::Text(crate::roles::owner_acl_item(&snapshot.user)));
+    items.insert(0, Value::Text(crate::roles::owner_acl_item(&owner)));
     Value::Array(Box::new(ArrayValue::new(ArrayElement::AclItem, items)))
 }
 

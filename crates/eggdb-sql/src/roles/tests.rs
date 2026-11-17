@@ -236,3 +236,34 @@ fn an_acl_item_marks_each_grantable_privilege_with_a_star() {
         "clerk=ar*/ada"
     );
 }
+
+#[test]
+fn a_table_s_owner_holds_every_privilege_and_may_grant_them() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE USER auditor WITH PASSWORD 'secret'",
+        "ALTER TABLE audit OWNER TO clerk",
+        "ALTER TABLE accounts OWNER TO postgres",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    assert_eq!(
+        run(
+            &mut admin,
+            "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname = 'audit'"
+        )
+        .unwrap(),
+        "pg_get_userbyid\nclerk\nSELECT 1"
+    );
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    run(&mut clerk, "INSERT INTO audit VALUES (1)").unwrap();
+    run(&mut clerk, "DELETE FROM audit").unwrap();
+    run(&mut clerk, "GRANT SELECT ON audit TO auditor").unwrap();
+    run(&mut admin, "ALTER TABLE audit RENAME TO audit_log").unwrap();
+    run(&mut clerk, "TRUNCATE audit_log").unwrap();
+    let error = run(&mut clerk, "DELETE FROM accounts").expect_err("not owner");
+    assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE);
+}

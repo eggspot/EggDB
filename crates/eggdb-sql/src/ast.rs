@@ -1113,6 +1113,7 @@ pub(crate) enum AlterAction {
         to: Name,
     },
     Accepted,
+    OwnerTo(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -876,8 +876,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `SET ROLE`, object owners, `WITH GRANT OPTION`, and schema, sequence and routine privileges
   (D183). `SET ROLE`, `SET ROLE NONE` and `RESET ROLE`: **code written, unbuilt** (code-only mode, 2026-11-12,
   D827); `WITH GRANT OPTION` and `REVOKE GRANT OPTION FOR` on table privileges: **code written, unbuilt**
-  (code-only mode, 2026-11-17, D1189). Left: object owners, grantors and `CASCADE`, schema, sequence and routine
-  privileges.
+  (code-only mode, 2026-11-17, D1189); schema and routine grants stored: **code written, unbuilt** (code-only mode,
+  2026-11-17, D1190, D1191); table owners (`ALTER TABLE ... OWNER TO`): **code written, unbuilt** (code-only mode,
+  2026-11-17, D1192). Left: tables created by non-superusers, owners of other objects, grantors and `CASCADE`,
+  sequence privileges, and checking schema and routine privileges in statements.
 - Schema, type, parameter (`GRANT SET ON PARAMETER`) and tablespace grants stored, so the
   inquiry functions and `pg_namespace.nspacl` follow them; `information_schema.role_routine_grants`
   and `role_udt_grants` (D326, D344). Schema, type, parameter and tablespace grants stored and answered by the inquiry

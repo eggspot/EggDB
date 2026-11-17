@@ -12,6 +12,7 @@ pub(crate) const ROLE_SPACE: u8 = 0x11;
 pub(crate) const GRANT_SPACE: u8 = 0x12;
 pub(crate) const DENY_SPACE: u8 = 0x18;
 pub(crate) const GRANT_OPTION_SPACE: u8 = 0x1C;
+pub(crate) const OWNER_SPACE: u8 = 0x1E;
 const RECORD_VERSION: u8 = 1;
 const LOGIN: u8 = 1;
 const SUPERUSER: u8 = 2;
@@ -234,6 +235,84 @@ fn grant_option_key(table: &str, grantee: &str) -> Vec<u8> {
     key.push(0);
     key.extend_from_slice(grantee.as_bytes());
     key
+}
+
+fn owner_key(table: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(OWNER_SPACE);
+    key.extend_from_slice(table.as_bytes());
+    key
+}
+
+/// The stored role that owns `table` (`ALTER TABLE ... OWNER TO`, D1192); None while the
+/// session's user, a superuser, owns it.
+pub(crate) fn owner_of(reader: &dyn KeyValueRead, table: &str) -> SqlResult<Option<String>> {
+    match reader.get(&owner_key(table))?.as_deref() {
+        Some([RECORD_VERSION, name @ ..]) => std::str::from_utf8(name)
+            .map(|name| Some(name.to_owned()))
+            .map_err(|_| crate::encoding::corrupt("owner")),
+        Some(_) => Err(crate::encoding::corrupt("owner")),
+        None => Ok(None),
+    }
+}
+
+/// Makes stored role `owner` the owner of `table`: it then holds every privilege on it and may
+/// grant them. A name that is no stored role (a dump's `OWNER TO postgres`) leaves the owner as
+/// it was, as EggDB's superusers own what they create.
+pub(crate) fn set_owner(writer: &mut dyn KeyValueWrite, table: &str, owner: &str) -> SqlResult<()> {
+    let Some(role) = stored_role(writer, owner)? else {
+        return Ok(());
+    };
+    if role.superuser {
+        writer.delete(&owner_key(table))?;
+        return Ok(());
+    }
+    let mut value = vec![RECORD_VERSION];
+    value.extend_from_slice(owner.as_bytes());
+    writer.put(&owner_key(table), &value)
+}
+
+/// Moves `from`'s owner, grant options and denials to `to`, when a table is renamed.
+pub(super) fn move_table_records(
+    writer: &mut dyn KeyValueWrite,
+    from: &str,
+    to: &str,
+) -> SqlResult<()> {
+    if let Some(value) = writer.get(&owner_key(from))? {
+        writer.delete(&owner_key(from))?;
+        writer.put(&owner_key(to), &value)?;
+    }
+    for space in [DENY_SPACE, GRANT_OPTION_SPACE] {
+        let mut prefix = NAMESPACE.to_vec();
+        prefix.push(space);
+        prefix.extend_from_slice(from.as_bytes());
+        prefix.push(0);
+        let mut moved = Vec::new();
+        writer.scan(
+            &prefix,
+            &prefix_end(&prefix),
+            ScanDirection::Forward,
+            &mut |key, value| {
+                moved.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            },
+        )?;
+        for (key, value) in moved {
+            let grantee = &key[prefix.len()..];
+            let mut target = NAMESPACE.to_vec();
+            target.push(space);
+            target.extend_from_slice(to.as_bytes());
+            target.push(0);
+            target.extend_from_slice(grantee);
+            writer.delete(&key)?;
+            writer.put(&target, &value)?;
+        }
+    }
+    Ok(())
+}
+
+fn owned_by(reader: &dyn KeyValueRead, held: &BTreeSet<String>, table: &str) -> SqlResult<bool> {
+    Ok(owner_of(reader, table)?.is_some_and(|owner| held.contains(&owner)))
 }
 
 /// The privileges `grantee` may grant on to others on `table` (`WITH GRANT OPTION`).
@@ -494,6 +573,9 @@ pub(crate) fn may_grant_on(
 ) -> SqlResult<bool> {
     let held = role_closure(reader, role)?;
     for table in tables {
+        if owned_by(reader, &held, &table.text)? {
+            continue;
+        }
         for privilege in privileges {
             if denied(reader, &held, &table.text, *privilege)? {
                 return Ok(false);
@@ -733,6 +815,7 @@ pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlRe
     for (grantee, _) in table_grant_records(writer, table)? {
         writer.delete(&grant_key(table, &grantee))?;
     }
+    writer.delete(&owner_key(table))?;
     for space in [DENY_SPACE, GRANT_OPTION_SPACE] {
         let mut prefix = NAMESPACE.to_vec();
         prefix.push(space);
@@ -1061,6 +1144,9 @@ pub(crate) fn holds_grant_option(
         return Ok(true);
     };
     let held = role_closure(reader, role)?;
+    if owned_by(reader, &held, table)? {
+        return Ok(true);
+    }
     if denied(reader, &held, table, privilege)? {
         return Ok(false);
     }
@@ -1099,6 +1185,9 @@ fn table_level_held(
     table: &str,
     privilege: Privilege,
 ) -> SqlResult<bool> {
+    if owned_by(reader, held, table)? {
+        return Ok(true);
+    }
     if denied(reader, held, table, privilege)? {
         return Ok(false);
     }

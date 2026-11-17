@@ -1164,6 +1164,7 @@ fn altered(table: &Name, actions: &[AlterAction]) -> Option<DestructiveStatement
             | AlterAction::SystemVersioning(_)
             | AlterAction::SystemPeriod { .. }
             | AlterAction::SystemVersioningOn { .. }
+            | AlterAction::OwnerTo(_)
             | AlterAction::Accepted => continue,
         };
         match &mut found {

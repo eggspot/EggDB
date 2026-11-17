@@ -327,6 +327,7 @@ impl AlteredTexts {
         for action in actions {
             match action {
                 AlterAction::Accepted
+                | AlterAction::OwnerTo(_)
                 | AlterAction::SystemVersioning(_)
                 | AlterAction::SystemPeriod { .. }
                 | AlterAction::SystemVersioningOn { .. } => {}

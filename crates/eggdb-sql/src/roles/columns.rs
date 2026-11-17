@@ -370,7 +370,7 @@ pub(crate) fn move_table(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -
             &[COLUMN_RECORD_VERSION, grant.privileges],
         )?;
     }
-    Ok(())
+    super::move_table_records(writer, from, to)
 }
 
 /// Removes every column grant on `table`, when the table is dropped.

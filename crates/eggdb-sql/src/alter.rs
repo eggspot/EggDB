@@ -155,6 +155,10 @@ fn apply(
         | AlterAction::SystemVersioning(_)
         | AlterAction::SystemPeriod { .. }
         | AlterAction::SystemVersioningOn { .. } => Ok(None),
+        AlterAction::OwnerTo(owner) => {
+            crate::roles::set_owner(writer, name, owner)?;
+            Ok(None)
+        }
         AlterAction::AddColumn {
             column,
             if_not_exists,

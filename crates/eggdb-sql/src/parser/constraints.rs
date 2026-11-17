@@ -801,8 +801,8 @@ impl Parser<'_> {
         }
         if self.postgresql() && self.take_word("owner") {
             self.expect_word("to")?;
-            self.label()?;
-            actions.push(AlterAction::Accepted);
+            let owner = self.label()?;
+            actions.push(AlterAction::OwnerTo(owner));
             return Ok(());
         }
         if self.postgresql() && self.is_word("attach") && self.is_word_at(1, "partition") {
