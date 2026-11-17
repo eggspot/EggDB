@@ -27,10 +27,11 @@ pub use api::{
     SQLFetch, SQLForeignKeys, SQLFreeHandle, SQLFreeStmt, SQLGetConnectAttr, SQLGetData,
     SQLGetDiagRec, SQLGetEnvAttr, SQLGetInfo, SQLGetTypeInfo, SQLNumParams, SQLNumResultCols,
     SQLPrepare, SQLPrimaryKeys, SQLProcedures, SQLRowCount, SQLSetConnectAttr, SQLSetEnvAttr,
-    SQLSetStmtAttr, SQLSpecialColumns, SQLStatistics, SQLTables,
+    SQLSetStmtAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables, SQLColumnPrivileges,
 };
 pub use wide::{
     SQLColAttributeW, SQLColumnsW, SQLConnectW, SQLDescribeColW, SQLDriverConnectW,
     SQLExecDirectW, SQLForeignKeysW, SQLGetDiagRecW, SQLGetInfoW, SQLGetTypeInfoW, SQLPrepareW,
-    SQLPrimaryKeysW, SQLProceduresW, SQLSpecialColumnsW, SQLStatisticsW, SQLTablesW,
+    SQLPrimaryKeysW, SQLProceduresW, SQLSpecialColumnsW, SQLStatisticsW, SQLTablePrivilegesW, SQLTablesW,
+    SQLColumnPrivilegesW,
 };

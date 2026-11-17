@@ -1136,3 +1136,55 @@ pub extern "system" fn SQLStatistics(
     catalog_query(stmt, text, &[pattern(schema, schema_length), pattern(table, table_length)])
 }
 
+/// Lists the privileges granted on the tables matching the patterns, with ODBC's seven columns.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLTablePrivileges(
+    stmt: *mut c_void,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    table: *const u8,
+    table_length: i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = format!(
+        "SELECT table_catalog AS \"TABLE_CAT\", table_schema AS \"TABLE_SCHEM\", table_name AS \"TABLE_NAME\", \
+         grantor AS \"GRANTOR\", grantee AS \"GRANTEE\", privilege_type AS \"PRIVILEGE\", is_grantable AS \"IS_GRANTABLE\" \
+         FROM information_schema.table_privileges WHERE table_schema NOT IN {HIDDEN_SCHEMAS} \
+         AND ($1::text IS NULL OR table_schema LIKE $1) AND ($2::text IS NULL OR table_name LIKE $2) ORDER BY 2, 3, 6"
+    );
+    catalog_query(stmt, &text, &[pattern(schema, schema_length), pattern(table, table_length)])
+}
+
+/// Lists the privileges granted on a table's columns whose names match the pattern, with
+/// ODBC's eight columns.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLColumnPrivileges(
+    stmt: *mut c_void,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    table: *const u8,
+    table_length: i16,
+    column: *const u8,
+    column_length: i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = "SELECT table_catalog AS \"TABLE_CAT\", table_schema AS \"TABLE_SCHEM\", table_name AS \"TABLE_NAME\", \
+         column_name AS \"COLUMN_NAME\", grantor AS \"GRANTOR\", grantee AS \"GRANTEE\", privilege_type AS \"PRIVILEGE\", \
+         is_grantable AS \"IS_GRANTABLE\" FROM information_schema.column_privileges \
+         WHERE ($1::text IS NULL OR table_schema = $1) AND ($2::text IS NULL OR table_name = $2) \
+         AND ($3::text IS NULL OR column_name LIKE $3) ORDER BY 2, 3, 4, 7";
+    catalog_query(
+        stmt,
+        text,
+        &[pattern(schema, schema_length), pattern(table, table_length), pattern(column, column_length)],
+    )
+}
+

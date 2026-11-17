@@ -3,7 +3,7 @@
 use crate::api::{
     SQLColAttribute, SQLColumns, SQLConnect, SQLDescribeCol, SQLDriverConnect, SQLExecDirect,
     SQLForeignKeys, SQLGetDiagRec, SQLGetInfo, SQLGetTypeInfo, SQLPrepare, SQLPrimaryKeys,
-    SQLProcedures, SQLSpecialColumns, SQLStatistics, SQLTables,
+    SQLColumnPrivileges, SQLProcedures, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use crate::memory::{SQL_NTS, store};
 use std::ffi::{CString, c_void};
@@ -304,6 +304,33 @@ pub extern "system" fn SQLStatisticsW(stmt: *mut c_void, catalog: *const u16, ca
         return SQL_ERROR;
     };
     SQLStatistics(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&table), length_of(&table), unique, reserved)
+}
+
+/// [`SQLTablePrivileges`] with UTF-16 patterns.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLTablePrivilegesW(stmt: *mut c_void, catalog: *const u16, catalog_length: i16, schema: *const u16, schema_length: i16, table: *const u16, table_length: i16) -> SqlReturn {
+    let (Ok(catalog), Ok(schema), Ok(table)) = (
+        narrowed(catalog, isize::from(catalog_length)),
+        narrowed(schema, isize::from(schema_length)),
+        narrowed(table, isize::from(table_length)),
+    ) else {
+        return SQL_ERROR;
+    };
+    SQLTablePrivileges(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&table), length_of(&table))
+}
+
+/// [`SQLColumnPrivileges`] with UTF-16 names and pattern.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLColumnPrivilegesW(stmt: *mut c_void, catalog: *const u16, catalog_length: i16, schema: *const u16, schema_length: i16, table: *const u16, table_length: i16, column: *const u16, column_length: i16) -> SqlReturn {
+    let (Ok(catalog), Ok(schema), Ok(table), Ok(column)) = (
+        narrowed(catalog, isize::from(catalog_length)),
+        narrowed(schema, isize::from(schema_length)),
+        narrowed(table, isize::from(table_length)),
+        narrowed(column, isize::from(column_length)),
+    ) else {
+        return SQL_ERROR;
+    };
+    SQLColumnPrivileges(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&table), length_of(&table), pointer(&column), length_of(&column))
 }
 
 /// [`SQLGetTypeInfo`], as Unicode applications call it.
