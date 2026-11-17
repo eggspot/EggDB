@@ -1188,3 +1188,42 @@ pub extern "system" fn SQLColumnPrivileges(
     )
 }
 
+/// Lists the parameters of the functions and procedures matching the patterns, with ODBC's
+/// nineteen columns: `IN` as `SQL_PARAM_INPUT`, `OUT` as `SQL_PARAM_OUTPUT`, `INOUT` as
+/// `SQL_PARAM_INPUT_OUTPUT`.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLProcedureColumns(
+    stmt: *mut c_void,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    procedure: *const u8,
+    procedure_length: i16,
+    column: *const u8,
+    column_length: i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = format!(
+        "SELECT r.routine_catalog AS \"PROCEDURE_CAT\", r.routine_schema AS \"PROCEDURE_SCHEM\", r.routine_name AS \"PROCEDURE_NAME\", \
+         c.parameter_name AS \"COLUMN_NAME\", CASE c.parameter_mode WHEN 'OUT' THEN 4 WHEN 'INOUT' THEN 2 ELSE 1 END AS \"COLUMN_TYPE\", \
+         {ODBC_TYPE_OF_DATA_TYPE} AS \"DATA_TYPE\", c.data_type AS \"TYPE_NAME\", c.character_maximum_length AS \"COLUMN_SIZE\", \
+         c.character_octet_length AS \"BUFFER_LENGTH\", c.numeric_scale AS \"DECIMAL_DIGITS\", c.numeric_precision_radix AS \"NUM_PREC_RADIX\", \
+         2 AS \"NULLABLE\", NULL::text AS \"REMARKS\", NULL::text AS \"COLUMN_DEF\", {ODBC_TYPE_OF_DATA_TYPE} AS \"SQL_DATA_TYPE\", \
+         NULL::integer AS \"SQL_DATETIME_SUB\", c.character_octet_length AS \"CHAR_OCTET_LENGTH\", c.ordinal_position AS \"ORDINAL_POSITION\", \
+         '' AS \"IS_NULLABLE\" \
+         FROM information_schema.parameters c JOIN information_schema.routines r \
+         ON r.specific_schema = c.specific_schema AND r.specific_name = c.specific_name \
+         WHERE r.routine_schema NOT IN {HIDDEN_SCHEMAS} \
+         AND ($1::text IS NULL OR r.routine_schema LIKE $1) AND ($2::text IS NULL OR r.routine_name LIKE $2) \
+         AND ($3::text IS NULL OR c.parameter_name LIKE $3) ORDER BY 2, 3, 18"
+    );
+    catalog_query(
+        stmt,
+        &text,
+        &[pattern(schema, schema_length), pattern(procedure, procedure_length), pattern(column, column_length)],
+    )
+}
+

@@ -3,7 +3,7 @@
 use crate::api::{
     SQLColAttribute, SQLColumns, SQLConnect, SQLDescribeCol, SQLDriverConnect, SQLExecDirect,
     SQLForeignKeys, SQLGetDiagRec, SQLGetInfo, SQLGetTypeInfo, SQLPrepare, SQLPrimaryKeys,
-    SQLColumnPrivileges, SQLProcedures, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
+    SQLColumnPrivileges, SQLProcedureColumns, SQLProcedures, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use crate::memory::{SQL_NTS, store};
 use std::ffi::{CString, c_void};
@@ -331,6 +331,20 @@ pub extern "system" fn SQLColumnPrivilegesW(stmt: *mut c_void, catalog: *const u
         return SQL_ERROR;
     };
     SQLColumnPrivileges(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&table), length_of(&table), pointer(&column), length_of(&column))
+}
+
+/// [`SQLProcedureColumns`] with UTF-16 patterns.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLProcedureColumnsW(stmt: *mut c_void, catalog: *const u16, catalog_length: i16, schema: *const u16, schema_length: i16, procedure: *const u16, procedure_length: i16, column: *const u16, column_length: i16) -> SqlReturn {
+    let (Ok(catalog), Ok(schema), Ok(procedure), Ok(column)) = (
+        narrowed(catalog, isize::from(catalog_length)),
+        narrowed(schema, isize::from(schema_length)),
+        narrowed(procedure, isize::from(procedure_length)),
+        narrowed(column, isize::from(column_length)),
+    ) else {
+        return SQL_ERROR;
+    };
+    SQLProcedureColumns(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&procedure), length_of(&procedure), pointer(&column), length_of(&column))
 }
 
 /// [`SQLGetTypeInfo`], as Unicode applications call it.
