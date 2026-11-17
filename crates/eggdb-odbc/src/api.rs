@@ -856,3 +856,111 @@ pub extern "system" fn SQLColumns(
         &[pattern(schema, schema_length), pattern(table, table_length), pattern(column, column_length)],
     )
 }
+
+/// Lists the primary key columns of a table, with ODBC's six columns, in key order.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLPrimaryKeys(
+    stmt: *mut c_void,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    table: *const u8,
+    table_length: i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = "SELECT k.table_catalog AS \"TABLE_CAT\", k.table_schema AS \"TABLE_SCHEM\", k.table_name AS \"TABLE_NAME\", \
+         k.column_name AS \"COLUMN_NAME\", k.ordinal_position AS \"KEY_SEQ\", k.constraint_name AS \"PK_NAME\" \
+         FROM information_schema.table_constraints t JOIN information_schema.key_column_usage k \
+         ON k.constraint_schema = t.constraint_schema AND k.constraint_name = t.constraint_name AND k.table_name = t.table_name \
+         WHERE t.constraint_type = 'PRIMARY KEY' AND ($1::text IS NULL OR k.table_schema = $1) \
+         AND ($2::text IS NULL OR k.table_name = $2) ORDER BY 2, 3, 5";
+    catalog_query(stmt, text, &[pattern(schema, schema_length), pattern(table, table_length)])
+}
+
+const ODBC_RULE_OF: &str = "WHEN 'CASCADE' THEN 0 WHEN 'RESTRICT' THEN 1 WHEN 'SET NULL' THEN 2 WHEN 'SET DEFAULT' THEN 4 ELSE 3 END";
+
+/// Lists the foreign keys that refer to a primary key table, or that a foreign key table has,
+/// with ODBC's fourteen columns.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLForeignKeys(
+    stmt: *mut c_void,
+    _pk_catalog: *const u8,
+    _pk_catalog_length: i16,
+    pk_schema: *const u8,
+    pk_schema_length: i16,
+    pk_table: *const u8,
+    pk_table_length: i16,
+    _fk_catalog: *const u8,
+    _fk_catalog_length: i16,
+    fk_schema: *const u8,
+    fk_schema_length: i16,
+    fk_table: *const u8,
+    fk_table_length: i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = format!(
+        "SELECT pk.table_catalog AS \"PKTABLE_CAT\", pk.table_schema AS \"PKTABLE_SCHEM\", pk.table_name AS \"PKTABLE_NAME\", \
+         pk.column_name AS \"PKCOLUMN_NAME\", fk.table_catalog AS \"FKTABLE_CAT\", fk.table_schema AS \"FKTABLE_SCHEM\", \
+         fk.table_name AS \"FKTABLE_NAME\", fk.column_name AS \"FKCOLUMN_NAME\", fk.ordinal_position AS \"KEY_SEQ\", \
+         CASE rc.update_rule {ODBC_RULE_OF} AS \"UPDATE_RULE\", CASE rc.delete_rule {ODBC_RULE_OF} AS \"DELETE_RULE\", \
+         rc.constraint_name AS \"FK_NAME\", rc.unique_constraint_name AS \"PK_NAME\", 7 AS \"DEFERRABILITY\" \
+         FROM information_schema.referential_constraints rc \
+         JOIN information_schema.key_column_usage fk ON fk.constraint_schema = rc.constraint_schema AND fk.constraint_name = rc.constraint_name \
+         JOIN information_schema.key_column_usage pk ON pk.constraint_schema = rc.unique_constraint_schema \
+         AND pk.constraint_name = rc.unique_constraint_name AND pk.ordinal_position = fk.position_in_unique_constraint \
+         WHERE ($1::text IS NULL OR pk.table_schema = $1) AND ($2::text IS NULL OR pk.table_name = $2) \
+         AND ($3::text IS NULL OR fk.table_schema = $3) AND ($4::text IS NULL OR fk.table_name = $4) \
+         ORDER BY 6, 7, 2, 3, 9"
+    );
+    catalog_query(
+        stmt,
+        &text,
+        &[
+            pattern(pk_schema, pk_schema_length),
+            pattern(pk_table, pk_table_length),
+            pattern(fk_schema, fk_schema_length),
+            pattern(fk_table, fk_table_length),
+        ],
+    )
+}
+
+const TYPE_INFO_ROWS: &str = "('boolean', -7, 1, NULL, NULL, NULL, 1, 0, 2, NULL, 0, 0, 'boolean', NULL, NULL, -7, NULL, NULL, NULL), \
+    ('bigint', -5, 19, NULL, NULL, NULL, 1, 0, 2, 0, 0, 0, 'bigint', 0, 0, -5, NULL, 10, NULL), \
+    ('bytea', -3, 1073741823, NULL, NULL, NULL, 1, 0, 0, NULL, 0, 0, 'bytea', NULL, NULL, -3, NULL, NULL, NULL), \
+    ('text', -1, 1073741823, , , NULL, 1, 1, 3, NULL, 0, 0, 'text', NULL, NULL, -1, NULL, NULL, NULL), \
+    ('numeric', 2, 1000, NULL, NULL, 'precision,scale', 1, 0, 2, 0, 0, 0, 'numeric', 0, 1000, 2, NULL, 10, NULL), \
+    ('integer', 4, 10, NULL, NULL, NULL, 1, 0, 2, 0, 0, 0, 'integer', 0, 0, 4, NULL, 10, NULL), \
+    ('smallint', 5, 5, NULL, NULL, NULL, 1, 0, 2, 0, 0, 0, 'smallint', 0, 0, 5, NULL, 10, NULL), \
+    ('real', 7, 24, NULL, NULL, NULL, 1, 0, 2, 0, 0, 0, 'real', NULL, NULL, 7, NULL, 2, NULL), \
+    ('double precision', 8, 53, NULL, NULL, NULL, 1, 0, 2, 0, 0, 0, 'double precision', NULL, NULL, 8, NULL, 2, NULL), \
+    ('varchar', 12, 1073741823, , , 'max length', 1, 1, 3, NULL, 0, 0, 'varchar', NULL, NULL, 12, NULL, NULL, NULL), \
+    ('date', 91, 10, , , NULL, 1, 0, 2, NULL, 0, 0, 'date', NULL, NULL, 9, 1, NULL, NULL), \
+    ('time', 92, 15, , , NULL, 1, 0, 2, NULL, 0, 0, 'time', 0, 6, 9, 2, NULL, NULL), \
+    ('timestamp', 93, 26, , , NULL, 1, 0, 2, NULL, 0, 0, 'timestamp', 0, 6, 9, 3, NULL, NULL), \
+    ('uuid', -11, 36, , , NULL, 1, 0, 2, NULL, 0, 0, 'uuid', NULL, NULL, -11, NULL, NULL, NULL)";
+
+const TYPE_INFO_COLUMNS: &str = "\"TYPE_NAME\", \"DATA_TYPE\", \"COLUMN_SIZE\", \"LITERAL_PREFIX\", \"LITERAL_SUFFIX\", \
+    \"CREATE_PARAMS\", \"NULLABLE\", \"CASE_SENSITIVE\", \"SEARCHABLE\", \"UNSIGNED_ATTRIBUTE\", \"FIXED_PREC_SCALE\", \
+    \"AUTO_UNIQUE_VALUE\", \"LOCAL_TYPE_NAME\", \"MINIMUM_SCALE\", \"MAXIMUM_SCALE\", \"SQL_DATA_TYPE\", \
+    \"SQL_DATETIME_SUB\", \"NUM_PREC_RADIX\", \"INTERVAL_PRECISION\"";
+
+/// Lists the data types EggDB offers, with ODBC's nineteen columns, ordered by ODBC type;
+/// `SQL_ALL_TYPES` (0) lists all of them, another type only its own.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLGetTypeInfo(stmt: *mut c_void, data_type: i16) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = format!(
+        "SELECT * FROM (VALUES {TYPE_INFO_ROWS}) AS type_info ({TYPE_INFO_COLUMNS}) \
+         WHERE $1::text IS NULL OR \"DATA_TYPE\" = $1::integer ORDER BY 2, 1"
+    );
+    let wanted = (data_type != 0).then(|| data_type.to_string());
+    catalog_query(stmt, &text, &[wanted])
+}
+

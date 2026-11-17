@@ -1,7 +1,8 @@
 use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
-    SQLColumns, SQLNumResultCols, SQLPrepare, SQLRowCount, SQLSetConnectAttr, SQLTables,
+    SQLColumns, SQLForeignKeys, SQLGetTypeInfo, SQLNumResultCols, SQLPrepare, SQLPrimaryKeys,
+    SQLRowCount, SQLSetConnectAttr, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -98,6 +99,45 @@ fn an_application_connects_runs_binds_fetches_and_rolls_back() {
         names.push(text_column(stmt, 4).unwrap_or_default());
     }
     assert_eq!(names, ["id", "colour", "weight"]);
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    SQLDisconnect(dbc);
+    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+}
+
+#[test]
+fn primary_keys_foreign_keys_and_type_info_are_listed() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=sqlite\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(run(stmt, "CREATE TABLE eggs (id INTEGER PRIMARY KEY, colour TEXT)"), 0);
+    assert_eq!(run(stmt, "CREATE TABLE boxes (id INTEGER PRIMARY KEY, egg_id INTEGER REFERENCES eggs (id))"), 0);
+    let eggs = b"eggs\0";
+    assert_eq!(SQLPrimaryKeys(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 4).as_deref(), Some("id"));
+    assert_eq!(text_column(stmt, 5).as_deref(), Some("1"));
+    assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
+    assert_eq!(
+        SQLForeignKeys(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, ptr::null(), 0, ptr::null(), 0, ptr::null(), 0),
+        0
+    );
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 3).as_deref(), Some("eggs"));
+    assert_eq!(text_column(stmt, 7).as_deref(), Some("boxes"));
+    assert_eq!(text_column(stmt, 8).as_deref(), Some("egg_id"));
+    assert_eq!(SQLGetTypeInfo(stmt, SQL_INTEGER), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 1).as_deref(), Some("integer"));
+    assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
+    assert_eq!(SQLGetTypeInfo(stmt, 0), 0);
+    let mut listed = 0;
+    while SQLFetch(stmt) == 0 {
+        listed += 1;
+    }
+    assert_eq!(listed, 14);
     SQLFreeHandle(SQL_HANDLE_STMT, stmt);
     SQLDisconnect(dbc);
     SQLFreeHandle(SQL_HANDLE_DBC, dbc);

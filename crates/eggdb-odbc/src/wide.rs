@@ -2,7 +2,7 @@
 
 use crate::api::{
     SQLColAttribute, SQLColumns, SQLConnect, SQLDescribeCol, SQLDriverConnect, SQLExecDirect,
-    SQLGetDiagRec, SQLGetInfo, SQLPrepare, SQLTables,
+    SQLForeignKeys, SQLGetDiagRec, SQLGetInfo, SQLGetTypeInfo, SQLPrepare, SQLPrimaryKeys, SQLTables,
 };
 use crate::memory::{SQL_NTS, store};
 use std::ffi::{CString, c_void};
@@ -207,6 +207,69 @@ pub extern "system" fn SQLColumnsW(stmt: *mut c_void, catalog: *const u16, catal
         return SQL_ERROR;
     };
     SQLColumns(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&table), length_of(&table), pointer(&column), length_of(&column))
+}
+
+/// [`SQLPrimaryKeys`] with UTF-16 names.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLPrimaryKeysW(stmt: *mut c_void, catalog: *const u16, catalog_length: i16, schema: *const u16, schema_length: i16, table: *const u16, table_length: i16) -> SqlReturn {
+    let (Ok(catalog), Ok(schema), Ok(table)) = (
+        narrowed(catalog, isize::from(catalog_length)),
+        narrowed(schema, isize::from(schema_length)),
+        narrowed(table, isize::from(table_length)),
+    ) else {
+        return SQL_ERROR;
+    };
+    SQLPrimaryKeys(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&table), length_of(&table))
+}
+
+/// [`SQLForeignKeys`] with UTF-16 names.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLForeignKeysW(
+    stmt: *mut c_void,
+    pk_catalog: *const u16,
+    pk_catalog_length: i16,
+    pk_schema: *const u16,
+    pk_schema_length: i16,
+    pk_table: *const u16,
+    pk_table_length: i16,
+    fk_catalog: *const u16,
+    fk_catalog_length: i16,
+    fk_schema: *const u16,
+    fk_schema_length: i16,
+    fk_table: *const u16,
+    fk_table_length: i16,
+) -> SqlReturn {
+    let (Ok(pk_catalog), Ok(pk_schema), Ok(pk_table), Ok(fk_catalog), Ok(fk_schema), Ok(fk_table)) = (
+        narrowed(pk_catalog, isize::from(pk_catalog_length)),
+        narrowed(pk_schema, isize::from(pk_schema_length)),
+        narrowed(pk_table, isize::from(pk_table_length)),
+        narrowed(fk_catalog, isize::from(fk_catalog_length)),
+        narrowed(fk_schema, isize::from(fk_schema_length)),
+        narrowed(fk_table, isize::from(fk_table_length)),
+    ) else {
+        return SQL_ERROR;
+    };
+    SQLForeignKeys(
+        stmt,
+        pointer(&pk_catalog),
+        length_of(&pk_catalog),
+        pointer(&pk_schema),
+        length_of(&pk_schema),
+        pointer(&pk_table),
+        length_of(&pk_table),
+        pointer(&fk_catalog),
+        length_of(&fk_catalog),
+        pointer(&fk_schema),
+        length_of(&fk_schema),
+        pointer(&fk_table),
+        length_of(&fk_table),
+    )
+}
+
+/// [`SQLGetTypeInfo`], as Unicode applications call it.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLGetTypeInfoW(stmt: *mut c_void, data_type: i16) -> SqlReturn {
+    SQLGetTypeInfo(stmt, data_type)
 }
 
 #[cfg(test)]

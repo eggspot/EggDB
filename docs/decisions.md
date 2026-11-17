@@ -1260,3 +1260,4 @@ its full title with its status.
 - [D1233](decisions/D1233.md) Code-only batch 885 (M10): Oracle's ROWID pseudo-column in queries
 - [D1234](decisions/D1234.md) Code-only batch 886 (M10): DBMS_METADATA.GET_DDL for indexes and sequences
 - [D1235](decisions/D1235.md) Code-only batch 887 (M10): DBMS_METADATA.GET_DDL for triggers, routines and packages
+- [D1236](decisions/D1236.md) Code-only batch 888 (M6f): SQLPrimaryKeys, SQLForeignKeys and SQLGetTypeInfo in the ODBC driver
