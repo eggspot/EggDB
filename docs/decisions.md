@@ -1230,3 +1230,4 @@ its full title with its status.
 - [D1203](decisions/D1203.md) Code-only batch 855 (M6c): Plan advice, unused indexes and configuration advice in eggdb_advisor
 - [D1204](decisions/D1204.md) Code-only batch 856 (M6c): Per-account statement limits: MySQL's MAX_QUERIES_PER_HOUR and MAX_UPDATES_PER_HOUR
 - [D1205](decisions/D1205.md) Code-only batch 857 (M6f): A dbt adapter of our own: dbt-eggdb
+- [D1206](decisions/D1206.md) Code-only batch 858 (M6f): Airflow operators: airflow-provider-eggdb

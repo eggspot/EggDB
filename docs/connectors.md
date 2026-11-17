@@ -10,6 +10,7 @@ days (D44, D252).
 | Tool | How it connects today | Checked |
 |------|-----------------------|---------|
 | dbt | our adapter `dbt-eggdb` (`connectors/dbt-eggdb`, `type: eggdb`, with a `dialect` per profile, D1205), or `dbt-postgres`, over the PostgreSQL protocol (`eggdb serve --listen`) | `dbt debug`, `dbt run`, `dbt test` in CI |
+| Apache Airflow | our provider `airflow-provider-eggdb` (`connectors/airflow-provider-eggdb`): `EggDBHook`, `EggDBOperator` with a `dialect`, and `EggDBBackupOperator` (D1206), over the PostgreSQL protocol | not yet in the compatibility job |
 | Grafana | PostgreSQL data source; Prometheus data source on `--observability-listen` (PromQL, D220) | PromQL through influxdb-client and HTTP in CI |
 | Power BI, Tableau, Metabase | their PostgreSQL connectors | not yet |
 | Airbyte | PostgreSQL source and destination connectors | not yet |

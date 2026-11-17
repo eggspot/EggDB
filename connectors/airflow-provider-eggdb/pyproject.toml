@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airflow-provider-eggdb"
+version = "0.1.0"
+description = "Apache Airflow hooks and operators for EggDB"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = [
+    "apache-airflow>=2.7",
+    "apache-airflow-providers-common-sql>=1.10",
+    "apache-airflow-providers-postgres>=5.7",
+]
+
+[project.entry-points.apache_airflow_provider]
+provider_info = "airflow_provider_eggdb:get_provider_info"
+
+[tool.setuptools]
+packages = ["airflow_provider_eggdb", "airflow_provider_eggdb.hooks", "airflow_provider_eggdb.operators"]

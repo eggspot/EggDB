@@ -1185,7 +1185,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Our own connectors in each tool's plugin system: a Power BI connector, and Superset, Metabase
   and Grafana data source plugins (D46, D239).
 - A dbt adapter, an Airbyte source and destination, a Debezium connector and Airflow operators
-  (D46, D239). The dbt adapter (`dbt-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1205).
+  (D46, D239). The dbt adapter (`dbt-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1205); Airflow operators
+  (`airflow-provider-eggdb`): **code written, unbuilt** (code-only mode, 2026-11-17, D1206).
 - Spark, Flink, Trino and Presto connectors (D46, D239).
 
 ### M7 Caching and Redis
