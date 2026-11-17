@@ -413,6 +413,15 @@ mod tests {
             .unwrap(),
             "moves|low_point\n4|7\nSELECT 1"
         );
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT at FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at ALL ROWS PER MATCH \
+                 PATTERN (STRT {- DOWN+ -} UP+) DEFINE DOWN AS price < PREV(price), UP AS price > PREV(price)) AS mr ORDER BY at"
+            )
+            .unwrap(),
+            "at\n1\n4\n5\nSELECT 3"
+        );
         assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at PATTERN (A) SUBSET S = (B) DEFINE A AS price > 1) AS mr").is_err());
         assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at ALL ROWS PER MATCH WITH UNMATCHED ROWS PATTERN (A) DEFINE A AS price > 1) AS mr").is_err());
     }

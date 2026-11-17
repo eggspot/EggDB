@@ -2046,7 +2046,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   MATCH` and `PREV`/`NEXT` in `DEFINE`: **code written, unbuilt** (code-only mode, 2026-11-13, D1067). `ALL ROWS
   PER MATCH`, running measures, the other `AFTER MATCH SKIP` modes and anchors: **code written, unbuilt** (code-only
   mode, 2026-11-17, D1217); `SUBSET` in `MEASURES`: **code written, unbuilt** (code-only mode, 2026-11-17, D1218).
-  `PERMUTE`: **code written, unbuilt** (code-only mode, 2026-11-17, D1219). Left: union variables in `DEFINE`, exclusion, `SHOW EMPTY MATCHES` and `WITH UNMATCHED ROWS`.
+  `PERMUTE`: **code written, unbuilt** (code-only mode, 2026-11-17, D1219); exclusion: **code written, unbuilt**
+  (code-only mode, 2026-11-17, D1220). Left: union variables in `DEFINE`, `SHOW EMPTY MATCHES` and `WITH UNMATCHED ROWS`.
 - ETL connectors, first scheduled copies from PostgreSQL, MySQL and SQL Server and from CSV and
   Parquet in object storage (D46, D229). Check: a CI copy from PostgreSQL 17, compared by row. Scheduled copies
   (`eggdb_etl`) from PostgreSQL, SQL Server and local CSV and Parquet files: **code written, unbuilt** (code-only

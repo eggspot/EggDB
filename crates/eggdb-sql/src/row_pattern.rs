@@ -11,6 +11,7 @@ const MOST_PERMUTED: usize = 6;
 
 #[derive(Debug, Clone)]
 enum Pattern {
+    Excluded(Box<Pattern>),
     PartitionStart,
     PartitionEnd,
     Variable(String),
@@ -55,7 +56,7 @@ impl PatternParser<'_> {
     fn sequence(&mut self) -> Option<Pattern> {
         let mut items = Vec::new();
         while let Some(next) = self.peek() {
-            if next == b'|' || next == b')' {
+            if next == b'|' || next == b')' || (next == b'-' && self.text.get(self.at + 1) == Some(&b'}')) {
                 break;
             }
             items.push(self.quantified()?);
@@ -132,6 +133,15 @@ impl PatternParser<'_> {
                 self.at += 1;
                 Some(inner)
             }
+            b'{' if self.text.get(self.at + 1) == Some(&b'-') => {
+                self.at += 2;
+                let inner = self.alternation()?;
+                if self.peek() != Some(b'-') || self.text.get(self.at + 1) != Some(&b'}') {
+                    return None;
+                }
+                self.at += 2;
+                Some(Pattern::Excluded(Box::new(inner)))
+            }
             b'^' => {
                 self.at += 1;
                 Some(Pattern::PartitionStart)
@@ -193,6 +203,8 @@ impl PatternParser<'_> {
 
 #[derive(Debug, Clone, Copy)]
 enum Instruction {
+    ExcludeStart,
+    ExcludeEnd,
     PartitionStart,
     PartitionEnd,
     Row(usize),
@@ -236,6 +248,11 @@ impl Compiler {
 
     fn compile(&mut self, pattern: &Pattern) -> Option<()> {
         match pattern {
+            Pattern::Excluded(inner) => {
+                self.emit(Instruction::ExcludeStart)?;
+                self.compile(inner)?;
+                self.emit(Instruction::ExcludeEnd)?;
+            }
             Pattern::PartitionStart => {
                 self.emit(Instruction::PartitionStart)?;
             }
@@ -298,10 +315,10 @@ impl Matcher<'_> {
         self.rows.get(row).is_some_and(|flags| flags.get(variable).copied().flatten().unwrap_or(true))
     }
 
-    fn run(&mut self, start: usize) -> SqlResult<Option<(usize, Vec<usize>)>> {
-        let mut assigned: Vec<usize> = Vec::new();
-        let mut pending: Vec<(usize, usize, usize, usize)> = vec![(0, start, 0, usize::MAX)];
-        while let Some((mut pc, mut row, kept, loop_row)) = pending.pop() {
+    fn run(&mut self, start: usize) -> SqlResult<Option<(usize, Vec<(usize, bool)>)>> {
+        let mut assigned: Vec<(usize, bool)> = Vec::new();
+        let mut pending: Vec<(usize, usize, usize, usize, usize)> = vec![(0, start, 0, usize::MAX, 0)];
+        while let Some((mut pc, mut row, kept, loop_row, mut excluding)) = pending.pop() {
             assigned.truncate(kept);
             let mut entered_at = loop_row;
             loop {
@@ -310,6 +327,14 @@ impl Matcher<'_> {
                     return Err(SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "row_pattern_matches: the pattern takes too many steps on these rows"));
                 }
                 match self.program.get(pc) {
+                    Some(Instruction::ExcludeStart) => {
+                        excluding += 1;
+                        pc += 1;
+                    }
+                    Some(Instruction::ExcludeEnd) => {
+                        excluding = excluding.saturating_sub(1);
+                        pc += 1;
+                    }
                     Some(Instruction::PartitionStart) => {
                         if row != 0 {
                             break;
@@ -326,12 +351,12 @@ impl Matcher<'_> {
                         if !self.holds(row, *variable) {
                             break;
                         }
-                        assigned.push(*variable);
+                        assigned.push((*variable, excluding > 0));
                         row += 1;
                         pc += 1;
                     }
                     Some(Instruction::Split(first, second)) => {
-                        pending.push((*second, row, assigned.len(), entered_at));
+                        pending.push((*second, row, assigned.len(), entered_at, excluding));
                         pc = *first;
                     }
                     Some(Instruction::Jump(target)) => {
@@ -441,14 +466,16 @@ pub(crate) fn matches_skipping(rows_json: &str, pattern_text: &str, skip: &str) 
                     out.push_str(", ");
                 }
                 found += 1;
-                let classifiers: Vec<String> = assigned.iter().map(|variable| format!("\"{}\"", compiler.variables[*variable])).collect();
-                out.push_str(&format!("{{\"start\": {start}, \"end\": {}, \"classifiers\": [{}]}}", end - 1, classifiers.join(", ")));
+                let classifiers: Vec<String> = assigned.iter().map(|(variable, _)| format!("\"{}\"", compiler.variables[*variable])).collect();
+                let excluded: Vec<String> = assigned.iter().enumerate().filter(|(_, (_, excluded))| *excluded).map(|(offset, _)| offset.to_string()).collect();
+                let excluded = if excluded.is_empty() { String::new() } else { format!(", \"excluded\": [{}]", excluded.join(", ")) };
+                out.push_str(&format!("{{\"start\": {start}, \"end\": {}, \"classifiers\": [{}]{excluded}}}", end - 1, classifiers.join(", ")));
                 start = match &skip {
                     Skip::PastLastRow => end,
                     Skip::ToNextRow => start + 1,
                     Skip::ToFirst(variable) | Skip::ToLast(variable) => {
                         let index = compiler.variables.iter().position(|known| known == variable);
-                        let mut offsets = assigned.iter().enumerate().filter(|(_, assigned)| Some(**assigned) == index).map(|(offset, _)| offset);
+                        let mut offsets = assigned.iter().enumerate().filter(|(_, (assigned, _))| Some(*assigned) == index).map(|(offset, _)| offset);
                         let offset = if matches!(skip, Skip::ToFirst(_)) { offsets.next() } else { offsets.last() };
                         match offset {
                             Some(offset) if offset > 0 => start + offset,
@@ -490,6 +517,17 @@ mod tests {
         assert_eq!(matches(rows, "PERMUTE(A, B, A)").unwrap().matches("start").count(), 1);
         assert!(matches(rows, "PERMUTE(A, B, C, D, E, F, G)").is_err());
         assert!(matches(rows, "PERMUTE(A, B").is_err());
+    }
+
+    #[test]
+    fn excluded_rows_are_matched_and_listed() {
+        let rows = r#"[{"A": true}, {"A": true}, {"A": true}]"#;
+        assert_eq!(
+            matches(rows, "A {- A -} A").unwrap(),
+            r#"[{"start": 0, "end": 2, "classifiers": ["A", "A", "A"], "excluded": [1]}]"#
+        );
+        assert_eq!(matches(rows, "{- A -} A* | A").unwrap(), r#"[{"start": 0, "end": 2, "classifiers": ["A", "A", "A"], "excluded": [0]}]"#);
+        assert!(matches(rows, "{- A").is_err());
     }
 
     #[test]

@@ -1244,3 +1244,4 @@ its full title with its status.
 - [D1217](decisions/D1217.md) Code-only batch 869 (M16): ALL ROWS PER MATCH, running measures, skip modes and anchors in MATCH_RECOGNIZE
 - [D1218](decisions/D1218.md) Code-only batch 870 (M16): SUBSET union variables in MATCH_RECOGNIZE
 - [D1219](decisions/D1219.md) Code-only batch 871 (M16): PERMUTE in row patterns
+- [D1220](decisions/D1220.md) Code-only batch 872 (M16): Pattern exclusion in MATCH_RECOGNIZE

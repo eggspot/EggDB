@@ -4123,7 +4123,8 @@ SELECT cron.schedule('* * * * *', 'SELECT eggdb_streams.advance(''clicks'')');
   `FINAL` when asked), `AFTER MATCH SKIP PAST LAST ROW`, `TO NEXT ROW`, `TO FIRST var` and `TO [LAST] var`, and `^`
   for the partition's first row in `PATTERN` (D1217), and `SUBSET name = (var, ...)` union variables that
   `MEASURES` reads like any pattern variable (`COUNT(MOVE.*)`, `LAST(MOVE.price)`, D1218). `PERMUTE(a, b, ...)`
-  in `PATTERN` (up to six items) matches them in any order, the order listed first (D1219).
+  in `PATTERN` (up to six items) matches them in any order, the order listed first (D1219). `{- ... -}` marks rows
+  that belong to the match but are left out of `ALL ROWS PER MATCH` (D1220).
 
 ## Sign-in for applications (eggdb_app_auth)
 

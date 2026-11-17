@@ -516,7 +516,10 @@ impl Parser<'_> {
                 .collect();
             (
                 format!(", mr_all AS (SELECT mr_source.*, row_number() OVER ({window}) - 1 AS {hidden_row} FROM (SELECT * FROM {source}) AS mr_source)"),
-                format!(" JOIN mr_all AS mr_a ON mr_a.{hidden_row} BETWEEN {START} AND {END}{partition_on}"),
+                format!(
+                    " JOIN mr_all AS mr_a ON mr_a.{hidden_row} BETWEEN {START} AND {END}{partition_on} \
+                     AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(mr_m.mr_found -> 'excluded') AS mr_x WHERE mr_x.value::bigint = mr_a.{hidden_row} - {START})"
+                ),
             )
         } else {
             (String::new(), String::new())
