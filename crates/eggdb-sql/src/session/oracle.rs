@@ -149,7 +149,7 @@ impl Session<'_> {
         let mut planned = (*explain.statement).clone();
         let query = self.read(|reader, tables| {
             binding.statement(reader, tables, &mut planned)?;
-            crate::execute::explain(reader, tables, &planned)
+            crate::execute::explain_with_subplans(reader, tables, &planned)
         })?;
         let statement = crate::explain::PlannedStatement::of(&explain.statement)
             .unwrap_or(crate::explain::PlannedStatement::Select);

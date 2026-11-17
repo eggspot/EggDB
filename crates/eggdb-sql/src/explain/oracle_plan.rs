@@ -1,3 +1,4 @@
+use super::subplans::{Subplan, SubplanPlace};
 use super::{PlannedStatement, Step, key_name, steps_without_hashes};
 use crate::dialect::Dialect;
 use crate::execute::{ExplainedQuery, ExplainedSource};
@@ -188,6 +189,15 @@ fn keyed(
     ]
 }
 
+fn plain(depth: usize, operation: &'static str, options: Option<&'static str>) -> Operation {
+    Operation {
+        depth,
+        operation,
+        options,
+        object: None,
+    }
+}
+
 fn operations(query: &ExplainedQuery, statement: PlannedStatement) -> Vec<Operation> {
     let block = statement.query_block();
     let mut out = vec![Operation {
@@ -209,11 +219,34 @@ fn operations(query: &ExplainedQuery, statement: PlannedStatement) -> Vec<Operat
         });
         base = 2;
     }
-    let plain = |depth, operation, options| Operation {
-        depth,
-        operation,
-        options,
-        object: None,
+    query_operations(query, base, block, &mut out);
+    out
+}
+
+fn subquery_operations(subplan: &Subplan, depth: usize, out: &mut Vec<Operation>) {
+    let block = format!("SEL${}", subplan.number + 1);
+    let mut depth = depth;
+    if subplan.plan.grouping.is_some() {
+        out.push(plain(depth, "SORT", Some("AGGREGATE")));
+        depth += 1;
+    }
+    query_operations(&subplan.plan, depth, &block, out);
+}
+
+fn query_operations(query: &ExplainedQuery, base: usize, block: &str, out: &mut Vec<Operation>) {
+    for subplan in query.subplans.iter().filter(|subplan| subplan.place == SubplanPlace::Projection) {
+        subquery_operations(subplan, base, out);
+    }
+    let filtering: Vec<&Subplan> = query
+        .subplans
+        .iter()
+        .filter(|subplan| subplan.place == SubplanPlace::Condition)
+        .collect();
+    let base = if filtering.is_empty() {
+        base
+    } else {
+        out.push(plain(base, "FILTER", None));
+        base + 1
     };
     for (level, step) in steps_without_hashes(query) {
         let depth = base + level;
@@ -247,7 +280,9 @@ fn operations(query: &ExplainedQuery, statement: PlannedStatement) -> Vec<Operat
             }
         }
     }
-    out
+    for subplan in filtering {
+        subquery_operations(subplan, base, out);
+    }
 }
 
 /// The rows `EXPLAIN PLAN` writes for `query`: one per operation in Oracle's names, numbered

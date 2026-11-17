@@ -516,3 +516,27 @@ fn dynamic_sql_and_procedures_cannot_turn_showplan_off_to_run_what_follows() {
     assert_eq!(refused.vendor_code(), Some(1067), "{refused}");
     assert!(last(&mut session, "SELECT COUNT(*) AS n FROM t").contains("\n2\n"));
 }
+
+#[test]
+fn explain_plan_puts_subqueries_under_a_filter_or_beside_the_scan() {
+    let store = MemoryStore::default();
+    let mut session = oracle_emp(&store);
+    last(&mut session, "CREATE TABLE dept (id NUMBER(4) PRIMARY KEY, name VARCHAR2(20))");
+    last(
+        &mut session,
+        "EXPLAIN PLAN FOR SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM dept d WHERE d.id = e.dept)",
+    );
+    let rows = last(&mut session, "SELECT depth, operation, options, object_name FROM plan_table ORDER BY id");
+    let lines: Vec<&str> = rows.lines().collect();
+    assert_eq!(lines[1..4], ["0|SELECT STATEMENT|NULL|NULL", "1|FILTER|NULL|NULL", "2|TABLE ACCESS|FULL|EMP"], "{rows}");
+    assert!(lines[4].starts_with("2|TABLE ACCESS|") && lines[4].ends_with("|DEPT"), "{rows}");
+    last(&mut session, "DELETE FROM plan_table");
+    last(
+        &mut session,
+        "EXPLAIN PLAN FOR SELECT name, (SELECT max(d.name) FROM dept d) AS top_dept FROM emp",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT depth, operation, options FROM plan_table ORDER BY id"),
+        "DEPTH|OPERATION|OPTIONS\n0|SELECT STATEMENT|NULL\n1|SORT|AGGREGATE\n2|TABLE ACCESS|FULL\n1|TABLE ACCESS|FULL\nSELECT 4"
+    );
+}
