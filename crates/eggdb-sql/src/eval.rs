@@ -1463,6 +1463,9 @@ impl Evaluator<'_> {
             | "ts_headline" => {
                 return crate::text_search::function(name, &self.arguments(arguments)?);
             }
+            name if crate::text_search::VECTOR_FUNCTIONS.contains(&name) => {
+                return crate::text_search::function(name, &self.arguments(arguments)?);
+            }
             name if crate::geo_functions::FUNCTIONS.contains(&name) => {
                 return crate::geo_functions::function(name, &self.arguments(arguments)?);
             }

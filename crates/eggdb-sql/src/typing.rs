@@ -169,8 +169,13 @@ fn added_function_type(
         | "jsonb_extract_path_text"
         | "ts_headline"
         | "normalize" => Some(SqlType::Text),
-        "to_tsvector" | "setweight" => Some(SqlType::Defined(crate::types::DefinedType::TSVECTOR)),
-        "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery" | "websearch_to_tsquery" => {
+        "to_tsvector" | "setweight" | "array_to_tsvector" | "ts_delete" | "ts_filter" => {
+            Some(SqlType::Defined(crate::types::DefinedType::TSVECTOR))
+        }
+        "tsvector_to_array" => Some(SqlType::Array(crate::arrays::ArrayElement::Text)),
+        "numnode" => Some(SqlType::Integer),
+        "querytree" => Some(SqlType::Text),
+        "to_tsquery" | "plainto_tsquery" | "phraseto_tsquery" | "websearch_to_tsquery" | "tsquery_phrase" => {
             Some(SqlType::Defined(crate::types::DefinedType::TSQUERY))
         }
         "ts_rank" | "ts_rank_cd" => Some(SqlType::Real),

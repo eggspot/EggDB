@@ -213,6 +213,101 @@ fn ts_headline(values: &[Value]) -> SqlResult<Value> {
     }))
 }
 
+fn listed_texts(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(array) => array.items.iter().filter_map(text).collect(),
+        other => text(other)
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .split(',')
+            .map(|item| item.trim().trim_matches('"').to_owned())
+            .filter(|item| !item.is_empty())
+            .collect(),
+    }
+}
+
+fn vector_function(name: &str, values: &[Value]) -> SqlResult<Value> {
+    let wrong = || {
+        SqlError::new(
+            SqlState::UNDEFINED_FUNCTION,
+            format!("function {name} does not take these arguments"),
+        )
+    };
+    if values.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+    Ok(match (name, values) {
+        ("tsvector_to_array", [vector]) => {
+            let lexemes = vector_of(&text(vector).unwrap_or_default())
+                .lexemes()
+                .keys()
+                .map(|lexeme| Value::Text(lexeme.clone()))
+                .collect();
+            Value::Array(Box::new(crate::arrays::ArrayValue::new(crate::arrays::ArrayElement::Text, lexemes)))
+        }
+        ("array_to_tsvector", [lexemes]) => {
+            crate::text_types::tsvector_value(TsVector::of_lexemes(listed_texts(lexemes)).to_string())
+        }
+        ("ts_delete", [vector, removed]) => {
+            let removed = match removed {
+                Value::Array(_) => listed_texts(removed),
+                other => vec![text(other).unwrap_or_default()],
+            };
+            crate::text_types::tsvector_value(vector_of(&text(vector).unwrap_or_default()).without(&removed).to_string())
+        }
+        ("ts_filter", [vector, weights]) => {
+            let mut kept = Vec::new();
+            for letter in listed_texts(weights) {
+                let mut characters = letter.chars();
+                let weight = match (characters.next(), characters.next()) {
+                    (Some(single), None) => Weight::named(single),
+                    _ => None,
+                }
+                .ok_or_else(|| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("unrecognized weight: \"{letter}\"")))?;
+                kept.push(weight);
+            }
+            crate::text_types::tsvector_value(vector_of(&text(vector).unwrap_or_default()).filtered(&kept).to_string())
+        }
+        ("numnode", [query]) => Value::Integer(i32::try_from(query_of(&text(query).unwrap_or_default()).node_count()).unwrap_or(i32::MAX)),
+        ("querytree", [query]) => Value::Text(
+            query_of(&text(query).unwrap_or_default())
+                .indexable()
+                .map_or_else(|| "T".to_owned(), |query| query.to_string()),
+        ),
+        ("tsquery_phrase", [left, right] | [left, right, _]) => {
+            let distance = match values.get(2) {
+                None => 1,
+                Some(value) => text(value)
+                    .and_then(|written| written.trim().parse::<u32>().ok())
+                    .ok_or_else(|| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "distance in phrase operator must be an integer value between zero and 16384 inclusive"))?,
+            };
+            if distance > 16_384 {
+                return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "distance in phrase operator must be an integer value between zero and 16384 inclusive"));
+            }
+            let phrase = TsQuery::Phrase(
+                Box::new(query_of(&text(left).unwrap_or_default())),
+                Box::new(query_of(&text(right).unwrap_or_default())),
+                distance,
+            );
+            crate::text_types::tsquery_value(phrase.to_string())
+        }
+        _ => return Err(wrong()),
+    })
+}
+
+/// The names of the tsvector and tsquery functions `vector_function` answers.
+pub(crate) const VECTOR_FUNCTIONS: [&str; 7] = [
+    "tsvector_to_array",
+    "array_to_tsvector",
+    "ts_delete",
+    "ts_filter",
+    "numnode",
+    "querytree",
+    "tsquery_phrase",
+];
+
 fn written(name: &str, config: impl Lexer, input: &str) -> SqlResult<String> {
     Ok(match name {
         "to_tsvector" => TsVector::from_text(config, input).to_string(),
@@ -229,6 +324,7 @@ fn written(name: &str, config: impl Lexer, input: &str) -> SqlResult<String> {
 /// `phraseto_tsquery`, `websearch_to_tsquery`, `ts_rank` and `ts_rank_cd`.
 pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
     match name {
+        name if VECTOR_FUNCTIONS.contains(&name) => vector_function(name, values),
         "setweight" => setweight(values),
         "ts_headline" => ts_headline(values),
         "ts_rank" | "ts_rank_cd" => {
@@ -288,6 +384,37 @@ mod tests {
             .map(|text| Value::Text((*text).to_owned()))
             .collect();
         function(name, &values).unwrap()
+    }
+
+    #[test]
+    fn vector_and_query_utilities_follow_postgresql() {
+        let texts = |items: &[&str]| {
+            Value::Array(Box::new(crate::arrays::ArrayValue::new(
+                crate::arrays::ArrayElement::Text,
+                items.iter().map(|item| Value::Text((*item).to_owned())).collect(),
+            )))
+        };
+        assert_eq!(call("tsvector_to_array", &["'fat':2 'rat':3"]), texts(&["fat", "rat"]));
+        assert_eq!(
+            call("array_to_tsvector", &["{fat,cat,rat}"]),
+            crate::text_types::tsvector_value("'cat' 'fat' 'rat'".to_owned())
+        );
+        assert_eq!(
+            call("ts_delete", &["'fat':2,4 'cat':3 'rat':5A", "fat"]),
+            crate::text_types::tsvector_value("'cat':3 'rat':5A".to_owned())
+        );
+        assert_eq!(
+            call("ts_filter", &["'fat':2,4 'cat':3B 'rat':5A", "{a,b}"]),
+            crate::text_types::tsvector_value("'cat':3B 'rat':5A".to_owned())
+        );
+        assert_eq!(call("numnode", &["('fat' & 'rat') | 'cat'"]), Value::Integer(5));
+        assert_eq!(call("querytree", &["'foo' & !'bar'"]), Value::Text("'foo'".to_owned()));
+        assert_eq!(call("querytree", &["!'defined'"]), Value::Text("T".to_owned()));
+        assert_eq!(
+            call("tsquery_phrase", &["'fat'", "'cat'", "10"]),
+            crate::text_types::tsquery_value("'fat' <10> 'cat'".to_owned())
+        );
+        assert!(function("ts_filter", &[Value::Text("'a':1".to_owned()), Value::Text("{x}".to_owned())]).is_err());
     }
 
     #[test]

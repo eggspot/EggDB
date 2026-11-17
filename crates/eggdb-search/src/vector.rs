@@ -404,6 +404,40 @@ impl TsVector {
         }
     }
 
+    /// The vector without the lexemes in `removed`, as `ts_delete` makes it.
+    pub fn without(&self, removed: &[String]) -> Self {
+        let mut lexemes = self.lexemes.clone();
+        for lexeme in removed {
+            lexemes.remove(lexeme);
+        }
+        Self { lexemes }
+    }
+
+    /// Only the positions whose weight is in `weights`, a lexeme left with none dropped, as
+    /// `ts_filter` does.
+    pub fn filtered(&self, weights: &[Weight]) -> Self {
+        let lexemes = self
+            .lexemes
+            .iter()
+            .filter_map(|(lexeme, positions)| {
+                let kept: Vec<u32> = positions
+                    .iter()
+                    .copied()
+                    .filter(|stored| weights.contains(&weight_of(*stored)))
+                    .collect();
+                (!kept.is_empty()).then(|| (lexeme.clone(), kept))
+            })
+            .collect();
+        Self { lexemes }
+    }
+
+    /// A vector of `lexemes` without positions, as `array_to_tsvector` makes it.
+    pub fn of_lexemes(lexemes: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            lexemes: lexemes.into_iter().map(|lexeme| (lexeme, Vec::new())).collect(),
+        }
+    }
+
     /// How many words the text had, as its largest position.
     pub fn length(&self) -> usize {
         self.lexemes.values().map(Vec::len).sum()

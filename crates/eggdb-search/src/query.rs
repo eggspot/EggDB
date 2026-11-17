@@ -330,6 +330,41 @@ impl TsQuery {
         })
     }
 
+    /// How many operands and operators the query has, as `numnode` counts them.
+    pub fn node_count(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::Term { .. } => 1,
+            Self::Not(inner) => 1 + inner.node_count(),
+            Self::And(left, right) | Self::Or(left, right) | Self::Phrase(left, right, _) => {
+                1 + left.node_count() + right.node_count()
+            }
+        }
+    }
+
+    /// The part of the query an index can answer, with its negations taken out, as
+    /// `querytree` gives it; `None` when nothing is left.
+    pub fn indexable(&self) -> Option<TsQuery> {
+        match self {
+            Self::Empty | Self::Not(_) => None,
+            Self::Term { .. } => Some(self.clone()),
+            Self::And(left, right) => match (left.indexable(), right.indexable()) {
+                (Some(left), Some(right)) => Some(Self::And(Box::new(left), Box::new(right))),
+                (Some(side), None) | (None, Some(side)) => Some(side),
+                (None, None) => None,
+            },
+            Self::Phrase(left, right, distance) => match (left.indexable(), right.indexable()) {
+                (Some(left), Some(right)) => Some(Self::Phrase(Box::new(left), Box::new(right), *distance)),
+                (Some(side), None) | (None, Some(side)) => Some(side),
+                (None, None) => None,
+            },
+            Self::Or(left, right) => match (left.indexable(), right.indexable()) {
+                (Some(left), Some(right)) => Some(Self::Or(Box::new(left), Box::new(right))),
+                _ => None,
+            },
+        }
+    }
+
     /// Whether `vector` matches.
     pub fn matches(&self, vector: &TsVector) -> bool {
         match self {

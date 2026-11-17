@@ -1254,3 +1254,4 @@ its full title with its status.
 - [D1227](decisions/D1227.md) Code-only batch 879 (M6c): Subqueries in MySQL's tabular EXPLAIN
 - [D1228](decisions/D1228.md) Code-only batch 880 (M6c): Subqueries in Oracle's EXPLAIN PLAN
 - [D1229](decisions/D1229.md) Code-only batch 881 (M6c): Subqueries in SQL Server's showplan
+- [D1230](decisions/D1230.md) Code-only batch 882 (M8): tsvector and tsquery utility functions
