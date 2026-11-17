@@ -1162,10 +1162,12 @@ impl<'s> Session<'s> {
             ));
         };
         self.identify(user, database);
+        let limits = self.read(|reader, _| crate::roles::role_limits(reader, &role.name))?;
         let settings = Arc::make_mut(&mut self.settings);
         settings.checked_role = (!role.superuser).then(|| role.name.clone());
         settings.set_superuser(role.superuser);
         settings.login_role = Some(role.name);
+        settings.role_limits = limits;
         Ok(())
     }
 
@@ -3400,6 +3402,25 @@ impl<'s> Session<'s> {
         }
         self.refresh_database_names();
         let settings = Arc::clone(&self.settings);
+        if let Some(login) = settings.login_role.as_deref() {
+            let changes = crate::roles::defines_objects(statement)
+                || matches!(
+                    statement,
+                    Statement::Insert(_)
+                        | Statement::Update(_)
+                        | Statement::Delete(_)
+                        | Statement::Merge(_)
+                        | Statement::Truncate(_)
+                );
+            crate::admission::admit(
+                &settings.database,
+                login,
+                settings.role_limits,
+                changes,
+                self.dialect,
+                std::time::Instant::now(),
+            )?;
+        }
         let owns = match settings.checked_role.as_deref() {
             Some(role) if crate::roles::defines_objects(statement) => {
                 let reader = self.store.begin_boxed_read()?;

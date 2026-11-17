@@ -328,3 +328,27 @@ fn a_column_deny_hides_one_column_until_it_is_granted_again() {
         "has_column_privilege\nt\nSELECT 1"
     );
 }
+
+#[test]
+fn mysql_account_limits_refuse_statements_past_the_hour_s_count() {
+    let store = MemoryStore::default();
+    let mut mysql = Session::with_dialect(&store, crate::Dialect::MySql);
+    mysql
+        .execute(
+            "CREATE USER 'hourly_limit_user'@'%' IDENTIFIED BY 'secret' WITH MAX_QUERIES_PER_HOUR 2",
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(role_limits(&store.begin_read().unwrap(), "hourly_limit_user").unwrap().queries_per_hour, 2);
+    let mut limited = Session::with_dialect(&store, crate::Dialect::MySql);
+    limited.identify_role("hourly_limit_user", "eggdb").unwrap();
+    for _ in 0..2 {
+        limited.execute("SELECT 1", &mut |_| {}).unwrap();
+    }
+    let error = limited.execute("SELECT 1", &mut |_| {}).unwrap_err();
+    assert_eq!(error.state(), SqlState::MYSQL_SYNTAX_OR_ACCESS);
+    mysql
+        .execute("ALTER USER 'hourly_limit_user'@'%' WITH MAX_QUERIES_PER_HOUR 0", &mut |_| {})
+        .unwrap();
+    assert_eq!(role_limits(&store.begin_read().unwrap(), "hourly_limit_user").unwrap(), RoleLimits::default());
+}

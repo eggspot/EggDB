@@ -13,6 +13,7 @@ pub(crate) const GRANT_SPACE: u8 = 0x12;
 pub(crate) const DENY_SPACE: u8 = 0x18;
 pub(crate) const GRANT_OPTION_SPACE: u8 = 0x1C;
 pub(crate) const OWNER_SPACE: u8 = 0x1E;
+pub(crate) const ROLE_LIMIT_SPACE: u8 = 0x20;
 const RECORD_VERSION: u8 = 1;
 const LOGIN: u8 = 1;
 const SUPERUSER: u8 = 2;
@@ -72,6 +73,22 @@ pub(crate) struct RoleOptions {
     pub(crate) bypass_row_security: Option<bool>,
     pub(crate) password: Option<Option<String>>,
     pub(crate) member_of: Vec<String>,
+    pub(crate) limits: RoleLimitChanges,
+}
+
+/// The resource limits an account's `CREATE USER` or `ALTER USER ... WITH` names (MySQL's
+/// `MAX_QUERIES_PER_HOUR` and `MAX_UPDATES_PER_HOUR`, D1204): `Some(0)` removes a limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct RoleLimitChanges {
+    pub(crate) queries_per_hour: Option<u32>,
+    pub(crate) updates_per_hour: Option<u32>,
+}
+
+/// A role's resource limits; 0 means none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct RoleLimits {
+    pub(crate) queries_per_hour: u32,
+    pub(crate) updates_per_hour: u32,
 }
 
 const HIDDEN_SECRET: &str = "***";
@@ -236,6 +253,49 @@ fn grant_option_key(table: &str, grantee: &str) -> Vec<u8> {
     key.push(0);
     key.extend_from_slice(grantee.as_bytes());
     key
+}
+
+fn role_limit_key(role: &str) -> Vec<u8> {
+    let mut key = NAMESPACE.to_vec();
+    key.push(ROLE_LIMIT_SPACE);
+    key.extend_from_slice(role.as_bytes());
+    key
+}
+
+/// The resource limits stored for `role` (D1204).
+pub(crate) fn role_limits(reader: &dyn KeyValueRead, role: &str) -> SqlResult<RoleLimits> {
+    match reader.get(&role_limit_key(role))?.as_deref() {
+        Some([RECORD_VERSION, rest @ ..]) if rest.len() == 8 => Ok(RoleLimits {
+            queries_per_hour: u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]),
+            updates_per_hour: u32::from_be_bytes([rest[4], rest[5], rest[6], rest[7]]),
+        }),
+        Some(_) => Err(crate::encoding::corrupt("role limits")),
+        None => Ok(RoleLimits::default()),
+    }
+}
+
+fn change_role_limits(
+    writer: &mut dyn KeyValueWrite,
+    role: &str,
+    changes: RoleLimitChanges,
+) -> SqlResult<()> {
+    if changes == RoleLimitChanges::default() {
+        return Ok(());
+    }
+    let mut limits = role_limits(writer, role)?;
+    if let Some(queries) = changes.queries_per_hour {
+        limits.queries_per_hour = queries;
+    }
+    if let Some(updates) = changes.updates_per_hour {
+        limits.updates_per_hour = updates;
+    }
+    if limits == RoleLimits::default() {
+        return writer.delete(&role_limit_key(role)).map(|_| ());
+    }
+    let mut value = vec![RECORD_VERSION];
+    value.extend_from_slice(&limits.queries_per_hour.to_be_bytes());
+    value.extend_from_slice(&limits.updates_per_hour.to_be_bytes());
+    writer.put(&role_limit_key(role), &value)
 }
 
 fn owner_key(table: &str) -> Vec<u8> {
@@ -655,12 +715,14 @@ pub(crate) fn run(
                 }
             }
             writer.put(&role_key(&role.name), &encode_role(&role))?;
+            change_role_limits(writer, &role.name, options.limits)?;
         }
         RoleStatement::Alter { name, options } => {
             let mut role = stored_role(writer, &name.text)?
                 .ok_or_else(|| missing_role(&name.text).at(name.position))?;
             apply_options(&mut role, options)?;
             writer.put(&role_key(&role.name), &encode_role(&role))?;
+            change_role_limits(writer, &role.name, options.limits)?;
         }
         RoleStatement::Drop { names, if_exists } => drop_roles(writer, names, *if_exists)?,
         RoleStatement::Deny {
@@ -803,6 +865,7 @@ fn drop_roles(writer: &mut dyn KeyValueWrite, names: &[Name], if_exists: bool) -
             .at(name.position));
         }
         writer.delete(&role_key(&name.text))?;
+        writer.delete(&role_limit_key(&name.text))?;
         for mut role in stored_roles(writer)? {
             let before = role.member_of.len();
             role.member_of.retain(|parent| parent != &name.text);

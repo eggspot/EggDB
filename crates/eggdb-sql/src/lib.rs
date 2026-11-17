@@ -21,6 +21,7 @@
 pub mod activity;
 pub mod api_keys;
 pub mod audit_events;
+mod admission;
 mod advisory_locks;
 mod attached;
 mod aggregate;

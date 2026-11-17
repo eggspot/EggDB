@@ -142,6 +142,15 @@ impl Parser<'_> {
             .any(|word| self.is_word(word))
             {
                 self.at += 1;
+            } else if self.take_word("max_queries_per_hour") {
+                options.limits.queries_per_hour = Some(self.limit_count()?);
+            } else if self.take_word("max_updates_per_hour") {
+                options.limits.updates_per_hour = Some(self.limit_count()?);
+            } else if self.take_word("max_connections_per_hour")
+                || self.take_word("max_user_connections")
+            {
+                self.limit_count()?;
+            } else if self.mysql() && self.take_word("with") {
             } else if self.take_word("connection") {
                 self.expect_word("limit")?;
                 self.at += 1;
@@ -458,6 +467,17 @@ impl Parser<'_> {
                 members: grantees,
             }
         }))
+    }
+
+    fn limit_count(&mut self) -> SqlResult<u32> {
+        match self.peek_kind() {
+            TokenKind::Integer(text) => {
+                let count = text.parse::<u32>().map_err(|_| self.unexpected())?;
+                self.at += 1;
+                Ok(count)
+            }
+            _ => Err(self.unexpected()),
+        }
     }
 
     fn privilege_columns(&mut self) -> SqlResult<Vec<Name>> {

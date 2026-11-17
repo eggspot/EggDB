@@ -472,6 +472,7 @@ pub(crate) struct Settings {
     pub(crate) oracle_user_schema: Option<String>,
     pub(crate) checked_role: Option<String>,
     pub(crate) login_role: Option<String>,
+    pub(crate) role_limits: crate::roles::RoleLimits,
     pub(crate) role_before_set_role: Option<(Option<String>, bool)>,
     pub(crate) database_names: Vec<String>,
 }
@@ -533,6 +534,7 @@ impl Default for Settings {
             oracle_user_schema: None,
             checked_role: None,
             login_role: None,
+            role_limits: crate::roles::RoleLimits::default(),
             role_before_set_role: None,
             database_names: Vec::new(),
         }

@@ -1005,8 +1005,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `lock_timeout`, and memory, CPU and I/O limits per user, role, tenant and query (D25, PR #86).
   `lock_timeout` on the writer wait: **code written, unbuilt** (code-only mode, 2026-11-10, D393).
 - Quotas by bytes and requests per tenant, and admission control (D25, D234). Byte quotas per tenant and table (`max_bytes`): **code written, unbuilt** (code-only
-  mode, 2026-11-12, D928). Left: request quotas and admission control, which need the server to count statements per
-  tenant.
+  mode, 2026-11-12, D928); statements per hour per role (MySQL's `MAX_QUERIES_PER_HOUR` and `MAX_UPDATES_PER_HOUR`):
+  **code written, unbuilt** (code-only mode, 2026-11-17, D1204). Left: connection and concurrency limits.
 - An index and plan advisor, and automatic tuning of indexes and configuration (D25, D31). The index advisor
   (`eggdb_advisor`): **code written, unbuilt** (code-only mode, 2026-11-12, D780); plan advice, unused indexes and
   configuration advice: **code written, unbuilt** (code-only mode, 2026-11-17, D1203). Left: applying configuration
