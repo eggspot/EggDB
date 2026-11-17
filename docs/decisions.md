@@ -1224,3 +1224,4 @@ its full title with its status.
 - [D1197](decisions/D1197.md) Code-only batch 849 (M6b): Key sources on Azure and Google Cloud
 - [D1198](decisions/D1198.md) Code-only batch 850 (M6b): SCIM 2.0 provisioning of roles
 - [D1199](decisions/D1199.md) Code-only batch 851 (M6b): CREATE DATABASE ... TEMPLATE: tenants isolated by database
+- [D1200](decisions/D1200.md) Code-only batch 852 (M6c): Data-quality checks at scale in eggdb_catalog

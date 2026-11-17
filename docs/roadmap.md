@@ -1026,7 +1026,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Master data: entity resolution, match and merge, and golden records (D51). **Code written, unbuilt** (code-only mode,
   2026-11-12, D749).
 - Data profiling and data-quality rules at scale (D42, D51). Profiling (`eggdb_catalog.profile`): **code written,
-  unbuilt** (code-only mode, 2026-11-12, D749). Left: rules at scale.
+  unbuilt** (code-only mode, 2026-11-12, D749). Data-quality checks at scale (`quality_checks`, `run_quality_checks`): **code written, unbuilt** (code-only mode,
+  2026-11-17, D1200).
 
 ### M6d The built-in MCP server
 - OAuth for MCP over HTTP, as the MCP specification describes for remote servers; TLS comes with

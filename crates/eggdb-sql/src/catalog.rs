@@ -41,6 +41,53 @@ BEGIN
     RETURN broken;
 END
 $$;
+CREATE TABLE eggdb_catalog.quality_checks (check_name text PRIMARY KEY, kind text NOT NULL CHECK (kind IN ('rule', 'unique', 'null_ratio', 'freshness', 'row_count', 'references')), schema_name text NOT NULL, table_name text NOT NULL, column_names text NOT NULL DEFAULT '', parameter text, max_failed_ratio double precision NOT NULL DEFAULT 0, severity text NOT NULL DEFAULT 'error' CHECK (severity IN ('error', 'warning')), sample_percent double precision CHECK (sample_percent > 0 AND sample_percent <= 100));
+CREATE TABLE eggdb_catalog.quality_failures (check_name text NOT NULL, checked_at timestamptz NOT NULL DEFAULT now(), example text NOT NULL);
+CREATE FUNCTION eggdb_catalog.run_quality_checks(only_table text DEFAULT NULL, examples integer DEFAULT 5) RETURNS TABLE (name text, severity text, passed boolean, checked_rows bigint, failed_rows bigint, detail text) LANGUAGE plpgsql AS $$
+DECLARE
+    q record;
+    relation text;
+    sampled text;
+    columns_list text;
+    failing text;
+BEGIN
+    FOR q IN SELECT * FROM eggdb_catalog.quality_checks c WHERE only_table IS NULL OR c.schema_name || '.' || c.table_name = only_table OR c.table_name = only_table ORDER BY c.check_name LOOP
+        relation := format('%I.%I', q.schema_name, q.table_name);
+        sampled := CASE WHEN q.sample_percent IS NULL THEN 'true' ELSE format('random() * 100 < %s', q.sample_percent) END;
+        columns_list := (SELECT string_agg(format('%I', trim(c)), ', ') FROM unnest(string_to_array(q.column_names, ',')) c WHERE trim(c) <> '');
+        failing := NULL;
+        IF q.kind = 'rule' THEN
+            failing := format('NOT coalesce((%s), false)', q.parameter);
+        ELSIF q.kind = 'null_ratio' THEN
+            failing := format('%s IS NULL', columns_list);
+        ELSIF q.kind = 'references' THEN
+            failing := format('%1$s IS NOT NULL AND NOT EXISTS (SELECT 1 FROM %2$s r WHERE r.%3$I = %4$s.%1$s)', columns_list, split_part(q.parameter, ':', 1), split_part(q.parameter, ':', 2), relation);
+        END IF;
+        IF failing IS NOT NULL THEN
+            EXECUTE format('SELECT count(*), coalesce(sum(CASE WHEN %s THEN 1 ELSE 0 END), 0) FROM %s WHERE %s', failing, relation, sampled) INTO checked_rows, failed_rows;
+            IF failed_rows > 0 AND examples > 0 THEN
+                EXECUTE format('INSERT INTO eggdb_catalog.quality_failures (check_name, example) SELECT %L, row_to_json(t)::text FROM %s t WHERE %s AND %s LIMIT %s', q.check_name, relation, failing, sampled, examples);
+            END IF;
+            detail := format('%s of %s rows fail%s', failed_rows, checked_rows, CASE WHEN q.sample_percent IS NULL THEN '' ELSE format(' (a %s%% sample)', q.sample_percent) END);
+        ELSIF q.kind = 'unique' THEN
+            EXECUTE format('SELECT (SELECT count(*) FROM %1$s), coalesce((SELECT sum(n) FROM (SELECT count(*) AS n FROM %1$s GROUP BY %2$s HAVING count(*) > 1) d), 0)', relation, columns_list) INTO checked_rows, failed_rows;
+            detail := format('%s rows share their %s with another row', failed_rows, q.column_names);
+        ELSIF q.kind = 'freshness' THEN
+            EXECUTE format('SELECT count(*), CASE WHEN max(%s) >= now() - %L::interval THEN 0 ELSE 1 END FROM %s', columns_list, coalesce(q.parameter, '1 day'), relation) INTO checked_rows, failed_rows;
+            detail := CASE WHEN failed_rows = 0 THEN 'fresh' ELSE format('nothing newer than %s', coalesce(q.parameter, '1 day')) END;
+        ELSIF q.kind = 'row_count' THEN
+            EXECUTE format('SELECT count(*) FROM %s', relation) INTO checked_rows;
+            failed_rows := CASE WHEN checked_rows < coalesce(nullif(split_part(q.parameter, '..', 1), '')::bigint, 0) OR checked_rows > coalesce(nullif(split_part(q.parameter, '..', 2), '')::bigint, checked_rows) THEN 1 ELSE 0 END;
+            detail := format('%s rows, %s expected', checked_rows, q.parameter);
+        END IF;
+        name := q.check_name;
+        severity := q.severity;
+        passed := CASE WHEN q.kind IN ('freshness', 'row_count') THEN failed_rows = 0 ELSE failed_rows <= checked_rows * q.max_failed_ratio END;
+        INSERT INTO eggdb_catalog.quality_results (rule_name, checked_rows, failed_rows) VALUES (q.check_name, checked_rows, failed_rows);
+        RETURN NEXT;
+    END LOOP;
+END
+$$;
 CREATE FUNCTION eggdb_catalog.upstream(asset text) RETURNS TABLE (upstream_asset text, hops integer) LANGUAGE plpgsql AS $$
 BEGIN
     RETURN QUERY WITH RECURSIVE walked (reached, distance) AS (
@@ -368,6 +415,31 @@ mod tests {
         assert_eq!(
             run(&mut session, "SELECT rule_name, checked_rows, failed_rows FROM eggdb_catalog.quality_results ORDER BY rule_name").unwrap(),
             "rule_name|checked_rows|failed_rows\nemail present|3|1\nids positive|3|0\nknown country|3|1\nSELECT 3"
+        );
+    }
+
+    #[test]
+    fn quality_checks_cover_uniqueness_nulls_references_volume_and_freshness() {
+        let store = catalog();
+        let mut session = Session::new(&store);
+        for sql in [
+            "CREATE TABLE countries (code text PRIMARY KEY)",
+            "INSERT INTO countries VALUES ('VN'), ('SE')",
+            "INSERT INTO eggdb_catalog.quality_checks (check_name, kind, schema_name, table_name, column_names, parameter, max_failed_ratio) VALUES \
+             ('country known', 'references', 'public', 'customers', 'country', 'public.countries:code', 0), \
+             ('email mostly present', 'null_ratio', 'public', 'customers', 'email', NULL, 0.5), \
+             ('country unique', 'unique', 'public', 'customers', 'country', NULL, 0), \
+             ('enough rows', 'row_count', 'public', 'customers', '', '5..', 0)",
+        ] {
+            run(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert_eq!(
+            run(&mut session, "SELECT name, passed, failed_rows FROM eggdb_catalog.run_quality_checks()").unwrap(),
+            "name|passed|failed_rows\ncountry known|f|1\ncountry unique|t|0\nemail mostly present|t|1\nenough rows|f|1\nSELECT 4"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT check_name, example FROM eggdb_catalog.quality_failures WHERE check_name = 'country known'").unwrap(),
+            "check_name|example\ncountry known|{\"id\":3,\"email\":\"c@x.io\",\"country\":\"XX\"}\nSELECT 1"
         );
     }
 
