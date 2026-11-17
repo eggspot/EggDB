@@ -1234,3 +1234,4 @@ its full title with its status.
 - [D1207](decisions/D1207.md) Code-only batch 859 (M6f): Metabase, Superset and Power BI connectors in their own plugin systems
 - [D1208](decisions/D1208.md) Code-only batch 860 (M6f): An Airbyte source and destination
 - [D1209](decisions/D1209.md) Code-only batch 861 (M6f): Spark and Trino connectors
+- [D1210](decisions/D1210.md) Code-only batch 862 (M6f): An ActiveRecord adapter for the Ruby driver
