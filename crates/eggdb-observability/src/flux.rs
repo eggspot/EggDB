@@ -381,6 +381,8 @@ impl Parser {
             let first = self.call()?;
             if first.name == "join" || first.name.starts_with("join.") {
                 (Head::Join(first), Vec::new())
+            } else if first.name == "array.from" {
+                (Head::Array(first), Vec::new())
             } else {
                 (Head::From, vec![first])
             }
@@ -1652,6 +1654,7 @@ enum Head {
     From,
     Variable(String),
     Join(Call),
+    Array(Call),
 }
 
 #[derive(Debug, Clone)]
@@ -1670,7 +1673,52 @@ fn run_statement(session: &mut Session<'_>, statement: &Statement, streams: &BTr
         }
         Head::Join(call) if call.name == "join" => apply(joined(call, streams)?, &statement.calls.iter().collect::<Vec<_>>()),
         Head::Join(call) => apply(joins::joined(call, streams)?, &statement.calls.iter().collect::<Vec<_>>()),
+        Head::Array(call) => apply(array_rows(call)?, &statement.calls.iter().collect::<Vec<_>>()),
     }
+}
+
+fn array_value(argument: &Argument) -> Result<Value, String> {
+    Ok(match argument {
+        Argument::Text(text) => Value::Text(text.clone()),
+        Argument::Number(number) => Value::Double(*number),
+        Argument::Boolean(flag) => Value::Boolean(*flag),
+        Argument::Time(text) => value_of(packages::time_constant(text)?),
+        other => return Err(format!("array.from cannot hold {other:?}")),
+    })
+}
+
+fn array_rows(call: &Call) -> Result<Stream, String> {
+    let Some(Argument::List(items)) = call.argument("rows") else {
+        return Err("array.from needs rows: [{...}, ...]".to_owned());
+    };
+    if items.len() > MOST_ROWS {
+        return Err(format!("array.from takes at most {MOST_ROWS} rows"));
+    }
+    let mut rows = Vec::with_capacity(items.len());
+    for item in items {
+        let Argument::Record(members) = item else {
+            return Err("each row of array.from is a record".to_owned());
+        };
+        let mut row = Row::new();
+        for (name, value) in members {
+            row.insert(name.clone(), array_value(value)?);
+        }
+        rows.push(row);
+    }
+    let times: Vec<i64> = rows
+        .iter()
+        .filter_map(|row| match row.get("_time") {
+            Some(Value::TimestampTz(micros)) => Some(*micros),
+            _ => None,
+        })
+        .collect();
+    let start = times.iter().min().copied().unwrap_or_default();
+    let stop = times.iter().max().map_or(0, |last| last + 1);
+    Ok(Stream {
+        tables: vec![Table { key: Vec::new(), rows }],
+        start,
+        stop,
+    })
 }
 
 fn datatype(values: &[&Value]) -> &'static str {
@@ -1797,6 +1845,33 @@ pub(crate) fn answer(session: &mut Session<'_>, query: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn array_from_builds_a_table_from_records() {
+        let mut parser = Parser::new(
+            tokens(
+                r#"import "array"
+array.from(rows: [{host: "a", _value: 1.5, _time: 2026-11-17T00:00:00Z}, {host: "b", _value: 2.5, _time: 2026-11-17T00:01:00Z}]) |> filter(fn: (r) => r._value > 2.0)"#,
+            )
+            .unwrap(),
+        );
+        let statement = parser.statement().unwrap().unwrap();
+        let Head::Array(call) = &statement.head else {
+            panic!("an array head");
+        };
+        let stream = array_rows(call).unwrap();
+        assert_eq!(stream.tables[0].rows.len(), 2);
+        assert_eq!(stream.stop - stream.start, 60_000_001);
+        let applied = apply(stream, &statement.calls.iter().collect::<Vec<_>>()).unwrap();
+        let rows: Vec<&Row> = applied.stream.tables.iter().flat_map(|table| &table.rows).collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("host"), Some(&Value::Text("b".to_owned())));
+        let bad = Call {
+            name: "array.from".to_owned(),
+            arguments: vec![("rows".to_owned(), Argument::List(vec![Argument::Text("x".to_owned())]))],
+        };
+        assert!(array_rows(&bad).is_err());
+    }
 
     #[test]
     fn pipelines_parse_and_filters_fold() {
