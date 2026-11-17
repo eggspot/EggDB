@@ -1227,3 +1227,4 @@ its full title with its status.
 - [D1200](decisions/D1200.md) Code-only batch 852 (M6c): Data-quality checks at scale in eggdb_catalog
 - [D1201](decisions/D1201.md) Code-only batch 853 (M6c): OpenMetadata's API, read-only
 - [D1202](decisions/D1202.md) Code-only batch 854 (M6c): Apache Atlas's API, read-only
+- [D1203](decisions/D1203.md) Code-only batch 855 (M6c): Plan advice, unused indexes and configuration advice in eggdb_advisor

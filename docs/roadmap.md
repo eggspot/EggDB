@@ -1008,8 +1008,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-12, D928). Left: request quotas and admission control, which need the server to count statements per
   tenant.
 - An index and plan advisor, and automatic tuning of indexes and configuration (D25, D31). The index advisor
-  (`eggdb_advisor`): **code written, unbuilt** (code-only mode, 2026-11-12, D780). Left: plan advice and configuration
-  tuning.
+  (`eggdb_advisor`): **code written, unbuilt** (code-only mode, 2026-11-12, D780); plan advice, unused indexes and
+  configuration advice: **code written, unbuilt** (code-only mode, 2026-11-17, D1203). Left: applying configuration
+  changes automatically.
 - An admin API, with the same actions as MCP tools (D11, D25). `GET /admin/tools` and `POST /admin/tools/<name>` beside `/mcp`: **code written,
   unbuilt** (code-only mode, 2026-11-12, D840).
 - A Kubernetes operator in Rust (D25, D45). `eggdb-operator` with the `EggDB` resource (`deploy/operator`): **code written,
