@@ -267,3 +267,25 @@ fn a_table_s_owner_holds_every_privilege_and_may_grant_them() {
     let error = run(&mut clerk, "DELETE FROM accounts").expect_err("not owner");
     assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE);
 }
+
+#[test]
+fn a_role_with_create_on_a_schema_makes_tables_it_owns_and_may_drop() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    run(&mut admin, "GRANT CREATE ON SCHEMA public TO readers").unwrap();
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    run(&mut clerk, "CREATE TABLE mine (id integer)").unwrap();
+    run(&mut clerk, "INSERT INTO mine VALUES (1)").unwrap();
+    run(&mut clerk, "ALTER TABLE mine ADD COLUMN note text").unwrap();
+    assert_eq!(
+        run(&mut clerk, "SELECT id, note FROM mine").unwrap(),
+        "id|note\n1|\nSELECT 1"
+    );
+    for sql in ["ALTER TABLE mine OWNER TO readers", "DROP TABLE audit"] {
+        let error = run(&mut clerk, sql).expect_err(sql);
+        assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE, "{sql}");
+    }
+    run(&mut clerk, "DROP TABLE mine").unwrap();
+}

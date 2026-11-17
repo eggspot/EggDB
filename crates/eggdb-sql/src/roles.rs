@@ -1225,13 +1225,10 @@ pub(crate) fn target_privilege(statement: &Statement) -> Privilege {
     }
 }
 
-/// Refuses statements that change the schema for a session whose privileges are checked: only
-/// superusers define objects until object ownership lands.
-pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> SqlResult<()> {
-    if may_define_objects(settings.checked_role.as_deref()) {
-        return Ok(());
-    }
-    let defines = matches!(
+/// Whether `statement` creates, changes or drops an object, which a session whose privileges
+/// are checked may run only as a superuser, or as D1193 allows.
+pub(crate) fn defines_objects(statement: &Statement) -> bool {
+    matches!(
         statement,
         Statement::CreateTable(_)
             | Statement::CreateTableAs(_)
@@ -1267,7 +1264,63 @@ pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> Sql
             | Statement::DropPackage(_)
             | Statement::EventTrigger(_)
             | Statement::Analyze(_)
-    );
+    )
+}
+
+/// Whether `role` may run `statement` that defines objects (D1193): `CREATE TABLE` in a schema
+/// it holds `CREATE` on (stored, D1190), and `ALTER TABLE` (other than `OWNER TO`) and `DROP
+/// TABLE` of tables it, or a role it belongs to, owns (D1192).
+pub(crate) fn may_define_as(
+    reader: &dyn KeyValueRead,
+    role: &str,
+    statement: &Statement,
+) -> SqlResult<bool> {
+    let held = role_closure(reader, role)?;
+    let owns = |name: &str| -> SqlResult<bool> { owned_by(reader, &held, name) };
+    match statement {
+        Statement::CreateTable(create) if create.temporary.is_none() => {
+            let schema = match create.name.text.split_once('.') {
+                Some((schema, _)) => schema,
+                None => crate::schemas::DEFAULT_SCHEMA,
+            };
+            holds_object_grant(
+                reader,
+                role,
+                ObjectKind::Schema,
+                schema,
+                ObjectPrivilege::Create,
+                false,
+            )
+        }
+        Statement::AlterTable(alter) => {
+            if alter
+                .actions
+                .iter()
+                .any(|action| matches!(action, crate::ast::AlterAction::OwnerTo(_)))
+            {
+                return Ok(false);
+            }
+            owns(&alter.name.text)
+        }
+        Statement::DropTable { names, .. } => {
+            for name in names {
+                if !owns(&name.text)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Refuses statements that change the schema for a session whose privileges are checked: only
+/// superusers define objects until object ownership lands.
+pub(crate) fn check_statement(settings: &Settings, statement: &Statement) -> SqlResult<()> {
+    if may_define_objects(settings.checked_role.as_deref()) {
+        return Ok(());
+    }
+    let defines = defines_objects(statement);
     if defines {
         return Err(SqlError::new(
             SqlState::INSUFFICIENT_PRIVILEGE,

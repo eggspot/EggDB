@@ -3400,7 +3400,16 @@ impl<'s> Session<'s> {
         }
         self.refresh_database_names();
         let settings = Arc::clone(&self.settings);
-        crate::roles::check_statement(&settings, statement)?;
+        let owns = match settings.checked_role.as_deref() {
+            Some(role) if crate::roles::defines_objects(statement) => {
+                let reader = self.store.begin_boxed_read()?;
+                crate::roles::may_define_as(&*reader, role, statement)?
+            }
+            _ => false,
+        };
+        if !owns {
+            crate::roles::check_statement(&settings, statement)?;
+        }
         if let Some(most_rows) = self.max_result_rows
             && !self.statement_uses_sequences
         {
@@ -3741,9 +3750,17 @@ impl<'s> Session<'s> {
                     Some(scheme) => Some(self.partition_scheme_ranges(&scheme)?),
                     None => None,
                 };
+                let owner = binding.settings.checked_role.clone();
                 let created = self.write("CREATE TABLE", |writer, tables| {
                     binding.create_table(writer, tables, create)?;
-                    crate::sqlite_schema_text::create_table(writer, tables, create, dialect)
+                    let answer =
+                        crate::sqlite_schema_text::create_table(writer, tables, create, dialect)?;
+                    if let Some(owner) = owner.as_deref()
+                        && !crate::temporary::is_temporary_name(&create.name.text)
+                    {
+                        crate::roles::set_owner(writer, &create.name.text, owner)?;
+                    }
+                    Ok(answer)
                 });
                 let table = create.name.text.clone();
                 let created = match (created, create.system_versioning.clone()) {

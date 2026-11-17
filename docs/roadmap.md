@@ -878,7 +878,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   D827); `WITH GRANT OPTION` and `REVOKE GRANT OPTION FOR` on table privileges: **code written, unbuilt**
   (code-only mode, 2026-11-17, D1189); schema and routine grants stored: **code written, unbuilt** (code-only mode,
   2026-11-17, D1190, D1191); table owners (`ALTER TABLE ... OWNER TO`): **code written, unbuilt** (code-only mode,
-  2026-11-17, D1192). Left: tables created by non-superusers, owners of other objects, grantors and `CASCADE`,
+  2026-11-17, D1192); tables made by roles with `CREATE` on their schema and dropped or altered by their owners:
+  **code written, unbuilt** (code-only mode, 2026-11-17, D1193). Left: owners of other objects, grantors and `CASCADE`,
   sequence privileges, and checking schema and routine privileges in statements.
 - Schema, type, parameter (`GRANT SET ON PARAMETER`) and tablespace grants stored, so the
   inquiry functions and `pg_namespace.nspacl` follow them; `information_schema.role_routine_grants`
