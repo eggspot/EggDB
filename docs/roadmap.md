@@ -1681,7 +1681,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   written, unbuilt** (code-only mode, 2026-11-12, D905). `pgr_depthFirstSearch`,
   `pgr_breadthFirstSearch` and `pgr_KSP`: **code written, unbuilt** (code-only mode, 2026-11-13, D969). Strong components, articulation
   points, bridges, topological order and all-pairs costs (`pgr_floydWarshall`, `pgr_johnson`): **code written, unbuilt**
-  (code-only mode, 2026-11-17, D1215). Left: turn restrictions, contraction and pgRouting's other functions.
+  (code-only mode, 2026-11-17, D1215); `pgr_bellmanFord`, `pgr_dagShortestPath` and `pgr_biconnectedComponents`: **code
+  written, unbuilt** (code-only mode, 2026-11-17, D1216). Left: turn restrictions, contraction and pgRouting's other functions.
 - The OGC APIs (D57). OGC API - Features (Core, GeoJSON) on `--rest-listen`: **code written, unbuilt** (code-only
   mode, 2026-11-12, D781). CQL2 filters (text and JSON) and queryables (Part 3): **code written, unbuilt**
   (code-only mode, 2026-11-12, D879); CRS (Part 2): **code written, unbuilt** (code-only mode, 2026-11-12, D880).

@@ -3277,7 +3277,9 @@ code underneath is EggDB's own: `eggdb_route_dijkstra(edges, start, end, directe
 distance, directed)` and `eggdb_route_components(edges)` take the edges as a JSON array and return JSON.
 `pgr_strongComponents`, `pgr_articulationPoints`, `pgr_bridges`, `pgr_topologicalSort` (an error for a graph with
 a cycle), `pgr_floydWarshall(edges_sql [, directed])` and `pgr_johnson` (the cheapest cost between every two
-connected nodes, up to 4,096 nodes) work as in pgRouting (D1215).
+connected nodes, up to 4,096 nodes) work as in pgRouting (D1215), and so do `pgr_bellmanFord` (negative costs kept as
+costs, an error for a negative cycle), `pgr_dagShortestPath` (an error for a graph with a cycle) and
+`pgr_biconnectedComponents` (each edge with its component, named by the component's smallest edge, D1216).
 
 Geometries of two different SRIDs are refused, as in PostGIS. Not yet: a stored geometry type
 (values are text, shown as EWKT rather than hex EWKB), spatial indexes (R-tree/GiST), Z and M

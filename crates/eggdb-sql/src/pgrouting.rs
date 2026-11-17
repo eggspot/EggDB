@@ -9,7 +9,8 @@
 /// `pgr_maxFlow`, `pgr_pushRelabel`, `pgr_edmondsKarp` and `pgr_boykovKolmogorov` (D905); and
 /// `pgr_depthFirstSearch`, `pgr_breadthFirstSearch` and `pgr_KSP`, Yen's k shortest paths (D969);
 /// and `pgr_strongComponents`, `pgr_articulationPoints`, `pgr_bridges`, `pgr_topologicalSort`,
-/// `pgr_floydWarshall` and `pgr_johnson` (D1215).
+/// `pgr_floydWarshall` and `pgr_johnson` (D1215); and `pgr_bellmanFord`, `pgr_dagShortestPath` and
+/// `pgr_biconnectedComponents` (D1216).
 pub(crate) const PGROUTING_SCRIPT: &str = r#"
 CREATE SCHEMA pgrouting;
 CREATE FUNCTION public.pgr_edges_json(edges_sql text) RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -189,6 +190,15 @@ CREATE FUNCTION public.pgr_bridges(edges_sql text) RETURNS TABLE (edge bigint) L
 $$;
 CREATE FUNCTION public.pgr_topologicalsort(edges_sql text) RETURNS TABLE (seq integer, sorted_v bigint) LANGUAGE sql AS $$
     SELECT row_number() OVER ()::integer, (s.value ->> 'node')::bigint FROM jsonb_array_elements(eggdb_route_topological_sort(public.pgr_edges_json(edges_sql))) s
+$$;
+CREATE FUNCTION public.pgr_bellmanford(edges_sql text, start_vid bigint, end_vid bigint, directed boolean DEFAULT true) RETURNS TABLE (seq integer, path_seq integer, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE sql AS $$
+    SELECT row_number() OVER ()::integer, row_number() OVER ()::integer, (s.value ->> 'node')::bigint, (s.value ->> 'edge')::bigint, (s.value ->> 'cost')::double precision, (s.value ->> 'agg_cost')::double precision FROM jsonb_array_elements(eggdb_route_bellman_ford(public.pgr_edges_json(edges_sql), start_vid, end_vid, directed)) s
+$$;
+CREATE FUNCTION public.pgr_dagshortestpath(edges_sql text, start_vid bigint, end_vid bigint) RETURNS TABLE (seq integer, path_seq integer, node bigint, edge bigint, cost double precision, agg_cost double precision) LANGUAGE sql AS $$
+    SELECT row_number() OVER ()::integer, row_number() OVER ()::integer, (s.value ->> 'node')::bigint, (s.value ->> 'edge')::bigint, (s.value ->> 'cost')::double precision, (s.value ->> 'agg_cost')::double precision FROM jsonb_array_elements(eggdb_route_dag_shortest_path(public.pgr_edges_json(edges_sql), start_vid, end_vid)) s
+$$;
+CREATE FUNCTION public.pgr_biconnectedcomponents(edges_sql text) RETURNS TABLE (seq bigint, component bigint, edge bigint) LANGUAGE sql AS $$
+    SELECT row_number() OVER ()::bigint, (s.value ->> 'component')::bigint, (s.value ->> 'edge')::bigint FROM jsonb_array_elements(eggdb_route_biconnected_components(public.pgr_edges_json(edges_sql))) s
 $$;
 CREATE FUNCTION public.pgr_floydwarshall(edges_sql text, directed boolean DEFAULT true) RETURNS TABLE (start_vid bigint, end_vid bigint, agg_cost double precision) LANGUAGE sql AS $$
     SELECT (s.value ->> 'start_vid')::bigint, (s.value ->> 'end_vid')::bigint, (s.value ->> 'agg_cost')::double precision FROM jsonb_array_elements(eggdb_route_all_pairs(public.pgr_edges_json(edges_sql), directed)) s
@@ -602,6 +612,18 @@ mod tests {
             "pairs\n20\nSELECT 1"
         );
         assert!(run(&mut session, &format!("SELECT * FROM pgr_topologicalSort({edges})")).is_err());
+        assert_eq!(
+            run(&mut session, &format!("SELECT component, edge FROM pgr_biconnectedComponents({edges})")).unwrap(),
+            "component|edge\n1|1\n1|2\n1|3\n4|4\n5|5\nSELECT 5"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT node, agg_cost FROM pgr_bellmanFord('SELECT 1 AS id, 1 AS source, 2 AS target, -1.5 AS cost', 1, 2)").unwrap(),
+            "node|agg_cost\n1|0\n2|-1.5\nSELECT 2"
+        );
+        assert_eq!(
+            run(&mut session, "SELECT max(agg_cost) AS total FROM pgr_dagShortestPath('SELECT id, source, target, cost FROM links WHERE id <> 3', 1, 5)").unwrap(),
+            "total\n5\nSELECT 1"
+        );
         assert_eq!(
             run(&mut session, "SELECT sorted_v FROM pgr_topologicalSort('SELECT id, source, target, cost FROM links WHERE id <> 3')").unwrap(),
             "sorted_v\n1\n2\n3\n4\n5\nSELECT 5"

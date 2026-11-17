@@ -5,7 +5,10 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
 mod structure;
 
-pub(crate) use structure::{all_pairs, articulation_points, bridges, strong_components, topological_sort};
+pub(crate) use structure::{
+    all_pairs, articulation_points, bellman_ford, biconnected_components, bridges, dag_shortest_path,
+    strong_components, topological_sort,
+};
 
 const MOST_EDGES: usize = 5_000_000;
 
@@ -61,6 +64,10 @@ fn whole(node: &Node, name: &str) -> SqlResult<i64> {
 type Graph = BTreeMap<i64, Vec<Arc>>;
 
 fn graph(edges_json: &str, directed: bool) -> SqlResult<Graph> {
+    graph_of(edges_json, directed, false)
+}
+
+fn graph_of(edges_json: &str, directed: bool, keep_negative: bool) -> SqlResult<Graph> {
     let document = parse_document(edges_json).map_err(|_| invalid("the edges are not JSON"))?;
     let Json::Array(edges) = &document.value else {
         return Err(invalid("the edges are a JSON array of objects"));
@@ -77,13 +84,13 @@ fn graph(edges_json: &str, directed: bool) -> SqlResult<Graph> {
         if !cost.is_finite() || reverse.is_some_and(|reverse| !reverse.is_finite()) {
             return Err(invalid("costs must be finite"));
         }
-        if cost >= 0.0 {
+        if keep_negative || cost >= 0.0 {
             add(source, target, id, cost);
             if !directed {
                 add(target, source, id, cost);
             }
         }
-        if let Some(reverse) = reverse.filter(|reverse| *reverse >= 0.0) {
+        if let Some(reverse) = reverse.filter(|reverse| keep_negative || *reverse >= 0.0) {
             add(target, source, id, reverse);
             if !directed {
                 add(source, target, id, reverse);
@@ -130,6 +137,12 @@ fn shortest(arcs: &Graph, start: i64, limit: Option<f64>, stop_at: Option<i64>) 
 pub(crate) fn dijkstra(edges_json: &str, start: i64, finish: i64, directed: bool) -> SqlResult<String> {
     let arcs = graph(edges_json, directed)?;
     let best = shortest(&arcs, start, None, Some(finish));
+    path_json(&best, finish)
+}
+
+type Reached = HashMap<i64, (f64, Option<(i64, i64, f64)>)>;
+
+fn path_json(best: &Reached, finish: i64) -> SqlResult<String> {
     let Some((total, _)) = best.get(&finish) else {
         return Ok("[]".to_owned());
     };

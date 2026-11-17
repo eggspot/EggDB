@@ -1,4 +1,4 @@
-use super::{Graph, graph, invalid, shortest};
+use super::{Graph, Reached, graph, graph_of, invalid, path_json, shortest};
 use crate::error::{SqlError, SqlResult, SqlState};
 use std::collections::{BTreeSet, HashMap};
 
@@ -129,6 +129,7 @@ pub(crate) fn strong_components(edges_json: &str) -> SqlResult<String> {
 struct Cuts {
     points: BTreeSet<i64>,
     bridges: BTreeSet<i64>,
+    blocks: Vec<Vec<i64>>,
 }
 
 fn cuts(dense: &Dense) -> Cuts {
@@ -137,6 +138,8 @@ fn cuts(dense: &Dense) -> Cuts {
     let mut low = vec![0; count];
     let mut points = BTreeSet::new();
     let mut bridges = BTreeSet::new();
+    let mut blocks = Vec::new();
+    let mut edge_stack: Vec<i64> = Vec::new();
     let mut next = 0;
     for root in 0..count {
         if order.get(root).copied().flatten().is_some() {
@@ -167,9 +170,13 @@ fn cuts(dense: &Dense) -> Cuts {
                         if node == root {
                             root_children += 1;
                         }
+                        edge_stack.push(edge);
                         work.push((to, Some(edge), 0));
                     }
                     Some(seen) => {
+                        if seen < order.get(node).copied().flatten().unwrap_or_default() {
+                            edge_stack.push(edge);
+                        }
                         if let Some(lowest) = low.get_mut(node) {
                             *lowest = (*lowest).min(seen);
                         }
@@ -189,6 +196,18 @@ fn cuts(dense: &Dense) -> Cuts {
             if parent != root && node_low >= parent_order {
                 points.insert(dense.node(parent));
             }
+            if node_low >= parent_order {
+                let mut block = Vec::new();
+                while let Some(edge) = edge_stack.pop() {
+                    block.push(edge);
+                    if Some(edge) == entered_by {
+                        break;
+                    }
+                }
+                block.sort_unstable();
+                block.dedup();
+                blocks.push(block);
+            }
             if node_low > parent_order
                 && let Some(edge) = entered_by
             {
@@ -199,7 +218,7 @@ fn cuts(dense: &Dense) -> Cuts {
             points.insert(dense.node(root));
         }
     }
-    Cuts { points, bridges }
+    Cuts { points, bridges, blocks }
 }
 
 /// The nodes whose removal disconnects the undirected graph of `edges`, in order.
@@ -213,6 +232,98 @@ pub(crate) fn articulation_points(edges_json: &str) -> SqlResult<String> {
 pub(crate) fn bridges(edges_json: &str) -> SqlResult<String> {
     let found = cuts(&Dense::of(&graph(edges_json, false)?));
     Ok(rows(found.bridges.iter().map(|edge| format!("{{\"edge\": {edge}}}"))))
+}
+
+/// The edges of the undirected graph of `edges` grouped into biconnected components, each
+/// named by its smallest edge, ordered by component and edge.
+pub(crate) fn biconnected_components(edges_json: &str) -> SqlResult<String> {
+    let mut blocks = cuts(&Dense::of(&graph(edges_json, false)?)).blocks;
+    blocks.retain(|block| !block.is_empty());
+    blocks.sort_by_key(|block| block.first().copied());
+    Ok(rows(blocks.iter().flat_map(|block| {
+        let name = block.first().copied().unwrap_or_default();
+        block
+            .iter()
+            .map(move |edge| format!("{{\"component\": {name}, \"edge\": {edge}}}"))
+    })))
+}
+
+fn acyclic(dense: &Dense) -> bool {
+    let count = dense.nodes.len();
+    let mut incoming = vec![0usize; count];
+    for at in 0..count {
+        for &(to, _) in dense.outgoing(at) {
+            if let Some(slot) = incoming.get_mut(to) {
+                *slot += 1;
+            }
+        }
+    }
+    let mut ready: Vec<usize> = (0..count).filter(|at| incoming.get(*at) == Some(&0)).collect();
+    let mut seen = 0;
+    while let Some(at) = ready.pop() {
+        seen += 1;
+        for &(to, _) in dense.outgoing(at) {
+            if let Some(slot) = incoming.get_mut(to) {
+                *slot -= 1;
+                if *slot == 0 {
+                    ready.push(to);
+                }
+            }
+        }
+    }
+    seen == count
+}
+
+/// The cheapest path from `start` to `finish` over the directed acyclic graph of `edges`, in
+/// the steps `dijkstra` gives.
+///
+/// # Errors
+///
+/// A graph with a cycle.
+pub(crate) fn dag_shortest_path(edges_json: &str, start: i64, finish: i64) -> SqlResult<String> {
+    let arcs = graph(edges_json, true)?;
+    if !acyclic(&Dense::of(&arcs)) {
+        return Err(invalid("the graph has a cycle, so it is not a directed acyclic graph"));
+    }
+    path_json(&shortest(&arcs, start, None, Some(finish)), finish)
+}
+
+/// The cheapest path from `start` to `finish` over `edges` with negative costs kept as costs,
+/// by Bellman and Ford's relaxation, in the steps `dijkstra` gives.
+///
+/// # Errors
+///
+/// A negative cycle reachable from `start`.
+pub(crate) fn bellman_ford(edges_json: &str, start: i64, finish: i64, directed: bool) -> SqlResult<String> {
+    let arcs = graph_of(edges_json, directed, true)?;
+    let rounds = Dense::of(&arcs).nodes.len();
+    let mut best: Reached = HashMap::new();
+    best.insert(start, (0.0, None));
+    for round in 0..=rounds {
+        let mut changed = false;
+        for (from, outgoing) in &arcs {
+            let Some(&(cost, _)) = best.get(from) else {
+                continue;
+            };
+            for arc in outgoing {
+                let reached = cost + arc.cost;
+                let better = best.get(&arc.to).is_none_or(|(known, _)| reached < *known);
+                if better && arc.to != start {
+                    best.insert(arc.to, (reached, Some((*from, arc.edge, arc.cost))));
+                    changed = true;
+                } else if better {
+                    return Err(invalid("the graph has a negative cycle"));
+                }
+            }
+        }
+        if !changed {
+            return path_json(&best, finish);
+        }
+        if round == rounds {
+            return Err(invalid("the graph has a negative cycle"));
+        }
+    }
+    path_json(&best, finish)
 }
 
 /// The nodes of the directed acyclic graph of `edges` in an order where every edge goes
@@ -330,6 +441,37 @@ mod tests {
             "[{\"node\": 1}, {\"node\": 5}, {\"node\": 2}, {\"node\": 3}]"
         );
         assert!(topological_sort(&edges(&[(1, 1, 2, 1.0), (2, 2, 1, 1.0)])).is_err());
+    }
+
+    #[test]
+    fn biconnected_components_split_at_cut_nodes() {
+        let graph = edges(&[
+            (1, 1, 2, 1.0),
+            (2, 2, 3, 1.0),
+            (3, 3, 1, 1.0),
+            (4, 3, 4, 1.0),
+            (5, 4, 5, 1.0),
+            (6, 5, 6, 1.0),
+            (7, 6, 4, 1.0),
+        ]);
+        assert_eq!(
+            biconnected_components(&graph).unwrap(),
+            "[{\"component\": 1, \"edge\": 1}, {\"component\": 1, \"edge\": 2}, {\"component\": 1, \"edge\": 3}, {\"component\": 4, \"edge\": 4}, {\"component\": 5, \"edge\": 5}, {\"component\": 5, \"edge\": 6}, {\"component\": 5, \"edge\": 7}]"
+        );
+    }
+
+    #[test]
+    fn bellman_ford_takes_negative_edges_and_refuses_negative_cycles() {
+        let graph = edges(&[(1, 1, 2, 4.0), (2, 1, 3, 1.0), (3, 3, 2, -2.0), (4, 2, 4, 1.0)]);
+        let path = bellman_ford(&graph, 1, 4, true).unwrap();
+        assert!(path.contains("\"node\": 3, \"edge\": 3"), "{path}");
+        assert!(path.ends_with("{\"node\": 4, \"edge\": -1, \"cost\": 0, \"agg_cost\": 0}]"), "{path}");
+        assert_eq!(bellman_ford(&graph, 1, 9, true).unwrap(), "[]");
+        let cycle = edges(&[(1, 1, 2, 1.0), (2, 2, 3, -3.0), (3, 3, 2, 1.0)]);
+        assert!(bellman_ford(&cycle, 1, 3, true).is_err());
+        assert!(dag_shortest_path(&cycle, 1, 3).is_err());
+        let dag = edges(&[(1, 1, 2, 1.0), (2, 2, 3, 1.0), (3, 1, 3, 5.0)]);
+        assert!(dag_shortest_path(&dag, 1, 3).unwrap().contains("\"agg_cost\": 2}]"));
     }
 
     #[test]

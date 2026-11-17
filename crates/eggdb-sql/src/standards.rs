@@ -1,7 +1,7 @@
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::Value;
 
-pub(crate) const FUNCTIONS: [&str; 36] = [
+pub(crate) const FUNCTIONS: [&str; 39] = [
     "eggdb_column_lineage",
     "image_rendition",
     "eggdb_pdf_table",
@@ -23,6 +23,9 @@ pub(crate) const FUNCTIONS: [&str; 36] = [
     "eggdb_route_bridges",
     "eggdb_route_topological_sort",
     "eggdb_route_all_pairs",
+    "eggdb_route_bellman_ford",
+    "eggdb_route_dag_shortest_path",
+    "eggdb_route_biconnected_components",
     "modbus_decode",
     "spreadsheet_recalculate",
     "row_pattern_matches",
@@ -496,6 +499,15 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             ("eggdb_route_components", Some(edges)) => crate::routing::connected_components(&edges).and_then(jsonb),
             ("eggdb_route_strong_components", Some(edges)) => crate::routing::strong_components(&edges).and_then(jsonb),
             ("eggdb_route_articulation_points", Some(edges)) => crate::routing::articulation_points(&edges).and_then(jsonb),
+            ("eggdb_route_biconnected_components", Some(edges)) => crate::routing::biconnected_components(&edges).and_then(jsonb),
+            ("eggdb_route_bellman_ford", Some(edges)) => match (whole(1), whole(2), flag(3)) {
+                (Some(start), Some(finish), Some(directed)) => crate::routing::bellman_ford(&edges, start, finish, directed).and_then(jsonb),
+                _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_bellman_ford takes edges, a start, an end and whether the graph is directed")),
+            },
+            ("eggdb_route_dag_shortest_path", Some(edges)) => match (whole(1), whole(2)) {
+                (Some(start), Some(finish)) => crate::routing::dag_shortest_path(&edges, start, finish).and_then(jsonb),
+                _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "eggdb_route_dag_shortest_path takes edges, a start and an end")),
+            },
             ("eggdb_route_bridges", Some(edges)) => crate::routing::bridges(&edges).and_then(jsonb),
             ("eggdb_route_topological_sort", Some(edges)) => crate::routing::topological_sort(&edges).and_then(jsonb),
             ("eggdb_route_all_pairs", Some(edges)) => match flag(1) {
