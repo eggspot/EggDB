@@ -18,7 +18,7 @@ pub(crate) struct SetReturningFunction {
     fields: bool,
 }
 
-const FUNCTIONS: [SetReturningFunction; 51] = [
+const FUNCTIONS: [SetReturningFunction; 54] = [
     to_records("read_parquet"),
     to_records("read_orc"),
     to_records("read_zarr"),
@@ -171,6 +171,24 @@ const FUNCTIONS: [SetReturningFunction; 51] = [
         fields: false,
     },
     SetReturningFunction {
+        name: crate::text_search::TOKEN_TYPES_FUNCTION,
+        result_type: text_search_type,
+        rows: token_type_rows,
+        fields: true,
+    },
+    SetReturningFunction {
+        name: crate::text_search::PARSE_FUNCTION,
+        result_type: text_search_type,
+        rows: parse_rows,
+        fields: true,
+    },
+    SetReturningFunction {
+        name: crate::text_search::DEBUG_FUNCTION,
+        result_type: text_search_type,
+        rows: debug_rows,
+        fields: true,
+    },
+    SetReturningFunction {
         name: crate::hstore_functions::EACH,
         result_type: hstore_each_type,
         rows: hstore_each_rows,
@@ -250,6 +268,22 @@ fn hstore_values_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> S
     crate::hstore_functions::value_rows(values, sink)
 }
 
+fn text_search_type(_: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    Ok(SqlType::Text)
+}
+
+fn token_type_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::text_search::token_type_rows(values, &mut |record| sink(crate::json_functions::record_text(&record)))
+}
+
+fn parse_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::text_search::parse_rows(values, &mut |record| sink(crate::json_functions::record_text(&record)))
+}
+
+fn debug_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::text_search::debug_rows(values, &mut |record| sink(crate::json_functions::record_text(&record)))
+}
+
 fn hstore_each_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
     crate::hstore_functions::each_records(values, &mut |record| {
         sink(crate::json_functions::record_text(&record))
@@ -299,6 +333,21 @@ fn record_columns(name: &str) -> Vec<OutputColumn> {
     }
     if name == crate::pg_catalog::acl::EXPLODE {
         return crate::pg_catalog::acl::EXPLODED_COLUMNS
+            .iter()
+            .map(|(column, sql_type)| OutputColumn {
+                name: (*column).to_owned(),
+                sql_type: Some(*sql_type),
+            })
+            .collect();
+    }
+    let text_search_columns: Option<&[(&str, SqlType)]> = match name {
+        crate::text_search::TOKEN_TYPES_FUNCTION => Some(&crate::text_search::TOKEN_TYPE_COLUMNS),
+        crate::text_search::PARSE_FUNCTION => Some(&crate::text_search::PARSE_COLUMNS),
+        crate::text_search::DEBUG_FUNCTION => Some(&crate::text_search::DEBUG_COLUMNS),
+        _ => None,
+    };
+    if let Some(columns) = text_search_columns {
+        return columns
             .iter()
             .map(|(column, sql_type)| OutputColumn {
                 name: (*column).to_owned(),

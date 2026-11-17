@@ -308,6 +308,170 @@ pub(crate) const VECTOR_FUNCTIONS: [&str; 7] = [
     "tsquery_phrase",
 ];
 
+/// `ts_token_type([parser])`: the default parser's token types.
+pub(crate) const TOKEN_TYPES_FUNCTION: &str = "ts_token_type";
+/// `ts_parse(parser, text)`: the tokens of a text.
+pub(crate) const PARSE_FUNCTION: &str = "ts_parse";
+/// `ts_debug([config,] text)`: each token with its dictionaries and lexemes.
+pub(crate) const DEBUG_FUNCTION: &str = "ts_debug";
+/// The columns of `ts_token_type`.
+pub(crate) const TOKEN_TYPE_COLUMNS: [(&str, crate::types::SqlType); 3] = [
+    ("tokid", crate::types::SqlType::Integer),
+    ("alias", crate::types::SqlType::Text),
+    ("description", crate::types::SqlType::Text),
+];
+/// The columns of `ts_parse`.
+pub(crate) const PARSE_COLUMNS: [(&str, crate::types::SqlType); 2] = [
+    ("tokid", crate::types::SqlType::Integer),
+    ("token", crate::types::SqlType::Text),
+];
+/// The columns of `ts_debug`; the dictionary lists and lexemes are in array text form.
+pub(crate) const DEBUG_COLUMNS: [(&str, crate::types::SqlType); 6] = [
+    ("alias", crate::types::SqlType::Text),
+    ("description", crate::types::SqlType::Text),
+    ("token", crate::types::SqlType::Text),
+    ("dictionaries", crate::types::SqlType::Text),
+    ("dictionary", crate::types::SqlType::Text),
+    ("lexemes", crate::types::SqlType::Text),
+];
+
+const BLANK: &str = "blank";
+
+fn token_id(token_type: &str) -> i32 {
+    eggdb_search::TOKEN_TYPES
+        .iter()
+        .position(|(name, _)| *name == token_type)
+        .map_or(0, |at| i32::try_from(at + 1).unwrap_or(0))
+}
+
+fn description_of(token_type: &str) -> &'static str {
+    eggdb_search::TOKEN_TYPES
+        .iter()
+        .find(|(name, _)| *name == token_type)
+        .map_or("", |(_, description)| description)
+}
+
+fn default_parser(value: Option<&Value>) -> SqlResult<()> {
+    match value.and_then(text) {
+        None => Ok(()),
+        Some(name) if matches!(name.trim_start_matches("pg_catalog.").to_ascii_lowercase().as_str(), "default" | "3722") => Ok(()),
+        Some(name) => Err(SqlError::new(
+            SqlState::UNDEFINED_OBJECT,
+            format!("text search parser \"{name}\" does not exist"),
+        )),
+    }
+}
+
+fn tokens(input: &str) -> Vec<(&'static str, &str)> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    for word in eggdb_search::words(input) {
+        let start = (word.as_ptr() as usize).saturating_sub(input.as_ptr() as usize);
+        if start > at
+            && let Some(gap) = input.get(at..start)
+        {
+            found.push((BLANK, gap));
+        }
+        found.push((eggdb_search::token_type_of(word), word));
+        at = at.max(start + word.len());
+    }
+    if let Some(rest) = input.get(at..).filter(|rest| !rest.is_empty()) {
+        found.push((BLANK, rest));
+    }
+    found
+}
+
+/// The rows of `ts_token_type([parser])`.
+pub(crate) fn token_type_rows(values: &[Value], sink: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>) -> SqlResult<()> {
+    default_parser(values.first())?;
+    for (at, (alias, description)) in eggdb_search::TOKEN_TYPES.iter().enumerate() {
+        sink(vec![
+            Value::Integer(i32::try_from(at + 1).unwrap_or(0)),
+            Value::Text((*alias).to_owned()),
+            Value::Text((*description).to_owned()),
+        ])?;
+    }
+    Ok(())
+}
+
+/// The rows of `ts_parse(parser, text)`: every token, blanks included, in order.
+pub(crate) fn parse_rows(values: &[Value], sink: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>) -> SqlResult<()> {
+    let [parser, input] = values else {
+        return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "function ts_parse takes a parser and a text"));
+    };
+    default_parser(Some(parser))?;
+    let Some(input) = text(input) else {
+        return Ok(());
+    };
+    for (token_type, token) in tokens(&input) {
+        sink(vec![Value::Integer(token_id(token_type)), Value::Text(token.to_owned())])?;
+    }
+    Ok(())
+}
+
+fn array_text(items: &[String]) -> String {
+    format!("{{{}}}", items.join(","))
+}
+
+/// The rows of `ts_debug([config,] text)` for a built-in configuration: each token's type,
+/// the dictionaries its type maps to, the one that recognized it and its lexemes (`{}` for a
+/// stop word, NULL for a blank).
+pub(crate) fn debug_rows(values: &[Value], sink: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>) -> SqlResult<()> {
+    let (config, input) = match values {
+        [input] => (DEFAULT_CONFIG, input),
+        [config, input] => {
+            let Some(name) = text(config) else {
+                return Ok(());
+            };
+            match config_named(&name)? {
+                Chosen::BuiltIn(config) => (config, input),
+                Chosen::Defined(_) => {
+                    return Err(SqlError::not_supported(
+                        "ts_debug of a configuration made with CREATE TEXT SEARCH CONFIGURATION",
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_FUNCTION,
+                "function ts_debug takes an optional configuration and a text",
+            ));
+        }
+    };
+    let Some(input) = text(input) else {
+        return Ok(());
+    };
+    let stemmer = match config {
+        Config::Simple | Config::Cjk | Config::Thai => "simple".to_owned(),
+        language => format!("{}_stem", language.name()),
+    };
+    for (token_type, token) in tokens(&input) {
+        let mut row = vec![
+            Value::Text(token_type.to_owned()),
+            Value::Text(description_of(token_type).to_owned()),
+            Value::Text(token.to_owned()),
+        ];
+        if token_type == BLANK {
+            row.extend([Value::Text("{}".to_owned()), Value::Null, Value::Null]);
+        } else {
+            let dictionary = if eggdb_search::Analyzer::word_types().contains(&token_type) {
+                stemmer.clone()
+            } else {
+                "simple".to_owned()
+            };
+            let lexemes = config.lexeme(token).map_or_else(Vec::new, |lexeme| vec![lexeme]);
+            row.extend([
+                Value::Text(array_text(std::slice::from_ref(&dictionary))),
+                Value::Text(dictionary),
+                Value::Text(array_text(&lexemes)),
+            ]);
+        }
+        sink(row)?;
+    }
+    Ok(())
+}
+
 fn written(name: &str, config: impl Lexer, input: &str) -> SqlResult<String> {
     Ok(match name {
         "to_tsvector" => TsVector::from_text(config, input).to_string(),

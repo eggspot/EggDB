@@ -2513,7 +2513,8 @@ types, `RENAME TO`, `OWNER TO` and `DROP TEXT SEARCH ...` work as in PostgreSQL;
 its token type (`asciiword`, `word`, `numword` or `uint`) and the type's dictionaries are asked in
 turn. `to_tsvector`, the `to_tsquery` family and `ts_headline` take these configurations by name.
 `tsvector_to_array`, `array_to_tsvector`, `ts_delete`, `ts_filter`, `numnode`, `querytree` and `tsquery_phrase` work as
-in PostgreSQL (D1230).
+in PostgreSQL (D1230), and so do `ts_token_type`, `ts_parse('default', text)` and `ts_debug([config,] text)` for the
+built-in configurations (D1231).
 
 ## EXPLAIN ANALYZE and the slow-statement log
 

@@ -639,3 +639,22 @@ fn hstore_prefix_operators_and_populate_record_follow_postgresql() {
         "22P02"
     );
 }
+
+#[test]
+fn text_search_parser_functions_list_tokens_and_their_lexemes() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        ok(&mut session, "SELECT tokid, alias FROM ts_token_type('default') WHERE tokid IN (1, 23)"),
+        "tokid|alias\n1|asciiword\n23|blank\nSELECT 2"
+    );
+    assert_eq!(
+        ok(&mut session, "SELECT tokid, token FROM ts_parse('default', 'The 2 cats')"),
+        "tokid|token\n1|The\n23| \n19|2\n23| \n1|cats\nSELECT 5"
+    );
+    assert_eq!(
+        ok(&mut session, "SELECT alias, token, dictionary, lexemes FROM ts_debug('english', 'The cats')"),
+        "alias|token|dictionary|lexemes\nasciiword|The|english_stem|{}\nblank| |NULL|NULL\nasciiword|cats|english_stem|{cat}\nSELECT 3"
+    );
+    assert!(run(&mut session, "SELECT * FROM ts_parse('nope', 'x')").is_err());
+}
