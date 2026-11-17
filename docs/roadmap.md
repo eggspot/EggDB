@@ -959,7 +959,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A secrets store with dynamic, short-lived credentials in Vault's style (D54). **Code written, unbuilt** (code-only mode,
   2026-11-12, D751), in `eggdb_secrets`.
 - An LDAP v3 server, SCIM, and the published Active Directory protocols (MS-ADTS) after D58's
-  legal check (D54).
+  legal check (D54). SCIM 2.0 provisioning of roles at `/scim/v2`: **code written, unbuilt** (code-only mode,
+  2026-11-17, D1198). Left: the LDAP v3 server and MS-ADTS.
 - Isolation of tenants by schema or by database, beside isolation by row (D32, D234). By schema: **code written,
   unbuilt** (code-only mode, 2026-11-12, D764). Left: by database.
 - SECURITY.md's scope: denial of service from hostile input, sandbox escapes and protocol attacks

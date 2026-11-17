@@ -22,6 +22,7 @@ mod live;
 mod live_ws;
 mod realtime_channels;
 mod saml_pages;
+mod scim;
 mod odata;
 mod ogc;
 mod ogc_tiles;
@@ -398,8 +399,17 @@ impl<'s, S: KeyValueStore> Endpoint<'s, S> {
         if let Some(page) = self.saml_page(request.path.trim_matches('/'), request) {
             return page.into();
         }
+        let path = request.path.trim_matches('/');
+        let scim_path = path == "scim/v2" || path.starts_with("scim/v2/");
         match self.caller(request) {
+            Caller::Server if scim_path => self
+                .scim_page(path, request)
+                .unwrap_or_else(|| failure(404, "PGRST125", "no such SCIM path"))
+                .into(),
             Caller::Server => self.serve(request),
+            Caller::Role(..) if scim_path => {
+                failure(403, "42501", "SCIM provisioning is the server user's").into()
+            }
             Caller::Role(role, claims) => self.acting_as(role, claims).serve(request),
             Caller::Refused(why) => {
                 let mut response = failure(401, "PGRST301", &why);

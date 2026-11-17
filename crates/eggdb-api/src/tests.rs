@@ -949,3 +949,48 @@ fn realtime_channels_join_postgres_changes_and_answer_heartbeats() {
     assert!(answered.contains("\"event\":\"broadcast\",\"payload\":{\"event\":\"cursor\",\"x\":1}"), "{answered}");
     assert!(answered.contains("\"topic\":\"realtime:missing\",\"event\":\"phx_reply\",\"payload\":{\"status\":\"error\""), "{answered}");
 }
+
+#[test]
+fn scim_provisions_users_and_groups_as_roles() {
+    let store = MemoryStore::default();
+    let endpoint = Endpoint::new(&store, "eggdb", eggdb_crypto::sha256(b"secret"), "eggdb", "public");
+    let created = call(
+        &endpoint,
+        "POST",
+        "/scim/v2/Users",
+        "{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:User\"],\"userName\":\"ada@contoso.com\",\"externalId\":\"e1\",\"active\":true}",
+        None,
+    );
+    assert_eq!(created.status, 201, "{}", text(&created));
+    assert!(text(&created).contains("\"userName\":\"ada@contoso.com\""));
+    let group = call(
+        &endpoint,
+        "POST",
+        "/scim/v2/Groups",
+        "{\"displayName\":\"analysts\",\"members\":[{\"value\":\"ada@contoso.com\"}]}",
+        None,
+    );
+    assert_eq!(group.status, 201, "{}", text(&group));
+    assert!(text(&group).contains("\"members\":[{\"value\":\"ada@contoso.com\"}]"), "{}", text(&group));
+    let found = call(&endpoint, "GET", "/scim/v2/Users?filter=externalId%20eq%20%22e1%22", "", None);
+    assert!(text(&found).contains("\"totalResults\":1"), "{}", text(&found));
+    let disabled = call(
+        &endpoint,
+        "PATCH",
+        "/scim/v2/Users/ada@contoso.com",
+        "{\"Operations\":[{\"op\":\"replace\",\"path\":\"active\",\"value\":false}]}",
+        None,
+    );
+    assert!(text(&disabled).contains("\"active\":false"), "{}", text(&disabled));
+    let emptied = call(
+        &endpoint,
+        "PATCH",
+        "/scim/v2/Groups/analysts",
+        "{\"Operations\":[{\"op\":\"remove\",\"path\":\"members[value eq \\\"ada@contoso.com\\\"]\"}]}",
+        None,
+    );
+    assert!(text(&emptied).contains("\"members\":[]"), "{}", text(&emptied));
+    assert_eq!(call(&endpoint, "DELETE", "/scim/v2/Groups/analysts", "", None).status, 204);
+    assert_eq!(call(&endpoint, "DELETE", "/scim/v2/Users/ada@contoso.com", "", None).status, 204);
+    assert_eq!(call(&endpoint, "GET", "/scim/v2/Users/ada@contoso.com", "", None).status, 404);
+}
