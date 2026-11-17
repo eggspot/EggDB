@@ -8,8 +8,9 @@
 //! or prepared, with `?` parameters bound by `SQLBindParameter`; reads rows with `SQLFetch`,
 //! `SQLGetData` (in pieces for long values) and `SQLBindCol`; describes columns; commits and
 //! rolls back with autocommit off; answers diagnostics and the first `SQLGetInfo` types; and
-//! lists tables, columns, primary and foreign keys and the data types with `SQLTables`,
-//! `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys` and `SQLGetTypeInfo`. Each
+//! lists tables, columns, keys, key-backed indexes, routines and the data types with
+//! `SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys`, `SQLSpecialColumns`,
+//! `SQLStatistics`, `SQLProcedures` and `SQLGetTypeInfo`. Each
 //! text-taking call also has its `W` form, for Unicode applications.
 
 mod api;
@@ -25,11 +26,11 @@ pub use api::{
     SQLDescribeCol, SQLDisconnect, SQLDriverConnect, SQLEndTran, SQLExecDirect, SQLExecute,
     SQLFetch, SQLForeignKeys, SQLFreeHandle, SQLFreeStmt, SQLGetConnectAttr, SQLGetData,
     SQLGetDiagRec, SQLGetEnvAttr, SQLGetInfo, SQLGetTypeInfo, SQLNumParams, SQLNumResultCols,
-    SQLPrepare, SQLPrimaryKeys, SQLRowCount, SQLSetConnectAttr, SQLSetEnvAttr, SQLSetStmtAttr,
-    SQLTables,
+    SQLPrepare, SQLPrimaryKeys, SQLProcedures, SQLRowCount, SQLSetConnectAttr, SQLSetEnvAttr,
+    SQLSetStmtAttr, SQLSpecialColumns, SQLStatistics, SQLTables,
 };
 pub use wide::{
     SQLColAttributeW, SQLColumnsW, SQLConnectW, SQLDescribeColW, SQLDriverConnectW,
     SQLExecDirectW, SQLForeignKeysW, SQLGetDiagRecW, SQLGetInfoW, SQLGetTypeInfoW, SQLPrepareW,
-    SQLPrimaryKeysW, SQLTablesW,
+    SQLPrimaryKeysW, SQLProceduresW, SQLSpecialColumnsW, SQLStatisticsW, SQLTablesW,
 };

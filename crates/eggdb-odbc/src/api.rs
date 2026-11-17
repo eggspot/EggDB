@@ -964,3 +964,98 @@ pub extern "system" fn SQLGetTypeInfo(stmt: *mut c_void, data_type: i16) -> SqlR
     catalog_query(stmt, &text, &[wanted])
 }
 
+/// Lists the functions and procedures whose schema and name match the patterns, with ODBC's
+/// eight columns; parameter and result set counts are unknown (-1).
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLProcedures(
+    stmt: *mut c_void,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    procedure: *const u8,
+    procedure_length: i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = format!(
+        "SELECT routine_catalog AS \"PROCEDURE_CAT\", routine_schema AS \"PROCEDURE_SCHEM\", routine_name AS \"PROCEDURE_NAME\", \
+         -1 AS \"NUM_INPUT_PARAMS\", -1 AS \"NUM_OUTPUT_PARAMS\", -1 AS \"NUM_RESULT_SETS\", NULL::text AS \"REMARKS\", \
+         CASE routine_type WHEN 'FUNCTION' THEN 2 ELSE 1 END AS \"PROCEDURE_TYPE\" \
+         FROM information_schema.routines WHERE routine_schema NOT IN {HIDDEN_SCHEMAS} \
+         AND ($1::text IS NULL OR routine_schema LIKE $1) AND ($2::text IS NULL OR routine_name LIKE $2) ORDER BY 2, 3"
+    );
+    catalog_query(stmt, &text, &[pattern(schema, schema_length), pattern(procedure, procedure_length)])
+}
+
+const SQL_BEST_ROWID: u16 = 1;
+
+/// The columns that identify a row (`SQL_BEST_ROWID`: the primary key's, with ODBC's eight
+/// columns); EggDB has no row-version column, so `SQL_ROWVER` lists none.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLSpecialColumns(
+    stmt: *mut c_void,
+    identifier_type: u16,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    table: *const u8,
+    table_length: i16,
+    _scope: u16,
+    _nullable: u16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = format!(
+        "SELECT 2 AS \"SCOPE\", c.column_name AS \"COLUMN_NAME\", {ODBC_TYPE_OF_DATA_TYPE} AS \"DATA_TYPE\", \
+         c.data_type AS \"TYPE_NAME\", c.character_maximum_length AS \"COLUMN_SIZE\", c.character_octet_length AS \"BUFFER_LENGTH\", \
+         c.numeric_scale AS \"DECIMAL_DIGITS\", 1 AS \"PSEUDO_COLUMN\" \
+         FROM information_schema.table_constraints t JOIN information_schema.key_column_usage k \
+         ON k.constraint_schema = t.constraint_schema AND k.constraint_name = t.constraint_name AND k.table_name = t.table_name \
+         JOIN information_schema.columns c ON c.table_schema = k.table_schema AND c.table_name = k.table_name AND c.column_name = k.column_name \
+         WHERE t.constraint_type = 'PRIMARY KEY' AND $3::text = '1' \
+         AND ($1::text IS NULL OR k.table_schema = $1) AND ($2::text IS NULL OR k.table_name = $2) ORDER BY k.ordinal_position"
+    );
+    catalog_query(
+        stmt,
+        &text,
+        &[
+            pattern(schema, schema_length),
+            pattern(table, table_length),
+            Some(if identifier_type == SQL_BEST_ROWID { "1" } else { "0" }.to_owned()),
+        ],
+    )
+}
+
+/// The indexes behind a table's primary key and unique constraints, with ODBC's thirteen
+/// columns (`SQL_INDEX_OTHER` entries, no table statistics row); `SQL_INDEX_UNIQUE` and
+/// `SQL_INDEX_ALL` list the same, since every one listed is unique.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLStatistics(
+    stmt: *mut c_void,
+    _catalog: *const u8,
+    _catalog_length: i16,
+    schema: *const u8,
+    schema_length: i16,
+    table: *const u8,
+    table_length: i16,
+    _unique: u16,
+    _reserved: u16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let text = "SELECT k.table_catalog AS \"TABLE_CAT\", k.table_schema AS \"TABLE_SCHEM\", k.table_name AS \"TABLE_NAME\", \
+         0 AS \"NON_UNIQUE\", NULL::text AS \"INDEX_QUALIFIER\", k.constraint_name AS \"INDEX_NAME\", 3 AS \"TYPE\", \
+         k.ordinal_position AS \"ORDINAL_POSITION\", k.column_name AS \"COLUMN_NAME\", 'A' AS \"ASC_OR_DESC\", \
+         NULL::integer AS \"CARDINALITY\", NULL::integer AS \"PAGES\", NULL::text AS \"FILTER_CONDITION\" \
+         FROM information_schema.table_constraints t JOIN information_schema.key_column_usage k \
+         ON k.constraint_schema = t.constraint_schema AND k.constraint_name = t.constraint_name AND k.table_name = t.table_name \
+         WHERE t.constraint_type IN ('PRIMARY KEY', 'UNIQUE') \
+         AND ($1::text IS NULL OR k.table_schema = $1) AND ($2::text IS NULL OR k.table_name = $2) ORDER BY 4, 6, 8";
+    catalog_query(stmt, text, &[pattern(schema, schema_length), pattern(table, table_length)])
+}
+

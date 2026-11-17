@@ -2,7 +2,8 @@
 
 use crate::api::{
     SQLColAttribute, SQLColumns, SQLConnect, SQLDescribeCol, SQLDriverConnect, SQLExecDirect,
-    SQLForeignKeys, SQLGetDiagRec, SQLGetInfo, SQLGetTypeInfo, SQLPrepare, SQLPrimaryKeys, SQLTables,
+    SQLForeignKeys, SQLGetDiagRec, SQLGetInfo, SQLGetTypeInfo, SQLPrepare, SQLPrimaryKeys,
+    SQLProcedures, SQLSpecialColumns, SQLStatistics, SQLTables,
 };
 use crate::memory::{SQL_NTS, store};
 use std::ffi::{CString, c_void};
@@ -264,6 +265,45 @@ pub extern "system" fn SQLForeignKeysW(
         pointer(&fk_table),
         length_of(&fk_table),
     )
+}
+
+/// [`SQLProcedures`] with UTF-16 patterns.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLProceduresW(stmt: *mut c_void, catalog: *const u16, catalog_length: i16, schema: *const u16, schema_length: i16, procedure: *const u16, procedure_length: i16) -> SqlReturn {
+    let (Ok(catalog), Ok(schema), Ok(procedure)) = (
+        narrowed(catalog, isize::from(catalog_length)),
+        narrowed(schema, isize::from(schema_length)),
+        narrowed(procedure, isize::from(procedure_length)),
+    ) else {
+        return SQL_ERROR;
+    };
+    SQLProcedures(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&procedure), length_of(&procedure))
+}
+
+/// [`SQLSpecialColumns`] with UTF-16 names.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLSpecialColumnsW(stmt: *mut c_void, identifier_type: u16, catalog: *const u16, catalog_length: i16, schema: *const u16, schema_length: i16, table: *const u16, table_length: i16, scope: u16, nullable: u16) -> SqlReturn {
+    let (Ok(catalog), Ok(schema), Ok(table)) = (
+        narrowed(catalog, isize::from(catalog_length)),
+        narrowed(schema, isize::from(schema_length)),
+        narrowed(table, isize::from(table_length)),
+    ) else {
+        return SQL_ERROR;
+    };
+    SQLSpecialColumns(stmt, identifier_type, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&table), length_of(&table), scope, nullable)
+}
+
+/// [`SQLStatistics`] with UTF-16 names.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLStatisticsW(stmt: *mut c_void, catalog: *const u16, catalog_length: i16, schema: *const u16, schema_length: i16, table: *const u16, table_length: i16, unique: u16, reserved: u16) -> SqlReturn {
+    let (Ok(catalog), Ok(schema), Ok(table)) = (
+        narrowed(catalog, isize::from(catalog_length)),
+        narrowed(schema, isize::from(schema_length)),
+        narrowed(table, isize::from(table_length)),
+    ) else {
+        return SQL_ERROR;
+    };
+    SQLStatistics(stmt, pointer(&catalog), length_of(&catalog), pointer(&schema), length_of(&schema), pointer(&table), length_of(&table), unique, reserved)
 }
 
 /// [`SQLGetTypeInfo`], as Unicode applications call it.

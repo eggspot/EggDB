@@ -2,7 +2,7 @@ use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
     SQLColumns, SQLForeignKeys, SQLGetTypeInfo, SQLNumResultCols, SQLPrepare, SQLPrimaryKeys,
-    SQLRowCount, SQLSetConnectAttr, SQLTables,
+    SQLRowCount, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -128,6 +128,15 @@ fn primary_keys_foreign_keys_and_type_info_are_listed() {
     assert_eq!(text_column(stmt, 3).as_deref(), Some("eggs"));
     assert_eq!(text_column(stmt, 7).as_deref(), Some("boxes"));
     assert_eq!(text_column(stmt, 8).as_deref(), Some("egg_id"));
+    assert_eq!(SQLSpecialColumns(stmt, 1, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, 0, 1), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 2).as_deref(), Some("id"));
+    assert_eq!(SQLSpecialColumns(stmt, 2, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, 0, 1), 0);
+    assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
+    assert_eq!(SQLStatistics(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, 1, 0), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 9).as_deref(), Some("id"));
+    assert_eq!(text_column(stmt, 4).as_deref(), Some("0"));
     assert_eq!(SQLGetTypeInfo(stmt, SQL_INTEGER), 0);
     assert_eq!(SQLFetch(stmt), 0);
     assert_eq!(text_column(stmt, 1).as_deref(), Some("integer"));
