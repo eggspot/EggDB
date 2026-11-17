@@ -623,6 +623,7 @@ pub(crate) fn drop_schemas(
         }
         writer.delete(&schema_comment_key(&name.text))?;
         writer.delete(&schema_key(&name.text))?;
+        crate::roles::forget_object_grants(writer, crate::roles::ObjectKind::Schema, &name.text)?;
     }
     Ok(result)
 }

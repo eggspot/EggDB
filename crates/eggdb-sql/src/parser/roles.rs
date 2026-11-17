@@ -2,7 +2,7 @@ use super::Parser;
 use crate::ast::{Name, Statement};
 use crate::error::SqlResult;
 use crate::lexer::TokenKind;
-use crate::roles::{Privilege, RoleOptions, RoleStatement};
+use crate::roles::{ObjectKind, ObjectPrivilege, Privilege, RoleOptions, RoleStatement};
 
 impl Parser<'_> {
     pub(super) fn at_role_definition(&self) -> bool {
@@ -198,7 +198,86 @@ impl Parser<'_> {
         }
     }
 
+    fn object_kind_of(target: &str) -> Option<ObjectKind> {
+        match target {
+            "schema" => Some(ObjectKind::Schema),
+            "type" | "domain" => Some(ObjectKind::Type),
+            "parameter" => Some(ObjectKind::Parameter),
+            "tablespace" => Some(ObjectKind::Tablespace),
+            _ => None,
+        }
+    }
+
+    fn object_privileges(&mut self, granting: bool, kind: ObjectKind) -> SqlResult<Statement> {
+        self.at += 1;
+        let mut grant_option = false;
+        if !granting && self.is_word("grant") {
+            self.at += 1;
+            self.expect_word("option")?;
+            self.expect_word("for")?;
+            grant_option = true;
+        }
+        let mut privileges = Vec::new();
+        loop {
+            if self.take_word("all") {
+                self.take_word("privileges");
+                privileges.extend_from_slice(kind.privileges());
+            } else if self.take_word("usage") {
+                privileges.push(ObjectPrivilege::Usage);
+            } else if self.take_word("create") {
+                privileges.push(ObjectPrivilege::Create);
+            } else if self.take_word("set") {
+                privileges.push(ObjectPrivilege::Set);
+            } else if self.take_word("alter") {
+                self.expect_word("system")?;
+                privileges.push(ObjectPrivilege::AlterSystem);
+            } else {
+                return Err(self.unexpected());
+            }
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect_word("on")?;
+        self.at += 1;
+        let mut objects = vec![self.name()?.text];
+        while self.take(&TokenKind::Comma) {
+            objects.push(self.name()?.text);
+        }
+        if granting || !self.take_word("from") {
+            self.expect_word("to")?;
+        }
+        let mut grantees = vec![self.grantee()?];
+        while self.take(&TokenKind::Comma) {
+            grantees.push(self.grantee()?);
+        }
+        if granting && self.take_word("with") {
+            self.expect_word("grant")?;
+            self.expect_word("option")?;
+            grant_option = true;
+        }
+        if !granting {
+            let _ = self.take_word("cascade") || self.take_word("restrict");
+        }
+        Ok(Statement::Role(RoleStatement::ObjectPrivileges {
+            granting,
+            grant_option,
+            kind,
+            privileges,
+            objects,
+            grantees,
+        }))
+    }
+
     pub(super) fn grant_or_revoke_privileges(&mut self, granting: bool) -> SqlResult<Statement> {
+        if let Some(kind) = self
+            .privileges_target()
+            .as_deref()
+            .and_then(Self::object_kind_of)
+            .filter(|_| !self.sqlserver() && !self.mysql())
+        {
+            return self.object_privileges(granting, kind);
+        }
         if let Some(target) = self.privileges_target().filter(|target| {
             matches!(
                 target.as_str(),

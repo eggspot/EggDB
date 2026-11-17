@@ -926,3 +926,60 @@ fn random_acl_items_never_panic() {
         }
     }
 }
+
+#[test]
+fn schema_type_parameter_and_tablespace_grants_are_stored_and_answered() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE TYPE mood AS ENUM ('sad', 'happy')",
+        "GRANT CREATE ON SCHEMA myschema TO joe WITH GRANT OPTION",
+        "GRANT USAGE ON TYPE mood TO joe WITH GRANT OPTION",
+        "GRANT SET ON PARAMETER work_mem TO staff",
+        "GRANT CREATE ON TABLESPACE pg_default TO carol",
+    ] {
+        shown(&mut admin, sql);
+    }
+    assert_eq!(
+        shown(
+            &mut admin,
+            "SELECT nspacl FROM pg_catalog.pg_namespace WHERE nspname = 'myschema'"
+        ),
+        "nspacl\n{eggdb=UC/eggdb,=U/eggdb,joe=C*/eggdb}\nSELECT 1"
+    );
+    let mut joe = as_role(&store, "joe");
+    assert_eq!(
+        shown(
+            &mut joe,
+            "SELECT has_schema_privilege('myschema', 'CREATE WITH GRANT OPTION'), \
+             has_type_privilege('mood', 'USAGE WITH GRANT OPTION'), \
+             has_parameter_privilege('work_mem', 'SET')"
+        ),
+        "has_schema_privilege|has_type_privilege|has_parameter_privilege\nt|t|f\nSELECT 1"
+    );
+    let mut carol = as_role(&store, "carol");
+    assert_eq!(
+        shown(
+            &mut carol,
+            "SELECT has_parameter_privilege('work_mem', 'SET'), \
+             has_tablespace_privilege('pg_default', 'CREATE')"
+        ),
+        "has_parameter_privilege|has_tablespace_privilege\nt|t\nSELECT 1"
+    );
+    shown(&mut admin, "REVOKE CREATE ON SCHEMA myschema FROM joe");
+    assert_eq!(
+        shown(&mut joe, "SELECT has_schema_privilege('myschema', 'CREATE')"),
+        "has_schema_privilege\nf\nSELECT 1"
+    );
+    fails_with(
+        &mut admin,
+        "GRANT USAGE ON SCHEMA nowhere TO joe",
+        SqlState::INVALID_SCHEMA_NAME,
+    );
+    fails_with(
+        &mut admin,
+        "GRANT SET ON SCHEMA myschema TO joe",
+        SqlState::INVALID_GRANT_OPERATION,
+    );
+}

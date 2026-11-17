@@ -122,6 +122,14 @@ pub(crate) enum RoleStatement {
         tables: Vec<Name>,
         grantees: Vec<String>,
     },
+    ObjectPrivileges {
+        granting: bool,
+        grant_option: bool,
+        kind: ObjectKind,
+        privileges: Vec<ObjectPrivilege>,
+        objects: Vec<String>,
+        grantees: Vec<String>,
+    },
     Membership {
         granting: bool,
         roles: Vec<String>,
@@ -139,10 +147,12 @@ impl RoleStatement {
             Self::Create { .. } => "CREATE ROLE",
             Self::Alter { .. } => "ALTER ROLE",
             Self::Drop { .. } => "DROP ROLE",
-            Self::Privileges { granting: true, .. } | Self::Membership { granting: true, .. } => {
-                "GRANT"
+            Self::Privileges { granting: true, .. }
+            | Self::Membership { granting: true, .. }
+            | Self::ObjectPrivileges { granting: true, .. } => "GRANT",
+            Self::Privileges { .. } | Self::Membership { .. } | Self::ObjectPrivileges { .. } => {
+                "REVOKE"
             }
-            Self::Privileges { .. } | Self::Membership { .. } => "REVOKE",
             Self::Deny { .. } => "DENY",
             Self::SetRole { reset: true, .. } => "RESET",
             Self::SetRole { .. } => "SET",
@@ -626,6 +636,24 @@ pub(crate) fn run(
             roles,
             members,
         } => change_membership(writer, *granting, roles, members)?,
+        RoleStatement::ObjectPrivileges {
+            granting,
+            grant_option,
+            kind,
+            privileges,
+            objects,
+            grantees,
+        } => object_grants::change(
+            writer,
+            &ObjectChange {
+                granting: *granting,
+                grant_option: *grant_option,
+                kind: *kind,
+                privileges,
+                objects,
+                grantees,
+            },
+        )?,
         RoleStatement::SetRole { .. } => {
             return Err(SqlError::new(SqlState::INTERNAL_ERROR, "SET ROLE reached the catalog writer"));
         }
@@ -1179,8 +1207,13 @@ pub fn login_verifier(reader: &dyn KeyValueRead, user: &str) -> SqlResult<Option
 
 mod access_records;
 mod columns;
+mod object_grants;
 
 pub(crate) use access_records::AccessRecords;
+pub(crate) use object_grants::{
+    OBJECT_GRANT_SPACE, ObjectChange, ObjectKind, ObjectPrivilege, forget as forget_object_grants,
+    grants_on as object_grants_on, holds as holds_object_grant,
+};
 pub(crate) use columns::{
     COLUMN_GRANT_SPACE, COLUMN_PRIVILEGES, ColumnGrant, ColumnReach, check_columns,
     column_grant_target, column_privilege_reach, column_reach, every_column_grant, forget_column,

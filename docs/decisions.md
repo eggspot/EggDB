@@ -1214,3 +1214,4 @@ its full title with its status.
 - [D1187](decisions/D1187.md) Code-only batch 839 (M6b): Multi-factor sign-in with one-time codes (eggdb_mfa, password+totp)
 - [D1188](decisions/D1188.md) Code-only batch 840 (M6b): SAML sign-in for interactive tools, with one-time tickets
 - [D1189](decisions/D1189.md) Code-only batch 841 (M6b): WITH GRANT OPTION on table privileges
+- [D1190](decisions/D1190.md) Code-only batch 842 (M6b): Grants on schemas, types, parameters and tablespaces stored

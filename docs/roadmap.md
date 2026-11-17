@@ -880,7 +880,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   privileges.
 - Schema, type, parameter (`GRANT SET ON PARAMETER`) and tablespace grants stored, so the
   inquiry functions and `pg_namespace.nspacl` follow them; `information_schema.role_routine_grants`
-  and `role_udt_grants` (D326, D344).
+  and `role_udt_grants` (D326, D344). Schema, type, parameter and tablespace grants stored and answered by the inquiry
+  functions and `nspacl`: **code written, unbuilt** (code-only mode, 2026-11-17, D1190). Left: `role_routine_grants`
+  and `role_udt_grants`.
 - `FORCE ROW LEVEL SECURITY` taking effect once object owners land, and roles with `BYPASSRLS`
   (D326). Roles with `BYPASSRLS`: **code written, unbuilt** (code-only mode, 2026-11-13, D979). Left: `FORCE ROW LEVEL
   SECURITY` with object owners.

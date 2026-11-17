@@ -3,7 +3,7 @@ use super::oids;
 use super::snapshot::{self, CatalogSnapshot, RelationEntry, RelationSource};
 use super::types::{oid_number, split_object_name};
 use crate::error::{SqlError, SqlResult, SqlState};
-use crate::roles::{PUBLIC, Privilege};
+use crate::roles::{ObjectKind, ObjectPrivilege, PUBLIC, Privilege};
 use crate::types::Value;
 
 const INQUIRIES: [&str; 13] = [
@@ -532,10 +532,15 @@ impl Inquiry<'_> {
             }
         };
         let wanted = parse_privileges(&written_name(list), &SCHEMA_PRIVILEGES, &[GRANT_OPTION])?;
-        answer(schema.as_ref(), |_| {
-            Ok(wanted
-                .iter()
-                .any(|wanted| holds_object_privilege(holder, *wanted, false)))
+        answer(schema.as_ref(), |schema| {
+            for wanted in &wanted {
+                if holds_object_privilege(holder, *wanted, false)
+                    || self.granted(holder, ObjectKind::Schema, schema, *wanted)?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         })
     }
 
@@ -716,18 +721,22 @@ impl Inquiry<'_> {
         object: &Value,
         list: &Value,
     ) -> SqlResult<Value> {
-        let exists = match object_oid(object) {
-            Some(oid) => self.type_exists(oid),
+        let (exists, name) = match object_oid(object) {
+            Some(oid) => (self.type_exists(oid), None),
             None => {
                 self.type_named(&written_name(object))?;
-                true
+                (true, Some(written_name(object)))
             }
         };
         let wanted = parse_privileges(&written_name(list), &TYPE_PRIVILEGES, &[GRANT_OPTION])?;
         answer(exists.then_some(()), |()| {
-            Ok(held_without_option(holder, &wanted, |_| {
-                EVERY_ROLE_USES_EVERY_TYPE
-            }))
+            if held_without_option(holder, &wanted, |_| EVERY_ROLE_USES_EVERY_TYPE) {
+                return Ok(true);
+            }
+            match &name {
+                Some(name) => self.any_granted(holder, ObjectKind::Type, name, &wanted),
+                None => Ok(false),
+            }
         })
     }
 
@@ -752,10 +761,23 @@ impl Inquiry<'_> {
         };
         let wanted =
             parse_privileges(&written_name(list), &TABLESPACE_PRIVILEGES, &[GRANT_OPTION])?;
+        let name = match object_oid(object) {
+            Some(oid) => TABLESPACES
+                .iter()
+                .find(|(found, _)| *found == oid)
+                .map(|(_, name)| (*name).to_owned()),
+            None => Some(written_name(object)),
+        };
         answer(exists.then_some(()), |()| {
-            Ok(held_without_option(holder, &wanted, |_| {
+            if held_without_option(holder, &wanted, |_| {
                 crate::roles::may_define_objects(holder.checked_role())
-            }))
+            }) {
+                return Ok(true);
+            }
+            match &name {
+                Some(name) => self.any_granted(holder, ObjectKind::Tablespace, name, &wanted),
+                None => Ok(false),
+            }
         })
     }
 
@@ -770,11 +792,61 @@ impl Inquiry<'_> {
         Ok(Value::Null)
     }
 
-    fn has_parameter_privilege(&self, holder: &Holder, list: &Value) -> SqlResult<Value> {
+    fn has_parameter_privilege(
+        &self,
+        holder: &Holder,
+        parameter: &Value,
+        list: &Value,
+    ) -> SqlResult<Value> {
         let wanted = parse_privileges(&written_name(list), &PARAMETER_PRIVILEGES, &[GRANT_OPTION])?;
-        Ok(Value::Boolean(held_without_option(holder, &wanted, |_| {
-            CHECKED_ROLES_HOLD_PARAMETER_PRIVILEGES
-        })))
+        if held_without_option(holder, &wanted, |_| CHECKED_ROLES_HOLD_PARAMETER_PRIVILEGES) {
+            return Ok(Value::Boolean(true));
+        }
+        let name = written_name(parameter).to_ascii_lowercase();
+        self.any_granted(holder, ObjectKind::Parameter, &name, &wanted)
+            .map(Value::Boolean)
+    }
+
+    fn granted(
+        &self,
+        holder: &Holder,
+        kind: ObjectKind,
+        object: &str,
+        wanted: Wanted,
+    ) -> SqlResult<bool> {
+        let Holder::Role(role) = holder else {
+            return Ok(true);
+        };
+        let privilege = match wanted.asked {
+            Asked::Usage => ObjectPrivilege::Usage,
+            Asked::Create => ObjectPrivilege::Create,
+            Asked::Set => ObjectPrivilege::Set,
+            Asked::AlterSystem => ObjectPrivilege::AlterSystem,
+            _ => return Ok(false),
+        };
+        crate::roles::holds_object_grant(
+            &self.snapshot.access,
+            role,
+            kind,
+            object,
+            privilege,
+            wanted.with_option,
+        )
+    }
+
+    fn any_granted(
+        &self,
+        holder: &Holder,
+        kind: ObjectKind,
+        object: &str,
+        wanted: &[Wanted],
+    ) -> SqlResult<bool> {
+        for wanted in wanted {
+            if self.granted(holder, kind, object, *wanted)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -949,10 +1021,12 @@ pub(crate) fn function(name: &str, values: &[Value]) -> SqlResult<Value> {
             inquiry.holder(role, true)?;
             inquiry.has_foreign_privilege(SERVER, object, list)
         }
-        ("has_parameter_privilege", [_, list]) => inquiry.has_parameter_privilege(&session, list),
-        ("has_parameter_privilege", [role, _, list]) => {
+        ("has_parameter_privilege", [parameter, list]) => {
+            inquiry.has_parameter_privilege(&session, parameter, list)
+        }
+        ("has_parameter_privilege", [role, parameter, list]) => {
             let holder = inquiry.holder(role, true)?;
-            inquiry.has_parameter_privilege(&holder, list)
+            inquiry.has_parameter_privilege(&holder, parameter, list)
         }
         ("pg_has_role", [member, role, list]) => {
             let holder = inquiry.holder(member, false)?;

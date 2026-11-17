@@ -545,23 +545,62 @@ pub(crate) fn schema_acl(snapshot: &CatalogSnapshot, schema: &SchemaEntry) -> Va
         return Value::Null;
     }
     let roles = Roles { snapshot };
-    acl_array(
-        &roles,
-        &[
-            AclItem {
-                grantee: schema.owner,
-                grantor: schema.owner,
-                rights: USAGE | CREATE,
-                grant_options: NO_RIGHTS,
-            },
-            AclItem {
-                grantee: PUBLIC_GRANTEE,
-                grantor: schema.owner,
-                rights: USAGE,
-                grant_options: NO_RIGHTS,
-            },
-        ],
+    let mut items = vec![
+        AclItem {
+            grantee: schema.owner,
+            grantor: schema.owner,
+            rights: USAGE | CREATE,
+            grant_options: NO_RIGHTS,
+        },
+        AclItem {
+            grantee: PUBLIC_GRANTEE,
+            grantor: schema.owner,
+            rights: USAGE,
+            grant_options: NO_RIGHTS,
+        },
+    ];
+    let stored = crate::roles::object_grants_on(
+        &snapshot.access,
+        crate::roles::ObjectKind::Schema,
+        &schema.name,
     )
+    .unwrap_or_default();
+    for grant in stored {
+        let rights = object_rights(grant.privileges);
+        let grant_options = object_rights(grant.grantable);
+        let grantee = match grant.grantee == crate::roles::PUBLIC {
+            true => Some(PUBLIC_GRANTEE),
+            false => roles.oid_named(&grant.grantee),
+        };
+        let Some(grantee) = grantee else {
+            continue;
+        };
+        match items.iter_mut().find(|item| item.grantee == grantee) {
+            Some(item) => {
+                item.rights |= rights;
+                item.grant_options |= grant_options;
+            }
+            None => items.push(AclItem {
+                grantee,
+                grantor: schema.owner,
+                rights,
+                grant_options,
+            }),
+        }
+    }
+    acl_array(&roles, &items)
+}
+
+fn object_rights(bits: u8) -> u16 {
+    [
+        (crate::roles::ObjectPrivilege::Usage, USAGE),
+        (crate::roles::ObjectPrivilege::Create, CREATE),
+        (crate::roles::ObjectPrivilege::Set, SET),
+        (crate::roles::ObjectPrivilege::AlterSystem, ALTER_SYSTEM),
+    ]
+    .into_iter()
+    .filter(|(privilege, _)| bits & privilege.bit() != 0)
+    .fold(NO_RIGHTS, |rights, (_, right)| rights | right)
 }
 
 #[cfg(test)]
