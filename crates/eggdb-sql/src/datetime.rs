@@ -1738,3 +1738,24 @@ mod tests {
         }
     }
 }
+
+/// `timeofday()`: the wall-clock time now, not the statement's, in PostgreSQL's text form
+/// (`Wed Nov 18 23:30:00.123456 2026 UTC`), in UTC (D1294).
+pub(crate) fn time_of_day_text() -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let now = system_now();
+    let days = now.div_euclid(MICROS_PER_DAY);
+    let of_day = now.rem_euclid(MICROS_PER_DAY);
+    let (year, month, day) = civil_from_days(days);
+    let weekday = WEEKDAYS[usize::try_from((days + 6).rem_euclid(7)).unwrap_or(0)];
+    let month_name = MONTHS[usize::try_from(month - 1).unwrap_or(0).min(11)];
+    let seconds = of_day / MICROS_PER_SECOND;
+    format!(
+        "{weekday} {month_name} {day:02} {:02}:{:02}:{:02}.{:06} {year} UTC",
+        seconds / 3_600,
+        seconds / 60 % 60,
+        seconds % 60,
+        of_day % MICROS_PER_SECOND
+    )
+}

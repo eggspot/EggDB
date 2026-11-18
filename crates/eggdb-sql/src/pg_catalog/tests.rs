@@ -793,6 +793,14 @@ fn client_driver_catalog_functions_settings_and_subscripts_answer() {
     assert_eq!(
         rows_of(&last(
             &mut session,
+            "SELECT to_regnamespace('app'), to_regnamespace('nope'), to_regproc('nope'), to_regrole('nobody'), \
+             inet_server_addr(), array_to_json(ARRAY[1, 2])::text, length(timeofday()) > 20"
+        )),
+        ["app|NULL|NULL|NULL|NULL|[1,2]|t"]
+    );
+    assert_eq!(
+        rows_of(&last(
+            &mut session,
             "SELECT setting, context FROM pg_catalog.pg_settings WHERE name = 'max_index_keys'"
         )),
         ["32|internal"]

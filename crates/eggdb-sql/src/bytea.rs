@@ -498,6 +498,8 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 other => sliced_text(character(other)?, start, count),
             }
         }
+        ("inet_server_addr" | "inet_server_port" | "inet_client_addr" | "inet_client_port", []) => Ok(Value::Null),
+        ("timeofday", []) => Ok(Value::Text(crate::datetime::time_of_day_text())),
         ("gen_random_uuid" | "uuid_generate_v4", []) => {
             let mut bytes = [0u8; 16];
             crate::random::fill(&mut bytes).map(|()| Value::Uuid(random_uuid(bytes)))

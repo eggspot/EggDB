@@ -5,8 +5,9 @@ use crate::eval::Evaluator;
 use crate::json::{self, Json, Node};
 use crate::types::{SqlType, Value};
 
-pub(crate) const FUNCTIONS: [&str; 16] = [
+pub(crate) const FUNCTIONS: [&str; 17] = [
     "to_json",
+    "array_to_json",
     "to_jsonb",
     "row_to_json",
     "json_build_object",
@@ -648,7 +649,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         return Some(Ok(Value::Null));
     }
     Some(match name {
-        "to_json" => to_json_text(values.first()?).map(Value::Json),
+        "to_json" | "array_to_json" => to_json_text(values.first()?).map(Value::Json),
         "to_jsonb" => to_jsonb_text(values.first()?).map(Value::Jsonb),
         "row_to_json" => return row_to_json(values),
         "json_build_object" => build_object(values, false, name),

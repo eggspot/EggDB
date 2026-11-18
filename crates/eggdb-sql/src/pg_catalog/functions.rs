@@ -17,7 +17,7 @@ const INTEGER: Option<SqlType> = Some(SqlType::Integer);
 const BOOLEAN: Option<SqlType> = Some(SqlType::Boolean);
 const TEXT: Option<SqlType> = Some(SqlType::Text);
 const INTERNAL_CHAR: Option<SqlType> = Some(SqlType::Catalog(CatalogType::InternalChar));
-const NOT_FOUND: [&str; 3] = ["42P01", "3F000", "42704"];
+const NOT_FOUND: [&str; 4] = ["42P01", "3F000", "42704", "42883"];
 const PG_CLASS: u32 = 1259;
 const PG_NAMESPACE: u32 = 2615;
 const PG_CONSTRAINT: u32 = 2606;
@@ -49,7 +49,7 @@ pub(crate) fn argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "obj_description" | "shobj_description" => &[OID, NAME],
         "col_description" => &[OID, INTEGER],
         "pg_get_serial_sequence" => &[TEXT, TEXT],
-        "to_regclass" | "to_regtype" => &[TEXT],
+        "to_regclass" | "to_regtype" | "to_regproc" | "to_regprocedure" | "to_regnamespace" | "to_regrole" => &[TEXT],
         "acldefault" => &[INTERNAL_CHAR, OID],
         "makeaclitem" => &[OID, OID, TEXT, BOOLEAN],
         _ => return None,
@@ -85,6 +85,10 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "to_regclass" | "pg_partition_root" => SqlType::Catalog(CatalogType::Reg(RegKind::Class)),
         "pg_export_snapshot" => SqlType::Text,
         "to_regtype" | "pg_typeof" => SqlType::Catalog(CatalogType::Reg(RegKind::Type)),
+        "to_regproc" => SqlType::Catalog(CatalogType::Reg(RegKind::Proc)),
+        "to_regprocedure" => SqlType::Catalog(CatalogType::Reg(RegKind::Procedure)),
+        "to_regnamespace" => SqlType::Catalog(CatalogType::Reg(RegKind::Namespace)),
+        "to_regrole" => SqlType::Catalog(CatalogType::Reg(RegKind::Role)),
         "acldefault" => SqlType::Array(crate::arrays::ArrayElement::AclItem),
         "makeaclitem" => SqlType::Catalog(CatalogType::AclItem),
         _ => return None,
@@ -324,6 +328,10 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("pg_get_serial_sequence", [table, column]) => serial_sequence(table, column),
         ("to_regclass", [text]) => registered(RegKind::Class, text),
         ("to_regtype", [text]) => registered(RegKind::Type, text),
+        ("to_regproc", [text]) => registered(RegKind::Proc, text),
+        ("to_regprocedure", [text]) => registered(RegKind::Procedure, text),
+        ("to_regnamespace", [text]) => registered(RegKind::Namespace, text),
+        ("to_regrole", [text]) => registered(RegKind::Role, text),
         _ => with_snapshot(name, values, first),
     })
 }
