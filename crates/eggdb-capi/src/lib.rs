@@ -28,6 +28,7 @@
 mod args;
 mod copy;
 mod database;
+mod functions;
 mod inspection;
 mod scan;
 mod sql;
@@ -39,6 +40,11 @@ mod transaction;
 pub use copy::{
     EggdbCopy, eggdb_copy_end, eggdb_copy_free, eggdb_copy_put, eggdb_copy_read, eggdb_sql_copy_in,
     eggdb_sql_copy_in_begin, eggdb_sql_copy_out_begin,
+};
+pub use functions::{
+    EggdbDestroy, EggdbFunction, EggdbFunctionContext, eggdb_function_result_blob,
+    eggdb_function_result_double, eggdb_function_result_error, eggdb_function_result_int64,
+    eggdb_function_result_null, eggdb_function_result_text, eggdb_sql_create_function,
 };
 pub use inspection::{EggdbCheckReport, EggdbStats, eggdb_check, eggdb_open_v2, eggdb_stats};
 pub use database::{

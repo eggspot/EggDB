@@ -1290,3 +1290,4 @@ its full title with its status.
 - [D1263](decisions/D1263.md) Code-only batch 919: binary tuples in pgoutput
 - [D1264](decisions/D1264.md) Code-only batch 920: TRUNCATE in logical replication
 - [D1265](decisions/D1265.md) Code-only batch 921: Update, Delete and Insert nodes in PostgreSQL's plans of writes, EXPLAIN INSERT
+- [D1266](decisions/D1266.md) Code-only batch 922 (M6): functions the program defines, in the C API and the Python driver

@@ -91,6 +91,21 @@ class DbApiTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+    def test_functions_defined_in_python_run_in_sql(self):
+        connection = eggdb.connect(":memory:")
+        connection.create_function("twice", 1, lambda value: None if value is None else value * 2, deterministic=True)
+        connection.create_function("fail", 0, lambda: 1 / 0)
+        cursor = connection.cursor()
+        cursor.execute("SELECT twice(21), twice('ab'), twice(NULL), twice(1.5)")
+        self.assertEqual(cursor.fetchone(), (42, "abab", None, 3.0))
+        with self.assertRaises(eggdb.Error) as raised:
+            cursor.execute("SELECT fail()")
+        self.assertIn("division by zero", str(raised.exception))
+        connection.create_function("twice", 1, None)
+        with self.assertRaises(eggdb.Error):
+            cursor.execute("SELECT twice(1)")
+        connection.close()
+
 
 class KeyValueTest(unittest.TestCase):
     def test_collections_hold_keys_apart_and_rename_and_count(self):

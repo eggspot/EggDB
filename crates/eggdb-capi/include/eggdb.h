@@ -66,6 +66,7 @@ typedef struct eggdb_scan eggdb_scan;
 typedef struct eggdb_sql eggdb_sql;
 typedef struct eggdb_stmt eggdb_stmt;
 typedef struct eggdb_copy eggdb_copy;
+typedef struct eggdb_function_context eggdb_function_context;
 
 typedef struct eggdb_options {
     uint32_t flags;
@@ -231,6 +232,18 @@ int eggdb_sql_copy_in(eggdb_sql *sql, const char *text, const uint8_t *data, siz
                       const eggdb_result **results, size_t *count);
 int eggdb_sql_cancel(eggdb_sql *sql);
 int eggdb_sql_close(eggdb_sql *sql);
+
+typedef void (*eggdb_function)(eggdb_function_context *context, void *user_data,
+                               const eggdb_value *arguments, size_t count);
+typedef void (*eggdb_destroy)(void *user_data);
+int eggdb_sql_create_function(eggdb_sql *sql, const char *name, int arguments,
+                              eggdb_function function, void *user_data, eggdb_destroy destroy);
+void eggdb_function_result_null(eggdb_function_context *context);
+void eggdb_function_result_int64(eggdb_function_context *context, int64_t value);
+void eggdb_function_result_double(eggdb_function_context *context, double value);
+void eggdb_function_result_text(eggdb_function_context *context, const uint8_t *data, size_t len);
+void eggdb_function_result_blob(eggdb_function_context *context, const uint8_t *data, size_t len);
+void eggdb_function_result_error(eggdb_function_context *context, const char *message);
 
 int eggdb_sql_prepare(eggdb_sql *sql, const char *text, size_t len, eggdb_stmt **stmt);
 int eggdb_stmt_parameter_count(eggdb_stmt *stmt, size_t *count);

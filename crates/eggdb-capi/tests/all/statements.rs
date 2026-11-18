@@ -11,7 +11,8 @@ use eggdb_capi::{
     eggdb_stmt_bind_blob, eggdb_stmt_bind_bool, eggdb_stmt_bind_double, eggdb_stmt_bind_int64,
     eggdb_stmt_bind_null, eggdb_stmt_bind_text, eggdb_stmt_clear_bindings, eggdb_stmt_column_count,
     eggdb_stmt_column_name, eggdb_stmt_column_type, eggdb_stmt_execute, eggdb_stmt_finalize,
-    eggdb_stmt_parameter_count, eggdb_stmt_reset,
+    eggdb_stmt_parameter_count, eggdb_stmt_reset, EggdbFunctionContext, eggdb_function_result_error,
+    eggdb_function_result_int64, eggdb_function_result_text, eggdb_sql_create_function,
 };
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::PathBuf;
@@ -580,5 +581,76 @@ fn copy_from_stdin_bulk_loads_rows() {
     };
     assert_eq!(status, EGGDB_ERR_INVALID_ARGUMENT);
     close_sql(sql);
+    close_db(db);
+}
+
+unsafe extern "C" fn doubled(context: *mut EggdbFunctionContext, _: *mut std::ffi::c_void, arguments: *const EggdbValue, count: usize) {
+    // SAFETY: the library passes `count` arguments that live for this call.
+    let values = unsafe { std::slice::from_raw_parts(arguments, count) };
+    match values.first() {
+        Some(value) if value.kind == EGGDB_INTEGER => {
+            // SAFETY: the context of this call.
+            unsafe { eggdb_function_result_int64(context, value.integer * 2) };
+        }
+        Some(value) if value.kind == EGGDB_TEXT => {
+            // SAFETY: the argument's text, `len` bytes, live for this call.
+            let text = unsafe { std::slice::from_raw_parts(value.data, value.len) };
+            let twice = [text, text].concat();
+            // SAFETY: the context of this call and bytes it copies before returning.
+            unsafe { eggdb_function_result_text(context, twice.as_ptr(), twice.len()) };
+        }
+        _ => {
+            // SAFETY: the context of this call and a NUL-terminated message.
+            unsafe { eggdb_function_result_error(context, c"doubled takes a number or text".as_ptr()) };
+        }
+    }
+}
+
+static DESTROYED: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn count_destroyed(_: *mut std::ffi::c_void) {
+    DESTROYED.fetch_add(1, Ordering::SeqCst);
+}
+
+fn first_value(results: &[EggdbResult]) -> EggdbValue {
+    let result = results.iter().find(|result| result.column_count > 0).expect("a result with rows");
+    // SAFETY: the session lends the result's values until its next call.
+    unsafe { *result.values }
+}
+
+#[test]
+fn a_defined_function_answers_from_the_program_and_is_destroyed_with_its_session() {
+    let file = TempPath::new("functions");
+    let db = open_db(&file);
+    let sql = open_sql(db, "sqlite");
+    let name = c_text("doubled");
+    // SAFETY: a live session, a name, a callback that reads its arguments, and no user data.
+    ok(unsafe { eggdb_sql_create_function(sql, name.as_ptr(), 1, Some(doubled), ptr::null_mut(), Some(count_destroyed)) });
+    let (status, results) = execute(sql, "SELECT doubled(21)");
+    assert_eq!(status, EGGDB_OK, "{}", last_error());
+    let value = first_value(&results);
+    assert_eq!((value.kind, value.integer), (EGGDB_INTEGER, 42));
+    let (status, results) = execute(sql, "SELECT doubled('ab')");
+    assert_eq!(status, EGGDB_OK, "{}", last_error());
+    let value = first_value(&results);
+    // SAFETY: the text the session lends until its next call.
+    assert_eq!(unsafe { std::slice::from_raw_parts(value.data, value.len) }, b"abab");
+    let (status, _) = execute(sql, "SELECT doubled(1.5)");
+    assert_eq!(status, EGGDB_ERR_SQL);
+    assert!(last_error().contains("doubled takes a number or text"), "{}", last_error());
+    let statement = prepared(sql, "SELECT doubled(?)");
+    // SAFETY: a live statement and a first parameter.
+    ok(unsafe { eggdb_stmt_bind_int64(statement, 1, 5) });
+    let (status, results) = run(statement);
+    assert_eq!(status, EGGDB_OK, "{}", last_error());
+    assert_eq!(first_value(&results).integer, 10);
+    // SAFETY: the statement, given up here.
+    ok(unsafe { eggdb_stmt_finalize(statement) });
+    let empty = c_text("");
+    // SAFETY: as above, with an empty name.
+    assert_eq!(unsafe { eggdb_sql_create_function(sql, empty.as_ptr(), 1, Some(doubled), ptr::null_mut(), None) }, EGGDB_ERR_INVALID_ARGUMENT);
+    assert_eq!(DESTROYED.load(Ordering::SeqCst), 0);
+    close_sql(sql);
+    assert_eq!(DESTROYED.load(Ordering::SeqCst), 1);
     close_db(db);
 }

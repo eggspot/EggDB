@@ -194,9 +194,14 @@ impl EggdbStmt {
 
     fn start_stepping(&mut self, state: &mut SessionState) -> Result<(), Failure> {
         match &mut state.backend {
-            Backend::Local { session, .. } => {
-                let gathered =
-                    gather_local(session, &self.text, Some(self.parameters.as_slice()), None)?;
+            Backend::Local { session, functions, .. } => {
+                let gathered = gather_local(
+                    session,
+                    functions,
+                    &self.text,
+                    Some(self.parameters.as_slice()),
+                    None,
+                )?;
                 let dialect = session.dialect();
                 let with_rows = gathered.into_iter().find(|result| result.columns.is_some());
                 let Some(result) = with_rows else {
@@ -380,19 +385,22 @@ pub unsafe extern "C" fn eggdb_sql_prepare(
         state.ensure_free()?;
         let id = state.next_handle_id();
         let (parameter_count, columns, remote_name) = match &mut state.backend {
-            Backend::Local { session, .. } => {
-                let outline = session
-                    .prepare(text, &[])
-                    .map_err(|error| Failure::sql(&error))?;
-                let columns = if outline.is_empty {
-                    Vec::new()
-                } else {
-                    let described = session
-                        .describe(text, &[])
+            Backend::Local { session, functions, .. } => {
+                let (parameter_count, columns) = eggdb::sql::with_native_functions(functions, || {
+                    let outline = session
+                        .prepare(text, &[])
                         .map_err(|error| Failure::sql(&error))?;
-                    statement_columns(described.columns.as_deref().unwrap_or_default())
-                };
-                (outline.parameter_count, columns, None)
+                    let columns = if outline.is_empty {
+                        Vec::new()
+                    } else {
+                        let described = session
+                            .describe(text, &[])
+                            .map_err(|error| Failure::sql(&error))?;
+                        statement_columns(described.columns.as_deref().unwrap_or_default())
+                    };
+                    Ok::<_, Failure>((outline.parameter_count, columns))
+                })?;
+                (parameter_count, columns, None)
             }
             Backend::Remote(remote) => {
                 let name = format!("eggdb_capi_{id}");

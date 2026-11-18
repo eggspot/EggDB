@@ -81,6 +81,57 @@ class _Value(Structure):
     ]
 
 
+_FUNCTION = ctypes.CFUNCTYPE(None, c_void_p, c_void_p, POINTER(_Value), c_size_t)
+_INT64_RANGE = range(-(2**63), 2**63)
+
+
+def _argument(value):
+    if value.kind == _INTEGER:
+        return value.integer
+    if value.kind == _REAL:
+        return value.real
+    if value.kind == _NULL:
+        return None
+    data = ctypes.string_at(value.data, value.len) if value.len else b""
+    if value.kind == _BLOB:
+        return data
+    return data.decode("utf-8")
+
+
+def _answer(api, context, value):
+    if value is None:
+        api.eggdb_function_result_null(context)
+    elif isinstance(value, bool) or (isinstance(value, int) and value in _INT64_RANGE):
+        api.eggdb_function_result_int64(context, int(value))
+    elif isinstance(value, int):
+        text = str(value).encode("utf-8")
+        api.eggdb_function_result_text(context, text, len(text))
+    elif isinstance(value, float):
+        api.eggdb_function_result_double(context, value)
+    elif isinstance(value, str):
+        text = value.encode("utf-8")
+        api.eggdb_function_result_text(context, text, len(text))
+    elif isinstance(value, (bytes, bytearray, memoryview)):
+        data = bytes(value)
+        api.eggdb_function_result_blob(context, data, len(data))
+    else:
+        message = f"user-defined function returned a value of type {type(value).__name__}".encode("utf-8")
+        api.eggdb_function_result_error(context, message)
+
+
+def _callback(function):
+    def called(context, _user_data, arguments, count):
+        api = _api()
+        try:
+            values = [_argument(arguments[index]) for index in range(count)]
+            _answer(api, context, function(*values))
+        except BaseException as error:
+            message = f"user-defined function raised exception: {error}".encode("utf-8", "replace")
+            api.eggdb_function_result_error(context, message)
+
+    return _FUNCTION(called)
+
+
 class _Parameter(Structure):
     _fields_ = [("text", c_char_p), ("len", c_size_t)]
 
@@ -188,6 +239,13 @@ def _api():
         "eggdb_copy_read": (c_int, [c_void_p, POINTER(POINTER(c_uint8)), POINTER(c_size_t)]),
         "eggdb_copy_end": (c_int, [c_void_p, POINTER(POINTER(_Result)), POINTER(c_size_t)]),
         "eggdb_copy_free": (None, [c_void_p]),
+        "eggdb_sql_create_function": (c_int, [c_void_p, c_char_p, c_int, _FUNCTION, c_void_p, c_void_p]),
+        "eggdb_function_result_null": (None, [c_void_p]),
+        "eggdb_function_result_int64": (None, [c_void_p, c_int64]),
+        "eggdb_function_result_double": (None, [c_void_p, c_double]),
+        "eggdb_function_result_text": (None, [c_void_p, c_char_p, c_size_t]),
+        "eggdb_function_result_blob": (None, [c_void_p, c_char_p, c_size_t]),
+        "eggdb_function_result_error": (None, [c_void_p, c_char_p]),
     }
     for name, (restype, argtypes) in prototypes.items():
         function = getattr(library, name)
@@ -352,6 +410,7 @@ class Connection:
                 _raise_last(status)
             self._database = None
             self._session = session
+            self._functions = {}
             self._dialect = "postgresql"
             self._in_transaction = False
             self.autocommit = False
@@ -368,6 +427,7 @@ class Connection:
             _raise_last(status)
         self._database = database
         self._session = session
+        self._functions = {}
         self._dialect = dialect
         self._in_transaction = False
         self.autocommit = False
@@ -403,6 +463,31 @@ class Connection:
         if self._session is None:
             raise InterfaceError("the connection is closed")
         return self._session
+
+    def create_function(self, name, narg, func, *, deterministic=False):
+        """Makes `func` callable as the SQL function `name` with `narg` arguments (-1 for any
+        number), as `sqlite3.Connection.create_function` does; `func` None removes it. Values
+        arrive and return as `None`, `int`, `float`, `str` or `bytes`; an exception fails the
+        statement. `deterministic` is accepted for compatibility."""
+        session = self._live_session()
+        if self._database is None:
+            raise NotSupportedError("functions are defined on an embedded connection, not a server one")
+        callback = None if func is None else _callback(func)
+        status = _api().eggdb_sql_create_function(
+            session,
+            str(name).encode("utf-8"),
+            int(narg),
+            callback if callback is not None else ctypes.cast(None, _FUNCTION),
+            None,
+            None,
+        )
+        if status != 0:
+            _raise_last(status)
+        key = (str(name).lower(), int(narg))
+        if callback is None:
+            self._functions.pop(key, None)
+        else:
+            self._functions[key] = callback
 
     def prepare(self, sql):
         """Checks one statement once and returns a `Statement` that runs it as often as needed,
@@ -501,6 +586,7 @@ class Connection:
             api.eggdb_close(self._database)
         self._session = None
         self._database = None
+        self._functions = {}
 
     def __enter__(self):
         return self

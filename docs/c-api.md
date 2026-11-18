@@ -400,6 +400,19 @@ session's next call; bound values go as text, typed by their place in the statem
 request. A connection that breaks fails that call with `EGGDB_ERR_IO`, and every later call on
 the session fails the same way until it is closed.
 
+### Functions the program defines
+
+`eggdb_sql_create_function(sql, name, arguments, function, user_data, destroy)` makes a C
+function callable from the session's SQL under `name`, with `arguments` arguments (-1 for any
+number), as `sqlite3_create_function` does: it wins over an EggDB function of the same name,
+replaces an earlier definition of that name and count, and `function` NULL removes it. Each call
+gets the arguments as `eggdb_value`s, live until it returns, and sets its answer with one of
+`eggdb_function_result_null`, `_int64`, `_double`, `_text`, `_blob` (copied before the call
+returns) or `_error`, which fails the statement with SQLSTATE 38000; setting nothing answers NULL.
+`destroy`, when not NULL, frees `user_data` once the definition is replaced or removed or the
+session closes. The function runs on the thread that runs the statement. A session from
+`eggdb_sql_connect` refuses definitions. Aggregate functions are not there yet.
+
 ## Backup and compaction
 `eggdb_backup(db, path, &report)` writes a copy of the last commit to a new file while readers
 and the writer keep working; a file at `path` fails with `EGGDB_ERR_ALREADY_EXISTS`.

@@ -109,7 +109,7 @@ pub(crate) struct ResultBatch {
     results: Vec<EggdbResult>,
 }
 
-fn kind_and_number(value: &Value) -> (i32, i64, f64) {
+pub(crate) fn kind_and_number(value: &Value) -> (i32, i64, f64) {
     match value {
         Value::Null => (EGGDB_NULL, 0, 0.0),
         Value::Boolean(flag) => (EGGDB_INTEGER, i64::from(*flag), 0.0),
@@ -385,6 +385,7 @@ pub(crate) enum Backend {
         session: Box<SqlSession>,
         store: Arc<Store<'static>>,
         database: Arc<Database>,
+        functions: crate::functions::DefinedFunctions,
     },
     Remote(Box<RemoteSession>),
     MySql(Box<crate::text_backend::MySqlRemote>),
@@ -510,6 +511,18 @@ impl EggdbSql {
     }
 }
 
+impl SessionState {
+    /// The functions defined on an embedded session (D1266).
+    pub(crate) fn defined_functions(&mut self) -> Result<&mut crate::functions::DefinedFunctions, Failure> {
+        match &mut self.backend {
+            Backend::Local { functions, .. } => Ok(functions),
+            _ => Err(Failure::invalid_argument(
+                "functions are defined on an embedded session; a server session runs the server's own",
+            )),
+        }
+    }
+}
+
 pub(crate) unsafe fn session_state<'a>(
     sql: *mut EggdbSql,
     what: &str,
@@ -566,6 +579,7 @@ pub unsafe extern "C" fn eggdb_sql_open(
             session: Box::new(session),
             store,
             database,
+            functions: Arc::default(),
         }));
         // SAFETY: as for the first write to `sql`.
         unsafe { args::write(sql, handle, "sql") }
@@ -675,6 +689,16 @@ pub(crate) fn text_values(parameters: &[Parameter]) -> Vec<Option<&[u8]>> {
 
 pub(crate) fn gather_local(
     session: &mut SqlSession,
+    functions: &crate::functions::DefinedFunctions,
+    text: &str,
+    parameters: Option<&[Parameter]>,
+    copy: Option<&mut dyn CopyChannel>,
+) -> Result<Vec<QueryResult>, Failure> {
+    eggdb::sql::with_native_functions(functions, || gather_local_now(session, text, parameters, copy))
+}
+
+fn gather_local_now(
+    session: &mut SqlSession,
     text: &str,
     parameters: Option<&[Parameter]>,
     copy: Option<&mut dyn CopyChannel>,
@@ -706,8 +730,8 @@ pub(crate) fn run_on(
 ) -> Result<(*const EggdbResult, usize), Failure> {
     batch.clear();
     match backend {
-        Backend::Local { session, .. } => {
-            let gathered = gather_local(session, text, parameters, copy)?;
+        Backend::Local { session, functions, .. } => {
+            let gathered = gather_local(session, functions, text, parameters, copy)?;
             let dialect = session.dialect();
             for result in &gathered {
                 batch.add(result, dialect);
@@ -950,8 +974,10 @@ pub unsafe extern "C" fn eggdb_sql_close(sql: *mut EggdbSql) -> c_int {
                 session,
                 store,
                 database,
+                functions,
             } => {
                 let closed = session.close();
+                drop(functions);
                 drop(store);
                 drop(database);
                 closed.map(|_| ()).map_err(|error| Failure::sql(&error))

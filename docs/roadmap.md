@@ -1171,7 +1171,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-13, D964). Left: R2DBC, and the jOOQ and Spring Data checks.
 - The SQLAlchemy dialect, the Django backend and asyncio support for Python (D16, D182). The SQLAlchemy dialect
   (`eggdb.sqlalchemy`) and asyncio support (`eggdb.aio`): **code written, unbuilt** (code-only mode, 2026-11-13,
-  D957). Left: the Django backend, which needs Django's SQLite user functions in EggDB.
+  D957). Functions the program defines (`create_function`, on the C API's `eggdb_sql_create_function`): **code written,
+  unbuilt** (D1266). Left: aggregates (`create_aggregate`) and the Django backend on them.
 - Prisma, TypeORM, Drizzle, Sequelize and Knex adapters for Node.js (D16, D182). Drizzle (`eggdb/drizzle`) and Knex
   (`eggdb/knex`): **code written, unbuilt** (code-only mode, 2026-11-13, D959). TypeORM and Sequelize through a
   `sqlite3`-compatible module (`eggdb/sqlite3`): **code written, unbuilt** (code-only mode, 2026-11-13, D960).
