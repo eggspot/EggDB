@@ -76,6 +76,28 @@ class AsyncConnection:
 
         await self._run(switch)
 
+    @property
+    def in_transaction(self):
+        return self._connection.in_transaction
+
+    @property
+    def row_factory(self):
+        return self._connection.row_factory
+
+    @row_factory.setter
+    def row_factory(self, factory):
+        self._connection.row_factory = factory
+
+    async def create_function(self, name, narg, func, *, deterministic=False):
+        """Defines a SQL function as ``Connection.create_function`` does; it runs on the
+        connection's worker thread."""
+        await self._run(lambda: self._connection.create_function(name, narg, func, deterministic=deterministic))
+
+    async def executescript(self, script):
+        """Runs a script as ``Connection.executescript`` does."""
+        cursor = await self._run(self._connection.executescript, script)
+        return AsyncCursor(self, cursor)
+
     async def cursor(self):
         """A new cursor."""
         cursor = await self._run(self._connection.cursor)

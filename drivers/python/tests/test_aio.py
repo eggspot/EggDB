@@ -21,6 +21,18 @@ class AsyncioTest(unittest.TestCase):
         self.assertEqual(colours, ["brown", "white"])
         self.assertEqual(tick, "tick")
 
+    def test_functions_scripts_and_row_factories_from_asyncio(self):
+        async def scenario():
+            async with await eggdb.aio.connect(":memory:") as connection:
+                await connection.create_function("twice", 1, lambda value: value * 2)
+                await connection.executescript("CREATE TABLE eggs (id INTEGER PRIMARY KEY); INSERT INTO eggs VALUES (21);")
+                connection.row_factory = eggdb.Row
+                cursor = await connection.execute("SELECT twice(id) AS doubled FROM eggs")
+                row = await cursor.fetchone()
+                return row["doubled"]
+
+        self.assertEqual(asyncio.run(scenario()), 42)
+
 
 if __name__ == "__main__":
     unittest.main()
