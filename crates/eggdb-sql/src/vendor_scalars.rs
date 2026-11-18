@@ -19,7 +19,26 @@ const SQLSERVER_FUNCTIONS: [&str; 11] = [
     "smalldatetimefromparts",
     "timefromparts",
 ];
-const ORACLE_FUNCTIONS: [&str; 3] = ["bitand", "remainder", "nanvl"];
+const ORACLE_FUNCTIONS: [&str; 17] = [
+    "bitand",
+    "remainder",
+    "nanvl",
+    "sys_guid",
+    "standard_hash",
+    "ora_hash",
+    "nls_upper",
+    "nls_lower",
+    "nls_initcap",
+    "to_clob",
+    "to_blob",
+    "empty_clob",
+    "empty_blob",
+    "vsize",
+    "lnnvl",
+    "asciistr",
+    "unistr",
+];
+const ORA_HASH_MOST: i64 = 4_294_967_295;
 const MOST_QUOTED_CHARACTERS: usize = 128;
 
 fn dialect_has(name: &str) -> bool {
@@ -174,6 +193,54 @@ fn timestamp_from_parts(values: &[Value], seconds: f64) -> SqlResult<Value> {
     }
 }
 
+fn hashed_bytes(value: &Value) -> Vec<u8> {
+    match value {
+        Value::Bytea(bytes) => bytes.clone(),
+        other => other.to_text().unwrap_or_default().into_bytes(),
+    }
+}
+
+fn ascii_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\\' => out.push_str("\\005C"),
+            ' '..='~' => out.push(character),
+            other => {
+                let mut units = [0u16; 2];
+                for unit in other.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\{unit:04X}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn unicode_unescaped(text: &str) -> SqlResult<String> {
+    let invalid = || SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "invalid Unicode escape value").with_oracle_code(30186);
+    let mut units: Vec<u16> = Vec::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            let mut buffer = [0u16; 2];
+            units.extend_from_slice(character.encode_utf16(&mut buffer));
+            continue;
+        }
+        if characters.peek() == Some(&'\\') {
+            characters.next();
+            units.push(u16::from(b'\\'));
+            continue;
+        }
+        let digits: String = characters.by_ref().take(4).collect();
+        if digits.len() != 4 {
+            return Err(invalid());
+        }
+        units.push(u16::from_str_radix(&digits, 16).map_err(|_| invalid())?);
+    }
+    String::from_utf16(&units).map_err(|_| invalid())
+}
+
 fn text_of(value: &Value) -> String {
     value.to_text().unwrap_or_default()
 }
@@ -206,7 +273,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if !dialect_has(name) {
         return None;
     }
-    if name != "nanvl" && values.iter().any(Value::is_null) {
+    if !matches!(name, "nanvl" | "lnnvl") && values.iter().any(Value::is_null) {
         return Some(Ok(Value::Null));
     }
     let text = |at: usize| values.get(at).and_then(Value::to_text);
@@ -270,6 +337,42 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             Ok(Value::Text(json_escaped(&text_of(value))))
         }
         ("app_name", []) => Ok(Value::Text(String::new())),
+        ("sys_guid", []) => {
+            let mut bytes = [0u8; 16];
+            crate::random::fill(&mut bytes).map(|()| Value::Bytea(bytes.to_vec()))
+        }
+        ("standard_hash", [input, rest @ ..]) => {
+            let bytes = hashed_bytes(input);
+            let algorithm = rest.first().map_or_else(|| "SHA1".to_owned(), text_of).to_ascii_uppercase();
+            match algorithm.as_str() {
+                "SHA1" => Ok(Value::Bytea(eggdb_crypto::sha1(&bytes).to_vec())),
+                "SHA256" => Ok(Value::Bytea(eggdb_crypto::sha256(&bytes).to_vec())),
+                "SHA384" => Ok(Value::Bytea(eggdb_crypto::sha384(&bytes).to_vec())),
+                "SHA512" => Ok(Value::Bytea(eggdb_crypto::sha512(&bytes).to_vec())),
+                "MD5" => Ok(Value::Bytea(eggdb_crypto::md5_checksum(&bytes).to_vec())),
+                _ => Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "invalid algorithm name").with_oracle_code(932)),
+            }
+        }
+        ("ora_hash", [input, rest @ ..]) => {
+            let most = rest.first().and_then(Value::as_integer).unwrap_or(ORA_HASH_MOST);
+            let seed = rest.get(1).and_then(Value::as_integer).unwrap_or(0);
+            if !(0..=ORA_HASH_MOST).contains(&most) || !(0..=ORA_HASH_MOST).contains(&seed) {
+                return Some(Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "argument is out of range").with_oracle_code(1428)));
+            }
+            let digest = eggdb_crypto::sha256(&[seed.to_be_bytes().as_slice(), &hashed_bytes(input)].concat());
+            let word = u64::from_be_bytes(digest[..8].try_into().unwrap_or([0; 8]));
+            Ok(Value::BigInt(i64::try_from(word % (most as u64 + 1)).unwrap_or(0)))
+        }
+        ("nls_upper" | "nls_lower", [text, ..]) => crate::string_functions::case_mapped(&text_of(text), name == "nls_upper"),
+        ("nls_initcap", [text, ..]) => crate::string_functions::function("initcap", std::slice::from_ref(text))?,
+        ("to_clob", [value]) => Ok(Value::Text(text_of(value))),
+        ("to_blob", [value]) => Ok(Value::Bytea(hashed_bytes(value))),
+        ("empty_clob", []) => Ok(Value::Text(String::new())),
+        ("empty_blob", []) => Ok(Value::Bytea(Vec::new())),
+        ("vsize", [value]) => Ok(Value::BigInt(i64::try_from(hashed_bytes(value).len()).unwrap_or(i64::MAX))),
+        ("lnnvl", [condition]) => Ok(Value::Boolean(!matches!(condition, Value::Boolean(true)))),
+        ("asciistr", [text]) => Ok(Value::Text(ascii_escaped(&text_of(text)))),
+        ("unistr", [text]) => unicode_unescaped(&text_of(text)).map(Value::Text),
         ("bitand", [_, _]) => Ok(Value::BigInt(integer(0)? & integer(1)?)),
         ("remainder", [dividend, divisor]) => {
             let (n2, n1) = (dividend.as_float()?, divisor.as_float()?);
@@ -295,7 +398,10 @@ pub(crate) fn result_type(name: &str, first: Option<SqlType>) -> Option<SqlType>
     }
     Some(match name {
         "patindex" | "bitand" => SqlType::BigInt,
-        "hashbytes" => SqlType::Bytea,
+        "hashbytes" | "sys_guid" | "standard_hash" | "to_blob" | "empty_blob" => SqlType::Bytea,
+        "ora_hash" | "vsize" => SqlType::BigInt,
+        "lnnvl" => SqlType::Boolean,
+        "nls_upper" | "nls_lower" | "nls_initcap" | "to_clob" | "empty_clob" | "asciistr" | "unistr" => SqlType::Text,
         "string_escape" | "app_name" => SqlType::Text,
         "isnumeric" => SqlType::Integer,
         "quotename" => SqlType::Text,
@@ -329,5 +435,8 @@ mod tests {
         assert!(!looks_numeric("12a"));
         assert!(!looks_numeric(""));
         assert_eq!(json_escaped("a\"b\\c/d\n"), "a\\\"b\\\\c\\/d\\n");
+        assert_eq!(ascii_escaped("ABÄC\\"), "AB\\00C4C\\005C");
+        assert_eq!(unicode_unescaped("AB\\00C4C\\\\").unwrap(), "ABÄC\\");
+        assert!(unicode_unescaped("\\12").is_err());
     }
 }
