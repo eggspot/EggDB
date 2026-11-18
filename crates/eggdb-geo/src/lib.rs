@@ -17,7 +17,7 @@ mod wkb;
 mod wkt;
 
 pub use algorithms::{
-    area, contains, distance, envelope, hausdorff_distance, intersects, length, longest_line, shortest_line,
+    area, contains, distance, envelope, hausdorff_distance, intersects, is_simple, length, longest_line, shortest_line,
     sphere_distance,
 };
 pub use geodesic::{Spheroid, coord_spheroid_distance, spheroid_distance, spheroid_length};

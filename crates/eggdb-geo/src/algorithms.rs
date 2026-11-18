@@ -425,3 +425,76 @@ pub fn hausdorff_distance(left: &Geometry, right: &Geometry) -> Option<f64> {
     };
     Some(one_way(left, right)?.max(one_way(right, left)?))
 }
+
+fn line_segments(points: &[Coord]) -> Vec<(Coord, Coord)> {
+    points
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .filter(|(a, b)| a != b)
+        .collect()
+}
+
+fn line_is_simple(points: &[Coord]) -> bool {
+    let segments = line_segments(points);
+    let closed = points.len() >= 4 && points.first() == points.last();
+    let last = segments.len().saturating_sub(1);
+    for (i, first) in segments.iter().enumerate() {
+        for (j, second) in segments.iter().enumerate().skip(i + 1) {
+            if j == i + 1 {
+                if point_segment(second.1, *first) == 0.0 || point_segment(first.0, *second) == 0.0 {
+                    return false;
+                }
+                continue;
+            }
+            if closed && i == 0 && j == last {
+                if point_segment(second.0, *first) == 0.0 || point_segment(first.1, *second) == 0.0 {
+                    return false;
+                }
+                continue;
+            }
+            if segments_cross(*first, *second) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn ends_of(points: &[Coord]) -> [Option<Coord>; 2] {
+    [points.first().copied(), points.last().copied()]
+}
+
+/// Whether the geometry has no anomalous points in the Simple Features sense
+/// (`ST_IsSimple`, D1276): a line that does not cross or touch itself except where a closed
+/// line's ends meet, lines of a multiline meeting only at ends of both, and a multipoint
+/// without repeated points. Polygons are simple.
+pub fn is_simple(geometry: &Geometry) -> bool {
+    match geometry {
+        Geometry::LineString(points) => line_is_simple(points),
+        Geometry::MultiPoint(points) => points.iter().enumerate().all(|(at, point)| !points[..at].contains(point)),
+        Geometry::MultiLineString(lines) => {
+            if !lines.iter().all(|line| line_is_simple(line)) {
+                return false;
+            }
+            for (i, first) in lines.iter().enumerate() {
+                for second in lines.iter().skip(i + 1) {
+                    for a in line_segments(first) {
+                        for b in line_segments(second) {
+                            if !segments_cross(a, b) {
+                                continue;
+                            }
+                            let meeting = crossing_point(a, b);
+                            let at_ends = ends_of(first).contains(&Some(meeting)) && ends_of(second).contains(&Some(meeting));
+                            if !at_ends {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        }
+        Geometry::Collection(items) => items.iter().all(is_simple),
+        Geometry::Point(_) | Geometry::Polygon(_) | Geometry::MultiPolygon(_) => true,
+    }
+}

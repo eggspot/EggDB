@@ -2,7 +2,7 @@ use crate::{
     Coord, Geometry, area, centroid, contains, convex_hull, distance, envelope, from_wkb, from_wkt,
     intersects, invalidity, length, parts, perimeter, simplified, sphere_distance, to_geojson,
     to_wkb, to_wkt, translated, affine, as_multi, azimuth, boundary, expanded, rotated, segmentized,
-    snapped_to_grid, without_repeated_points, hausdorff_distance, longest_line, shortest_line,
+    snapped_to_grid, without_repeated_points, hausdorff_distance, longest_line, shortest_line, is_simple,
 };
 
 fn geometry(text: &str) -> Geometry {
@@ -241,4 +241,15 @@ fn nearest_and_farthest_positions_and_the_hausdorff_distance() {
     assert_eq!(longest_line(&point, &line), Some((Coord { x: 3.0, y: 4.0 }, Coord { x: 10.0, y: 0.0 })));
     assert_eq!(hausdorff_distance(&geometry("LINESTRING(0 0,10 0)"), &geometry("LINESTRING(0 1,10 1)")), Some(1.0));
     assert_eq!(shortest_line(&geometry("POINT EMPTY"), &line), None);
+}
+
+#[test]
+fn simple_lines_do_not_cross_or_touch_themselves() {
+    assert!(is_simple(&geometry("LINESTRING(0 0,1 1,2 0)")));
+    assert!(!is_simple(&geometry("LINESTRING(0 0,2 2,0 2,2 0)")));
+    assert!(is_simple(&geometry("LINESTRING(0 0,0 1,1 1,0 0)")));
+    assert!(!is_simple(&geometry("LINESTRING(0 0,2 0,1 0)")));
+    assert!(!is_simple(&geometry("MULTIPOINT(1 1,1 1)")));
+    assert!(is_simple(&geometry("MULTILINESTRING((0 0,1 1),(1 1,2 0))")));
+    assert!(!is_simple(&geometry("MULTILINESTRING((0 0,2 2),(0 2,2 0))")));
 }

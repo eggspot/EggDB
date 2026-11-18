@@ -6,7 +6,9 @@ use eggdb_geo::{Coord, Geometry, Spatial};
 const GEOGRAPHY_SRID: i32 = 4326;
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 97] = [
+pub(crate) const FUNCTIONS: [&str; 99] = [
+    "st_issimple",
+    "st_isring",
     "st_collect",
     "st_points",
     "st_isclosed",
@@ -120,7 +122,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
             SqlType::Integer
         }
         "st_dwithin" | "st_contains" | "st_within" | "st_intersects" | "st_disjoint"
-        | "st_isempty" | "st_equals" | "st_isvalid" | "st_isclosed" | "st_iscollection" => SqlType::Boolean,
+        | "st_isempty" | "st_equals" | "st_isvalid" | "st_isclosed" | "st_iscollection" | "st_issimple" | "st_isring" => SqlType::Boolean,
         name if FUNCTIONS.contains(&name) => SqlType::Text,
         _ => return None,
     })
@@ -693,6 +695,14 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
             geometry_value(&Spatial { srid: source.srid, geometry: Geometry::MultiPoint(source.geometry.coords()) })
         }
         ("st_isclosed", [_]) => Value::Boolean(closed(&spatial(0)?.geometry)),
+        ("st_issimple", [_]) => Value::Boolean(eggdb_geo::is_simple(&spatial(0)?.geometry)),
+        ("st_isring", [_]) => match spatial(0)?.geometry {
+            Geometry::LineString(points) => {
+                let line = Geometry::LineString(points);
+                Value::Boolean(closed(&line) && eggdb_geo::is_simple(&line))
+            }
+            _ => return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "ST_IsRing() should only be called on a linear feature")),
+        },
         ("st_iscollection", [_]) => Value::Boolean(matches!(
             spatial(0)?.geometry,
             Geometry::MultiPoint(_) | Geometry::MultiLineString(_) | Geometry::MultiPolygon(_) | Geometry::Collection(_)
