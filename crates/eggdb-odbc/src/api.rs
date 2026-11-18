@@ -1494,3 +1494,201 @@ mod tests {
         assert_eq!(server_dialect("mysql://ann@db.local:3306/sales"), "mysql");
     }
 }
+
+const SQL_API_ALL_FUNCTIONS: u16 = 0;
+const SQL_API_ODBC3_ALL_FUNCTIONS: u16 = 999;
+const SQL_API_ODBC3_ALL_FUNCTIONS_SIZE: usize = 250;
+const SQL_API_ALL_FUNCTIONS_SIZE: usize = 100;
+const SUPPORTED_FUNCTIONS: [u16; 46] = [
+    4, 5, 6, 7, 8, 9, 11, 12, 13, 16, 18, 19, 20, 40, 41, 43, 44, 45, 47, 52, 53, 54, 56, 58, 60, 61, 62, 63, 65, 66, 67,
+    70, 72, 1001, 1003, 1005, 1006, 1007, 1010, 1011, 1012, 1014, 1016, 1019, 1020, 1021,
+];
+const SQL_FETCH_NEXT: i16 = 1;
+const SQL_DIAG_RETURNCODE: i16 = 1;
+const SQL_DIAG_NUMBER: i16 = 2;
+const SQL_DIAG_ROW_COUNT: i16 = 3;
+const SQL_DIAG_SQLSTATE: i16 = 4;
+const SQL_DIAG_NATIVE: i16 = 5;
+const SQL_DIAG_MESSAGE_TEXT: i16 = 6;
+const SQL_DIAG_CLASS_ORIGIN: i16 = 8;
+const SQL_DIAG_SUBCLASS_ORIGIN: i16 = 9;
+const SQL_DIAG_CONNECTION_NAME: i16 = 10;
+const SQL_DIAG_SERVER_NAME: i16 = 11;
+
+/// Says which ODBC functions the driver has (D1278): one function's `SQL_TRUE` or `SQL_FALSE`,
+/// ODBC 2's array of 100 for `SQL_API_ALL_FUNCTIONS`, or ODBC 3's bitmap of 250 words for
+/// `SQL_API_ODBC3_ALL_FUNCTIONS`.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLGetFunctions(dbc: *mut c_void, function: u16, supported: *mut u16) -> SqlReturn {
+    if connection(dbc).is_none() {
+        return SQL_INVALID_HANDLE;
+    }
+    if supported.is_null() {
+        return SQL_ERROR;
+    }
+    match function {
+        SQL_API_ODBC3_ALL_FUNCTIONS => {
+            let mut bitmap = [0u16; SQL_API_ODBC3_ALL_FUNCTIONS_SIZE];
+            for id in SUPPORTED_FUNCTIONS {
+                if let Some(word) = bitmap.get_mut(usize::from(id >> 4)) {
+                    *word |= 1 << (id & 0xF);
+                }
+            }
+            for (at, word) in bitmap.iter().enumerate() {
+                store(supported.wrapping_add(at), *word);
+            }
+        }
+        SQL_API_ALL_FUNCTIONS => {
+            for at in 0..SQL_API_ALL_FUNCTIONS_SIZE {
+                let id = u16::try_from(at).unwrap_or(u16::MAX);
+                store(supported.wrapping_add(at), u16::from(SUPPORTED_FUNCTIONS.contains(&id)));
+            }
+        }
+        id => store(supported, u16::from(SUPPORTED_FUNCTIONS.contains(&id))),
+    }
+    SQL_SUCCESS
+}
+
+/// Moves to the statement's next result set, when its text ran several queries.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLMoreResults(stmt: *mut c_void) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    stmt.diagnostics.clear();
+    if stmt.pending.is_empty() {
+        stmt.close_cursor();
+        return SQL_NO_DATA;
+    }
+    let next = stmt.pending.remove(0);
+    stmt.show(next);
+    SQL_SUCCESS
+}
+
+/// Answers a statement's attributes: a forward-only, read-only cursor of one row at a time,
+/// with no timeout and no row limit.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLGetStmtAttr(stmt: *mut c_void, attribute: i32, value: *mut c_void, _capacity: i32, written: *mut i32) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    stmt.diagnostics.clear();
+    let answer: usize = match attribute {
+        0 | 1 | 6 | -1 | -2 => 0,
+        7 | 27 => 1,
+        14 => stmt.next_row,
+        _ => return failed(&mut stmt.diagnostics, Failure::new("HY092", format!("statement attribute {attribute} is not supported"))),
+    };
+    store(value.cast::<usize>(), answer);
+    store(written, i32::try_from(std::mem::size_of::<usize>()).unwrap_or(8));
+    SQL_SUCCESS
+}
+
+/// Stops a running statement; the driver runs each call to its end before returning, so there
+/// is never one to stop.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLCancel(stmt: *mut c_void) -> SqlReturn {
+    match statement(stmt) {
+        Some(_) => SQL_SUCCESS,
+        None => SQL_INVALID_HANDLE,
+    }
+}
+
+/// Fetches the next row; the cursor is forward-only, so any other direction is refused.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLFetchScroll(stmt: *mut c_void, orientation: i16, _offset: isize) -> SqlReturn {
+    if orientation == SQL_FETCH_NEXT {
+        return SQLFetch(stmt);
+    }
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    failed(&mut stmt.diagnostics, Failure::new("HY106", "the cursor is forward-only: only SQL_FETCH_NEXT is supported"))
+}
+
+/// Describes a parameter as text of unknown size and nullability, which every type the
+/// statement's place asks for accepts.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLDescribeParam(
+    stmt: *mut c_void,
+    number: u16,
+    data_type: *mut i16,
+    size: *mut usize,
+    digits: *mut i16,
+    nullable: *mut i16,
+) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    if number == 0 {
+        return failed(&mut stmt.diagnostics, Failure::new("07009", "parameters are numbered from 1"));
+    }
+    store(data_type, 12);
+    store(size, 0);
+    store(digits, 0);
+    store(nullable, SQL_NULLABLE_UNKNOWN);
+    SQL_SUCCESS
+}
+
+/// One field of a handle's diagnostics: the header's record count, return code and row count,
+/// or a record's SQLSTATE, native code, message and origins.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLGetDiagField(
+    handle_type: i16,
+    handle: *mut c_void,
+    record: i16,
+    field: i16,
+    value: *mut c_void,
+    capacity: i16,
+    written: *mut i16,
+) -> SqlReturn {
+    let (records, row_count) = match handle_type {
+        SQL_HANDLE_ENV => match environment(handle) {
+            Some(env) => (&env.diagnostics.records, 0),
+            None => return SQL_INVALID_HANDLE,
+        },
+        SQL_HANDLE_DBC => match connection(handle) {
+            Some(dbc) => (&dbc.diagnostics.records, 0),
+            None => return SQL_INVALID_HANDLE,
+        },
+        SQL_HANDLE_STMT => match statement(handle) {
+            Some(stmt) => (&stmt.diagnostics.records, stmt.row_count),
+            None => return SQL_INVALID_HANDLE,
+        },
+        _ => return SQL_INVALID_HANDLE,
+    };
+    match field {
+        SQL_DIAG_NUMBER => {
+            store(value.cast::<i32>(), i32::try_from(records.len()).unwrap_or(i32::MAX));
+            return SQL_SUCCESS;
+        }
+        SQL_DIAG_RETURNCODE => {
+            store(value.cast::<i16>(), if records.is_empty() { SQL_SUCCESS } else { SQL_ERROR });
+            return SQL_SUCCESS;
+        }
+        SQL_DIAG_ROW_COUNT => {
+            store(value.cast::<isize>(), row_count);
+            return SQL_SUCCESS;
+        }
+        _ => {}
+    }
+    let Some(found) = usize::try_from(record).ok().and_then(|number| number.checked_sub(1)).and_then(|at| records.get(at)) else {
+        return SQL_NO_DATA;
+    };
+    let text = match field {
+        SQL_DIAG_NATIVE => {
+            store(value.cast::<i32>(), found.native);
+            return SQL_SUCCESS;
+        }
+        SQL_DIAG_SQLSTATE => found.sqlstate.clone(),
+        SQL_DIAG_MESSAGE_TEXT => found.message.clone(),
+        SQL_DIAG_CLASS_ORIGIN | SQL_DIAG_SUBCLASS_ORIGIN => {
+            if found.sqlstate.starts_with("IM") || found.sqlstate.starts_with("HY") { "ODBC 3.0" } else { "ISO 9075" }.to_owned()
+        }
+        SQL_DIAG_CONNECTION_NAME | SQL_DIAG_SERVER_NAME => String::new(),
+        _ => return SQL_ERROR,
+    };
+    let truncated = write_text(value.cast(), isize::from(capacity), text.as_bytes(), 1);
+    store(written, i16::try_from(text.len()).unwrap_or(i16::MAX));
+    if truncated { SQL_SUCCESS_WITH_INFO } else { SQL_SUCCESS }
+}

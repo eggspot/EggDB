@@ -1302,3 +1302,4 @@ its full title with its status.
 - [D1275](decisions/D1275.md) Code-only batch 931 (M4): ST_Collect, ST_Points and geometry properties
 - [D1276](decisions/D1276.md) Code-only batch 932 (M4): ST_IsSimple and ST_IsRing
 - [D1277](decisions/D1277.md) Code-only batch 933 (M4): ST_Covers, ST_CoveredBy and ST_ContainsProperly
+- [D1278](decisions/D1278.md) Code-only batch 934 (M6): SQLGetFunctions, SQLMoreResults, SQLGetStmtAttr, SQLGetDiagField and more

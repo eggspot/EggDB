@@ -110,6 +110,7 @@ pub(crate) struct StatementHandle {
     pub(crate) bound_columns: Vec<Option<BoundColumn>>,
     pub(crate) parameters: Vec<Option<BoundParameter>>,
     pub(crate) diagnostics: Diagnostics,
+    pub(crate) pending: Vec<Outcome>,
 }
 
 impl StatementHandle {
@@ -126,10 +127,12 @@ impl StatementHandle {
             bound_columns: Vec::new(),
             parameters: Vec::new(),
             diagnostics: Diagnostics::default(),
+            pending: Vec::new(),
         }
     }
 
     pub(crate) fn close_cursor(&mut self) {
+        self.pending.clear();
         self.columns.clear();
         self.rows.clear();
         self.next_row = 0;
@@ -143,12 +146,22 @@ impl StatementHandle {
             .iter()
             .map(|outcome| changed_rows(&outcome.tag))
             .sum::<isize>();
-        if let Some(last) = outcomes.into_iter().rev().find(|outcome| !outcome.columns.is_empty()) {
-            self.row_count = isize::try_from(last.rows.len()).unwrap_or(isize::MAX);
-            self.read_offsets = vec![0; last.columns.len()];
-            self.columns = last.columns;
-            self.rows = last.rows;
+        let mut with_rows: Vec<Outcome> = outcomes.into_iter().filter(|outcome| !outcome.columns.is_empty()).collect();
+        if !with_rows.is_empty() {
+            let first = with_rows.remove(0);
+            self.show(first);
         }
+        self.pending = with_rows;
+    }
+
+    /// Makes `outcome` the result the cursor reads, from its first row.
+    pub(crate) fn show(&mut self, outcome: Outcome) {
+        self.row_count = isize::try_from(outcome.rows.len()).unwrap_or(isize::MAX);
+        self.read_offsets = vec![0; outcome.columns.len()];
+        self.columns = outcome.columns;
+        self.rows = outcome.rows;
+        self.next_row = 0;
+        self.current = None;
     }
 
     pub(crate) fn sql_type_of(&self, column: usize) -> i16 {

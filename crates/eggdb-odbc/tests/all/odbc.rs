@@ -2,7 +2,7 @@ use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
     SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLProcedureColumns, SQLPrepare, SQLPrimaryKeys,
-    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
+    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -267,4 +267,33 @@ fn a_connection_string_with_a_server_connects_over_the_postgresql_protocol() {
     assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), wrong.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), SQL_ERROR);
     stop.store(true, std::sync::atomic::Ordering::Release);
     server.join().unwrap();
+}
+
+#[test]
+fn several_result_sets_functions_and_diagnostic_fields() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=sqlite\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let mut bitmap = [0u16; 250];
+    assert_eq!(SQLGetFunctions(dbc, 999, bitmap.as_mut_ptr()), 0);
+    let exists = |id: u16| bitmap[usize::from(id >> 4)] & (1 << (id & 0xF)) != 0;
+    assert!(exists(61) && exists(1021) && exists(44));
+    assert!(!exists(1004));
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(run(stmt, "SELECT 1; SELECT 'two'"), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 1).as_deref(), Some("1"));
+    assert_eq!(SQLMoreResults(stmt), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 1).as_deref(), Some("two"));
+    assert_eq!(SQLMoreResults(stmt), SQL_NO_DATA);
+    assert_eq!(run(stmt, "SELECT * FROM nowhere"), SQL_ERROR);
+    let mut count = 0i32;
+    assert_eq!(SQLGetDiagField(SQL_HANDLE_STMT, stmt, 0, 2, (&raw mut count).cast(), 0, ptr::null_mut()), 0);
+    assert_eq!(count, 1);
+    let mut state = [0u8; 6];
+    let mut written = 0i16;
+    assert_eq!(SQLGetDiagField(SQL_HANDLE_STMT, stmt, 1, 4, state.as_mut_ptr().cast(), 6, &raw mut written), 0);
+    assert_eq!(written, 5);
 }

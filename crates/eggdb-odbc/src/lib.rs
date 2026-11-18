@@ -29,7 +29,8 @@ pub use api::{
     SQLGetDiagRec, SQLGetEnvAttr, SQLGetInfo, SQLGetTypeInfo, SQLNumParams, SQLNumResultCols,
     SQLPrepare, SQLPrimaryKeys, SQLProcedures, SQLRowCount, SQLSetConnectAttr, SQLSetEnvAttr,
     SQLSetStmtAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables, SQLColumnPrivileges,
-    SQLProcedureColumns, SQLNativeSql,
+    SQLProcedureColumns, SQLNativeSql, SQLCancel, SQLDescribeParam, SQLFetchScroll, SQLGetDiagField,
+    SQLGetFunctions, SQLGetStmtAttr, SQLMoreResults,
 };
 pub use wide::{
     SQLColAttributeW, SQLColumnsW, SQLConnectW, SQLDescribeColW, SQLDriverConnectW,
