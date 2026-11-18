@@ -5,7 +5,8 @@ use crate::eval::Evaluator;
 use crate::json::{self, Json, Node};
 use crate::types::{SqlType, Value};
 
-pub(crate) const FUNCTIONS: [&str; 17] = [
+pub(crate) const FUNCTIONS: [&str; 18] = [
+    "jsonb_set_lax",
     "to_json",
     "array_to_json",
     "to_jsonb",
@@ -641,6 +642,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if !FUNCTIONS.contains(&name) {
         return None;
     }
+    if name == "jsonb_set_lax" {
+        return Some(set_lax(values));
+    }
     let builder = matches!(
         name,
         "json_build_object" | "jsonb_build_object" | "json_build_array" | "jsonb_build_array"
@@ -754,6 +758,31 @@ pub(crate) fn has_key(symbol: &str, left: &Value, right: &Value) -> SqlResult<Va
             .iter()
             .all(|key| top_level_contains(&tree, key)),
     }))
+}
+
+fn set_lax(values: &[Value]) -> SqlResult<Value> {
+    let (Some(target), Some(path)) = (values.first(), values.get(1)) else {
+        return Err(invalid("jsonb_set_lax takes a target, a path and a new value"));
+    };
+    if target.is_null() || path.is_null() {
+        return Ok(Value::Null);
+    }
+    let create = values.get(3).cloned().unwrap_or(Value::Boolean(true));
+    let treatment = values.get(4).and_then(Value::to_text).unwrap_or_else(|| "use_json_null".to_owned());
+    let replacement = values.get(2).cloned().unwrap_or(Value::Null);
+    if !replacement.is_null() {
+        return function("jsonb_set", &[target.clone(), path.clone(), replacement, create]).unwrap_or(Ok(Value::Null));
+    }
+    match treatment.as_str() {
+        "use_json_null" => function("jsonb_set", &[target.clone(), path.clone(), Value::Jsonb("null".to_owned()), create])
+            .unwrap_or(Ok(Value::Null)),
+        "delete_key" => delete_path(target, path),
+        "return_target" => Ok(target.clone()),
+        "raise_exception" => Err(SqlError::new(SqlState::NULL_VALUE_NOT_ALLOWED, "JSON value must not be null")
+            .with_detail("Exception was raised because null_value_treatment is \"raise_exception\".")
+            .with_hint("To avoid, either change the null_value_treatment argument or ensure that an SQL NULL is not passed.")),
+        _ => Err(invalid("null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"")),
+    }
 }
 
 pub(crate) fn delete_path(left: &Value, right: &Value) -> SqlResult<Value> {

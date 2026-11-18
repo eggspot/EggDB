@@ -1328,3 +1328,4 @@ its full title with its status.
 - [D1301](decisions/D1301.md) Code-only batch 957 (M4): PostgreSQL's administration functions for dashboards
 - [D1302](decisions/D1302.md) Code-only batch 958 (M4): MySQL's network, UUID, hash and base64 functions
 - [D1303](decisions/D1303.md) Code-only batch 959 (M4): SHA-224, and PostgreSQL's sha224 and sha384
+- [D1304](decisions/D1304.md) Code-only batch 960 (M4): jsonb_set_lax

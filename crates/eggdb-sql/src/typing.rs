@@ -257,7 +257,7 @@ fn added_function_type(
         | "json_extract_path"
         | crate::json_functions::WHOLE_ROW
         | crate::json_functions::ROW_OBJECT => Some(SqlType::Json),
-        "to_jsonb" | "jsonb_build_object" | "jsonb_build_array" | "jsonb_set" | "jsonb_insert"
+        "to_jsonb" | "jsonb_build_object" | "jsonb_build_array" | "jsonb_set" | "jsonb_set_lax" | "jsonb_insert"
         | "jsonb_strip_nulls" | "jsonb_extract_path" => Some(SqlType::Jsonb),
         _ => return None,
     })

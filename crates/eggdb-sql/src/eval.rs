@@ -1932,6 +1932,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "date_bin" => &[INTERVAL, None, None],
         "timezone" => &[None, Some(SqlType::TimestampTz(None))],
         "jsonb_set" | "jsonb_insert" => &[JSONB, None, JSONB, BOOLEAN],
+        "jsonb_set_lax" => &[JSONB, None, JSONB, BOOLEAN, TEXT],
         "jsonb_strip_nulls" | "jsonb_pretty" => &[JSONB],
         "json_strip_nulls" => &[JSON],
         "json_extract_path" | "json_extract_path_text" => &[JSON],

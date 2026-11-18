@@ -772,3 +772,20 @@ fn shuffled_and_sampled_arrays_keep_their_elements() {
     );
     assert_eq!(state(&mut session, "SELECT array_sample(ARRAY[1], 2)"), "22023");
 }
+
+#[test]
+fn jsonb_set_lax_treats_a_null_value_as_asked() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT jsonb_set_lax('{\"a\": 1, \"b\": 2}', '{a}', NULL)::text AS j, \
+             jsonb_set_lax('{\"a\": 1, \"b\": 2}', '{a}', NULL, true, 'delete_key')::text AS d, \
+             jsonb_set_lax('{\"a\": 1}', '{a}', '3')::text AS s"
+        )
+        .unwrap(),
+        "j|d|s\n{\"a\": null, \"b\": 2}|{\"b\": 2}|{\"a\": 3}\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "SELECT jsonb_set_lax('{}', '{a}', NULL, true, 'raise_exception')"), "22004");
+}
