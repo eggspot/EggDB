@@ -1289,3 +1289,4 @@ its full title with its status.
 - [D1262](decisions/D1262.md) Code-only batch 918 (M7): empty matches in MATCH_RECOGNIZE
 - [D1263](decisions/D1263.md) Code-only batch 919: binary tuples in pgoutput
 - [D1264](decisions/D1264.md) Code-only batch 920: TRUNCATE in logical replication
+- [D1265](decisions/D1265.md) Code-only batch 921: Update and Delete nodes in PostgreSQL's plans of writes

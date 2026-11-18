@@ -993,7 +993,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   write's `Update`/`Delete` iterator (D345).
 - Subqueries in `EXPLAIN` of `UPDATE` and `DELETE`, and of derived tables, `WITH` and set
   operations (D327). `UPDATE` and `DELETE` without `FROM` or `USING`: **code written, unbuilt** (code-only mode,
-  2026-11-17, D1223). Left: joined writes, derived tables, `WITH` and set operations.
+  2026-11-17, D1223); PostgreSQL's `Update on t` and `Delete on t` nodes: **code written, unbuilt** (D1265). Left: joined
+  writes, derived tables, `WITH` and set operations.
 - Subqueries in Oracle's, SQL Server's, SQLite's and MySQL's tabular plans (D327). SQLite's `EXPLAIN QUERY PLAN`:
   **code written, unbuilt** (code-only mode, 2026-11-17, D1226); MySQL's tabular `EXPLAIN`: **code written, unbuilt**
   (code-only mode, 2026-11-17, D1227); Oracle's `EXPLAIN PLAN`: **code written, unbuilt** (code-only mode,

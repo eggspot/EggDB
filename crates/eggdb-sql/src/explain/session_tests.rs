@@ -760,13 +760,18 @@ fn update_and_delete_show_the_subplans_of_their_conditions_and_assignments() {
         plan(
             &mut session,
             "EXPLAIN DELETE FROM tenk1 WHERE hundred IN (SELECT ten FROM onek)"
-        )[..3],
+        )[..4],
         [
-            "Seq Scan on tenk1",
-            "  Filter: (hashed SubPlan 1)",
-            "  SubPlan 1",
+            "Delete on tenk1",
+            "  ->  Seq Scan on tenk1",
+            "        Filter: (hashed SubPlan 1)",
+            "        SubPlan 1",
         ]
     );
+    let update = plan(&mut session, "EXPLAIN UPDATE tenk1 t SET ten = 1 WHERE t.ten = 2");
+    assert_eq!(update[0], "Update on tenk1 t");
+    assert!(update[1].starts_with("  ->  ") && update[1].ends_with("on tenk1 t"), "{update:?}");
+    assert!(plan(&mut session, "EXPLAIN SELECT * FROM tenk1")[0].starts_with("Seq Scan"));
     assert_eq!(
         plan(
             &mut session,

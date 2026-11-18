@@ -162,6 +162,31 @@ pub(crate) struct Planned {
     pub(crate) query: ExplainedQuery,
     pub(crate) write: Option<PlannedWrite>,
     pub(crate) table_rows: TableRows,
+    pub(crate) modified: Option<String>,
+}
+
+fn modified_node(statement: &Statement, query: &ExplainedQuery, dialect: Dialect) -> Option<String> {
+    if dialect != Dialect::PostgreSql {
+        return None;
+    }
+    let verb = match statement {
+        Statement::Update(update) if update.from.is_none() => "Update",
+        Statement::Delete(delete) if delete.using.is_none() => "Delete",
+        _ => return None,
+    };
+    query.sources.first().map(|source| format!("{verb} on {}", named_relation(source)))
+}
+
+fn under_modified(modified: Option<&str>, lines: Vec<String>) -> Vec<String> {
+    let Some(modified) = modified else {
+        return lines;
+    };
+    let mut nested = Vec::with_capacity(lines.len() + 1);
+    nested.push(modified.to_owned());
+    for (at, line) in lines.into_iter().enumerate() {
+        nested.push(if at == 0 { format!("  ->  {line}") } else { format!("      {line}") });
+    }
+    nested
 }
 
 fn explained(
@@ -291,10 +316,12 @@ pub(crate) fn plan(
     } else {
         TableRows::default()
     };
+    let modified = modified_node(statement, &query, dialect);
     Ok(Planned {
         query,
         write,
         table_rows,
+        modified,
     })
 }
 
@@ -314,7 +341,7 @@ pub(crate) fn render(planned: &Planned, style: ExplainStyle, dialect: Dialect) -
         }
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => sqlite_rows(query),
         (ExplainStyle::Plan, Dialect::MySql) => mysql_rows(query),
-        (ExplainStyle::Plan, _) => postgresql_lines(query)
+        (ExplainStyle::Plan, _) => under_modified(planned.modified.as_deref(), postgresql_lines(query))
             .into_iter()
             .map(|line| vec![Value::Text(line)])
             .collect(),
