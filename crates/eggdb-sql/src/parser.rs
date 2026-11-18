@@ -5787,6 +5787,18 @@ impl<'t> Parser<'t> {
         {
             return Ok(expr);
         }
+        if self.mysql()
+            && matches!(name.text.as_str(), "json_arrayagg" | "json_objectagg")
+            && self.peek_kind() == &TokenKind::LeftParen
+        {
+            let renamed = Name {
+                text: if name.text == "json_arrayagg" { "json_agg" } else { "json_object_agg" }.to_owned(),
+                position: name.position,
+            };
+            if let Some(expr) = self.postgresql_function(&renamed)? {
+                return Ok(expr);
+            }
+        }
         if !self.sqlite()
             && !self.oracle()
             && let Some(expr) = self.session_function(&name)?
