@@ -507,18 +507,28 @@ fn bound_parameters(stmt: &StatementHandle, text: &str, set: usize) -> Result<(S
             return Err(Failure::new("07002", format!("parameter {} is not bound", index + 1)));
         };
         let parameter = &parameter_element(parameter, stmt.parameter_array.bind_type, set);
-        let indicator = read(parameter.indicator).unwrap_or(SQL_NTS);
-        if indicator == SQL_NULL_DATA {
-            values.push(None);
-            continue;
-        }
-        let length = match fixed_size(parameter.value_type) {
-            Some(size) => size,
-            None if indicator == SQL_NTS => terminated_length(parameter.value),
-            None if indicator >= 0 => usize::try_from(indicator).unwrap_or(0),
-            None => usize::try_from(parameter.buffer_length).unwrap_or(0),
+        let sent = stmt.awaited.as_ref().and_then(|awaited| awaited.sent.get(index).cloned().flatten());
+        let bytes = match sent {
+            Some(None) => {
+                values.push(None);
+                continue;
+            }
+            Some(Some(bytes)) => bytes,
+            None => {
+                let indicator = read(parameter.indicator).unwrap_or(SQL_NTS);
+                if indicator == SQL_NULL_DATA {
+                    values.push(None);
+                    continue;
+                }
+                let length = match fixed_size(parameter.value_type) {
+                    Some(size) => size,
+                    None if indicator == SQL_NTS => terminated_length(parameter.value),
+                    None if indicator >= 0 => usize::try_from(indicator).unwrap_or(0),
+                    None => usize::try_from(parameter.buffer_length).unwrap_or(0),
+                };
+                input_bytes(parameter.value, length)
+            }
         };
-        let bytes = input_bytes(parameter.value, length);
         if parameter.value_type == SQL_C_BINARY {
             values.push(Some(hex_literal(&bytes)));
             continue;
@@ -570,6 +580,27 @@ fn execute(stmt: &mut StatementHandle, text: &str) -> SqlReturn {
     if stmt.parameter_array.size > 1 && !stmt.parameters.is_empty() {
         return execute_sets(stmt, &text);
     }
+    let at_execution: Vec<usize> = stmt
+        .parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| {
+            parameter.is_some_and(|parameter| {
+                read(parameter.indicator).is_some_and(|indicator| indicator == SQL_DATA_AT_EXEC || indicator <= SQL_LEN_DATA_AT_EXEC_OFFSET)
+            })
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if !at_execution.is_empty() && stmt.awaited.is_none() {
+        stmt.awaited = Some(crate::handles::AwaitedData {
+            text,
+            parameters: at_execution,
+            next: 0,
+            current: None,
+            sent: vec![None; stmt.parameters.len()],
+        });
+        return SQL_NEED_DATA;
+    }
     let (text, values) = match bound_parameters(stmt, &text, 0) {
         Ok(bound) => bound,
         Err(failure) => return failed(&mut stmt.diagnostics, failure),
@@ -584,6 +615,70 @@ fn execute(stmt: &mut StatementHandle, text: &str) -> SqlReturn {
         }
         Err(failure) => failed(&mut stmt.diagnostics, failure),
     }
+}
+
+const SQL_NEED_DATA: SqlReturn = 99;
+const SQL_DATA_AT_EXEC: isize = -2;
+const SQL_LEN_DATA_AT_EXEC_OFFSET: isize = -100;
+
+/// Gives the application the next parameter whose value it sends with [`SQLPutData`] (its
+/// bound value pointer, as ODBC defines the token), or runs the statement once all are sent
+/// (D1281).
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLParamData(stmt: *mut c_void, token: *mut *mut c_void) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let Some(awaited) = stmt.awaited.as_mut() else {
+        return failed(&mut stmt.diagnostics, Failure::new("HY010", "no statement is waiting for data"));
+    };
+    if let Some(&index) = awaited.parameters.get(awaited.next) {
+        awaited.next += 1;
+        awaited.current = Some(index);
+        if let Some(slot) = awaited.sent.get_mut(index)
+            && slot.is_none()
+        {
+            *slot = Some(Some(Vec::new()));
+        }
+        let pointer = stmt.parameters.get(index).copied().flatten().map_or(std::ptr::null_mut(), |parameter| parameter.value.cast_mut().cast());
+        store(token, pointer);
+        return SQL_NEED_DATA;
+    }
+    let text = awaited.text.clone();
+    let outcome = execute(stmt, &text);
+    stmt.awaited = None;
+    outcome
+}
+
+/// Sends part of the value of the parameter [`SQLParamData`] named last: `length` bytes at
+/// `data` (`SQL_NTS` for a terminated string), appended to what was sent before, or
+/// `SQL_NULL_DATA` for NULL.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLPutData(stmt: *mut c_void, data: *mut c_void, length: isize) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let Some(index) = stmt.awaited.as_ref().and_then(|awaited| awaited.current) else {
+        return failed(&mut stmt.diagnostics, Failure::new("HY010", "SQLParamData has not named a parameter"));
+    };
+    let value_type = stmt.parameters.get(index).copied().flatten().map_or(1, |parameter| parameter.value_type);
+    let Some(slot) = stmt.awaited.as_mut().and_then(|awaited| awaited.sent.get_mut(index)) else {
+        return SQL_ERROR;
+    };
+    if length == SQL_NULL_DATA {
+        *slot = Some(None);
+        return SQL_SUCCESS;
+    }
+    let bytes = match fixed_size(value_type) {
+        Some(size) => input_bytes(data.cast_const().cast(), size),
+        None if length == SQL_NTS => input_bytes(data.cast_const().cast(), terminated_length(data.cast_const().cast())),
+        None => input_bytes(data.cast_const().cast(), usize::try_from(length).unwrap_or(0)),
+    };
+    match slot {
+        Some(Some(sent)) => sent.extend_from_slice(&bytes),
+        other => *other = Some(Some(bytes)),
+    }
+    SQL_SUCCESS
 }
 
 const SQL_PARAM_SUCCESS: u16 = 0;
@@ -1648,9 +1743,9 @@ const SQL_API_ALL_FUNCTIONS: u16 = 0;
 const SQL_API_ODBC3_ALL_FUNCTIONS: u16 = 999;
 const SQL_API_ODBC3_ALL_FUNCTIONS_SIZE: usize = 250;
 const SQL_API_ALL_FUNCTIONS_SIZE: usize = 100;
-const SUPPORTED_FUNCTIONS: [u16; 46] = [
+const SUPPORTED_FUNCTIONS: [u16; 48] = [
     4, 5, 6, 7, 8, 9, 11, 12, 13, 16, 18, 19, 20, 40, 41, 43, 44, 45, 47, 52, 53, 54, 56, 58, 60, 61, 62, 63, 65, 66, 67,
-    70, 72, 1001, 1003, 1005, 1006, 1007, 1010, 1011, 1012, 1014, 1016, 1019, 1020, 1021,
+    70, 72, 48, 49, 1001, 1003, 1005, 1006, 1007, 1010, 1011, 1012, 1014, 1016, 1019, 1020, 1021,
 ];
 const SQL_FETCH_NEXT: i16 = 1;
 const SQL_DIAG_RETURNCODE: i16 = 1;

@@ -2,7 +2,7 @@ use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
     SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLProcedureColumns, SQLPrepare, SQLPrimaryKeys,
-    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
+    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLParamData, SQLPutData, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -345,4 +345,30 @@ fn parameter_arrays_run_a_statement_once_per_set() {
     assert_eq!(run(stmt, "SELECT count(*) FROM eggs"), 0);
     assert_eq!(SQLFetch(stmt), 0);
     assert_eq!(text_column(stmt, 1).as_deref(), Some("2"));
+}
+
+#[test]
+fn data_at_execution_is_sent_in_pieces_before_the_statement_runs() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=sqlite\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(run(stmt, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"), 0);
+    let mut token_place = 7u8;
+    let mut at_execution = -2isize;
+    SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR, 0, 0, (&raw mut token_place).cast(), 0, &raw mut at_execution);
+    let insert = b"INSERT INTO notes (body) VALUES (?)\0";
+    assert_eq!(SQLExecDirect(stmt, insert.as_ptr(), SQL_NTS), 99);
+    let mut token: *mut c_void = ptr::null_mut();
+    assert_eq!(SQLParamData(stmt, &raw mut token), 99);
+    assert_eq!(token, (&raw mut token_place).cast::<c_void>());
+    let mut first = *b"hello, ";
+    let mut second = *b"world";
+    assert_eq!(SQLPutData(stmt, first.as_mut_ptr().cast(), 7), 0);
+    assert_eq!(SQLPutData(stmt, second.as_mut_ptr().cast(), 5), 0);
+    assert_eq!(SQLParamData(stmt, &raw mut token), 0);
+    assert_eq!(run(stmt, "SELECT body FROM notes"), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 1).as_deref(), Some("hello, world"));
 }

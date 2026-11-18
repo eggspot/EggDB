@@ -30,7 +30,7 @@ pub use api::{
     SQLPrepare, SQLPrimaryKeys, SQLProcedures, SQLRowCount, SQLSetConnectAttr, SQLSetEnvAttr,
     SQLSetStmtAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables, SQLColumnPrivileges,
     SQLProcedureColumns, SQLNativeSql, SQLCancel, SQLDescribeParam, SQLFetchScroll, SQLGetDiagField,
-    SQLGetFunctions, SQLGetStmtAttr, SQLMoreResults,
+    SQLGetFunctions, SQLGetStmtAttr, SQLMoreResults, SQLParamData, SQLPutData,
 };
 pub use wide::{
     SQLColAttributeW, SQLColumnsW, SQLConnectW, SQLDescribeColW, SQLDriverConnectW,

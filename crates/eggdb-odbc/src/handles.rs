@@ -143,6 +143,18 @@ impl Default for ParameterArray {
     }
 }
 
+/// A run waiting for data at execution (D1281): the statement text, the parameters whose
+/// values the application sends with `SQLPutData`, in order, the one being sent, and what was
+/// sent for each (`None` until sent, `Some(None)` for NULL).
+#[derive(Debug, Default)]
+pub(crate) struct AwaitedData {
+    pub(crate) text: String,
+    pub(crate) parameters: Vec<usize>,
+    pub(crate) next: usize,
+    pub(crate) current: Option<usize>,
+    pub(crate) sent: Vec<Option<Option<Vec<u8>>>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct StatementHandle {
     pub(crate) connection: *mut ConnectionHandle,
@@ -159,6 +171,7 @@ pub(crate) struct StatementHandle {
     pub(crate) pending: Vec<Outcome>,
     pub(crate) block: BlockFetch,
     pub(crate) parameter_array: ParameterArray,
+    pub(crate) awaited: Option<AwaitedData>,
 }
 
 impl StatementHandle {
@@ -178,6 +191,7 @@ impl StatementHandle {
             pending: Vec::new(),
             block: BlockFetch::default(),
             parameter_array: ParameterArray::default(),
+            awaited: None,
         }
     }
 

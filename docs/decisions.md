@@ -1305,3 +1305,4 @@ its full title with its status.
 - [D1278](decisions/D1278.md) Code-only batch 934 (M6): SQLGetFunctions, SQLMoreResults, SQLGetStmtAttr, SQLGetDiagField and more
 - [D1279](decisions/D1279.md) Code-only batch 935 (M6): ODBC block fetches
 - [D1280](decisions/D1280.md) Code-only batch 936 (M6): ODBC parameter arrays
+- [D1281](decisions/D1281.md) Code-only batch 937 (M6): ODBC data at execution
