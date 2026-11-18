@@ -1321,3 +1321,4 @@ its full title with its status.
 - [D1294](decisions/D1294.md) Code-only batch 950 (M4): to_reg*, array_to_json, timeofday, inet_ functions
 - [D1295](decisions/D1295.md) Code-only batch 951 (M4): HASHBYTES, STRING_ESCAPE and APP_NAME
 - [D1296](decisions/D1296.md) Code-only batch 952 (M4): Oracle's SYS_GUID, STANDARD_HASH, ORA_HASH and more
+- [D1297](decisions/D1297.md) Code-only batch 953 (M4): MySQL's JSON functions
