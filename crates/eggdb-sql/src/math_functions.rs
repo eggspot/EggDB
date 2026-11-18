@@ -10,8 +10,8 @@ use crate::numeric::Numeric;
 use crate::types::{SqlType, Value};
 
 /// The functions this module answers.
-pub(crate) const FUNCTIONS: [&str; 23] = [
-    "exp", "ln", "log", "log10", "log2", "power", "pow", "cbrt", "degrees", "radians", "pi", "sign", "mod", "div", "gcd", "lcm",
+pub(crate) const FUNCTIONS: [&str; 25] = [
+    "setseed", "factorial", "exp", "ln", "log", "log10", "log2", "power", "pow", "cbrt", "degrees", "radians", "pi", "sign", "mod", "div", "gcd", "lcm",
     "width_bucket", "atan2", "atan2d", "random", "erf", "erfc", "gamma",
 ];
 
@@ -263,10 +263,46 @@ fn natural_log_dialect() -> bool {
     matches!(crate::constraints::current_dialect(), crate::Dialect::MySql | crate::Dialect::SqlServer)
 }
 
+std::thread_local! {
+    static SEEDED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+fn split_mix(state: u64) -> (u64, u64) {
+    let next = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut mixed = next;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (next, mixed ^ (mixed >> 31))
+}
+
 fn random_double() -> SqlResult<f64> {
-    let mut bytes = [0u8; 8];
-    crate::random::fill(&mut bytes)?;
-    Ok((u64::from_be_bytes(bytes) >> 11) as f64 / (1u64 << 53) as f64)
+    let word = match SEEDED.with(std::cell::Cell::get) {
+        Some(state) => {
+            let (next, word) = split_mix(state);
+            SEEDED.with(|seeded| seeded.set(Some(next)));
+            word
+        }
+        None => {
+            let mut bytes = [0u8; 8];
+            crate::random::fill(&mut bytes)?;
+            u64::from_be_bytes(bytes)
+        }
+    };
+    Ok((word >> 11) as f64 / (1u64 << 53) as f64)
+}
+
+fn factorial(n: i64) -> SqlResult<Value> {
+    if n < 0 {
+        return Err(out_of_range("factorial of a negative number is undefined"));
+    }
+    if n > 1_000 {
+        return Err(out_of_range("value overflows numeric format"));
+    }
+    let mut product = Numeric::from_i64(1);
+    for factor in 2..=n {
+        product = product.multiply(&Numeric::from_i64(factor))?;
+    }
+    Ok(Value::Numeric(product))
 }
 
 /// Runs one of [`FUNCTIONS`]; `None` for other names or arguments these functions do not take.
@@ -281,6 +317,15 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     Some(match (name, values) {
         ("pi", []) => Ok(Value::Double(std::f64::consts::PI)),
         ("random", []) => random_double().map(Value::Double),
+        ("setseed", [seed]) => {
+            let seed = number(0)?;
+            if !(-1.0..=1.0).contains(&seed) {
+                return Some(Err(out_of_range(&format!("setseed parameter {seed} is out of allowed range [-1,1]"))));
+            }
+            SEEDED.with(|seeded| seeded.set(Some(seed.to_bits())));
+            Ok(Value::Null)
+        }
+        ("factorial", [value]) => factorial(value.as_integer()?),
         ("exp", [value]) => shaped(value, number(0)?.exp()),
         ("ln", [value]) => logarithm(number(0)?, None).and_then(|result| shaped(value, result)),
         ("log", [value]) if natural_log_dialect() => logarithm(number(0)?, None).and_then(|result| shaped(value, result)),
@@ -408,7 +453,8 @@ pub(crate) fn result_type(name: &str, first: Option<SqlType>) -> Option<SqlType>
             Some(SqlType::Numeric(_)) => SqlType::Numeric(None),
             _ => SqlType::Double,
         },
-        "div" => SqlType::Numeric(None),
+        "div" | "factorial" => SqlType::Numeric(None),
+        "setseed" => SqlType::Text,
         "exp" | "ln" | "log" | "log10" | "log2" | "power" | "pow" | "cbrt" | "degrees" | "radians" | "sign" | "erf" | "erfc" if numeric => {
             SqlType::Numeric(None)
         }
@@ -457,5 +503,11 @@ mod tests {
         assert!((factorial - 24.0).abs() < 1e-10);
         let Value::Double(random) = call("random", &[]) else { panic!("double") };
         assert!((0.0..1.0).contains(&random));
+        call("setseed", &[Value::Double(0.5)]);
+        let first = call("random", &[]);
+        call("setseed", &[Value::Double(0.5)]);
+        assert_eq!(call("random", &[]), first);
+        assert!(function("setseed", &[Value::Double(2.0)]).unwrap().is_err());
+        assert_eq!(call("factorial", &[Value::Integer(5)]), Value::Numeric(Numeric::from_i64(120)));
     }
 }
