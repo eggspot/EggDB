@@ -22,6 +22,13 @@ fn describe(content: &str) -> (String, Vec<(String, String)>) {
         }
         None => head.trim().to_owned(),
     };
+    let node_type = match node_type.as_str() {
+        "Update" | "Delete" | "Insert" if relation.is_some() => {
+            details.push(("Operation".to_owned(), node_type));
+            "ModifyTable".to_owned()
+        }
+        _ => node_type,
+    };
     if let Some(relation) = relation {
         let mut parts = relation.split_whitespace();
         if let Some(name) = parts.next() {
@@ -334,6 +341,16 @@ mod tests {
 
     fn lines(text: &[&str]) -> Vec<String> {
         text.iter().map(|line| (*line).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_write_node_becomes_modify_table_with_its_operation() {
+        let plan = lines(&["Update on eggs e", "  ->  Seq Scan on eggs e", "        Filter: (id = 1)"]);
+        let text = json(&plan);
+        assert!(text.contains("\"Node Type\": \"ModifyTable\""), "{text}");
+        assert!(text.contains("\"Operation\": \"Update\""), "{text}");
+        assert!(text.contains("\"Relation Name\": \"eggs\""), "{text}");
+        assert!(text.contains("\"Node Type\": \"Seq Scan\""), "{text}");
     }
 
     #[test]

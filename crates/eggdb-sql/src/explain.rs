@@ -316,7 +316,11 @@ pub(crate) fn plan(
 ) -> SqlResult<Planned> {
     let with_subplans = shows_subplans(style, dialect);
     let mysql = dialect == Dialect::MySql;
-    let postgresql_text = dialect == Dialect::PostgreSql && style == ExplainStyle::Plan;
+    let postgresql_text = dialect == Dialect::PostgreSql
+        && matches!(
+            style,
+            ExplainStyle::Plan | ExplainStyle::PostgresJson | ExplainStyle::PostgresYaml | ExplainStyle::PostgresXml
+        );
     let mut inserted = None;
     let (query, write) = match statement {
         Statement::Insert(insert) if postgresql_text => {
@@ -402,13 +406,13 @@ pub(crate) fn render(planned: &Planned, style: ExplainStyle, dialect: Dialect) -
         (ExplainStyle::Tree, _) => vec![vec![Value::Text(mysql_tree::tree_text(planned, None))]],
         (ExplainStyle::Json, _) => vec![vec![Value::Text(mysql_json::json_text(planned))]],
         (ExplainStyle::PostgresJson, _) => {
-            vec![vec![Value::Json(postgres_formats::json(&postgresql_lines(query)))]]
+            vec![vec![Value::Json(postgres_formats::json(&under_modified(planned.modified.as_ref(), postgresql_lines(query))))]]
         }
         (ExplainStyle::PostgresYaml, _) => {
-            vec![vec![Value::Text(postgres_formats::yaml(&postgresql_lines(query)))]]
+            vec![vec![Value::Text(postgres_formats::yaml(&under_modified(planned.modified.as_ref(), postgresql_lines(query))))]]
         }
         (ExplainStyle::PostgresXml, _) => {
-            vec![vec![Value::Text(postgres_formats::xml(&postgresql_lines(query)))]]
+            vec![vec![Value::Text(postgres_formats::xml(&under_modified(planned.modified.as_ref(), postgresql_lines(query))))]]
         }
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => sqlite_rows(query),
         (ExplainStyle::Plan, Dialect::MySql) => mysql_rows(query),
