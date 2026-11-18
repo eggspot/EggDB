@@ -369,7 +369,7 @@ pub(crate) fn made_date(year: i64, month: i64, day: i64) -> SqlResult<i64> {
     Ok(datetime::days_from_civil(astronomical, month, day))
 }
 
-fn made_time(hour: i64, minute: i64, seconds: f64) -> SqlResult<i64> {
+pub(crate) fn made_time(hour: i64, minute: i64, seconds: f64) -> SqlResult<i64> {
     let fits =
         (0..=23).contains(&hour) && (0..=59).contains(&minute) && (0.0..60.0).contains(&seconds);
     let midnight = hour == 24 && minute == 0 && seconds == 0.0;
@@ -380,7 +380,7 @@ fn made_time(hour: i64, minute: i64, seconds: f64) -> SqlResult<i64> {
     Ok(hour * 3600 * MICROS_PER_SECOND + minute * 60 * MICROS_PER_SECOND + micros)
 }
 
-fn made_local(values: &[Value]) -> Option<SqlResult<i64>> {
+pub(crate) fn made_local(values: &[Value]) -> Option<SqlResult<i64>> {
     let integer = |at: usize| values.get(at).and_then(Value::as_integer);
     let (year, month, day) = (integer(0)?, integer(1)?, integer(2)?);
     let (hour, minute) = (integer(3)?, integer(4)?);

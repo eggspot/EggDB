@@ -6,7 +6,16 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::{SqlType, Value};
 
-const SQLSERVER_FUNCTIONS: [&str; 4] = ["patindex", "quotename", "isnumeric", "datefromparts"];
+const SQLSERVER_FUNCTIONS: [&str; 8] = [
+    "patindex",
+    "quotename",
+    "isnumeric",
+    "datefromparts",
+    "datetimefromparts",
+    "datetime2fromparts",
+    "smalldatetimefromparts",
+    "timefromparts",
+];
 const ORACLE_FUNCTIONS: [&str; 3] = ["bitand", "remainder", "nanvl"];
 const MOST_QUOTED_CHARACTERS: usize = 128;
 
@@ -146,6 +155,22 @@ fn looks_numeric(text: &str) -> bool {
     without_groups.parse::<f64>().is_ok_and(f64::is_finite) && !without_groups.contains(['i', 'I', 'n', 'N'])
 }
 
+fn parts_error(type_name: &str) -> SqlError {
+    SqlError::new(
+        SqlState::DATETIME_FIELD_OVERFLOW,
+        format!("Cannot construct data type {type_name}, some of the arguments have values which are not valid."),
+    )
+}
+
+fn timestamp_from_parts(values: &[Value], seconds: f64) -> SqlResult<Value> {
+    let mut parts: Vec<Value> = values.iter().take(5).cloned().collect();
+    parts.push(Value::Double(seconds));
+    match crate::temporal::made_local(&parts) {
+        Some(Ok(micros)) => Ok(Value::Timestamp(micros)),
+        _ => Err(parts_error("datetime")),
+    }
+}
+
 fn rounded_away(value: f64) -> f64 {
     value.round()
 }
@@ -175,6 +200,27 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             .and_then(crate::datetime::checked_date)
             .map(Value::Date)
             .map_err(|_| SqlError::new(SqlState::DATETIME_FIELD_OVERFLOW, "Cannot construct data type date, some of the arguments have values which are not valid.")),
+        ("datetimefromparts", [_, _, _, _, _, _, _]) => {
+            let seconds = integer(5)? as f64 + integer(6)? as f64 / 1_000.0;
+            timestamp_from_parts(values, seconds)
+        }
+        ("datetime2fromparts", [_, _, _, _, _, _, _, _]) => {
+            let precision = integer(7)?;
+            if !(0..=7).contains(&precision) {
+                return Some(Err(parts_error("datetime2")));
+            }
+            let seconds = integer(5)? as f64 + integer(6)? as f64 / 10f64.powi(i32::try_from(precision).unwrap_or(0));
+            timestamp_from_parts(values, seconds)
+        }
+        ("smalldatetimefromparts", [_, _, _, _, _]) => timestamp_from_parts(values, 0.0),
+        ("timefromparts", [_, _, _, _, _]) => {
+            let precision = integer(4)?;
+            if !(0..=7).contains(&precision) {
+                return Some(Err(parts_error("time")));
+            }
+            let seconds = integer(2)? as f64 + integer(3)? as f64 / 10f64.powi(i32::try_from(precision).unwrap_or(0));
+            crate::temporal::made_time(integer(0)?, integer(1)?, seconds).map(Value::Time).map_err(|_| parts_error("time"))
+        }
         ("bitand", [_, _]) => Ok(Value::BigInt(integer(0)? & integer(1)?)),
         ("remainder", [dividend, divisor]) => {
             let (n2, n1) = (dividend.as_float()?, divisor.as_float()?);
@@ -203,6 +249,8 @@ pub(crate) fn result_type(name: &str, first: Option<SqlType>) -> Option<SqlType>
         "isnumeric" => SqlType::Integer,
         "quotename" => SqlType::Text,
         "datefromparts" => SqlType::Date,
+        "datetimefromparts" | "datetime2fromparts" | "smalldatetimefromparts" => SqlType::Timestamp(None),
+        "timefromparts" => SqlType::Time(None),
         "nanvl" => first.unwrap_or(SqlType::Double),
         _ => SqlType::Double,
     })
