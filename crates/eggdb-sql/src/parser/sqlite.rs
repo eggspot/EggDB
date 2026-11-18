@@ -905,6 +905,9 @@ impl<'t> Parser<'t> {
         let position = name.position;
         let (internal, counts): (&'static str, &[usize]) = match name.text.as_str() {
             "sqlite_version" => ("sqlite_version", &[0]),
+            "sqlite_source_id" => ("sqlite_source_id", &[0]),
+            "likely" | "unlikely" => ("sqlite_planner_hint", &[1]),
+            "likelihood" => ("sqlite_planner_hint", &[2]),
             "last_insert_rowid" => ("last_insert_rowid", &[0]),
             "changes" => ("changes", &[0]),
             "total_changes" => ("total_changes", &[0]),
@@ -963,6 +966,27 @@ impl<'t> Parser<'t> {
         }
         let expr = match internal {
             "sqlite_version" => text_value(SQLITE_COMPATIBLE_VERSION.to_owned(), position),
+            "sqlite_source_id" => text_value(format!("EggDB {} (SQLite {SQLITE_COMPATIBLE_VERSION} compatible)", env!("CARGO_PKG_VERSION")), position),
+            "sqlite_planner_hint" => {
+                let mut arguments = arguments.into_iter();
+                let Some(value) = arguments.next() else {
+                    return Err(wrong_argument_count(name));
+                };
+                if let Some(probability) = arguments.next() {
+                    let constant = match &probability.kind {
+                        ExprKind::Literal(crate::ast::Literal::Decimal(text)) => text.parse::<f64>().ok(),
+                        ExprKind::Literal(crate::ast::Literal::Integer(whole)) => Some(*whole as f64),
+                        _ => None,
+                    };
+                    if !constant.is_some_and(|probability| (0.0..=1.0).contains(&probability)) {
+                        return Err(SqlError::syntax(
+                            "second argument to likelihood() must be a constant between 0.0 and 1.0",
+                            probability.position,
+                        ));
+                    }
+                }
+                value
+            }
             "last_insert_rowid" => integer_value(
                 self.sqlite_settings(|settings| settings.sqlite.last_insert_rowid),
                 position,

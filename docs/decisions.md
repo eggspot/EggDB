@@ -1317,3 +1317,4 @@ its full title with its status.
 - [D1290](decisions/D1290.md) Code-only batch 946 (M4): bit_length, bit_count, num_nulls, num_nonnulls, uuid_generate_v4
 - [D1291](decisions/D1291.md) Code-only batch 947 (M4): MySQL's missing string and number functions
 - [D1292](decisions/D1292.md) Code-only batch 948 (M4): PATINDEX, QUOTENAME, ISNUMERIC, DATEFROMPARTS, BITAND, REMAINDER, NANVL
+- [D1293](decisions/D1293.md) Code-only batch 949 (M2): SQLite's likely, unlikely, likelihood and sqlite_source_id

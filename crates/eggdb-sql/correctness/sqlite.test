@@ -440,6 +440,16 @@ sqlite_version()
 3.46.0
 SELECT 1
 
+rows
+SELECT likely(1 = 1), unlikely(2), likelihood(3, 0.25)
+----
+likely(1 = 1)|unlikely(2)|likelihood(3, 0.25)
+1|2|3
+SELECT 1
+
+error 42601 1
+SELECT likelihood(3, 2)
+
 error 42883 1
 SELECT ifnull(1)
 
