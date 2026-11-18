@@ -8,6 +8,7 @@ use std::ffi::c_void;
 
 type SqlReturn = i16;
 
+const SQL_INDEX_UNIQUE: u16 = 0;
 const SQL_SUCCESS: SqlReturn = 0;
 const SQL_SUCCESS_WITH_INFO: SqlReturn = 1;
 const SQL_NO_DATA: SqlReturn = 100;
@@ -1107,9 +1108,10 @@ pub extern "system" fn SQLSpecialColumns(
     )
 }
 
-/// The indexes behind a table's primary key and unique constraints, with ODBC's thirteen
-/// columns (`SQL_INDEX_OTHER` entries, no table statistics row); `SQL_INDEX_UNIQUE` and
-/// `SQL_INDEX_ALL` list the same, since every one listed is unique.
+/// A table's indexes, one row a key column with ODBC's thirteen columns (`SQL_INDEX_OTHER`
+/// entries, no table statistics row): the ones behind its primary key and unique constraints
+/// and the plain ones `CREATE INDEX` made, read from `pg_index`; `SQL_INDEX_UNIQUE` keeps the
+/// unique ones only. A descending key column says `D`; a partial index gives its condition.
 #[unsafe(no_mangle)]
 pub extern "system" fn SQLStatistics(
     stmt: *mut c_void,
@@ -1119,21 +1121,29 @@ pub extern "system" fn SQLStatistics(
     schema_length: i16,
     table: *const u8,
     table_length: i16,
-    _unique: u16,
+    unique: u16,
     _reserved: u16,
 ) -> SqlReturn {
     let Some(stmt) = statement(stmt) else {
         return SQL_INVALID_HANDLE;
     };
-    let text = "SELECT k.table_catalog AS \"TABLE_CAT\", k.table_schema AS \"TABLE_SCHEM\", k.table_name AS \"TABLE_NAME\", \
-         0 AS \"NON_UNIQUE\", NULL::text AS \"INDEX_QUALIFIER\", k.constraint_name AS \"INDEX_NAME\", 3 AS \"TYPE\", \
-         k.ordinal_position AS \"ORDINAL_POSITION\", k.column_name AS \"COLUMN_NAME\", 'A' AS \"ASC_OR_DESC\", \
-         NULL::integer AS \"CARDINALITY\", NULL::integer AS \"PAGES\", NULL::text AS \"FILTER_CONDITION\" \
-         FROM information_schema.table_constraints t JOIN information_schema.key_column_usage k \
-         ON k.constraint_schema = t.constraint_schema AND k.constraint_name = t.constraint_name AND k.table_name = t.table_name \
-         WHERE t.constraint_type IN ('PRIMARY KEY', 'UNIQUE') \
-         AND ($1::text IS NULL OR k.table_schema = $1) AND ($2::text IS NULL OR k.table_name = $2) ORDER BY 4, 6, 8";
-    catalog_query(stmt, text, &[pattern(schema, schema_length), pattern(table, table_length)])
+    let text = "SELECT current_database() AS \"TABLE_CAT\", tmp.schema_name AS \"TABLE_SCHEM\", \
+         tmp.table_name AS \"TABLE_NAME\", CASE WHEN tmp.is_unique THEN 0 ELSE 1 END AS \"NON_UNIQUE\", \
+         NULL::text AS \"INDEX_QUALIFIER\", tmp.index_name AS \"INDEX_NAME\", 3 AS \"TYPE\", \
+         tmp.position AS \"ORDINAL_POSITION\", \
+         trim(both '\"' from pg_catalog.pg_get_indexdef(tmp.index_oid, tmp.position, false)) AS \"COLUMN_NAME\", \
+         CASE tmp.options[tmp.position - 1] & 1::smallint WHEN 1 THEN 'D' ELSE 'A' END AS \"ASC_OR_DESC\", \
+         NULL::integer AS \"CARDINALITY\", NULL::integer AS \"PAGES\", \
+         pg_catalog.pg_get_expr(tmp.predicate, tmp.table_oid) AS \"FILTER_CONDITION\" \
+         FROM (SELECT n.nspname AS schema_name, ct.relname AS table_name, i.indisunique AS is_unique, \
+         ci.relname AS index_name, (information_schema._pg_expandarray(i.indkey)).n AS position, \
+         ci.oid AS index_oid, i.indoption AS options, i.indpred AS predicate, ct.oid AS table_oid \
+         FROM pg_catalog.pg_class ct JOIN pg_catalog.pg_namespace n ON ct.relnamespace = n.oid \
+         JOIN pg_catalog.pg_index i ON ct.oid = i.indrelid JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid \
+         WHERE ($1::text IS NULL OR n.nspname = $1) AND ($2::text IS NULL OR ct.relname = $2) \
+         AND ($3::boolean IS FALSE OR i.indisunique)) AS tmp ORDER BY 4, 7, 6, 8";
+    let unique_only = Some(String::from(if unique == SQL_INDEX_UNIQUE { "true" } else { "false" }));
+    catalog_query(stmt, text, &[pattern(schema, schema_length), pattern(table, table_length), unique_only])
 }
 
 /// Lists the privileges granted on the tables matching the patterns, with ODBC's seven columns.

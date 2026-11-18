@@ -143,10 +143,20 @@ fn primary_keys_foreign_keys_and_type_info_are_listed() {
     assert_eq!(text_column(stmt, 2).as_deref(), Some("id"));
     assert_eq!(SQLSpecialColumns(stmt, 2, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, 0, 1), 0);
     assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
+    assert_eq!(run(stmt, "CREATE INDEX eggs_colour ON eggs (colour DESC)"), 0);
     assert_eq!(SQLStatistics(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, 1, 0), 0);
     assert_eq!(SQLFetch(stmt), 0);
     assert_eq!(text_column(stmt, 9).as_deref(), Some("id"));
     assert_eq!(text_column(stmt, 4).as_deref(), Some("0"));
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 6).as_deref(), Some("eggs_colour"));
+    assert_eq!(text_column(stmt, 9).as_deref(), Some("colour"));
+    assert_eq!(text_column(stmt, 4).as_deref(), Some("1"));
+    assert_eq!(text_column(stmt, 10).as_deref(), Some("D"));
+    assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
+    assert_eq!(SQLStatistics(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, 0, 0), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
     assert_eq!(SQLTablePrivileges(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3), 0);
     while SQLFetch(stmt) == 0 {
         assert_eq!(text_column(stmt, 3).as_deref(), Some("eggs"));

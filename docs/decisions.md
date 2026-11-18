@@ -1271,3 +1271,4 @@ its full title with its status.
 - [D1244](decisions/D1244.md) Code-only batch 900 (M12): pgRouting's pgr_dijkstraNear and pgr_dijkstraNearCost
 - [D1245](decisions/D1245.md) Code-only batch 901 (M14): Publications, and the replication stream filtered by them
 - [D1246](decisions/D1246.md) Code-only batch 902 (M6f): EggDB's own GORM dialector
+- [D1247](decisions/D1247.md) Code-only batch 903 (M6): ODBC's SQLStatistics lists every index
