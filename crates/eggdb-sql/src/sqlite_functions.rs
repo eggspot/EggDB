@@ -246,6 +246,8 @@ pub(crate) fn truth(value: &Value) -> Value {
     }
 }
 
+const COMPILE_OPTIONS: [&str; 3] = ["ENABLE_JSON1", "ENABLE_MATH_FUNCTIONS", "THREADSAFE=1"];
+
 pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
     if let Some(function) = crate::sqlite_datetime::DateFunction::of_internal_name(name) {
         return Ok(crate::sqlite_datetime::call(function, values));
@@ -262,6 +264,21 @@ pub(crate) fn call(name: &str, values: &[Value]) -> SqlResult<Value> {
     let first = values.first().unwrap_or(&null);
     let second = values.get(1).unwrap_or(&null);
     Ok(match name {
+        "sqlite_compileoption_used" => match text(0) {
+            Some(option) => {
+                let wanted = option.trim().to_ascii_uppercase();
+                let wanted = wanted.strip_prefix("SQLITE_").unwrap_or(&wanted);
+                Value::Integer(i32::from(COMPILE_OPTIONS.iter().any(|known| {
+                    *known == wanted || known.split('=').next() == Some(wanted)
+                })))
+            }
+            None => Value::Null,
+        },
+        "sqlite_compileoption_get" => first
+            .as_integer()
+            .and_then(|at| usize::try_from(at).ok())
+            .and_then(|at| COMPILE_OPTIONS.get(at))
+            .map_or(Value::Null, |option| Value::Text((*option).to_owned())),
         "sqlite_truth" => truth(first),
         "sqlite_typeof" => Value::Text(
             match first {

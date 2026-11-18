@@ -2005,3 +2005,10 @@ REINDEX
 
 error 0A000 1
 VACUUM INTO 'copy.db'
+
+rows
+SELECT sqlite_compileoption_used('SQLITE_ENABLE_MATH_FUNCTIONS'), sqlite_compileoption_used('THREADSAFE'), sqlite_compileoption_used('OMIT_JSON'), sqlite_compileoption_get(2), sqlite_compileoption_get(3) IS NULL
+----
+sqlite_compileoption_used('SQLITE_ENABLE_MATH_FUNCTIONS')|sqlite_compileoption_used('THREADSAFE')|sqlite_compileoption_used('OMIT_JSON')|sqlite_compileoption_get(2)|sqlite_compileoption_get(3) IS NULL
+1|1|0|THREADSAFE=1|1
+SELECT 1

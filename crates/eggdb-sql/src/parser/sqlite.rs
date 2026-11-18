@@ -906,6 +906,8 @@ impl<'t> Parser<'t> {
         let (internal, counts): (&'static str, &[usize]) = match name.text.as_str() {
             "sqlite_version" => ("sqlite_version", &[0]),
             "sqlite_source_id" => ("sqlite_source_id", &[0]),
+            "sqlite_compileoption_used" => ("sqlite_compileoption_used", &[1]),
+            "sqlite_compileoption_get" => ("sqlite_compileoption_get", &[1]),
             "likely" | "unlikely" => ("sqlite_planner_hint", &[1]),
             "likelihood" => ("sqlite_planner_hint", &[2]),
             "last_insert_rowid" => ("last_insert_rowid", &[0]),
