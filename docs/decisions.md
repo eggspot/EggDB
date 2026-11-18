@@ -1325,3 +1325,4 @@ its full title with its status.
 - [D1298](decisions/D1298.md) Code-only batch 954 (M4): string_to_table
 - [D1299](decisions/D1299.md) Code-only batch 955 (M4): PostgreSQL's unistr
 - [D1300](decisions/D1300.md) Code-only batch 956 (M4): PostgreSQL's date_add and date_subtract
+- [D1301](decisions/D1301.md) Code-only batch 957 (M4): PostgreSQL's administration functions for dashboards

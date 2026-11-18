@@ -254,6 +254,7 @@ mod math_functions;
 mod mysql_strings;
 mod mysql_json;
 mod vendor_scalars;
+mod pg_administration;
 mod stack_depth;
 mod dictionaries;
 mod xsd;

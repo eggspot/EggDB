@@ -1611,6 +1611,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::vendor_scalars::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::pg_administration::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::xml_functions::function(name, &values) {
             return result;
         }
