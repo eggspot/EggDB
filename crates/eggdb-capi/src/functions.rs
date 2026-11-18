@@ -35,8 +35,7 @@ struct Callback {
     destroy: Option<EggdbDestroy>,
 }
 
-// SAFETY: eggdb.h asks the program to make a function and its user data callable from the
-// thread that runs the session's statements, the only thread that calls it.
+// SAFETY: eggdb.h asks for a function and user data callable from the session's thread.
 unsafe impl Send for Callback {}
 // SAFETY: as above; the callback is never called from two threads at once.
 unsafe impl Sync for Callback {}
@@ -78,8 +77,7 @@ impl Callback {
             })
             .collect();
         let mut context = EggdbFunctionContext { answer: Ok(Value::Null) };
-        // SAFETY: the context and the arguments live until the callback returns, and eggdb.h
-        // asks the callback to read at most `count` arguments.
+        // SAFETY: the context and `count` arguments live until the callback returns.
         unsafe { (self.function)(&raw mut context, self.user_data, arguments.as_ptr(), arguments.len()) };
         context.answer
     }
