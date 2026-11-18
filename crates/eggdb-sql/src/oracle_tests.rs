@@ -1125,6 +1125,21 @@ fn dbms_metadata_get_ddl_writes_tables_and_views_in_oracle_form() {
     assert!(sequence.starts_with("CREATE SEQUENCE \"EMP_SEQ\" MINVALUE 1 "), "{sequence}");
     assert!(sequence.contains("INCREMENT BY 5 START WITH 10 CACHE 20 NOCYCLE;"), "{sequence}");
     failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('INDEX', 'EMP_SEQ') FROM dual");
+    values(&mut session, "CREATE USER scott IDENTIFIED BY tiger");
+    values(&mut session, "GRANT SELECT, UPDATE ON emp TO scott");
+    let user = values(&mut session, "SELECT DBMS_METADATA.GET_DDL('USER', 'SCOTT') FROM dual");
+    let Value::Text(user) = &user[0][0] else {
+        panic!("text DDL: {user:?}");
+    };
+    assert!(user.starts_with("CREATE USER \"SCOTT\" IDENTIFIED BY VALUES"), "{user}");
+    let granted = values(&mut session, "SELECT DBMS_METADATA.GET_GRANTED_DDL('OBJECT_GRANT', 'SCOTT') FROM dual");
+    let Value::Text(granted) = &granted[0][0] else {
+        panic!("text DDL: {granted:?}");
+    };
+    assert!(granted.contains("GRANT SELECT ON \"EMP\" TO \"SCOTT\""), "{granted}");
+    assert!(granted.contains("GRANT UPDATE ON \"EMP\" TO \"SCOTT\""), "{granted}");
+    let none = failure(&mut session, "SELECT DBMS_METADATA.GET_GRANTED_DDL('OBJECT_GRANT', 'NOBODY') FROM dual");
+    assert!(none.message().starts_with("ORA-31603"), "{none}");
     values(
         &mut session,
         "CREATE OR REPLACE FUNCTION double_it(n NUMBER) RETURN NUMBER IS BEGIN RETURN n * 2; END;",

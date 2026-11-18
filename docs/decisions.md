@@ -1278,3 +1278,4 @@ its full title with its status.
 - [D1251](decisions/D1251.md) Code-only batch 907 (M10): Oracle's ROWID in UPDATE and DELETE
 - [D1252](decisions/D1252.md) Code-only batch 908 (M10): Oracle's DBMS_ROWID
 - [D1253](decisions/D1253.md) Code-only batch 909 (M10): MySQL ENUM columns sort by member position
+- [D1254](decisions/D1254.md) Code-only batch 910 (M10): DBMS_METADATA for users and object grants

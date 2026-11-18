@@ -83,6 +83,7 @@ pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static s
         ("utl_compress", "lz_compress") => ("oracle_utl_compress_lz_compress", 1, 2),
         ("utl_compress", "lz_uncompress") => ("oracle_utl_compress_lz_uncompress", 1, 1),
         ("dbms_metadata", "get_ddl") => ("oracle_dbms_metadata_get_ddl", 2, 4),
+        ("dbms_metadata", "get_granted_ddl") => ("oracle_dbms_metadata_get_granted_ddl", 1, 3),
         _ => return None,
     })
 }
@@ -128,7 +129,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_assert_enquote_name"
         | "oracle_dbms_assert_enquote_literal" => SqlType::Text,
         "oracle_utl_i18n_raw_to_char" | "oracle_utl_url_escape" | "oracle_utl_url_unescape" => SqlType::Text,
-        "oracle_dbms_metadata_get_ddl" => SqlType::Text,
+        "oracle_dbms_metadata_get_ddl" | "oracle_dbms_metadata_get_granted_ddl" => SqlType::Text,
         "oracle_utl_encode_base64_encode"
         | "oracle_utl_encode_base64_decode"
         | "oracle_utl_i18n_string_to_raw"
@@ -357,6 +358,7 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
     if !matches!(
         object_type.as_str(),
         "TABLE" | "VIEW" | "INDEX" | "SEQUENCE" | "TRIGGER" | "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE_SPEC" | "PACKAGE_BODY"
+            | "USER"
     ) {
         return Err(metadata_error(
             ORACLE_METADATA_INVALID_INPUT,
@@ -378,6 +380,20 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
             ),
         )
     };
+    if object_type == "USER" {
+        let role = snapshot
+            .stored_roles
+            .iter()
+            .find(|role| role.name == internal_name && role.login)
+            .ok_or_else(|| {
+                metadata_error(ORACLE_METADATA_NOT_FOUND, format!("object \"{name}\" of type USER not found"))
+            })?;
+        let ddl = format!(
+            "CREATE USER \"{}\" IDENTIFIED BY VALUES '********'\n  DEFAULT TABLESPACE \"USERS\"\n  TEMPORARY TABLESPACE \"TEMP\"",
+            crate::lexer::swap_uniform_case(&role.name)
+        );
+        return Ok(Value::Text(ddl));
+    }
     if matches!(
         object_type.as_str(),
         "TRIGGER" | "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE_SPEC" | "PACKAGE_BODY"
@@ -450,9 +466,56 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
     crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl))
 }
 
+/// `DBMS_METADATA.GET_GRANTED_DDL('OBJECT_GRANT', grantee)` (D1254): one `GRANT` statement a
+/// table privilege the grantee holds, `WITH GRANT OPTION` where it may pass it on.
+fn get_granted_ddl(values: &[Value]) -> SqlResult<Value> {
+    let text = |at: usize| values.get(at).filter(|value| !matches!(value, Value::Null)).and_then(Value::to_text);
+    let Some(object_type) = text(0) else {
+        return Ok(Value::Null);
+    };
+    let object_type = object_type.trim().to_ascii_uppercase();
+    if object_type != "OBJECT_GRANT" {
+        return Err(metadata_error(
+            ORACLE_METADATA_INVALID_INPUT,
+            format!("invalid input value {object_type} for parameter OBJECT_TYPE in function GET_GRANTED_DDL"),
+        ));
+    }
+    let snapshot = crate::pg_catalog::current_snapshot().ok_or_else(|| {
+        SqlError::new(SqlState::INTERNAL_ERROR, "DBMS_METADATA.GET_GRANTED_DDL ran without the catalog loaded")
+    })?;
+    let grantee = text(1).unwrap_or_else(|| snapshot.user.to_uppercase());
+    let internal = crate::lexer::swap_uniform_case(&grantee);
+    let mut statements = Vec::new();
+    for grant in snapshot.grants.iter().filter(|grant| grant.grantee == internal) {
+        for privilege in crate::roles::Privilege::ALL {
+            if grant.privileges & privilege.bit() == 0 {
+                continue;
+            }
+            statements.push(format!(
+                "  GRANT {} ON \"{}\" TO \"{}\"{}",
+                privilege.keyword().to_ascii_uppercase(),
+                crate::lexer::swap_uniform_case(&crate::schemas::display(&grant.table)),
+                grantee,
+                if grant.grantable & privilege.bit() != 0 { " WITH GRANT OPTION" } else { "" }
+            ));
+        }
+    }
+    if statements.is_empty() {
+        return Err(metadata_error(
+            ORACLE_METADATA_NOT_FOUND,
+            format!("object \"{grantee}\" of type OBJECT_GRANT not found"),
+        ));
+    }
+    let ddl = statements.join(";\n") + ";";
+    crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl))
+}
+
 pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if name == "oracle_dbms_metadata_get_ddl" {
         return Some(get_ddl(values));
+    }
+    if name == "oracle_dbms_metadata_get_granted_ddl" {
+        return Some(get_granted_ddl(values));
     }
     if name.starts_with("oracle_dbms_rowid_") {
         return Some(rowid_part(name, values));
