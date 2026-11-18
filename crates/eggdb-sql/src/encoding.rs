@@ -251,7 +251,7 @@ pub(crate) fn key_owner(key: &[u8]) -> KeyOwner<'_> {
         TABLE_SPACE | SEQUENCE_SPACE | triggers::TRIGGER_SPACE | partitions::PARTITION_SPACE => {
             KeyOwner::Relation(rest)
         }
-        ROW_SPACE | INDEX_SPACE => rest
+        ROW_SPACE | INDEX_SPACE | crate::cdc::TRUNCATE_MARK_SPACE => rest
             .get(..4)
             .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
             .map_or(KeyOwner::Unreadable, |bytes| {

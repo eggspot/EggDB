@@ -585,7 +585,7 @@ pub const CAPTURE_PREFIX: &[u8] = b"\xffCOL\x00\x7fcapture\x00";
 /// One captured key: its stored bytes before the commit and after it, `None` when absent.
 pub type CapturedKey = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
-const TRUNCATE_MARK_SPACE: u8 = 0x22;
+pub(crate) const TRUNCATE_MARK_SPACE: u8 = 0x22;
 
 /// The key `TRUNCATE` counts a table's truncations under, so capture records a truncation
 /// as one change of its own (D1264).
