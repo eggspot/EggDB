@@ -465,7 +465,7 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         ("bit_length" | "num_nulls" | "num_nonnulls", _) => Some(SqlType::Integer),
         ("bit_count", [_]) => Some(SqlType::BigInt),
         ("encode", [_, _]) => Some(SqlType::Text),
-        ("sha256" | "sha512", [_]) => Some(SqlType::Bytea),
+        ("sha256" | "sha512" | "sha224" | "sha384", [_]) => Some(SqlType::Bytea),
         ("decode", [_, _]) => Some(SqlType::Bytea),
         ("get_byte", [_, _]) | ("octet_length", [_]) => Some(SqlType::Integer),
         ("substring", [argument, ..]) => match static_type(argument, scope)? {

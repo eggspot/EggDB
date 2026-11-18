@@ -294,6 +294,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("sha1", 1) => string(0).map_or(Value::Null, |text| Value::Text(hex_of(&eggdb_crypto::sha1(text.as_bytes())))),
         ("sha2", 2) => match (string(0), integer(1)) {
             (Some(text), Some(256 | 0)) => Value::Text(hex_of(&eggdb_crypto::sha256(text.as_bytes()))),
+            (Some(text), Some(224)) => Value::Text(hex_of(&eggdb_crypto::sha224(text.as_bytes()))),
             (Some(text), Some(384)) => Value::Text(hex_of(&eggdb_crypto::sha384(text.as_bytes()))),
             (Some(text), Some(512)) => Value::Text(hex_of(&eggdb_crypto::sha512(text.as_bytes()))),
             _ => Value::Null,

@@ -1327,3 +1327,4 @@ its full title with its status.
 - [D1300](decisions/D1300.md) Code-only batch 956 (M4): PostgreSQL's date_add and date_subtract
 - [D1301](decisions/D1301.md) Code-only batch 957 (M4): PostgreSQL's administration functions for dashboards
 - [D1302](decisions/D1302.md) Code-only batch 958 (M4): MySQL's network, UUID, hash and base64 functions
+- [D1303](decisions/D1303.md) Code-only batch 959 (M4): SHA-224, and PostgreSQL's sha224 and sha384

@@ -18,6 +18,13 @@ const INITIAL_STATE: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
+const SHA224_INITIAL_STATE: [u32; 8] = [
+    0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4,
+];
+
+/// The length of a SHA-224 digest in bytes.
+pub const SHA224_DIGEST_BYTES: usize = 28;
+
 /// A SHA-256 hash in progress (FIPS 180-4): feed it with [`Sha256::update`] and read the digest
 /// with [`Sha256::finish`].
 #[derive(Clone)]
@@ -139,9 +146,34 @@ fn compress(state: &mut [u32; 8], block: &[u8; SHA256_BLOCK_BYTES]) {
     }
 }
 
+/// The SHA-224 digest of `bytes` (FIPS 180-4): SHA-256 from SHA-224's initial state, cut to
+/// 28 bytes.
+pub fn sha224(bytes: &[u8]) -> [u8; SHA224_DIGEST_BYTES] {
+    let mut hash = Sha256 {
+        state: SHA224_INITIAL_STATE,
+        ..Sha256::new()
+    };
+    hash.update(bytes);
+    let full = hash.finish();
+    let mut digest = [0u8; SHA224_DIGEST_BYTES];
+    digest.copy_from_slice(&full[..SHA224_DIGEST_BYTES]);
+    digest
+}
+
 /// The SHA-256 digest of `bytes`.
 pub fn sha256(bytes: &[u8]) -> [u8; SHA256_DIGEST_BYTES] {
     let mut hash = Sha256::new();
     hash.update(bytes);
     hash.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha224_of_abc_matches_fips_180() {
+        let hex: String = sha224(b"abc").iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(hex, "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7");
+    }
 }

@@ -93,7 +93,7 @@ pub use rsa::{
     rsa_pkcs1v15_sign, rsa_pkcs1v15_verify, rsa_pss_sign, rsa_pss_verify,
 };
 pub use sha1::{SHA1_BLOCK_BYTES, SHA1_DIGEST_BYTES, Sha1, sha1};
-pub use sha256::{SHA256_BLOCK_BYTES, SHA256_DIGEST_BYTES, Sha256, sha256};
+pub use sha256::{SHA224_DIGEST_BYTES, SHA256_BLOCK_BYTES, SHA256_DIGEST_BYTES, Sha256, sha224, sha256};
 pub use sha3::{SHA3_256_DIGEST_BYTES, SHA3_512_DIGEST_BYTES, sha3_256, sha3_512, shake256};
 pub use sha512::{
     SHA384_DIGEST_BYTES, SHA512_BLOCK_BYTES, SHA512_DIGEST_BYTES, Sha384, Sha512, sha384, sha512,
