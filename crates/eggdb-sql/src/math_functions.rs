@@ -10,8 +10,8 @@ use crate::numeric::Numeric;
 use crate::types::{SqlType, Value};
 
 /// The functions this module answers.
-pub(crate) const FUNCTIONS: [&str; 25] = [
-    "setseed", "factorial", "exp", "ln", "log", "log10", "log2", "power", "pow", "cbrt", "degrees", "radians", "pi", "sign", "mod", "div", "gcd", "lcm",
+pub(crate) const FUNCTIONS: [&str; 27] = [
+    "to_bin", "to_oct", "setseed", "factorial", "exp", "ln", "log", "log10", "log2", "power", "pow", "cbrt", "degrees", "radians", "pi", "sign", "mod", "div", "gcd", "lcm",
     "width_bucket", "atan2", "atan2d", "random", "erf", "erfc", "gamma",
 ];
 
@@ -325,6 +325,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             Ok(Value::Null)
         }
         ("factorial", [value]) => factorial(value.as_integer()?),
+        ("to_bin" | "to_oct", [value]) => {
+            let number = value.as_integer()?;
+            let written = match (name, value) {
+                ("to_bin", Value::BigInt(_)) => format!("{:b}", number as u64),
+                ("to_bin", _) => format!("{:b}", number as i32 as u32),
+                (_, Value::BigInt(_)) => format!("{:o}", number as u64),
+                _ => format!("{:o}", number as i32 as u32),
+            };
+            Ok(Value::Text(written))
+        }
         ("exp", [value]) => shaped(value, number(0)?.exp()),
         ("ln", [value]) => logarithm(number(0)?, None).and_then(|result| shaped(value, result)),
         ("log", [value]) if natural_log_dialect() => logarithm(number(0)?, None).and_then(|result| shaped(value, result)),
@@ -453,7 +463,7 @@ pub(crate) fn result_type(name: &str, first: Option<SqlType>) -> Option<SqlType>
             _ => SqlType::Double,
         },
         "div" | "factorial" => SqlType::Numeric(None),
-        "setseed" => SqlType::Text,
+        "setseed" | "to_bin" | "to_oct" => SqlType::Text,
         "exp" | "ln" | "log" | "log10" | "log2" | "power" | "pow" | "cbrt" | "degrees" | "radians" | "sign" | "erf" | "erfc" if numeric => {
             SqlType::Numeric(None)
         }
@@ -508,5 +518,8 @@ mod tests {
         assert_eq!(call("random", &[]), first);
         assert!(function("setseed", &[Value::Double(2.0)]).unwrap().is_err());
         assert_eq!(call("factorial", &[Value::Integer(5)]), Value::Numeric(Numeric::from_i64(120)));
+        assert_eq!(call("to_bin", &[Value::Integer(10)]), Value::Text("1010".to_owned()));
+        assert_eq!(call("to_bin", &[Value::Integer(-1)]), Value::Text("1".repeat(32)));
+        assert_eq!(call("to_oct", &[Value::BigInt(64)]), Value::Text("100".to_owned()));
     }
 }
