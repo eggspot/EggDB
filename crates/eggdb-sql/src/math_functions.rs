@@ -60,8 +60,8 @@ fn logarithm(value: f64, base: Option<f64>) -> SqlResult<f64> {
             "cannot take logarithm of a negative number"
         })),
         Some(base) if base == 1.0 => Err(SqlError::new(SqlState::DIVISION_BY_ZERO, "division by zero")),
-        Some(10.0) => Ok(value.log10()),
-        Some(2.0) => Ok(value.log2()),
+        Some(base) if base == 10.0 => Ok(value.log10()),
+        Some(base) if base == 2.0 => Ok(value.log2()),
         Some(base) => Ok(value.ln() / base.ln()),
     }
 }
