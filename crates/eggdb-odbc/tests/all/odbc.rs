@@ -2,7 +2,7 @@ use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
     SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLProcedureColumns, SQLPrepare, SQLPrimaryKeys,
-    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLParamData, SQLPutData, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
+    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLParamData, SQLPutData, SQLFetchScroll, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -371,4 +371,25 @@ fn data_at_execution_is_sent_in_pieces_before_the_statement_runs() {
     assert_eq!(run(stmt, "SELECT body FROM notes"), 0);
     assert_eq!(SQLFetch(stmt), 0);
     assert_eq!(text_column(stmt, 1).as_deref(), Some("hello, world"));
+}
+
+#[test]
+fn a_static_cursor_scrolls_in_every_direction() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=sqlite\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(run(stmt, "SELECT 10 UNION ALL SELECT 20 UNION ALL SELECT 30"), 0);
+    assert_eq!(SQLFetchScroll(stmt, 2, 0), SQL_ERROR);
+    assert_eq!(SQLSetStmtAttr(stmt, 6, ptr::without_provenance_mut(3), 0), 0);
+    assert_eq!(run(stmt, "SELECT 10 UNION ALL SELECT 20 UNION ALL SELECT 30"), 0);
+    let mut seen = Vec::new();
+    for (orientation, offset) in [(3, 0), (4, 0), (2, 0), (6, 1), (5, -1), (5, 2)] {
+        assert_eq!(SQLFetchScroll(stmt, orientation, offset), 0, "{orientation} {offset}");
+        seen.push(text_column(stmt, 1).unwrap_or_default());
+    }
+    assert_eq!(seen, ["30", "20", "10", "20", "30", "20"]);
+    assert_eq!(SQLFetchScroll(stmt, 5, 0), SQL_NO_DATA);
+    assert_eq!(SQLFetchScroll(stmt, 5, 9), SQL_NO_DATA);
 }

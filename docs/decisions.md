@@ -1306,3 +1306,4 @@ its full title with its status.
 - [D1279](decisions/D1279.md) Code-only batch 935 (M6): ODBC block fetches
 - [D1280](decisions/D1280.md) Code-only batch 936 (M6): ODBC parameter arrays
 - [D1281](decisions/D1281.md) Code-only batch 937 (M6): ODBC data at execution
+- [D1282](decisions/D1282.md) Code-only batch 938 (M6): ODBC static scrollable cursors

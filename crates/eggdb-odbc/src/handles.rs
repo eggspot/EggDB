@@ -172,6 +172,8 @@ pub(crate) struct StatementHandle {
     pub(crate) block: BlockFetch,
     pub(crate) parameter_array: ParameterArray,
     pub(crate) awaited: Option<AwaitedData>,
+    pub(crate) scrollable: bool,
+    pub(crate) rowset_start: Option<usize>,
 }
 
 impl StatementHandle {
@@ -192,11 +194,14 @@ impl StatementHandle {
             block: BlockFetch::default(),
             parameter_array: ParameterArray::default(),
             awaited: None,
+            scrollable: false,
+            rowset_start: None,
         }
     }
 
     pub(crate) fn close_cursor(&mut self) {
         self.pending.clear();
+        self.rowset_start = None;
         self.columns.clear();
         self.rows.clear();
         self.next_row = 0;
@@ -226,6 +231,7 @@ impl StatementHandle {
         self.rows = outcome.rows;
         self.next_row = 0;
         self.current = None;
+        self.rowset_start = None;
     }
 
     pub(crate) fn sql_type_of(&self, column: usize) -> i16 {

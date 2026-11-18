@@ -965,6 +965,7 @@ pub extern "system" fn SQLFetch(stmt: *mut c_void) -> SqlReturn {
     let block = stmt.block;
     let size = block.row_array_size.max(1);
     let offset = read(block.bind_offset).unwrap_or(0);
+    let start = stmt.next_row;
     let mut fetched = 0usize;
     let mut outcome = SQL_SUCCESS;
     for at in 0..size {
@@ -997,8 +998,10 @@ pub extern "system" fn SQLFetch(stmt: *mut c_void) -> SqlReturn {
     store(block.rows_fetched, fetched);
     if fetched == 0 {
         stmt.current = None;
+        stmt.rowset_start = None;
         return SQL_NO_DATA;
     }
+    stmt.rowset_start = Some(start);
     stmt.read_offsets = vec![0; stmt.columns.len()];
     outcome
 }
@@ -1164,6 +1167,8 @@ pub extern "system" fn SQLSetStmtAttr(stmt: *mut c_void, attribute: i32, value: 
         SQL_ATTR_ROW_STATUS_PTR => stmt.block.row_status = value.cast(),
         SQL_ATTR_ROW_BIND_OFFSET_PTR => stmt.block.bind_offset = value.cast_const().cast(),
         SQL_ATTR_PARAMSET_SIZE => stmt.parameter_array.size = value.addr().max(1),
+        SQL_ATTR_CURSOR_TYPE => stmt.scrollable = value.addr() != SQL_CURSOR_FORWARD_ONLY,
+        SQL_ATTR_CURSOR_SCROLLABLE => stmt.scrollable = value.addr() != 0,
         SQL_ATTR_PARAM_BIND_TYPE => stmt.parameter_array.bind_type = value.addr(),
         SQL_ATTR_PARAMS_PROCESSED_PTR => stmt.parameter_array.processed = value.cast(),
         SQL_ATTR_PARAM_STATUS_PTR => stmt.parameter_array.status = value.cast(),
@@ -1818,7 +1823,9 @@ pub extern "system" fn SQLGetStmtAttr(stmt: *mut c_void, attribute: i32, value: 
     };
     stmt.diagnostics.clear();
     let answer: usize = match attribute {
-        0 | 1 | 6 | -1 | -2 => 0,
+        SQL_ATTR_CURSOR_TYPE => if stmt.scrollable { SQL_CURSOR_STATIC } else { SQL_CURSOR_FORWARD_ONLY },
+        SQL_ATTR_CURSOR_SCROLLABLE => usize::from(stmt.scrollable),
+        0 | 1 | -2 => 0,
         7 => 1,
         SQL_ATTR_ROW_ARRAY_SIZE => stmt.block.row_array_size,
         SQL_ATTR_ROW_BIND_TYPE => stmt.block.row_bind_type,
@@ -1840,16 +1847,56 @@ pub extern "system" fn SQLCancel(stmt: *mut c_void) -> SqlReturn {
     }
 }
 
-/// Fetches the next row; the cursor is forward-only, so any other direction is refused.
+const SQL_ATTR_CURSOR_TYPE: i32 = 6;
+const SQL_ATTR_CURSOR_SCROLLABLE: i32 = -1;
+const SQL_CURSOR_FORWARD_ONLY: usize = 0;
+const SQL_CURSOR_STATIC: usize = 3;
+const SQL_FETCH_FIRST: i16 = 2;
+const SQL_FETCH_LAST: i16 = 3;
+const SQL_FETCH_PRIOR: i16 = 4;
+const SQL_FETCH_ABSOLUTE: i16 = 5;
+const SQL_FETCH_RELATIVE: i16 = 6;
+
+/// Fetches a rowset by direction (D1282): the next one on any cursor; on a static cursor
+/// (`SQL_ATTR_CURSOR_TYPE` `SQL_CURSOR_STATIC`, or `SQL_ATTR_CURSOR_SCROLLABLE`) also the first,
+/// the last, the prior one, or one starting at an absolute or relative row, the result being
+/// held whole. A position before the first row or past the last gives `SQL_NO_DATA`.
 #[unsafe(no_mangle)]
-pub extern "system" fn SQLFetchScroll(stmt: *mut c_void, orientation: i16, _offset: isize) -> SqlReturn {
+pub extern "system" fn SQLFetchScroll(stmt_handle: *mut c_void, orientation: i16, offset: isize) -> SqlReturn {
     if orientation == SQL_FETCH_NEXT {
-        return SQLFetch(stmt);
+        return SQLFetch(stmt_handle);
     }
-    let Some(stmt) = statement(stmt) else {
+    let Some(stmt) = statement(stmt_handle) else {
         return SQL_INVALID_HANDLE;
     };
-    failed(&mut stmt.diagnostics, Failure::new("HY106", "the cursor is forward-only: only SQL_FETCH_NEXT is supported"))
+    if !stmt.scrollable {
+        return failed(&mut stmt.diagnostics, Failure::new("HY106", "the cursor is forward-only: only SQL_FETCH_NEXT is supported"));
+    }
+    let size = isize::try_from(stmt.block.row_array_size.max(1)).unwrap_or(1);
+    let rows = isize::try_from(stmt.rows.len()).unwrap_or(isize::MAX);
+    let current = stmt.rowset_start.and_then(|start| isize::try_from(start).ok());
+    let target = match orientation {
+        SQL_FETCH_FIRST => 0,
+        SQL_FETCH_LAST => (rows - size).max(0),
+        SQL_FETCH_PRIOR => match current {
+            None | Some(0) => -1,
+            Some(start) => (start - size).max(0),
+        },
+        SQL_FETCH_ABSOLUTE if offset > 0 => offset - 1,
+        SQL_FETCH_ABSOLUTE if offset < 0 => rows + offset,
+        SQL_FETCH_ABSOLUTE => -1,
+        SQL_FETCH_RELATIVE => current.unwrap_or(-1).saturating_add(offset),
+        _ => return failed(&mut stmt.diagnostics, Failure::new("HY106", format!("fetch orientation {orientation} is not supported"))),
+    };
+    if target < 0 || target >= rows {
+        stmt.next_row = if target < 0 { 0 } else { stmt.rows.len() };
+        stmt.rowset_start = None;
+        stmt.current = None;
+        store(stmt.block.rows_fetched, 0);
+        return SQL_NO_DATA;
+    }
+    stmt.next_row = usize::try_from(target).unwrap_or(0);
+    SQLFetch(stmt_handle)
 }
 
 /// Describes a parameter as text of unknown size and nullability, which every type the
