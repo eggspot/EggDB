@@ -606,8 +606,8 @@ fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
 /// `(never executed)` for a step it never read), the rows the statement returned or changed on
 /// the top line, under `BUFFERS` the page lookups of the whole statement under the top node and
 /// those of planning under `Planning:`, and the planning and execution times.
-pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> QueryResult {
-    let mut lines = analyzed_plan_lines(query, &analyzed);
+pub(crate) fn render_analyzed(query: &ExplainedQuery, modified: Option<&ModifiedNode>, analyzed: Analyzed) -> QueryResult {
+    let mut lines = analyzed_lines_under(query, modified, &analyzed);
     if let Some(buffers) = &analyzed.buffers
         && let Some(line) = buffers_line("  ", buffers.planning)
     {
@@ -636,10 +636,11 @@ pub(crate) fn render_analyzed(query: &ExplainedQuery, analyzed: Analyzed) -> Que
 /// actual times, rows and loops, and the planning and execution times beside it.
 pub(crate) fn render_analyzed_formatted(
     query: &ExplainedQuery,
+    modified: Option<&ModifiedNode>,
     analyzed: Analyzed,
     style: ExplainStyle,
 ) -> QueryResult {
-    let lines = analyzed_plan_lines(query, &analyzed);
+    let lines = analyzed_lines_under(query, modified, &analyzed);
     let (planning, execution) = (milliseconds(analyzed.planning), milliseconds(analyzed.execution));
     let value = match style {
         ExplainStyle::PostgresYaml => Value::Text(postgres_formats::yaml_analyzed(&lines, planning, execution)),
@@ -651,6 +652,19 @@ pub(crate) fn render_analyzed_formatted(
         columns(style, Dialect::PostgreSql),
         vec![vec![value]],
     )
+}
+
+fn analyzed_lines_under(query: &ExplainedQuery, modified: Option<&ModifiedNode>, analyzed: &Analyzed) -> Vec<String> {
+    let lines = analyzed_plan_lines(query, analyzed);
+    let Some(node) = modified else {
+        return lines;
+    };
+    let total = milliseconds(analyzed.execution);
+    let measured = ModifiedNode {
+        line: format!("{} (actual time={total:.3}..{total:.3} rows=0 loops=1)", node.line),
+        child: node.child.clone(),
+    };
+    under_modified(Some(&measured), lines)
 }
 
 fn analyzed_plan_lines(query: &ExplainedQuery, analyzed: &Analyzed) -> Vec<String> {
@@ -1199,7 +1213,7 @@ mod tests {
     }
 
     fn plan_lines(query: &ExplainedQuery, analyzed: Analyzed) -> Vec<String> {
-        render_analyzed(query, analyzed)
+        render_analyzed(query, None, analyzed)
             .rows
             .into_iter()
             .filter_map(|row| match row.into_iter().next() {

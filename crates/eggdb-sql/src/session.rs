@@ -3215,9 +3215,9 @@ impl<'s> Session<'s> {
             style @ (crate::ast::ExplainStyle::PostgresJson
             | crate::ast::ExplainStyle::PostgresYaml
             | crate::ast::ExplainStyle::PostgresXml) => {
-                crate::explain::render_analyzed_formatted(&plan.query, analyzed, style)
+                crate::explain::render_analyzed_formatted(&plan.query, plan.modified.as_ref(), analyzed, style)
             }
-            _ => crate::explain::render_analyzed(&plan.query, analyzed),
+            _ => crate::explain::render_analyzed(&plan.query, plan.modified.as_ref(), analyzed),
         })
     }
 
