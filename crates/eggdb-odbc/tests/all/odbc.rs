@@ -143,6 +143,11 @@ fn primary_keys_foreign_keys_and_type_info_are_listed() {
     assert_eq!(text_column(stmt, 2).as_deref(), Some("id"));
     assert_eq!(SQLSpecialColumns(stmt, 2, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, 0, 1), 0);
     assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
+    assert_eq!(run(stmt, "SELECT {fn UCASE({fn CONCAT('ab', 'c')})} AS shout"), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 1).as_deref(), Some("ABC"));
+    assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
+    assert_eq!(run(stmt, "SELECT {fn UCASE('x')"), SQL_ERROR);
     assert_eq!(run(stmt, "CREATE INDEX eggs_colour ON eggs (colour DESC)"), 0);
     assert_eq!(SQLStatistics(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3, 1, 0), 0);
     assert_eq!(SQLFetch(stmt), 0);

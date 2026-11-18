@@ -59,7 +59,7 @@ enum InfoAnswer {
 
 const IDENTIFIER_BYTES: u16 = 63;
 
-const FIXED_INFO: [(u16, InfoAnswer); 45] = [
+const FIXED_INFO: [(u16, InfoAnswer); 50] = [
     (0, InfoAnswer::Short(0)),
     (8, InfoAnswer::Long(1)),
     (9, InfoAnswer::Short(1)),
@@ -88,6 +88,11 @@ const FIXED_INFO: [(u16, InfoAnswer); 45] = [
     (42, InfoAnswer::Text("")),
     (44, InfoAnswer::Long(1)),
     (45, InfoAnswer::Text("table")),
+    (48, InfoAnswer::Long(crate::escapes::CONVERT_FUNCTIONS)),
+    (49, InfoAnswer::Long(crate::escapes::NUMERIC_FUNCTIONS)),
+    (50, InfoAnswer::Long(crate::escapes::STRING_FUNCTIONS)),
+    (51, InfoAnswer::Long(crate::escapes::SYSTEM_FUNCTIONS)),
+    (52, InfoAnswer::Long(crate::escapes::TIMEDATE_FUNCTIONS)),
     (72, InfoAnswer::Long(2 | 4 | 8)),
     (74, InfoAnswer::Short(2)),
     (75, InfoAnswer::Short(1)),
@@ -240,6 +245,7 @@ fn connect(dbc: &mut ConnectionHandle, settings: &str) -> SqlReturn {
             dbc.session = Some(session);
             dbc.database = database;
             dbc.read_only = read_only;
+            dbc.dialect = dialect;
             SQL_SUCCESS
         }
         Err(failure) => failed(&mut dbc.diagnostics, Failure { sqlstate: "08001".to_owned(), ..failure }),
@@ -366,7 +372,12 @@ fn bound_parameters(stmt: &StatementHandle, text: &str) -> Result<(String, Vec<O
 
 fn execute(stmt: &mut StatementHandle, text: &str) -> SqlReturn {
     stmt.diagnostics.clear();
-    let (text, values) = match bound_parameters(stmt, text) {
+    let family = owning_connection(stmt).map_or(crate::escapes::Family::Sqlite, |dbc| crate::escapes::Family::of(&dbc.dialect));
+    let text = match crate::escapes::translated(text, family) {
+        Ok(text) => text,
+        Err(message) => return failed(&mut stmt.diagnostics, Failure::new("37000", message)),
+    };
+    let (text, values) = match bound_parameters(stmt, &text) {
         Ok(bound) => bound,
         Err(failure) => return failed(&mut stmt.diagnostics, failure),
     };

@@ -1279,3 +1279,4 @@ its full title with its status.
 - [D1252](decisions/D1252.md) Code-only batch 908 (M10): Oracle's DBMS_ROWID
 - [D1253](decisions/D1253.md) Code-only batch 909 (M10): MySQL ENUM columns sort by member position
 - [D1254](decisions/D1254.md) Code-only batch 910 (M10): DBMS_METADATA for users and object grants
+- [D1255](decisions/D1255.md) Code-only batch 911 (M6): ODBC escape sequences and the function bitmasks

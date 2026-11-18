@@ -30,6 +30,7 @@ pub(crate) struct ConnectionHandle {
     pub(crate) in_transaction: bool,
     pub(crate) database: String,
     pub(crate) read_only: bool,
+    pub(crate) dialect: String,
     pub(crate) diagnostics: Diagnostics,
 }
 
@@ -41,6 +42,7 @@ impl ConnectionHandle {
             in_transaction: false,
             database: String::new(),
             read_only: false,
+            dialect: String::from("sqlite"),
             diagnostics: Diagnostics::default(),
         }
     }

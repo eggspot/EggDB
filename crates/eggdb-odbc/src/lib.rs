@@ -14,6 +14,7 @@
 //! text-taking call also has its `W` form, for Unicode applications.
 
 mod api;
+mod escapes;
 mod handles;
 mod memory;
 mod native;
