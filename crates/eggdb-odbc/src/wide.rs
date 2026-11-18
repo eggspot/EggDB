@@ -156,7 +156,12 @@ pub extern "system" fn SQLColAttributeW(stmt: *mut c_void, number: u16, field: u
     let mut scratch = vec![0u8; SCRATCH_BYTES];
     let mut written = 0i16;
     let outcome = SQLColAttribute(stmt, number, field, scratch.as_mut_ptr().cast(), SCRATCH_BYTES as i16, &raw mut written, numeric);
-    if outcome < 0 || written == 0 {
+    if outcome < 0 {
+        return outcome;
+    }
+    if written == 0 {
+        widen_into(text.cast(), usize::try_from(text_capacity).unwrap_or(0) / 2, &[]);
+        store(text_length, 0);
         return outcome;
     }
     let capacity_units = usize::try_from(text_capacity).unwrap_or(0) / 2;
