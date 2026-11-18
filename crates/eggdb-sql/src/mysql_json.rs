@@ -7,7 +7,8 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::json::{self, Json, Node};
 use crate::types::{SqlType, Value};
 
-const FUNCTIONS: [&str; 14] = [
+const FUNCTIONS: [&str; 15] = [
+    "json_array_append",
     "json_search",
     "json_extract",
     "json_unquote",
@@ -271,6 +272,56 @@ fn search(values: &[Value]) -> SqlResult<Value> {
     })
 }
 
+fn located<'n>(node: &'n mut Node, legs: &[Leg]) -> Option<&'n mut Node> {
+    let Some((leg, rest)) = legs.split_first() else {
+        return Some(node);
+    };
+    let next = match (leg, &mut node.value) {
+        (Leg::Key(key), Json::Object(members)) => members.iter_mut().rev().find(|(name, _)| name == key).map(|(_, value)| value)?,
+        (Leg::Index(index), Json::Array(items)) => items.get_mut(*index)?,
+        (Leg::Index(0), _) => return located(node, rest),
+        _ => return None,
+    };
+    located(next, rest)
+}
+
+fn json_of(value: &Value) -> SqlResult<Node> {
+    let leaf = |value| Node { value, start: 0, end: 0 };
+    Ok(match value {
+        Value::Null => leaf(Json::Null),
+        Value::Json(text) | Value::Jsonb(text) => json::parse(text, true)?,
+        Value::Boolean(flag) => leaf(Json::Boolean(*flag)),
+        Value::SmallInt(_) | Value::Integer(_) | Value::BigInt(_) | Value::Real(_) | Value::Double(_) | Value::Numeric(_) => {
+            leaf(Json::Number(value.to_text().unwrap_or_default()))
+        }
+        other => leaf(Json::String(other.to_text().unwrap_or_default())),
+    })
+}
+
+fn array_appended(values: &[Value]) -> SqlResult<Value> {
+    let mut node = document(&values[0], 1)?;
+    for pair in values[1..].chunks(2) {
+        let [path, item] = pair else {
+            return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "Incorrect parameter count in the call to native function 'json_array_append'"));
+        };
+        let legs = legs_of(&path.to_text().unwrap_or_default())?;
+        if wildcard(&legs) {
+            return Err(SqlError::new(SqlState::SYNTAX_ERROR, "In this situation, path expressions may not contain the * and ** tokens."));
+        }
+        let appended = json_of(item)?;
+        if let Some(target) = located(&mut node, &legs) {
+            match &mut target.value {
+                Json::Array(items) => items.push(appended),
+                other => {
+                    let existing = Node { value: std::mem::replace(other, Json::Null), start: 0, end: 0 };
+                    *other = Json::Array(vec![existing, appended]);
+                }
+            }
+        }
+    }
+    written(&node).map(Value::Json)
+}
+
 fn extracted(values: &[Value]) -> SqlResult<Value> {
     let node = document(&values[0], 1)?;
     let mut matches = Vec::new();
@@ -313,6 +364,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     Some(match (name, values.len()) {
         ("json_extract", count) if count >= 2 => extracted(values),
         ("json_search", 3 | 4) => search(values),
+        ("json_array_append", count) if count >= 3 && count % 2 == 1 => array_appended(values),
         ("json_unquote", 1) => Ok(Value::Text(unquoted(&values[0].to_text().unwrap_or_default()))),
         ("json_valid", 1) => Ok(Value::BigInt(i64::from(json::parse(&values[0].to_text().unwrap_or_default(), false).is_ok()))),
         ("json_type", 1) => document(&values[0], 1).map(|node| Value::Text(mysql_type(&node.value).to_owned())),
@@ -381,7 +433,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         return None;
     }
     Some(match name {
-        "json_extract" | "json_search" | "json_keys" | "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch" => SqlType::Json,
+        "json_extract" | "json_search" | "json_array_append" | "json_keys" | "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch" => SqlType::Json,
         "json_quote" => SqlType::Text,
         "json_unquote" | "json_type" => SqlType::Text,
         _ => SqlType::BigInt,
@@ -409,6 +461,15 @@ mod tests {
         found(&node, &legs_of("$**.b").unwrap(), &mut out);
         assert_eq!(out.len(), 1);
         assert!(legs_of("$**").is_err());
+        let appended = array_appended(&[
+            Value::Text(r#"{"a": [1], "b": 2}"#.to_owned()),
+            Value::Text("$.a".to_owned()),
+            Value::Integer(3),
+            Value::Text("$.b".to_owned()),
+            Value::Text("x".to_owned()),
+        ])
+        .unwrap();
+        assert_eq!(appended, Value::Json(r#"{"a": [1, 3], "b": [2, "x"]}"#.to_owned()));
         assert!(legs_of("$.a[x]").is_err());
         assert_eq!(unquoted("\"a\\tb\""), "a\tb");
         assert_eq!(unquoted("plain"), "plain");
