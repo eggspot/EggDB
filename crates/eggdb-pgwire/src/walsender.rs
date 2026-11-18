@@ -6,7 +6,7 @@
 
 use crate::replication::{format_lsn, parse_lsn};
 use eggdb_sql::logical_decoding::{DecodedChange, DecodedOperation, DecodedTransaction};
-use eggdb_sql::{Session, SqlType, Value};
+use eggdb_sql::{Session, SqlType, TimeZone, Value};
 use std::collections::HashSet;
 
 /// Microseconds from the Unix epoch to PostgreSQL's epoch, 2000-01-01.
@@ -199,10 +199,31 @@ fn relation_message(change: &DecodedChange) -> Vec<u8> {
     out
 }
 
-fn tuple(out: &mut Vec<u8>, values: &[Value], only: Option<&[usize]>) {
+/// Whether `START_REPLICATION`'s options ask for `binary` tuples (D1263).
+pub(crate) fn binary(options: &[(String, String)]) -> bool {
+    options
+        .iter()
+        .any(|(key, value)| key == "binary" && matches!(value.to_ascii_lowercase().as_str(), "true" | "on" | "1" | "yes"))
+}
+
+fn binary_column(value: &Value, sql_type: SqlType) -> Option<Vec<u8>> {
+    eggdb_sql::encode_pg_binary(value, type_oid(sql_type), TimeZone::UTC).ok().flatten()
+}
+
+fn tuple(out: &mut Vec<u8>, values: &[Value], only: Option<&[usize]>, binary_types: Option<&[(String, SqlType)]>) {
     out.extend_from_slice(&(values.len() as u16).to_be_bytes());
     for (index, value) in values.iter().enumerate() {
         let wanted = only.is_none_or(|columns| columns.contains(&index));
+        let binary = binary_types
+            .filter(|_| wanted && !matches!(value, Value::Null))
+            .and_then(|columns| columns.get(index))
+            .and_then(|(_, sql_type)| binary_column(value, *sql_type));
+        if let Some(bytes) = binary {
+            out.push(b'b');
+            out.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+            out.extend_from_slice(&bytes);
+            continue;
+        }
         match value.to_text() {
             Some(text) if wanted => {
                 out.push(b't');
@@ -214,30 +235,31 @@ fn tuple(out: &mut Vec<u8>, values: &[Value], only: Option<&[usize]>) {
     }
 }
 
-fn change_message(change: &DecodedChange) -> Vec<u8> {
+fn change_message(change: &DecodedChange, binary: bool) -> Vec<u8> {
     let mut out = Vec::new();
+    let types = binary.then_some(change.columns.as_slice());
     match change.operation {
         DecodedOperation::Insert => {
             out.push(b'I');
             out.extend_from_slice(&change.table_id.to_be_bytes());
             out.push(b'N');
-            tuple(&mut out, change.after.as_deref().unwrap_or_default(), None);
+            tuple(&mut out, change.after.as_deref().unwrap_or_default(), None, types);
         }
         DecodedOperation::Update => {
             out.push(b'U');
             out.extend_from_slice(&change.table_id.to_be_bytes());
             if let Some(before) = &change.before {
                 out.push(b'O');
-                tuple(&mut out, before, None);
+                tuple(&mut out, before, None, types);
             }
             out.push(b'N');
-            tuple(&mut out, change.after.as_deref().unwrap_or_default(), None);
+            tuple(&mut out, change.after.as_deref().unwrap_or_default(), None, types);
         }
         DecodedOperation::Delete => {
             out.push(b'D');
             out.extend_from_slice(&change.table_id.to_be_bytes());
             out.push(b'O');
-            tuple(&mut out, change.before.as_deref().unwrap_or_default(), None);
+            tuple(&mut out, change.before.as_deref().unwrap_or_default(), None, types);
         }
     }
     out
@@ -262,8 +284,8 @@ pub(crate) fn sequence_of(lsn: u64) -> u64 {
 }
 
 /// One transaction as `pgoutput` messages: begin, a relation message for each table the stream
-/// has not described yet, its changes, commit.
-pub(crate) fn transaction_messages(transaction: &DecodedTransaction, described: &mut HashSet<u32>) -> Vec<(u64, Vec<u8>)> {
+/// has not described yet, its changes (with binary column values when `binary`), commit.
+pub(crate) fn transaction_messages(transaction: &DecodedTransaction, described: &mut HashSet<u32>, binary: bool) -> Vec<(u64, Vec<u8>)> {
     let lsn = commit_lsn(transaction.lsn);
     let time = now_postgres_micros();
     let mut messages = Vec::with_capacity(transaction.changes.len() + 2);
@@ -276,7 +298,7 @@ pub(crate) fn transaction_messages(transaction: &DecodedTransaction, described: 
         if described.insert(change.table_id) {
             messages.push((lsn, relation_message(change)));
         }
-        messages.push((lsn, change_message(change)));
+        messages.push((lsn, change_message(change, binary)));
     }
     let mut commit = vec![b'C', 0];
     commit.extend_from_slice(&lsn.to_be_bytes());
@@ -369,5 +391,31 @@ mod tests {
         let five = options("START_REPLICATION SLOT \"s\" LOGICAL 0/10 (proto_version '5', publication_names '\"p\"')");
         assert!(protocol_version(&five).unwrap_err().contains("only supports protocol 4"));
         assert!(protocol_version(&options("START_REPLICATION SLOT \"s\" LOGICAL 0/10")).is_err());
+        assert!(binary(&four));
+        assert!(!binary(&five));
+    }
+
+    #[test]
+    fn binary_tuples_carry_each_value_in_its_binary_form() {
+        let change = DecodedChange {
+            table_id: 7,
+            schema: "public".to_owned(),
+            table: "eggs".to_owned(),
+            columns: vec![("id".to_owned(), SqlType::Integer), ("colour".to_owned(), SqlType::Text)],
+            key_columns: vec![0],
+            operation: DecodedOperation::Insert,
+            before: None,
+            after: Some(vec![Value::Integer(5), Value::Null]),
+        };
+        let message = change_message(&change, true);
+        assert_eq!(&message[..6], &[b'I', 0, 0, 0, 7, b'N']);
+        assert_eq!(&message[6..8], &2u16.to_be_bytes());
+        assert_eq!(message[8], b'b');
+        assert_eq!(&message[9..13], &4i32.to_be_bytes());
+        assert_eq!(&message[13..17], &5i32.to_be_bytes());
+        assert_eq!(message[17], b'n');
+        let text = change_message(&change, false);
+        assert_eq!(text[8], b't');
+        assert_eq!(&text[13..14], b"5");
     }
 }

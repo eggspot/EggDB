@@ -1287,3 +1287,4 @@ its full title with its status.
 - [D1260](decisions/D1260.md) Code-only batch 916 (M6): SQLNativeSqlW and SQLGetInfoW text answers in UTF-16
 - [D1261](decisions/D1261.md) Code-only batch 917 (M6): the ODBC driver connects to servers
 - [D1262](decisions/D1262.md) Code-only batch 918 (M7): empty matches in MATCH_RECOGNIZE
+- [D1263](decisions/D1263.md) Code-only batch 919: binary tuples in pgoutput

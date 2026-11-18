@@ -1936,7 +1936,7 @@ impl<'a, 's> Connection<'a, 's> {
                     .map_err(|message| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message))
                     .and_then(|names| self.session.publication_filter(&names))
                 {
-                    Ok(filter) => return self.stream_changes(&slot, lsn, &filter),
+                    Ok(filter) => return self.stream_changes(&slot, lsn, &filter, crate::walsender::binary(&options)),
                     Err(error) => Err(error),
                 },
                 Err(message) => Err(SqlError::new(SqlState::FEATURE_NOT_SUPPORTED, message)),
@@ -1952,7 +1952,7 @@ impl<'a, 's> Connection<'a, 's> {
         self.wire.flush().is_ok()
     }
 
-    fn stream_changes(&mut self, slot: &str, start: u64, filter: &eggdb_sql::PublicationFilter) -> bool {
+    fn stream_changes(&mut self, slot: &str, start: u64, filter: &eggdb_sql::PublicationFilter, binary: bool) -> bool {
         use crate::walsender::{flushed_lsn, keepalive, sequence_of, transaction_messages, xlog_data};
         let confirmed = match self.session.logical_slot_position(slot) {
             Ok(confirmed) => confirmed,
@@ -1974,7 +1974,7 @@ impl<'a, 's> Connection<'a, 's> {
                 Ok(transactions) => {
                     for transaction in &transactions {
                         let published = crate::walsender::published(transaction, filter);
-                        for (lsn, message) in published.iter().flat_map(|kept| transaction_messages(kept, &mut described)) {
+                        for (lsn, message) in published.iter().flat_map(|kept| transaction_messages(kept, &mut described, binary)) {
                             if self.wire.outbox.copy_data(&xlog_data(lsn, &message)).is_err() {
                                 return false;
                             }
