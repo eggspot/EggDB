@@ -39,6 +39,7 @@ enum Leg {
     Index(usize),
     AnyMember,
     AnyElement,
+    AnyDepth,
 }
 
 fn invalid_path(path: &str) -> SqlError {
@@ -55,6 +56,13 @@ fn legs_of(path: &str) -> SqlResult<Vec<Leg>> {
     while at < characters.len() {
         match characters[at] {
             ' ' | '\t' => at += 1,
+            '*' if characters.get(at + 1) == Some(&'*') => {
+                if at + 2 >= characters.len() {
+                    return Err(invalid_path(path));
+                }
+                legs.push(Leg::AnyDepth);
+                at += 2;
+            }
             '.' => {
                 at += 1;
                 match characters.get(at) {
@@ -113,7 +121,7 @@ fn legs_of(path: &str) -> SqlResult<Vec<Leg>> {
 }
 
 fn wildcard(legs: &[Leg]) -> bool {
-    legs.iter().any(|leg| matches!(leg, Leg::AnyMember | Leg::AnyElement))
+    legs.iter().any(|leg| matches!(leg, Leg::AnyMember | Leg::AnyElement | Leg::AnyDepth))
 }
 
 fn found<'n>(node: &'n Node, legs: &[Leg], out: &mut Vec<&'n Node>) {
@@ -122,6 +130,14 @@ fn found<'n>(node: &'n Node, legs: &[Leg], out: &mut Vec<&'n Node>) {
         return;
     };
     match (leg, &node.value) {
+        (Leg::AnyDepth, _) => {
+            found(node, rest, out);
+            match &node.value {
+                Json::Object(members) => members.iter().for_each(|(_, value)| found(value, legs, out)),
+                Json::Array(items) => items.iter().for_each(|item| found(item, legs, out)),
+                _ => {}
+            }
+        }
         (Leg::Key(key), Json::Object(members)) => {
             if let Some((_, value)) = members.iter().rev().find(|(name, _)| name == key) {
                 found(value, rest, out);
@@ -389,6 +405,10 @@ mod tests {
         found(&node, &legs_of("$.a.b[*]").unwrap(), &mut out);
         assert_eq!(out.len(), 2);
         assert!(legs_of("a.b").is_err());
+        let mut out = Vec::new();
+        found(&node, &legs_of("$**.b").unwrap(), &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(legs_of("$**").is_err());
         assert!(legs_of("$.a[x]").is_err());
         assert_eq!(unquoted("\"a\\tb\""), "a\tb");
         assert_eq!(unquoted("plain"), "plain");
