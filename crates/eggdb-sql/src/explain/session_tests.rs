@@ -772,6 +772,12 @@ fn update_and_delete_show_the_subplans_of_their_conditions_and_assignments() {
     assert_eq!(update[0], "Update on tenk1 t");
     assert!(update[1].starts_with("  ->  ") && update[1].ends_with("on tenk1 t"), "{update:?}");
     assert!(plan(&mut session, "EXPLAIN SELECT * FROM tenk1")[0].starts_with("Seq Scan"));
+    assert_eq!(plan(&mut session, "EXPLAIN INSERT INTO onek (unique1) VALUES (1)"), ["Insert on onek", "  ->  Result", "EXPLAIN"]);
+    assert_eq!(
+        plan(&mut session, "EXPLAIN INSERT INTO onek (unique1) VALUES (1), (2)"),
+        ["Insert on onek", "  ->  Values Scan on \"*VALUES*\"", "EXPLAIN"]
+    );
+    assert_eq!(plan(&mut session, "EXPLAIN INSERT INTO onek SELECT * FROM onek"), ["Insert on onek", "  ->  Seq Scan on onek", "EXPLAIN"]);
     assert_eq!(
         plan(
             &mut session,

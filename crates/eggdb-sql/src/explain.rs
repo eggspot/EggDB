@@ -162,10 +162,17 @@ pub(crate) struct Planned {
     pub(crate) query: ExplainedQuery,
     pub(crate) write: Option<PlannedWrite>,
     pub(crate) table_rows: TableRows,
-    pub(crate) modified: Option<String>,
+    pub(crate) modified: Option<ModifiedNode>,
 }
 
-fn modified_node(statement: &Statement, query: &ExplainedQuery, dialect: Dialect) -> Option<String> {
+/// PostgreSQL's node on top of a write's plan (`Update on t`), and the line that stands for
+/// what an `INSERT` reads when it is not a query (`Result`, `Values Scan`).
+pub(crate) struct ModifiedNode {
+    line: String,
+    child: Option<String>,
+}
+
+fn modified_node(statement: &Statement, query: &ExplainedQuery, dialect: Dialect) -> Option<ModifiedNode> {
     if dialect != Dialect::PostgreSql {
         return None;
     }
@@ -174,15 +181,59 @@ fn modified_node(statement: &Statement, query: &ExplainedQuery, dialect: Dialect
         Statement::Delete(delete) if delete.using.is_none() => "Delete",
         _ => return None,
     };
-    query.sources.first().map(|source| format!("{verb} on {}", named_relation(source)))
+    query.sources.first().map(|source| ModifiedNode {
+        line: format!("{verb} on {}", named_relation(source)),
+        child: None,
+    })
 }
 
-fn under_modified(modified: Option<&str>, lines: Vec<String>) -> Vec<String> {
+fn plain_select(query: &crate::ast::Query) -> Option<&Select> {
+    let plain = query.with.is_empty() && query.order_by.is_empty() && query.limit.is_none() && query.offset.is_none();
+    match &query.body {
+        crate::ast::SetExpr::Select(select) if plain => Some(select.as_ref()),
+        _ => None,
+    }
+}
+
+fn inserted_plan(
+    reader: &dyn KeyValueRead,
+    tables: &mut TableCache,
+    insert: &crate::ast::Insert,
+    with_subplans: bool,
+) -> SqlResult<(ExplainedQuery, ModifiedNode)> {
+    let table = tables.require(reader, &insert.table.name)?;
+    let relation = match &insert.table.alias {
+        Some(alias) => format!("{} {alias}", table.name),
+        None => table.name.clone(),
+    };
+    let line = format!("Insert on {relation}");
+    let (query, child) = match &insert.source {
+        crate::ast::InsertSource::Values(rows) if rows.len() > 1 => {
+            (ExplainedQuery::default(), Some("Values Scan on \"*VALUES*\"".to_owned()))
+        }
+        crate::ast::InsertSource::Values(_) | crate::ast::InsertSource::DefaultValues => (ExplainedQuery::default(), None),
+        crate::ast::InsertSource::Query(query) => match plain_select(query) {
+            Some(select) => (explained(reader, tables, &Statement::Select(select.clone()), with_subplans)?, None),
+            None => {
+                return Err(crate::error::SqlError::not_supported(
+                    "EXPLAIN of INSERT from a query with WITH, set operations, ORDER BY or LIMIT",
+                ));
+            }
+        },
+    };
+    Ok((query, ModifiedNode { line, child }))
+}
+
+fn under_modified(modified: Option<&ModifiedNode>, lines: Vec<String>) -> Vec<String> {
     let Some(modified) = modified else {
         return lines;
     };
+    let lines = match &modified.child {
+        Some(child) => vec![child.clone()],
+        None => lines,
+    };
     let mut nested = Vec::with_capacity(lines.len() + 1);
-    nested.push(modified.to_owned());
+    nested.push(modified.line.clone());
     for (at, line) in lines.into_iter().enumerate() {
         nested.push(if at == 0 { format!("  ->  {line}") } else { format!("      {line}") });
     }
@@ -262,7 +313,13 @@ pub(crate) fn plan(
 ) -> SqlResult<Planned> {
     let with_subplans = shows_subplans(style, dialect);
     let mysql = dialect == Dialect::MySql;
+    let mut inserted = None;
     let (query, write) = match statement {
+        Statement::Insert(insert) if dialect == Dialect::PostgreSql && style == ExplainStyle::Plan => {
+            let (query, node) = inserted_plan(reader, tables, insert, with_subplans)?;
+            inserted = Some(node);
+            (query, None)
+        }
         Statement::Update(update) if mysql => {
             let (query, targets, joined) = match &update.from {
                 Some(joined) => (
@@ -316,7 +373,7 @@ pub(crate) fn plan(
     } else {
         TableRows::default()
     };
-    let modified = modified_node(statement, &query, dialect);
+    let modified = inserted.or_else(|| modified_node(statement, &query, dialect));
     Ok(Planned {
         query,
         write,
@@ -341,7 +398,7 @@ pub(crate) fn render(planned: &Planned, style: ExplainStyle, dialect: Dialect) -
         }
         (ExplainStyle::QueryPlan, _) | (_, Dialect::Sqlite) => sqlite_rows(query),
         (ExplainStyle::Plan, Dialect::MySql) => mysql_rows(query),
-        (ExplainStyle::Plan, _) => under_modified(planned.modified.as_deref(), postgresql_lines(query))
+        (ExplainStyle::Plan, _) => under_modified(planned.modified.as_ref(), postgresql_lines(query))
             .into_iter()
             .map(|line| vec![Value::Text(line)])
             .collect(),
