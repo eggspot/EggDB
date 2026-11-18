@@ -679,6 +679,19 @@ fn constructed(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     }
     let integer = |at: usize| values.get(at).and_then(Value::as_integer);
     Some(match (name, values) {
+        ("date_add" | "date_subtract", [Value::TimestampTz(utc), Value::Interval(by), rest @ ..]) if rest.len() <= 1 => {
+            let by = if name == "date_subtract" { by.negated() } else { Ok(*by) };
+            by.and_then(|by| match rest.first() {
+                None => shifted_instant(*utc, by).map(Value::TimestampTz),
+                Some(Value::Null) => Ok(Value::Null),
+                Some(zone) => {
+                    let zone = zone_named(zone)?;
+                    let local = i64::try_from(zone.local_of_utc(*utc)).map_err(|_| datetime::timestamp_out_of_range())?;
+                    let moved = interval::add_to_timestamp(local, by)?;
+                    datetime::checked_timestamp(zone.utc_of_local(moved)).map(Value::TimestampTz)
+                }
+            })
+        }
         ("make_date", [_, _, _]) => made_date(integer(0)?, integer(1)?, integer(2)?)
             .and_then(datetime::checked_date)
             .map(Value::Date),

@@ -1921,6 +1921,7 @@ fn function_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         "to_date" | "to_number" => &[TEXT, TEXT],
         "to_timestamp" => &[None, TEXT],
         "make_date" => &[INTEGER, INTEGER, INTEGER],
+        "date_add" | "date_subtract" => &[Some(SqlType::TimestampTz(None)), INTERVAL, TEXT],
         "make_time" => &[INTEGER, INTEGER, DOUBLE],
         "make_timestamp" => &[INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, DOUBLE],
         "make_timestamptz" => &[INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, DOUBLE, TEXT],

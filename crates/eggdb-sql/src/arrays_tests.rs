@@ -727,3 +727,18 @@ fn string_to_table_gives_a_row_per_piece() {
         "string_to_table|ordinality\na|1\nb|2\nNULL|3\nc|4\nSELECT 4"
     );
 }
+
+#[test]
+fn date_add_and_date_subtract_shift_instants_in_a_zone() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(
+            &mut session,
+            "SELECT date_add(TIMESTAMPTZ '2021-10-31 00:00:00+00', INTERVAL '1 day', 'UTC') AS a, \
+             date_subtract(TIMESTAMPTZ '2021-11-01 00:00:00+00', INTERVAL '1 day') AS s"
+        )
+        .unwrap(),
+        "a|s\n2021-11-01 00:00:00+00|2021-10-31 00:00:00+00\nSELECT 1"
+    );
+}
