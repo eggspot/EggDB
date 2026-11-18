@@ -1387,6 +1387,16 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `XMLTABLE`: **code written, unbuilt** (code-only mode, 2026-11-12, D692). Left: XQuery and the stored `xml` type.
 
 ### M10 The other SQL dialects
+- Built-in functions each dialect's applications call, found missing by a sweep on 2026-11-18: PostgreSQL's
+  mathematical functions (`exp`, `ln`, `log`, trigonometry, `random`, `setseed`, `width_bucket` and more; D1289), array
+  editing (`string_to_array`, `array_append`, `array_position` and more; D1288), `string_to_table` (D1298), `unistr`
+  (D1299), `date_add`/`date_subtract` (D1300), `jsonb_set_lax` (D1304), `to_reg*`, `timeofday` and the dashboard
+  functions (D1294, D1301), `sha224`/`sha384` (D1303); MySQL's `LOCATE`, `SUBSTRING_INDEX`, `FIND_IN_SET`, `CONV`, `CRC32`,
+  network, UUID, hash and base64 functions (D1291, D1302) and JSON functions with `->`/`->>` (D1297); SQL Server's
+  `PATINDEX`, `QUOTENAME`, `ISNUMERIC`, `...FROMPARTS`, `HASHBYTES`, `STRING_ESCAPE`, `FORMATMESSAGE` (D1292, D1295);
+  Oracle's `BITAND`, `REMAINDER`, `NANVL`, `SYS_GUID`, `STANDARD_HASH`, `ORA_HASH`, `UNISTR` and more (D1292, D1296);
+  SQLite's planner hints (D1293): **code written, unbuilt** (code-only mode, 2026-11-18). Left: user-defined aggregates
+  (`any_value`, `create_aggregate`), `current_query`, MySQL's `JSON_TABLE`, and a sweep of the remaining names.
 - MySQL's types: `BIGINT UNSIGNED` and unsigned ranges, `ENUM`, `SET`, `YEAR`, `BIT`, the spatial
   types, zero dates and the full `TIME` range (D19, sql.md). Columns of `BIGINT UNSIGNED`, `YEAR`, `BIT`,
   `ENUM` and `SET` accepted on the nearest stored type: **code written, unbuilt** (code-only mode, 2026-11-12,
