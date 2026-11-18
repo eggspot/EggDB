@@ -8,7 +8,8 @@ use crate::error::SqlResult;
 use crate::types::{SqlType, Value};
 
 /// The functions this module answers in MySQL's dialect.
-pub(crate) const FUNCTIONS: [&str; 22] = [
+pub(crate) const FUNCTIONS: [&str; 24] = [
+    "inet6_aton", "inet6_ntoa",
     "locate", "substring_index", "find_in_set", "elt", "mid", "strcmp", "ord", "bin", "conv", "crc32", "unhex", "rand",
     "inet_aton", "inet_ntoa", "is_ipv4", "is_ipv6", "uuid_to_bin", "bin_to_uuid", "sha1", "sha2", "to_base64",
     "from_base64",
@@ -256,6 +257,26 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             Some(address) => Value::Text(std::net::Ipv4Addr::from(address).to_string()),
             None => Value::Null,
         },
+        ("inet6_aton", 1) => match string(0) {
+            Some(text) => match (text.parse::<std::net::Ipv4Addr>(), text.parse::<std::net::Ipv6Addr>()) {
+                (Ok(v4), _) => Value::Bytea(v4.octets().to_vec()),
+                (_, Ok(v6)) => Value::Bytea(v6.octets().to_vec()),
+                _ => Value::Null,
+            },
+            None => Value::Null,
+        },
+        ("inet6_ntoa", 1) => match values.first() {
+            Some(Value::Bytea(bytes)) => match bytes.len() {
+                4 => Value::Text(std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string()),
+                16 => {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(bytes);
+                    Value::Text(std::net::Ipv6Addr::from(octets).to_string())
+                }
+                _ => Value::Null,
+            },
+            _ => Value::Null,
+        },
         ("is_ipv4", 1) => Value::BigInt(i64::from(string(0).is_some_and(|text| text.parse::<std::net::Ipv4Addr>().is_ok()))),
         ("is_ipv6", 1) => Value::BigInt(i64::from(string(0).is_some_and(|text| text.parse::<std::net::Ipv6Addr>().is_ok()))),
         ("uuid_to_bin", 1 | 2) => match string(0).and_then(|text| uuid_bytes(&text)) {
@@ -298,7 +319,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     }
     Some(match name {
         "locate" | "find_in_set" | "strcmp" | "ord" | "crc32" => SqlType::BigInt,
-        "unhex" | "uuid_to_bin" | "from_base64" => SqlType::Bytea,
+        "unhex" | "uuid_to_bin" | "from_base64" | "inet6_aton" => SqlType::Bytea,
         "inet_aton" | "is_ipv4" | "is_ipv6" => SqlType::BigInt,
         "rand" => SqlType::Double,
         _ => SqlType::Text,
