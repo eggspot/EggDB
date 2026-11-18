@@ -6,7 +6,10 @@ use eggdb_geo::{Coord, Geometry, Spatial};
 const GEOGRAPHY_SRID: i32 = 4326;
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 99] = [
+pub(crate) const FUNCTIONS: [&str; 102] = [
+    "st_covers",
+    "st_coveredby",
+    "st_containsproperly",
     "st_issimple",
     "st_isring",
     "st_collect",
@@ -122,7 +125,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
             SqlType::Integer
         }
         "st_dwithin" | "st_contains" | "st_within" | "st_intersects" | "st_disjoint"
-        | "st_isempty" | "st_equals" | "st_isvalid" | "st_isclosed" | "st_iscollection" | "st_issimple" | "st_isring" => SqlType::Boolean,
+        | "st_isempty" | "st_equals" | "st_isvalid" | "st_isclosed" | "st_iscollection" | "st_issimple" | "st_isring" | "st_covers" | "st_coveredby" | "st_containsproperly" => SqlType::Boolean,
         name if FUNCTIONS.contains(&name) => SqlType::Text,
         _ => return None,
     })
@@ -619,6 +622,14 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                 eggdb_geo::distance(&left.geometry, &right.geometry)
                     .is_some_and(|distance| distance <= number(within).unwrap_or(-1.0)),
             )
+        }
+        ("st_covers" | "st_coveredby" | "st_containsproperly", [_, _]) => {
+            let (left, right) = pair()?;
+            Value::Boolean(match name {
+                "st_covers" => eggdb_geo::contains(&left.geometry, &right.geometry),
+                "st_coveredby" => eggdb_geo::contains(&right.geometry, &left.geometry),
+                _ => eggdb_geo::contains_properly(&left.geometry, &right.geometry),
+            })
         }
         ("st_contains", [_, _]) => {
             let (left, right) = pair()?;

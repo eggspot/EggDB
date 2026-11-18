@@ -498,3 +498,21 @@ pub fn is_simple(geometry: &Geometry) -> bool {
         Geometry::Point(_) | Geometry::Polygon(_) | Geometry::MultiPolygon(_) => true,
     }
 }
+
+/// Whether `inner` lies in `outer` without touching `outer`'s boundary (`ST_ContainsProperly`,
+/// D1277): contained, no vertex of `inner` on an edge of `outer`, and no edge of `inner`
+/// meeting one of `outer`'s.
+pub fn contains_properly(outer: &Geometry, inner: &Geometry) -> bool {
+    if !contains(outer, inner) {
+        return false;
+    }
+    let edges = segments(outer);
+    if edges.is_empty() {
+        return true;
+    }
+    let touches_edge = |point: &Coord| edges.iter().any(|edge| point_segment(*point, *edge) == 0.0);
+    !inner.coords().iter().any(touches_edge)
+        && !segments(inner)
+            .iter()
+            .any(|segment| edges.iter().any(|edge| segments_cross(*segment, *edge)))
+}

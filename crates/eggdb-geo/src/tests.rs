@@ -2,7 +2,7 @@ use crate::{
     Coord, Geometry, area, centroid, contains, convex_hull, distance, envelope, from_wkb, from_wkt,
     intersects, invalidity, length, parts, perimeter, simplified, sphere_distance, to_geojson,
     to_wkb, to_wkt, translated, affine, as_multi, azimuth, boundary, expanded, rotated, segmentized,
-    snapped_to_grid, without_repeated_points, hausdorff_distance, longest_line, shortest_line, is_simple,
+    snapped_to_grid, without_repeated_points, hausdorff_distance, longest_line, shortest_line, is_simple, contains_properly,
 };
 
 fn geometry(text: &str) -> Geometry {
@@ -252,4 +252,14 @@ fn simple_lines_do_not_cross_or_touch_themselves() {
     assert!(!is_simple(&geometry("MULTIPOINT(1 1,1 1)")));
     assert!(is_simple(&geometry("MULTILINESTRING((0 0,1 1),(1 1,2 0))")));
     assert!(!is_simple(&geometry("MULTILINESTRING((0 0,2 2),(0 2,2 0))")));
+}
+
+#[test]
+fn proper_containment_keeps_off_the_boundary() {
+    let square = geometry("POLYGON((0 0,0 10,10 10,10 0,0 0))");
+    assert!(contains_properly(&square, &geometry("POINT(5 5)")));
+    assert!(!contains_properly(&square, &geometry("POINT(0 5)")));
+    assert!(contains(&square, &geometry("POINT(0 5)")));
+    assert!(contains_properly(&square, &geometry("LINESTRING(1 1,9 9)")));
+    assert!(!contains_properly(&square, &geometry("LINESTRING(0 0,9 9)")));
 }
