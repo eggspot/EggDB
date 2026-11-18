@@ -482,7 +482,7 @@ fn get_dependent_ddl(values: &[Value]) -> SqlResult<Value> {
         return Ok(Value::Null);
     };
     let object_type = object_type.trim().to_ascii_uppercase();
-    if !matches!(object_type.as_str(), "INDEX" | "TRIGGER" | "OBJECT_GRANT") {
+    if !matches!(object_type.as_str(), "INDEX" | "TRIGGER" | "OBJECT_GRANT" | "CONSTRAINT" | "REF_CONSTRAINT" | "COMMENT") {
         return Err(metadata_error(
             ORACLE_METADATA_INVALID_INPUT,
             format!("invalid input value {object_type} for parameter OBJECT_TYPE in function GET_DEPENDENT_DDL"),
@@ -527,6 +527,38 @@ fn get_dependent_ddl(values: &[Value]) -> SqlResult<Value> {
         "TRIGGER" => {
             for trigger in snapshot.triggers.iter().filter(|trigger| trigger.relation == table_at) {
                 statements.push(format!("  {}", as_statement(&trigger.definition.text)));
+            }
+        }
+        "CONSTRAINT" | "REF_CONSTRAINT" => {
+            let foreign = object_type == "REF_CONSTRAINT";
+            for constraint in snapshot.constraints.iter().filter(|constraint| {
+                constraint.table == table_at
+                    && matches!(constraint.source, crate::pg_catalog::ConstraintSource::Foreign(_)) == foreign
+            }) {
+                if let Some(definition) = crate::pg_catalog::constraint_definition(&snapshot, constraint.oid, false) {
+                    statements.push(format!(
+                        "  ALTER TABLE \"{}\" ADD CONSTRAINT \"{}\" {definition} ENABLE;",
+                        crate::lexer::swap_uniform_case(&internal_name),
+                        crate::lexer::swap_uniform_case(&constraint.name)
+                    ));
+                }
+            }
+        }
+        "COMMENT" => {
+            let table = snapshot.relations.get(table_at).map(|entry| entry.internal.clone()).unwrap_or_default();
+            let shown_table = crate::lexer::swap_uniform_case(&internal_name);
+            for comment in snapshot.comments.iter().filter(|comment| comment.owner == table) {
+                let text = comment.text.replace('\'', "''");
+                match comment.kind {
+                    crate::encoding::CommentKind::Relation => {
+                        statements.push(format!("  COMMENT ON TABLE \"{shown_table}\" IS '{text}';"));
+                    }
+                    crate::encoding::CommentKind::Column => statements.push(format!(
+                        "  COMMENT ON COLUMN \"{shown_table}\".\"{}\" IS '{text}';",
+                        crate::lexer::swap_uniform_case(&comment.part)
+                    )),
+                    _ => {}
+                }
             }
         }
         _ => {

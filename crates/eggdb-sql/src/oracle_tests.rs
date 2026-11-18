@@ -1172,6 +1172,20 @@ fn dbms_metadata_get_ddl_writes_tables_and_views_in_oracle_form() {
         panic!("text DDL: {grants:?}");
     };
     assert!(grants.contains("GRANT SELECT ON \"EMP\" TO \"SCOTT\";"), "{grants}");
+    values(&mut session, "ALTER TABLE emp ADD CONSTRAINT emp_name_long CHECK (LENGTH(name) > 1)");
+    values(&mut session, "COMMENT ON TABLE emp IS 'People''s rows'");
+    let checks = values(&mut session, "SELECT DBMS_METADATA.GET_DEPENDENT_DDL('CONSTRAINT', 'EMP') FROM dual");
+    let Value::Text(checks) = &checks[0][0] else {
+        panic!("text DDL: {checks:?}");
+    };
+    assert!(checks.contains("ALTER TABLE \"EMP\" ADD CONSTRAINT \"EMP_NAME_LONG\" CHECK"), "{checks}");
+    let comments = values(&mut session, "SELECT DBMS_METADATA.GET_DEPENDENT_DDL('COMMENT', 'EMP') FROM dual");
+    let Value::Text(comments) = &comments[0][0] else {
+        panic!("text DDL: {comments:?}");
+    };
+    assert!(comments.contains("COMMENT ON TABLE \"EMP\" IS 'People''s rows';"), "{comments}");
+    let no_keys = failure(&mut session, "SELECT DBMS_METADATA.GET_DEPENDENT_DDL('REF_CONSTRAINT', 'EMP') FROM dual");
+    assert!(no_keys.message().starts_with("ORA-31608"), "{no_keys}");
     let none = failure(&mut session, "SELECT DBMS_METADATA.GET_DEPENDENT_DDL('OBJECT_GRANT', 'EMP_NAMES') FROM dual");
     assert!(none.message().starts_with("ORA-31603"), "{none}");
     values(
