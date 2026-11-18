@@ -1309,3 +1309,4 @@ its full title with its status.
 - [D1282](decisions/D1282.md) Code-only batch 938 (M6): ODBC static scrollable cursors
 - [D1283](decisions/D1283.md) Code-only batch 939 (M6): more ODBC column attributes
 - [D1284](decisions/D1284.md) Code-only batch 940 (M6): SQLSetPos positioning and cursor names
+- [D1285](decisions/D1285.md) Code-only batch 941 (M6): sqlite3 conveniences in the Python driver

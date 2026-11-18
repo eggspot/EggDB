@@ -106,6 +106,20 @@ if __name__ == "__main__":
             cursor.execute("SELECT twice(1)")
         connection.close()
 
+    def test_sqlite_conveniences_scripts_rowids_and_change_counts(self):
+        connection = eggdb.connect(":memory:")
+        connection.executescript("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('a');")
+        cursor = connection.cursor()
+        cursor.execute("INSERT INTO notes (body) VALUES (?)", ("b",))
+        self.assertEqual(cursor.lastrowid, 2)
+        self.assertTrue(connection.in_transaction)
+        connection.commit()
+        self.assertFalse(connection.in_transaction)
+        self.assertEqual(connection.total_changes, 2)
+        cursor.execute("SELECT count(*) FROM notes")
+        self.assertIsNone(cursor.lastrowid)
+        connection.close()
+
 
 class KeyValueTest(unittest.TestCase):
     def test_collections_hold_keys_apart_and_rename_and_count(self):

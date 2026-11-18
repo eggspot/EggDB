@@ -558,6 +558,27 @@ class Connection:
         """A new cursor."""
         return Cursor(self)
 
+    @property
+    def in_transaction(self):
+        """Whether a transaction is open, as `sqlite3.Connection.in_transaction` says."""
+        return self._in_transaction
+
+    @property
+    def total_changes(self):
+        """The rows inserted, changed or deleted since the connection opened, in the SQLite
+        dialect, as `sqlite3.Connection.total_changes` gives them."""
+        if self._dialect != "sqlite":
+            raise NotSupportedError("total_changes is answered in the SQLite dialect")
+        return self._execute("SELECT total_changes()")[-1][2][0][0]
+
+    def executescript(self, script):
+        """Commits an open transaction, then runs every statement of `script` as written, its
+        own BEGIN and COMMIT included, as `sqlite3.Connection.executescript` does."""
+        self.commit()
+        self._execute(script)
+        self._in_transaction = False
+        return self.cursor()
+
     def execute(self, sql, parameters=()):
         """Runs `sql` on a new cursor and returns it."""
         cursor = self.cursor()
@@ -609,6 +630,23 @@ class Cursor:
         self.description = None
         self.rowcount = -1
         self._rows = []
+        self._inserted = False
+
+    @property
+    def lastrowid(self):
+        """The rowid of the row the last INSERT through this cursor added, in the SQLite dialect,
+        as `sqlite3.Cursor.lastrowid` gives it; None otherwise."""
+        if not self._inserted or self.connection._dialect != "sqlite":
+            return None
+        return self.connection._execute("SELECT last_insert_rowid()")[-1][2][0][0]
+
+    def executescript(self, script):
+        """Runs the statements of `script` as `Connection.executescript` does."""
+        self.connection.executescript(script)
+        self.description = None
+        self.rowcount = -1
+        self._rows = []
+        return self
 
     def execute(self, sql, parameters=()):
         """Runs one statement with its parameters."""
@@ -617,8 +655,10 @@ class Cursor:
         self.description = None
         self.rowcount = -1
         self._rows = []
+        self._inserted = False
         if gathered:
             tag, names, rows = gathered[-1]
+            self._inserted = tag.upper().startswith("INSERT")
             if names:
                 self.description = [(name, None, None, None, None, None, None) for name in names]
                 self._rows = rows
