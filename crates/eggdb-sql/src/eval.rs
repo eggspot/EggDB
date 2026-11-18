@@ -1876,6 +1876,7 @@ fn declared_argument_types(name: &str) -> Option<&'static [Option<SqlType>]> {
         name if crate::pg_catalog::is_privilege_inquiry(name) => &[None, None, None, None],
         "btrim" | "ltrim" | "rtrim" => &[Some(SqlType::Text), Some(SqlType::Text)],
         "quote_ident" => &[Some(SqlType::Text)],
+        "parse_ident" => &[Some(SqlType::Text), Some(SqlType::Boolean)],
         _ => return function_argument_types(name),
     })
 }

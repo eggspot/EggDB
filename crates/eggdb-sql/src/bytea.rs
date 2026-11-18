@@ -451,6 +451,61 @@ fn uuid_timestamp(bytes: &[u8; 16]) -> Option<i64> {
     unix_micros.checked_sub(MICROS_FROM_UNIX_TO_2000)
 }
 
+fn not_an_identifier(text: &str) -> SqlError {
+    SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("string is not a valid identifier: \"{text}\""))
+}
+
+fn identifier_parts(text: &str, strict: bool) -> SqlResult<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut rest = text.trim_start();
+    loop {
+        let part = if let Some(quoted) = rest.strip_prefix('"') {
+            let mut part = String::new();
+            let mut characters = quoted.char_indices();
+            let end = loop {
+                match characters.next() {
+                    Some((at, '"')) if quoted[at + 1..].starts_with('"') => {
+                        part.push('"');
+                        characters.next();
+                    }
+                    Some((at, '"')) => break at + 1,
+                    Some((_, character)) => part.push(character),
+                    None => return Err(not_an_identifier(text)),
+                }
+            };
+            if part.is_empty() {
+                return Err(not_an_identifier(text));
+            }
+            rest = &quoted[end..];
+            part
+        } else {
+            let end = rest
+                .find(|character: char| !(character.is_alphanumeric() || character == '_' || character == '$'))
+                .unwrap_or(rest.len());
+            if end == 0 || rest.starts_with(|character: char| character.is_ascii_digit() || character == '$') {
+                return Err(not_an_identifier(text));
+            }
+            let part = rest[..end].to_lowercase();
+            rest = &rest[end..];
+            part
+        };
+        parts.push(part);
+        rest = rest.trim_start();
+        match rest.strip_prefix('.') {
+            Some(after) => rest = after.trim_start(),
+            None if rest.is_empty() || !strict => return Ok(parts),
+            None => return Err(not_an_identifier(text)),
+        }
+    }
+}
+
+fn identifier_array(parts: Vec<String>) -> Value {
+    Value::Array(Box::new(crate::arrays::ArrayValue::new(
+        crate::arrays::ArrayElement::Text,
+        parts.into_iter().map(Value::Text).collect(),
+    )))
+}
+
 fn uuid_argument(value: &Value) -> SqlResult<Option<[u8; 16]>> {
     match value {
         Value::Uuid(bytes) => Ok(Some(*bytes)),
@@ -548,6 +603,9 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         }
         ("inet_server_addr" | "inet_server_port" | "inet_client_addr" | "inet_client_port", []) => Ok(Value::Null),
         ("timeofday", []) => Ok(Value::Text(crate::datetime::time_of_day_text())),
+        ("parse_ident", [Value::Null] | [_, Value::Null]) => Ok(Value::Null),
+        ("parse_ident", [Value::Text(text)] | [Value::Text(text), Value::Boolean(true)]) => identifier_parts(text, true).map(identifier_array),
+        ("parse_ident", [Value::Text(text), Value::Boolean(false)]) => identifier_parts(text, false).map(identifier_array),
         ("gen_random_uuid" | "uuid_generate_v4" | "uuidv4", []) => {
             let mut bytes = [0u8; 16];
             crate::random::fill(&mut bytes).map(|()| Value::Uuid(random_uuid(bytes)))
@@ -575,6 +633,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_ident_splits_quoted_and_folds_unquoted_names() {
+        assert_eq!(identifier_parts("SomeSchema.\"SomeTable\"", true).unwrap(), ["someschema", "SomeTable"]);
+        assert_eq!(identifier_parts(" a . \"b\"\"c\" ", true).unwrap(), ["a", "b\"c"]);
+        assert!(identifier_parts("a.b()", true).is_err());
+        assert_eq!(identifier_parts("a.b()", false).unwrap(), ["a", "b"]);
+        assert!(identifier_parts("a..b", true).is_err());
+        assert!(identifier_parts("\"\"", true).is_err());
+    }
 
     #[test]
     fn time_based_uuids_give_back_their_version_and_timestamp() {
