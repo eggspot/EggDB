@@ -839,14 +839,16 @@ pub extern "system" fn SQLDescribeCol(
     };
     let truncated = write_text(name, isize::from(name_capacity), column.as_bytes(), 1);
     store(name_length, i16::try_from(column.len()).unwrap_or(i16::MAX));
-    store(data_type, stmt.sql_type_of(index - 1));
-    store(column_size, 0);
+    let sql_type = stmt.sql_type_of(index - 1);
+    let described = describe_column(sql_type, isize::try_from(stmt.longest(index - 1)).unwrap_or(isize::MAX));
+    store(data_type, sql_type);
+    store(column_size, usize::try_from(described.precision).unwrap_or(0));
     store(digits, 0);
     store(nullable, SQL_NULLABLE_UNKNOWN);
     if truncated { SQL_SUCCESS_WITH_INFO } else { SQL_SUCCESS }
 }
 
-/// A column attribute: the count, name, label, type or nullability.
+/// A column attribute: the count, name, label, type, nullability, sizes and the rest (D1283).
 #[unsafe(no_mangle)]
 pub extern "system" fn SQLColAttribute(
     stmt: *mut c_void,
