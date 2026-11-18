@@ -60,6 +60,8 @@ fn logarithm(value: f64, base: Option<f64>) -> SqlResult<f64> {
             "cannot take logarithm of a negative number"
         })),
         Some(base) if base == 1.0 => Err(SqlError::new(SqlState::DIVISION_BY_ZERO, "division by zero")),
+        Some(10.0) => Ok(value.log10()),
+        Some(2.0) => Ok(value.log2()),
         Some(base) => Ok(value.ln() / base.ln()),
     }
 }
@@ -96,8 +98,10 @@ fn exact_degrees(radians: f64) -> f64 {
 }
 
 fn exact_unit(value: f64) -> f64 {
-    let rounded = value.round();
-    if (value - rounded).abs() < 1e-15 { rounded } else { value }
+    [-1.0, -0.5, 0.0, 0.5, 1.0]
+        .into_iter()
+        .find(|exact: &f64| (value - exact).abs() < 1e-15)
+        .unwrap_or(value)
 }
 
 fn trigonometric(name: &str, x: f64) -> SqlResult<f64> {
@@ -424,6 +428,8 @@ mod tests {
         assert_eq!(call("ln", &[Value::Double(1.0)]), Value::Double(0.0));
         assert_eq!(call("log", &[Value::Integer(100)]), Value::Double(2.0));
         assert_eq!(call("log", &[Value::Double(2.0), Value::Double(8.0)]), Value::Double(3.0));
+        let Value::Double(cube) = call("log", &[Value::Double(3.0), Value::Double(27.0)]) else { panic!("double") };
+        assert!((cube - 3.0).abs() < 1e-14);
         assert_eq!(call("power", &[Value::Integer(2), Value::Integer(10)]), Value::Double(1024.0));
         assert!(function("ln", &[Value::Integer(0)]).unwrap().is_err());
         assert!(function("power", &[Value::Integer(0), Value::Integer(-1)]).unwrap().is_err());
