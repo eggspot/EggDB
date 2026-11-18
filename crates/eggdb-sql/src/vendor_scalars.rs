@@ -8,7 +8,8 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::{SqlType, Value};
 
-const SQLSERVER_FUNCTIONS: [&str; 11] = [
+const SQLSERVER_FUNCTIONS: [&str; 12] = [
+    "formatmessage",
     "hashbytes",
     "string_escape",
     "app_name",
@@ -277,6 +278,47 @@ fn half_width(character: char) -> char {
     }
 }
 
+fn formatted_message(format: &str, arguments: &[Value]) -> String {
+    let mut out = String::with_capacity(format.len());
+    let mut characters = format.chars().peekable();
+    let mut next = arguments.iter();
+    while let Some(character) = characters.next() {
+        if character != '%' {
+            out.push(character);
+            continue;
+        }
+        let mut flags = String::new();
+        while let Some(&flag) = characters.peek() {
+            if flag.is_ascii_digit() || matches!(flag, '-' | '+' | ' ' | '#' | '.') {
+                flags.push(flag);
+                characters.next();
+            } else {
+                break;
+            }
+        }
+        let Some(kind) = characters.next() else {
+            out.push('%');
+            break;
+        };
+        let argument = || next.next().filter(|value| !value.is_null());
+        match kind {
+            '%' => out.push('%'),
+            's' | 'S' => out.push_str(&argument().map_or_else(|| "(null)".to_owned(), text_of)),
+            'd' | 'i' => out.push_str(&argument().and_then(Value::as_integer).map_or_else(|| "(null)".to_owned(), |number| number.to_string())),
+            'u' => out.push_str(&argument().and_then(Value::as_integer).map_or_else(|| "(null)".to_owned(), |number| (number as u64).to_string())),
+            'x' => out.push_str(&argument().and_then(Value::as_integer).map_or_else(|| "(null)".to_owned(), |number| format!("{number:x}"))),
+            'X' => out.push_str(&argument().and_then(Value::as_integer).map_or_else(|| "(null)".to_owned(), |number| format!("{number:X}"))),
+            'o' => out.push_str(&argument().and_then(Value::as_integer).map_or_else(|| "(null)".to_owned(), |number| format!("{number:o}"))),
+            other => {
+                out.push('%');
+                out.push_str(&flags);
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
 fn text_of(value: &Value) -> String {
     value.to_text().unwrap_or_default()
 }
@@ -309,7 +351,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if !dialect_has(name) {
         return None;
     }
-    if !matches!(name, "nanvl" | "lnnvl") && values.iter().any(Value::is_null) {
+    if !matches!(name, "nanvl" | "lnnvl" | "formatmessage") && values.iter().any(Value::is_null) {
         return Some(Ok(Value::Null));
     }
     let text = |at: usize| values.get(at).and_then(Value::to_text);
@@ -373,6 +415,10 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             Ok(Value::Text(json_escaped(&text_of(value))))
         }
         ("app_name", []) => Ok(Value::Text(String::new())),
+        ("formatmessage", [format, arguments @ ..]) => Ok(match format {
+            Value::Null => Value::Null,
+            format => Value::Text(formatted_message(&text_of(format), arguments)),
+        }),
         ("sys_guid", []) => {
             let mut bytes = [0u8; 16];
             crate::random::fill(&mut bytes).map(|()| Value::Bytea(bytes.to_vec()))
@@ -441,7 +487,7 @@ pub(crate) fn result_type(name: &str, first: Option<SqlType>) -> Option<SqlType>
         "lnnvl" => SqlType::Boolean,
         "nls_upper" | "nls_lower" | "nls_initcap" | "to_clob" | "empty_clob" | "asciistr" | "unistr" | "to_multi_byte"
         | "to_single_byte" => SqlType::Text,
-        "string_escape" | "app_name" => SqlType::Text,
+        "string_escape" | "app_name" | "formatmessage" => SqlType::Text,
         "isnumeric" => SqlType::Integer,
         "quotename" => SqlType::Text,
         "datefromparts" => SqlType::Date,
@@ -473,6 +519,11 @@ mod tests {
         assert!(looks_numeric("-"));
         assert!(!looks_numeric("12a"));
         assert!(!looks_numeric(""));
+        assert_eq!(
+            formatted_message("%s has %d eggs, 100%%, %x", &[Value::Text("Ann".to_owned()), Value::Integer(12), Value::Integer(255)]),
+            "Ann has 12 eggs, 100%, ff"
+        );
+        assert_eq!(formatted_message("%s and %s", &[Value::Text("a".to_owned())]), "a and (null)");
         assert_eq!(json_escaped("a\"b\\c/d\n"), "a\\\"b\\\\c\\/d\\n");
         assert_eq!(ascii_escaped("ABÄC\\"), "AB\\00C4C\\005C");
         assert_eq!(unicode_unescaped("AB\\00C4C\\\\").unwrap(), "ABÄC\\");
