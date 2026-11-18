@@ -49,6 +49,7 @@ const SQL_MAX_CONCURRENT_ACTIVITIES: u16 = 1;
 const SQL_TC_ALL: u16 = 2;
 const SQL_GD_ANY_COLUMN: u32 = 1;
 const SQL_GD_ANY_ORDER: u32 = 2;
+const SQL_GD_BLOCK: u32 = 4;
 
 #[derive(Clone, Copy)]
 enum InfoAnswer {
@@ -67,7 +68,7 @@ const CONVERTS_FROM_TEXT: u32 = CVT_TEXT | CVT_NUMBERS | CVT_DATES | CVT_BINARY;
 const CONVERTS_FROM_DATES: u32 = CVT_TEXT | CVT_DATES;
 const CONVERTS_FROM_BINARY: u32 = CVT_TEXT | CVT_BINARY;
 
-const FIXED_INFO: [(u16, InfoAnswer); 71] = [
+const FIXED_INFO: [(u16, InfoAnswer); 76] = [
     (0, InfoAnswer::Short(0)),
     (8, InfoAnswer::Long(1)),
     (9, InfoAnswer::Short(1)),
@@ -94,7 +95,12 @@ const FIXED_INFO: [(u16, InfoAnswer); 71] = [
     (40, InfoAnswer::Text("procedure")),
     (41, InfoAnswer::Text("")),
     (42, InfoAnswer::Text("")),
-    (44, InfoAnswer::Long(1)),
+    (44, InfoAnswer::Long(0x1 | 0x10)),
+    (79, InfoAnswer::Long(0x1)),
+    (146, InfoAnswer::Long(0x1 | 0x200)),
+    (167, InfoAnswer::Long(0x1 | 0x2 | 0x4 | 0x200)),
+    (153, InfoAnswer::Long(1)),
+    (154, InfoAnswer::Long(3)),
     (45, InfoAnswer::Text("table")),
     (48, InfoAnswer::Long(crate::escapes::CONVERT_FUNCTIONS)),
     (49, InfoAnswer::Long(crate::escapes::NUMERIC_FUNCTIONS)),
@@ -1379,7 +1385,7 @@ pub extern "system" fn SQLGetInfo(dbc: *mut c_void, info: u16, value: *mut c_voi
             store(written, 2);
         }
         SQL_GETDATA_EXTENSIONS => {
-            store(value.cast::<u32>(), SQL_GD_ANY_COLUMN | SQL_GD_ANY_ORDER);
+            store(value.cast::<u32>(), SQL_GD_ANY_COLUMN | SQL_GD_ANY_ORDER | SQL_GD_BLOCK);
             store(written, 4);
         }
         _ => return failed(&mut dbc.diagnostics, Failure::new("HY096", format!("information type {info} is not supported"))),
