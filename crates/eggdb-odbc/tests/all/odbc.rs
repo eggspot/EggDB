@@ -2,7 +2,7 @@ use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
     SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLProcedureColumns, SQLPrepare, SQLPrimaryKeys,
-    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLParamData, SQLPutData, SQLFetchScroll, SQLColAttribute, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
+    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLParamData, SQLPutData, SQLFetchScroll, SQLColAttribute, SQLSetPos, SQLGetCursorName, SQLSetCursorName, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -414,4 +414,28 @@ fn column_attributes_describe_names_types_and_sizes() {
     assert_eq!(SQLColAttribute(stmt, 2, 8, ptr::null_mut(), 0, ptr::null_mut(), &raw mut numeric), 0);
     assert_eq!(numeric, 0);
     assert_eq!(SQLColAttribute(stmt, 3, 14, name.as_mut_ptr().cast(), 32, &raw mut length, &raw mut numeric), SQL_ERROR);
+}
+
+#[test]
+fn set_pos_reads_another_row_of_the_rowset_and_cursors_have_names() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=sqlite\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(SQLSetStmtAttr(stmt, 27, ptr::without_provenance_mut(2), 0), 0);
+    assert_eq!(run(stmt, "SELECT 10 UNION ALL SELECT 20 UNION ALL SELECT 30"), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(SQLSetPos(stmt, 2, 0, 0), 0);
+    assert_eq!(text_column(stmt, 1).as_deref(), Some("20"));
+    assert_eq!(SQLSetPos(stmt, 3, 0, 0), SQL_ERROR);
+    assert_eq!(SQLSetPos(stmt, 1, 2, 0), SQL_ERROR);
+    let mut name = [0u8; 64];
+    let mut length = 0i16;
+    assert_eq!(SQLGetCursorName(stmt, name.as_mut_ptr(), 64, &raw mut length), 0);
+    assert!(name.starts_with(b"SQL_CUR"));
+    let chosen = b"eggs_cursor\0";
+    assert_eq!(SQLSetCursorName(stmt, chosen.as_ptr(), -3), 0);
+    assert_eq!(SQLGetCursorName(stmt, name.as_mut_ptr(), 64, &raw mut length), 0);
+    assert_eq!(&name[..usize::try_from(length).unwrap_or(0)], b"eggs_cursor");
 }

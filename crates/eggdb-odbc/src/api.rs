@@ -1857,9 +1857,9 @@ const SQL_API_ALL_FUNCTIONS: u16 = 0;
 const SQL_API_ODBC3_ALL_FUNCTIONS: u16 = 999;
 const SQL_API_ODBC3_ALL_FUNCTIONS_SIZE: usize = 250;
 const SQL_API_ALL_FUNCTIONS_SIZE: usize = 100;
-const SUPPORTED_FUNCTIONS: [u16; 48] = [
+const SUPPORTED_FUNCTIONS: [u16; 51] = [
     4, 5, 6, 7, 8, 9, 11, 12, 13, 16, 18, 19, 20, 40, 41, 43, 44, 45, 47, 52, 53, 54, 56, 58, 60, 61, 62, 63, 65, 66, 67,
-    70, 72, 48, 49, 1001, 1003, 1005, 1006, 1007, 1010, 1011, 1012, 1014, 1016, 1019, 1020, 1021,
+    70, 72, 48, 49, 68, 21, 17, 1001, 1003, 1005, 1006, 1007, 1010, 1011, 1012, 1014, 1016, 1019, 1020, 1021,
 ];
 const SQL_FETCH_NEXT: i16 = 1;
 const SQL_DIAG_RETURNCODE: i16 = 1;
@@ -2092,5 +2092,66 @@ pub extern "system" fn SQLGetDiagField(
     };
     let truncated = write_text(value.cast(), isize::from(capacity), text.as_bytes(), 1);
     store(written, i16::try_from(text.len()).unwrap_or(i16::MAX));
+    if truncated { SQL_SUCCESS_WITH_INFO } else { SQL_SUCCESS }
+}
+
+const SQL_POSITION: u16 = 0;
+const MOST_CURSOR_NAME_BYTES: usize = 128;
+
+/// Positions the cursor on row `row` (from 1) of the current rowset, so [`SQLGetData`] reads
+/// it (`SQL_POSITION`, D1284); the cursor is read-only, so refreshing, updating, deleting and
+/// adding rows are refused.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLSetPos(stmt: *mut c_void, row: u16, operation: u16, _lock: u16) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    stmt.diagnostics.clear();
+    if operation != SQL_POSITION {
+        return failed(&mut stmt.diagnostics, Failure::new("HYC00", "the cursor is read-only: only SQL_POSITION is supported"));
+    }
+    let Some(start) = stmt.rowset_start else {
+        return failed(&mut stmt.diagnostics, Failure::new("24000", "no rowset has been fetched"));
+    };
+    let Some(at) = usize::from(row).checked_sub(1).filter(|at| *at < stmt.block.row_array_size.max(1)) else {
+        return failed(&mut stmt.diagnostics, Failure::new("HY107", format!("row {row} is outside the rowset")));
+    };
+    let Some(found) = stmt.rows.get(start + at).cloned() else {
+        return failed(&mut stmt.diagnostics, Failure::new("HY107", format!("row {row} is outside the rowset")));
+    };
+    stmt.current = Some(found);
+    stmt.read_offsets = vec![0; stmt.columns.len()];
+    SQL_SUCCESS
+}
+
+fn cursor_name_of(stmt: &StatementHandle, handle: *mut c_void) -> String {
+    stmt.cursor_name.clone().unwrap_or_else(|| format!("SQL_CUR{:X}", handle.addr()))
+}
+
+/// Names the statement's cursor, as `WHERE CURRENT OF` would use it.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLSetCursorName(stmt: *mut c_void, name: *const u8, length: i16) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let Some(name) = input_text(name, isize::from(length)) else {
+        return failed(&mut stmt.diagnostics, Failure::new("HY009", "the cursor name is NULL"));
+    };
+    if name.is_empty() || name.len() > MOST_CURSOR_NAME_BYTES || name.to_ascii_uppercase().starts_with("SQL_CUR") {
+        return failed(&mut stmt.diagnostics, Failure::new("34000", format!("invalid cursor name \"{name}\"")));
+    }
+    stmt.cursor_name = Some(name);
+    SQL_SUCCESS
+}
+
+/// The statement's cursor name: the one set, or a `SQL_CUR` name of the driver's.
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLGetCursorName(stmt_handle: *mut c_void, name: *mut u8, capacity: i16, written: *mut i16) -> SqlReturn {
+    let Some(stmt) = statement(stmt_handle) else {
+        return SQL_INVALID_HANDLE;
+    };
+    let shown = cursor_name_of(stmt, stmt_handle);
+    let truncated = write_text(name, isize::from(capacity), shown.as_bytes(), 1);
+    store(written, i16::try_from(shown.len()).unwrap_or(i16::MAX));
     if truncated { SQL_SUCCESS_WITH_INFO } else { SQL_SUCCESS }
 }

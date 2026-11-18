@@ -31,6 +31,7 @@ pub use api::{
     SQLSetStmtAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables, SQLColumnPrivileges,
     SQLProcedureColumns, SQLNativeSql, SQLCancel, SQLDescribeParam, SQLFetchScroll, SQLGetDiagField,
     SQLGetFunctions, SQLGetStmtAttr, SQLMoreResults, SQLParamData, SQLPutData,
+    SQLGetCursorName, SQLSetCursorName, SQLSetPos,
 };
 pub use wide::{
     SQLColAttributeW, SQLColumnsW, SQLConnectW, SQLDescribeColW, SQLDriverConnectW,

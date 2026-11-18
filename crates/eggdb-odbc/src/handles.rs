@@ -174,6 +174,7 @@ pub(crate) struct StatementHandle {
     pub(crate) awaited: Option<AwaitedData>,
     pub(crate) scrollable: bool,
     pub(crate) rowset_start: Option<usize>,
+    pub(crate) cursor_name: Option<String>,
 }
 
 impl StatementHandle {
@@ -196,6 +197,7 @@ impl StatementHandle {
             awaited: None,
             scrollable: false,
             rowset_start: None,
+            cursor_name: None,
         }
     }
 
