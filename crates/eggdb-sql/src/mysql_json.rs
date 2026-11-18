@@ -7,7 +7,8 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::json::{self, Json, Node};
 use crate::types::{SqlType, Value};
 
-const FUNCTIONS: [&str; 13] = [
+const FUNCTIONS: [&str; 14] = [
+    "json_search",
     "json_extract",
     "json_unquote",
     "json_length",
@@ -187,6 +188,73 @@ fn unquoted(text: &str) -> String {
     text.to_owned()
 }
 
+fn like(pattern: &[char], text: &[char], escape: char) -> bool {
+    match pattern.split_first() {
+        None => text.is_empty(),
+        Some(('%', rest)) => (0..=text.len()).any(|skip| like(rest, &text[skip..], escape)),
+        Some(('_', rest)) => !text.is_empty() && like(rest, &text[1..], escape),
+        Some((first, rest)) => {
+            let (wanted, rest) = match (*first == escape, rest.split_first()) {
+                (true, Some((escaped, after))) => (*escaped, after),
+                _ => (*first, rest),
+            };
+            text.first() == Some(&wanted) && like(rest, &text[1..], escape)
+        }
+    }
+}
+
+fn searched(node: &Node, path: &str, pattern: &[char], escape: char, out: &mut Vec<String>) {
+    match &node.value {
+        Json::String(text) => {
+            let characters: Vec<char> = text.chars().collect();
+            if like(pattern, &characters, escape) {
+                out.push(path.to_owned());
+            }
+        }
+        Json::Array(items) => {
+            for (at, item) in items.iter().enumerate() {
+                searched(item, &format!("{path}[{at}]"), pattern, escape, out);
+            }
+        }
+        Json::Object(members) => {
+            for (key, value) in members {
+                let simple = !key.is_empty() && key.chars().all(|character| character.is_alphanumeric() || character == '_');
+                let step = if simple {
+                    format!("{path}.{key}")
+                } else {
+                    let mut quoted = String::new();
+                    json::write_string(key, &mut quoted);
+                    format!("{path}.{quoted}")
+                };
+                searched(value, &step, pattern, escape, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn search(values: &[Value]) -> SqlResult<Value> {
+    let node = document(&values[0], 1)?;
+    let mode = values[1].to_text().unwrap_or_default().to_ascii_lowercase();
+    if mode != "one" && mode != "all" {
+        return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "The oneOrAll argument to json_search may take these values: 'one' or 'all'."));
+    }
+    let pattern: Vec<char> = values[2].to_text().unwrap_or_default().chars().collect();
+    let escape = values.get(3).and_then(Value::to_text).and_then(|text| text.chars().next()).unwrap_or('\\');
+    let mut found = Vec::new();
+    searched(&node, "$", &pattern, escape, &mut found);
+    let quoted = |path: &String| {
+        let mut out = String::new();
+        json::write_string(path, &mut out);
+        out
+    };
+    Ok(match (found.len(), mode.as_str()) {
+        (0, _) => Value::Null,
+        (_, "one") | (1, _) => Value::Json(quoted(&found[0])),
+        _ => Value::Json(format!("[{}]", found.iter().map(quoted).collect::<Vec<_>>().join(", "))),
+    })
+}
+
 fn extracted(values: &[Value]) -> SqlResult<Value> {
     let node = document(&values[0], 1)?;
     let mut matches = Vec::new();
@@ -228,6 +296,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     }
     Some(match (name, values.len()) {
         ("json_extract", count) if count >= 2 => extracted(values),
+        ("json_search", 3 | 4) => search(values),
         ("json_unquote", 1) => Ok(Value::Text(unquoted(&values[0].to_text().unwrap_or_default()))),
         ("json_valid", 1) => Ok(Value::BigInt(i64::from(json::parse(&values[0].to_text().unwrap_or_default(), false).is_ok()))),
         ("json_type", 1) => document(&values[0], 1).map(|node| Value::Text(mysql_type(&node.value).to_owned())),
@@ -296,7 +365,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         return None;
     }
     Some(match name {
-        "json_extract" | "json_keys" | "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch" => SqlType::Json,
+        "json_extract" | "json_search" | "json_keys" | "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch" => SqlType::Json,
         "json_quote" => SqlType::Text,
         "json_unquote" | "json_type" => SqlType::Text,
         _ => SqlType::BigInt,
@@ -324,5 +393,13 @@ mod tests {
         assert_eq!(unquoted("\"a\\tb\""), "a\tb");
         assert_eq!(unquoted("plain"), "plain");
         assert_eq!(mysql_type(&json::parse("1.5", false).unwrap().value), "DOUBLE");
+        let doc = Value::Text(r#"["abc", [{"k": "10"}, "def"], {"x": "abc"}]"#.to_owned());
+        assert_eq!(search(&[doc.clone(), Value::Text("one".to_owned()), Value::Text("abc".to_owned())]).unwrap(), Value::Json("\"$[0]\"".to_owned()));
+        assert_eq!(
+            search(&[doc.clone(), Value::Text("all".to_owned()), Value::Text("abc".to_owned())]).unwrap(),
+            Value::Json("[\"$[0]\", \"$[2].x\"]".to_owned())
+        );
+        assert_eq!(search(&[doc.clone(), Value::Text("one".to_owned()), Value::Text("1%".to_owned())]).unwrap(), Value::Json("\"$[1][0].k\"".to_owned()));
+        assert_eq!(search(&[doc, Value::Text("all".to_owned()), Value::Text("zzz".to_owned())]).unwrap(), Value::Null);
     }
 }
