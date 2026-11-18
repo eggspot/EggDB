@@ -789,3 +789,14 @@ fn jsonb_set_lax_treats_a_null_value_as_asked() {
     );
     assert_eq!(state(&mut session, "SELECT jsonb_set_lax('{}', '{a}', NULL, true, 'raise_exception')"), "22004");
 }
+
+#[test]
+fn array_fill_repeats_a_value_from_a_lower_bound() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(&mut session, "SELECT array_fill(7, ARRAY[3]) AS f, array_lower(array_fill(0, ARRAY[2], ARRAY[5]), 1) AS l").unwrap(),
+        "f|l\n{7,7,7}|5\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "SELECT array_fill(1, NULL)"), "22004");
+}

@@ -973,6 +973,32 @@ fn editing_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
             }
         }
         ("array_reverse", [Value::Array(array)]) => array_value(array.element, array.items.iter().rev().cloned().collect()),
+        ("array_fill", [_, Value::Null, ..]) => Err(SqlError::new(SqlState::NULL_VALUE_NOT_ALLOWED, "dimension array or low bound array cannot be null")),
+        ("array_fill", [item, Value::Array(dimensions), rest @ ..]) if rest.len() <= 1 => {
+            let lengths: Vec<Option<i64>> = dimensions.items.iter().map(Value::as_integer).collect();
+            let bounds: Vec<Option<i64>> = match rest.first() {
+                Some(Value::Array(bounds)) => bounds.items.iter().map(Value::as_integer).collect(),
+                Some(Value::Null) => return Some(Err(SqlError::new(SqlState::NULL_VALUE_NOT_ALLOWED, "dimension array or low bound array cannot be null"))),
+                _ => vec![Some(1)],
+            };
+            match (lengths.as_slice(), bounds.as_slice()) {
+                ([Some(length)], [Some(lower)]) if *length >= 0 => match i32::try_from(*lower) {
+                    Ok(lower) => {
+                        let count = usize::try_from(*length).unwrap_or(0);
+                        if let Err(error) = crate::memory::check_value_bytes(count.saturating_mul(8)) {
+                            return Some(Err(error));
+                        }
+                        let element = if item.is_null() { ArrayElement::Text } else { element_of_value(item) };
+                        let mut filled = ArrayValue::new(element, vec![item.clone(); count]);
+                        filled.lower_bound = lower;
+                        Ok(Value::Array(Box::new(filled)))
+                    }
+                    Err(_) => Err(SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, "array lower bound is too large")),
+                },
+                ([_], [_]) => Err(SqlError::new(SqlState::ARRAY_SUBSCRIPT_ERROR, "array size must be a non-negative number")),
+                _ => Err(SqlError::not_supported("multidimensional arrays in array_fill")),
+            }
+        }
         ("array_shuffle" | "array_sample", [Value::Null, ..]) => Ok(Value::Null),
         ("array_shuffle", [Value::Array(array)]) => shuffled(array, array.items.len()),
         ("array_sample", [Value::Array(array), count]) => match count.as_integer().and_then(|count| usize::try_from(count).ok()) {
@@ -1507,6 +1533,11 @@ pub(crate) fn function_type(
                 },
             }
         }
+        "array_fill" => arguments
+            .first()
+            .and_then(|item| crate::typing::static_type(item, scope))
+            .and_then(ArrayElement::of)
+            .map(SqlType::Array),
         "array_prepend" => match arguments.get(1).and_then(|array| crate::typing::static_type(array, scope)) {
             Some(SqlType::Array(element)) => Some(SqlType::Array(element)),
             _ => arguments
