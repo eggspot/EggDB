@@ -837,7 +837,158 @@ fn joined(array: &ArrayValue, separator: &str, null_text: Option<&str>) -> SqlRe
     Ok(Value::Text(out))
 }
 
+fn same_item(left: &Value, right: &Value) -> SqlResult<bool> {
+    match (left.is_null(), right.is_null()) {
+        (true, true) => Ok(true),
+        (true, false) | (false, true) => Ok(false),
+        (false, false) => Ok(compare_truth(left, right, "=")?.unwrap_or(false)),
+    }
+}
+
+fn array_value(element: ArrayElement, items: Vec<Value>) -> SqlResult<Value> {
+    crate::memory::check_value_bytes(items.len().saturating_mul(8))?;
+    Ok(Value::Array(Box::new(ArrayValue::new(element, items))))
+}
+
+fn element_of_value(value: &Value) -> ArrayElement {
+    value.sql_type().and_then(ArrayElement::of).unwrap_or(ArrayElement::Text)
+}
+
+fn split_text(text: &str, delimiter: Option<&str>, null_text: Option<&str>) -> Vec<Value> {
+    let pieces: Vec<String> = match delimiter {
+        _ if text.is_empty() => Vec::new(),
+        None => text.chars().map(String::from).collect(),
+        Some("") => vec![text.to_owned()],
+        Some(delimiter) => text.split(delimiter).map(str::to_owned).collect(),
+    };
+    pieces
+        .into_iter()
+        .map(|piece| if null_text == Some(piece.as_str()) { Value::Null } else { Value::Text(piece) })
+        .collect()
+}
+
+/// PostgreSQL's functions that build and edit arrays (D1288): `array_append`,
+/// `array_prepend`, `array_cat`, `array_remove`, `array_replace`, `array_position(s)`,
+/// `trim_array`, `array_reverse`, `array_dims` and `string_to_array`.
+fn editing_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    let result = match (name, values) {
+        ("array_append", [Value::Null, Value::Null]) | ("array_prepend", [Value::Null, Value::Null]) => Ok(Value::Null),
+        ("array_append", [Value::Null, item]) | ("array_prepend", [item, Value::Null]) => {
+            array_value(element_of_value(item), vec![item.clone()])
+        }
+        ("array_append", [Value::Array(array), item]) => {
+            let mut items = array.items.clone();
+            items.push(item.clone());
+            array_value(array.element, items)
+        }
+        ("array_prepend", [item, Value::Array(array)]) => {
+            let mut items = Vec::with_capacity(array.items.len() + 1);
+            items.push(item.clone());
+            items.extend(array.items.iter().cloned());
+            array_value(array.element, items)
+        }
+        ("array_cat", [Value::Null, other]) | ("array_cat", [other, Value::Null]) => Ok(other.clone()),
+        ("array_cat", [Value::Array(left), Value::Array(right)]) => {
+            array_value(left.element, left.items.iter().chain(&right.items).cloned().collect())
+        }
+        ("array_remove" | "array_replace" | "array_position" | "array_positions" | "trim_array" | "array_reverse" | "array_dims", [Value::Null, ..]) => {
+            Ok(Value::Null)
+        }
+        ("array_remove", [Value::Array(array), removed]) => {
+            let mut kept = Vec::with_capacity(array.items.len());
+            for item in &array.items {
+                match same_item(item, removed) {
+                    Ok(true) => {}
+                    Ok(false) => kept.push(item.clone()),
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+            array_value(array.element, kept)
+        }
+        ("array_replace", [Value::Array(array), from, to]) => {
+            let mut replaced = Vec::with_capacity(array.items.len());
+            for item in &array.items {
+                match same_item(item, from) {
+                    Ok(true) => replaced.push(to.clone()),
+                    Ok(false) => replaced.push(item.clone()),
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+            array_value(array.element, replaced)
+        }
+        ("array_position", [Value::Array(array), wanted, rest @ ..]) => {
+            let start = match rest.first() {
+                None => array.lower_bound,
+                Some(Value::Null) => return Some(Ok(Value::Null)),
+                Some(start) => match start.as_integer().and_then(|start| i32::try_from(start).ok()) {
+                    Some(start) => start,
+                    None => return Some(Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "initial position must not be null"))),
+                },
+            };
+            let mut found = Value::Null;
+            for (at, item) in array.items.iter().enumerate() {
+                let subscript = array.lower_bound.saturating_add(i32::try_from(at).unwrap_or(i32::MAX));
+                if subscript < start {
+                    continue;
+                }
+                match same_item(item, wanted) {
+                    Ok(true) => {
+                        found = Value::Integer(subscript);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+            Ok(found)
+        }
+        ("array_positions", [Value::Array(array), wanted]) => {
+            let mut found = Vec::new();
+            for (at, item) in array.items.iter().enumerate() {
+                match same_item(item, wanted) {
+                    Ok(true) => found.push(Value::Integer(array.lower_bound.saturating_add(i32::try_from(at).unwrap_or(i32::MAX)))),
+                    Ok(false) => {}
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+            array_value(ArrayElement::Integer, found)
+        }
+        ("trim_array", [Value::Array(array), count]) => {
+            let length = array.items.len();
+            match count.as_integer().and_then(|count| usize::try_from(count).ok()).filter(|count| *count <= length) {
+                Some(count) => array_value(array.element, array.items[..length - count].to_vec()),
+                None if count.is_null() => Ok(Value::Null),
+                None => Err(SqlError::new(
+                    SqlState::ARRAY_SUBSCRIPT_ERROR,
+                    format!("number of elements to trim must be between 0 and {length}"),
+                )),
+            }
+        }
+        ("array_reverse", [Value::Array(array)]) => array_value(array.element, array.items.iter().rev().cloned().collect()),
+        ("array_dims", [Value::Array(array)]) if array.items.is_empty() => Ok(Value::Null),
+        ("array_dims", [Value::Array(array)]) => Ok(Value::Text(format!(
+            "[{}:{}]",
+            array.lower_bound,
+            array.upper_bound().unwrap_or(i64::from(array.lower_bound))
+        ))),
+        ("string_to_array", [Value::Null, ..]) => Ok(Value::Null),
+        ("string_to_array", [text, delimiter, rest @ ..]) if rest.len() <= 1 => {
+            let Some(text) = text.to_text() else {
+                return Some(Ok(Value::Null));
+            };
+            let delimiter = delimiter.to_text();
+            let null_text = rest.first().and_then(Value::to_text);
+            array_value(ArrayElement::Text, split_text(&text, delimiter.as_deref(), null_text.as_deref()))
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    if let Some(result) = editing_function(name, values) {
+        return Some(result);
+    }
     let known = matches!(
         name,
         "array_to_string"
@@ -1328,6 +1479,28 @@ pub(crate) fn function_type(
             _ => None,
         },
         "array_any" | "array_all" => Some(SqlType::Boolean),
+        "array_append" | "array_cat" | "array_remove" | "array_replace" | "trim_array" | "array_reverse" => {
+            match arguments.first().and_then(|array| crate::typing::static_type(array, scope)) {
+                Some(SqlType::Array(element)) => Some(SqlType::Array(element)),
+                _ => match arguments.get(1).and_then(|other| crate::typing::static_type(other, scope)) {
+                    Some(SqlType::Array(element)) => Some(SqlType::Array(element)),
+                    Some(item) if name == "array_append" => ArrayElement::of(item).map(SqlType::Array),
+                    _ => None,
+                },
+            }
+        }
+        "array_prepend" => match arguments.get(1).and_then(|array| crate::typing::static_type(array, scope)) {
+            Some(SqlType::Array(element)) => Some(SqlType::Array(element)),
+            _ => arguments
+                .first()
+                .and_then(|item| crate::typing::static_type(item, scope))
+                .and_then(ArrayElement::of)
+                .map(SqlType::Array),
+        },
+        "array_position" => Some(SqlType::Integer),
+        "array_positions" => Some(SqlType::Array(ArrayElement::Integer)),
+        "array_dims" => Some(SqlType::Text),
+        "string_to_array" => Some(SqlType::Array(ArrayElement::Text)),
         "array_to_string" => Some(SqlType::Text),
         "array_length" | "array_upper" | "array_lower" | "array_ndims" | "cardinality" => {
             Some(SqlType::Integer)

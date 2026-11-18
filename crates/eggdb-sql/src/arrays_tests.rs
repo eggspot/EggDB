@@ -686,3 +686,23 @@ fn slices_take_a_range_of_elements_clamped_to_the_array() {
     assert_eq!(run(&mut session, "SELECT points[0:9] AS whole, points[5:6] AS outside FROM series").unwrap(), "whole|outside\n{10,20,30,40}|{}\nSELECT 1");
     assert_eq!(run(&mut session, "SELECT points[NULL:2] IS NULL AS nothing FROM series").unwrap(), "nothing\nt\nSELECT 1");
 }
+
+#[test]
+fn arrays_are_built_edited_and_searched_as_postgresql_does() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(&mut session, "SELECT array_append(ARRAY[1, 2], 3), array_prepend(0, ARRAY[1]), array_cat(ARRAY[1], ARRAY[2, 3])").unwrap(),
+        "array_append|array_prepend|array_cat\n{1,2,3}|{0,1}|{1,2,3}\nSELECT 1"
+    );
+    assert_eq!(
+        run(&mut session, "SELECT array_remove(ARRAY[1, 2, 1, NULL], 1), array_replace(ARRAY[1, 2, 1], 1, 9), array_position(ARRAY['a', 'b', 'a'], 'a', 2), array_positions(ARRAY[1, 2, 1], 1)").unwrap(),
+        "array_remove|array_replace|array_position|array_positions\n{2,NULL}|{9,2,9}|3|{1,3}\nSELECT 1"
+    );
+    assert_eq!(
+        run(&mut session, "SELECT string_to_array('a,b,,c', ',', ''), string_to_array('xyz', NULL), trim_array(ARRAY[1, 2, 3], 2), array_dims(ARRAY[4, 5])").unwrap(),
+        "string_to_array|string_to_array|trim_array|array_dims\n{a,b,NULL,c}|{x,y,z}|{1}|[1:2]\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "SELECT trim_array(ARRAY[1], 2)"), "2202E");
+    assert_eq!(run(&mut session, "SELECT array_position(ARRAY[1], 5)").unwrap(), "array_position\nNULL\nSELECT 1");
+}

@@ -602,7 +602,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A data-modifying `WITH` query that resolves conflicts (sql.md); `CREATE RECURSIVE VIEW` is
   built (D299). **Code written, unbuilt** (code-only mode, 2026-11-14, D1141).
 - Multidimensional arrays and array slices (D19, D288). Slices of one-dimensional arrays (`a[lo:hi]`, `a[:hi]`, `a[lo:]`):
-  **code written, unbuilt** (code-only mode, 2026-11-13, D977). Left: multidimensional arrays.
+  **code written, unbuilt** (code-only mode, 2026-11-13, D977); the editing and search functions (`array_append`, `array_remove`,
+  `array_position`, `string_to_array` and the rest): **code written, unbuilt** (D1288). Left: multidimensional arrays.
 - Generated columns' rest (D322): SQL Server's `sys.computed_columns` rows, the generation clause
   in SQLite's, Oracle's and MySQL's `CREATE TABLE` text and `SHOW CREATE TABLE`, `ALTER COLUMN
   ... SET EXPRESSION`/`DROP EXPRESSION`, MySQL `MODIFY` of a generated column, virtual columns

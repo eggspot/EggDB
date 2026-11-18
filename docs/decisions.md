@@ -1312,3 +1312,4 @@ its full title with its status.
 - [D1285](decisions/D1285.md) Code-only batch 941 (M6): sqlite3 conveniences in the Python driver
 - [D1286](decisions/D1286.md) Code-only batch 942 (M6): row factories and eggdb.Row
 - [D1287](decisions/D1287.md) Code-only batch 943 (M4): ST_Touches, ST_Crosses and ST_Overlaps
+- [D1288](decisions/D1288.md) Code-only batch 944 (M4): PostgreSQL's array editing functions
