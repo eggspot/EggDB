@@ -516,3 +516,134 @@ pub fn contains_properly(outer: &Geometry, inner: &Geometry) -> bool {
             .iter()
             .any(|segment| edges.iter().any(|edge| segments_cross(*segment, *edge)))
 }
+
+fn topological_dimension(geometry: &Geometry) -> u8 {
+    match geometry {
+        Geometry::Point(_) | Geometry::MultiPoint(_) => 0,
+        Geometry::LineString(_) | Geometry::MultiLineString(_) => 1,
+        Geometry::Polygon(_) | Geometry::MultiPolygon(_) => 2,
+        Geometry::Collection(items) => items.iter().map(topological_dimension).max().unwrap_or(0),
+    }
+}
+
+fn line_ends_of(geometry: &Geometry) -> Vec<Coord> {
+    let lines: Vec<&Vec<Coord>> = match geometry {
+        Geometry::LineString(points) => vec![points],
+        Geometry::MultiLineString(lines) => lines.iter().collect(),
+        _ => Vec::new(),
+    };
+    let mut ends: Vec<(Coord, usize)> = Vec::new();
+    for line in lines.into_iter().filter(|line| line.len() >= 2) {
+        for end in [line[0], line[line.len() - 1]] {
+            match ends.iter_mut().find(|(seen, _)| *seen == end) {
+                Some((_, count)) => *count += 1,
+                None => ends.push((end, 1)),
+            }
+        }
+    }
+    ends.into_iter().filter(|(_, count)| count % 2 == 1).map(|(end, _)| end).collect()
+}
+
+fn in_interior(point: Coord, geometry: &Geometry) -> bool {
+    match topological_dimension(geometry) {
+        0 => points(geometry).contains(&point),
+        1 => {
+            segments(geometry).iter().any(|segment| point_segment(point, *segment) == 0.0)
+                && !line_ends_of(geometry).contains(&point)
+        }
+        _ => polygons(geometry).iter().any(|rings| in_polygon(point, rings) && !on_boundary(point, rings)),
+    }
+}
+
+fn along((a, b): (Coord, Coord), t: f64) -> Coord {
+    Coord {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+    }
+}
+
+fn parameter_on((a, b): (Coord, Coord), point: Coord) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length = dx * dx + dy * dy;
+    if length == 0.0 {
+        return 0.0;
+    }
+    (((point.x - a.x) * dx + (point.y - a.y) * dy) / length).clamp(0.0, 1.0)
+}
+
+fn sample_points(geometry: &Geometry, other: &Geometry) -> Vec<Coord> {
+    let mut samples = vertices(geometry);
+    let edges = segments(other);
+    for segment in segments(geometry) {
+        let mut cuts = vec![0.0, 1.0];
+        for edge in &edges {
+            if segments_cross(segment, *edge) {
+                cuts.push(parameter_on(segment, crossing_point(segment, *edge)));
+                cuts.push(parameter_on(segment, edge.0));
+                cuts.push(parameter_on(segment, edge.1));
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        samples.extend(cuts.windows(2).map(|pair| along(segment, (pair[0] + pair[1]) / 2.0)));
+    }
+    if let Some(inside) = crate::operations::centroid(geometry) {
+        samples.push(inside);
+    }
+    samples
+}
+
+fn interiors_meet(left: &Geometry, right: &Geometry) -> bool {
+    let both = |from: &Geometry, to: &Geometry| {
+        let open = topological_dimension(to) == 2;
+        sample_points(from, to)
+            .into_iter()
+            .any(|point| in_interior(point, to) && (open || in_interior(point, from)))
+    };
+    if both(left, right) || both(right, left) {
+        return true;
+    }
+    let crossing_edges = segments(left)
+        .iter()
+        .any(|first| segments(right).iter().any(|second| crosses_properly(*first, *second)));
+    crossing_edges && topological_dimension(left) > 0 && topological_dimension(right) > 0
+}
+
+/// Whether the geometries meet only at their boundaries (`ST_Touches`, D1287): they intersect
+/// and no point lies in both interiors. Interiors are tested at the vertices, the segments'
+/// middles, the centroid and proper crossings of edges.
+pub fn touches(left: &Geometry, right: &Geometry) -> bool {
+    let both_points = topological_dimension(left) == 0 && topological_dimension(right) == 0;
+    !both_points && intersects(left, right) && !interiors_meet(left, right)
+}
+
+/// Whether the geometries cross (`ST_Crosses`): two lines whose edges cross properly, or a
+/// lower-dimension geometry with points both inside and outside the higher one's interior.
+pub fn crosses(left: &Geometry, right: &Geometry) -> bool {
+    let (left_dimension, right_dimension) = (topological_dimension(left), topological_dimension(right));
+    match (left_dimension, right_dimension) {
+        (1, 1) => segments(left)
+            .iter()
+            .any(|first| segments(right).iter().any(|second| crosses_properly(*first, *second))),
+        (low, high) if low < high => {
+            let samples = sample_points(left, right).into_iter().filter(|point| in_interior(*point, left)).collect::<Vec<_>>();
+            let samples = if samples.is_empty() { vertices(left) } else { samples };
+            samples.iter().any(|point| in_interior(*point, right)) && samples.iter().any(|point| !covered(*point, right))
+        }
+        (low, high) if low > high => crosses(right, left),
+        _ => false,
+    }
+}
+
+/// Whether the geometries overlap (`ST_Overlaps`): of the same dimension, their interiors meet,
+/// and neither covers the other.
+pub fn overlaps(left: &Geometry, right: &Geometry) -> bool {
+    if topological_dimension(left) != topological_dimension(right) {
+        return false;
+    }
+    let shared = match topological_dimension(left) {
+        0 => points(left).iter().any(|point| points(right).contains(point)),
+        _ => interiors_meet(left, right),
+    };
+    shared && !contains(left, right) && !contains(right, left)
+}

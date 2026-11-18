@@ -2,7 +2,7 @@ use crate::{
     Coord, Geometry, area, centroid, contains, convex_hull, distance, envelope, from_wkb, from_wkt,
     intersects, invalidity, length, parts, perimeter, simplified, sphere_distance, to_geojson,
     to_wkb, to_wkt, translated, affine, as_multi, azimuth, boundary, expanded, rotated, segmentized,
-    snapped_to_grid, without_repeated_points, hausdorff_distance, longest_line, shortest_line, is_simple, contains_properly,
+    snapped_to_grid, without_repeated_points, hausdorff_distance, longest_line, shortest_line, is_simple, contains_properly, crosses, overlaps, touches,
 };
 
 fn geometry(text: &str) -> Geometry {
@@ -262,4 +262,22 @@ fn proper_containment_keeps_off_the_boundary() {
     assert!(contains(&square, &geometry("POINT(0 5)")));
     assert!(contains_properly(&square, &geometry("LINESTRING(1 1,9 9)")));
     assert!(!contains_properly(&square, &geometry("LINESTRING(0 0,9 9)")));
+}
+
+#[test]
+fn touching_crossing_and_overlapping_geometries() {
+    let left_square = geometry("POLYGON((0 0,0 1,1 1,1 0,0 0))");
+    let right_square = geometry("POLYGON((1 0,1 1,2 1,2 0,1 0))");
+    let shifted = geometry("POLYGON((0.5 0,0.5 1,1.5 1,1.5 0,0.5 0))");
+    assert!(touches(&left_square, &right_square));
+    assert!(!touches(&left_square, &shifted));
+    assert!(touches(&geometry("LINESTRING(0 0,1 0)"), &geometry("LINESTRING(1 0,2 0)")));
+    assert!(!touches(&geometry("POINT(1 1)"), &geometry("POINT(1 1)")));
+    assert!(crosses(&geometry("LINESTRING(0 0,2 2)"), &geometry("LINESTRING(0 2,2 0)")));
+    assert!(crosses(&geometry("LINESTRING(-1 0.5,0.5 0.5)"), &left_square));
+    assert!(!crosses(&geometry("LINESTRING(0.2 0.5,0.8 0.5)"), &left_square));
+    assert!(overlaps(&left_square, &shifted));
+    assert!(!overlaps(&left_square, &right_square));
+    assert!(!overlaps(&left_square, &geometry("POLYGON((0.2 0.2,0.2 0.8,0.8 0.8,0.8 0.2,0.2 0.2))")));
+    assert!(overlaps(&geometry("LINESTRING(0 0,2 0)"), &geometry("LINESTRING(1 0,3 0)")));
 }
