@@ -24,8 +24,9 @@ pub use mvt::{MvtFeature, MvtValue, encode_layer};
 pub use projections::{knows_srid, transform};
 pub use s2::{s2_cell_id, s2_token};
 pub use operations::{
-    centroid, convex_hull, flipped, invalidity, parts, perimeter, reversed, scaled, simplified,
-    translated,
+    affine, as_multi, azimuth, boundary, centroid, convex_hull, expanded, flipped, invalidity, parts,
+    perimeter, reversed, rotated, scaled, segmentized, simplified, snapped_to_grid, translated,
+    without_repeated_points,
 };
 pub use tile_geometry::{TileGrid, tile_geometry};
 pub use tiles::{WEB_MERCATOR_RADIUS, from_web_mercator, geohash, tile_envelope, to_web_mercator};

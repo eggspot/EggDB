@@ -359,3 +359,209 @@ pub fn parts(geometry: &Geometry) -> Vec<Geometry> {
         single => vec![single.clone()],
     }
 }
+
+/// The geometry turned `angle` radians counter-clockwise about `origin` (D1272).
+pub fn rotated(geometry: &Geometry, angle: f64, origin: Coord) -> Geometry {
+    let (sin, cos) = angle.sin_cos();
+    mapped_coords(geometry, &|coord| {
+        let (dx, dy) = (coord.x - origin.x, coord.y - origin.y);
+        Coord {
+            x: origin.x + dx * cos - dy * sin,
+            y: origin.y + dx * sin + dy * cos,
+        }
+    })
+}
+
+/// The geometry under the two-dimensional affine map `x' = a·x + b·y + x_offset`,
+/// `y' = d·x + e·y + y_offset`.
+pub fn affine(geometry: &Geometry, [a, b, d, e, x_offset, y_offset]: [f64; 6]) -> Geometry {
+    mapped_coords(geometry, &|coord| Coord {
+        x: a * coord.x + b * coord.y + x_offset,
+        y: d * coord.x + e * coord.y + y_offset,
+    })
+}
+
+fn deduplicated(points: &[Coord]) -> Vec<Coord> {
+    let mut kept: Vec<Coord> = Vec::with_capacity(points.len());
+    for point in points {
+        if kept.last() != Some(point) {
+            kept.push(*point);
+        }
+    }
+    kept
+}
+
+fn kept_ring(ring: &[Coord]) -> Option<Vec<Coord>> {
+    let ring = deduplicated(ring);
+    (ring.len() >= 4).then_some(ring)
+}
+
+/// The geometry without consecutive repeated points in its lines and rings, and without
+/// repeated points in a multipoint; a ring left with fewer than four points is dropped.
+pub fn without_repeated_points(geometry: &Geometry) -> Geometry {
+    let rings = |rings: &Vec<Vec<Coord>>| rings.iter().filter_map(|ring| kept_ring(ring)).collect::<Vec<_>>();
+    match geometry {
+        Geometry::LineString(points) => Geometry::LineString(deduplicated(points)),
+        Geometry::MultiPoint(points) => {
+            let mut kept: Vec<Coord> = Vec::with_capacity(points.len());
+            for point in points {
+                if !kept.contains(point) {
+                    kept.push(*point);
+                }
+            }
+            Geometry::MultiPoint(kept)
+        }
+        Geometry::Polygon(polygon) => Geometry::Polygon(rings(polygon)),
+        Geometry::MultiLineString(lines) => Geometry::MultiLineString(lines.iter().map(|line| deduplicated(line)).collect()),
+        Geometry::MultiPolygon(polygons) => Geometry::MultiPolygon(polygons.iter().map(rings).filter(|polygon| !polygon.is_empty()).collect()),
+        Geometry::Collection(items) => Geometry::Collection(items.iter().map(without_repeated_points).collect()),
+        point => point.clone(),
+    }
+}
+
+/// The geometry with every coordinate rounded to the nearest multiple of `size`, then without
+/// repeated points; `size` 0 leaves the coordinates alone.
+pub fn snapped_to_grid(geometry: &Geometry, size: f64) -> Geometry {
+    if size <= 0.0 {
+        return without_repeated_points(geometry);
+    }
+    let snapped = mapped_coords(geometry, &|coord| Coord {
+        x: (coord.x / size).round() * size,
+        y: (coord.y / size).round() * size,
+    });
+    without_repeated_points(&snapped)
+}
+
+fn each_coord(geometry: &Geometry, visit: &mut dyn FnMut(Coord)) {
+    match geometry {
+        Geometry::Point(Some(point)) => visit(*point),
+        Geometry::Point(None) => {}
+        Geometry::LineString(points) | Geometry::MultiPoint(points) => points.iter().copied().for_each(&mut *visit),
+        Geometry::Polygon(rings) | Geometry::MultiLineString(rings) => rings.iter().flatten().copied().for_each(&mut *visit),
+        Geometry::MultiPolygon(polygons) => polygons.iter().flatten().flatten().copied().for_each(&mut *visit),
+        Geometry::Collection(items) => {
+            for item in items {
+                each_coord(item, &mut *visit);
+            }
+        }
+    }
+}
+
+/// The geometry's bounding box grown by `amount` on every side, as a polygon; `None` for an
+/// empty geometry.
+pub fn expanded(geometry: &Geometry, amount: f64) -> Option<Geometry> {
+    let mut bounds: Option<(f64, f64, f64, f64)> = None;
+    each_coord(geometry, &mut |coord| {
+        bounds = Some(match bounds {
+            None => (coord.x, coord.y, coord.x, coord.y),
+            Some((x_min, y_min, x_max, y_max)) => (x_min.min(coord.x), y_min.min(coord.y), x_max.max(coord.x), y_max.max(coord.y)),
+        });
+    });
+    let (x_min, y_min, x_max, y_max) = bounds?;
+    let (x_min, y_min, x_max, y_max) = (x_min - amount, y_min - amount, x_max + amount, y_max + amount);
+    Some(Geometry::Polygon(vec![vec![
+        Coord { x: x_min, y: y_min },
+        Coord { x: x_min, y: y_max },
+        Coord { x: x_max, y: y_max },
+        Coord { x: x_max, y: y_min },
+        Coord { x: x_min, y: y_min },
+    ]]))
+}
+
+fn line_ends(lines: &[Vec<Coord>]) -> Vec<Coord> {
+    let mut ends: Vec<(Coord, usize)> = Vec::new();
+    for line in lines.iter().filter(|line| line.len() >= 2) {
+        for end in [line[0], line[line.len() - 1]] {
+            match ends.iter_mut().find(|(seen, _)| *seen == end) {
+                Some((_, count)) => *count += 1,
+                None => ends.push((end, 1)),
+            }
+        }
+    }
+    ends.into_iter().filter(|(_, count)| count % 2 == 1).map(|(end, _)| end).collect()
+}
+
+/// The geometry's boundary in the Simple Features sense: a polygon's rings as lines, a line's
+/// ends that are not shared an even number of times (the mod-2 rule) as points, and nothing for
+/// points.
+pub fn boundary(geometry: &Geometry) -> Geometry {
+    match geometry {
+        Geometry::Point(_) | Geometry::MultiPoint(_) => Geometry::Collection(Vec::new()),
+        Geometry::LineString(points) => Geometry::MultiPoint(line_ends(std::slice::from_ref(points))),
+        Geometry::MultiLineString(lines) => Geometry::MultiPoint(line_ends(lines)),
+        Geometry::Polygon(rings) if rings.len() == 1 => Geometry::LineString(rings[0].clone()),
+        Geometry::Polygon(rings) => Geometry::MultiLineString(rings.clone()),
+        Geometry::MultiPolygon(polygons) => Geometry::MultiLineString(polygons.iter().flatten().cloned().collect()),
+        Geometry::Collection(items) => Geometry::Collection(items.iter().map(boundary).collect()),
+    }
+}
+
+fn densified(points: &[Coord], most: f64) -> Vec<Coord> {
+    let mut out = Vec::with_capacity(points.len());
+    for pair in points.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        out.push(start);
+        let length = (end.x - start.x).hypot(end.y - start.y);
+        let pieces = (length / most).ceil().min(crate::MAX_POINTS as f64) as usize;
+        for step in 1..pieces {
+            let fraction = step as f64 / pieces as f64;
+            out.push(Coord {
+                x: start.x + (end.x - start.x) * fraction,
+                y: start.y + (end.y - start.y) * fraction,
+            });
+        }
+    }
+    if let Some(last) = points.last() {
+        out.push(*last);
+    }
+    out
+}
+
+/// The geometry with points added along every segment longer than `most`, so that no segment
+/// is longer; the original points stay.
+///
+/// # Errors
+///
+/// `most` not above zero, or a result of more than [`crate::MAX_POINTS`] points.
+pub fn segmentized(geometry: &Geometry, most: f64) -> Result<Geometry, crate::GeoError> {
+    if most.is_nan() || most <= 0.0 {
+        return Err(crate::GeoError("ST_Segmentize needs a positive maximum length".to_owned()));
+    }
+    let line = |line: &Vec<Coord>| densified(line, most);
+    let result = match geometry {
+        Geometry::LineString(points) => Geometry::LineString(line(points)),
+        Geometry::Polygon(rings) => Geometry::Polygon(rings.iter().map(line).collect()),
+        Geometry::MultiLineString(lines) => Geometry::MultiLineString(lines.iter().map(line).collect()),
+        Geometry::MultiPolygon(polygons) => Geometry::MultiPolygon(polygons.iter().map(|rings| rings.iter().map(line).collect()).collect()),
+        Geometry::Collection(items) => Geometry::Collection(items.iter().map(|item| segmentized(item, most)).collect::<Result<_, _>>()?),
+        other => other.clone(),
+    };
+    let mut count = 0usize;
+    each_coord(&result, &mut |_| count += 1);
+    if count > crate::MAX_POINTS {
+        return Err(crate::GeoError(format!("ST_Segmentize would make more than {} points", crate::MAX_POINTS)));
+    }
+    Ok(result)
+}
+
+/// The single form of a geometry as a multi-geometry of one part (`ST_Multi`); a multi-geometry
+/// or collection stays as it is.
+pub fn as_multi(geometry: &Geometry) -> Geometry {
+    match geometry {
+        Geometry::Point(point) => Geometry::MultiPoint(point.iter().copied().collect()),
+        Geometry::LineString(points) => Geometry::MultiLineString(vec![points.clone()]),
+        Geometry::Polygon(rings) => Geometry::MultiPolygon(vec![rings.clone()]),
+        other => other.clone(),
+    }
+}
+
+/// The direction from `from` to `to` in radians clockwise from north (the positive y axis), in
+/// `[0, 2π)`; `None` when the points are the same.
+pub fn azimuth(from: Coord, to: Coord) -> Option<f64> {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    if dx == 0.0 && dy == 0.0 {
+        return None;
+    }
+    let angle = dx.atan2(dy);
+    Some(if angle < 0.0 { angle + std::f64::consts::TAU } else { angle })
+}

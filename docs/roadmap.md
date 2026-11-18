@@ -1683,7 +1683,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - An ANN benchmark (recall and queries per second) against pgvector (D203).
 - A stored geometry type (hex EWKB, the binary wire format, a catalog entry) (D204). **Code written, unbuilt** (code-only mode, 2026-11-12,
   D845); typmods (`geometry(Point, 4326)`) as checks: **code written, unbuilt** (code-only mode, 2026-11-12, D846).
-  Left: `geography`, Z and M subtypes, and the spatial functions returning `geometry`.
+  Geometry editing functions (`ST_Rotate`, `ST_Affine`, `ST_SnapToGrid`, `ST_Boundary`, `ST_Segmentize`, the line edits and
+  more): **code written, unbuilt** (code-only mode, 2026-11-18, D1272). Left: `geography`, Z and M subtypes, and the overlay
+  functions (`ST_Buffer`, `ST_Union`, `ST_Difference`).
 - R-tree spatial indexes, with MySQL's `SPATIAL` keys (D204, sql.md).
 - Z and M coordinates, and geography on the WGS 84 spheroid (D204). Distances and lengths on the spheroid (`ST_DistanceSpheroid`,
   `ST_LengthSpheroid`): **code written, unbuilt** (code-only mode, 2026-11-17, D1225). Left: Z and M, the `geography`

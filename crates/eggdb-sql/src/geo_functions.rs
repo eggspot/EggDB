@@ -6,7 +6,21 @@ use eggdb_geo::{Coord, Geometry, Spatial};
 const GEOGRAPHY_SRID: i32 = 4326;
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 70] = [
+pub(crate) const FUNCTIONS: [&str; 84] = [
+    "st_rotate",
+    "st_affine",
+    "st_snaptogrid",
+    "st_removerepeatedpoints",
+    "st_expand",
+    "st_boundary",
+    "st_segmentize",
+    "st_multi",
+    "st_force2d",
+    "st_makepolygon",
+    "st_addpoint",
+    "st_removepoint",
+    "st_setpoint",
+    "st_azimuth",
     "sqlserver_stdistance",
     "sqlserver_stgeometrytype",
     "st_linelocatepoint",
@@ -87,7 +101,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "s2_cellidtotoken" => SqlType::Text,
         "st_x" | "st_y" | "st_distance" | "sqlserver_stdistance" | "st_area" | "st_length" | "st_distancesphere"
         | "st_distancespheroid" | "st_lengthspheroid"
-        | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" | "st_linelocatepoint" => SqlType::Double,
+        | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" | "st_linelocatepoint" | "st_azimuth" => SqlType::Double,
         "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" => {
             SqlType::Integer
         }
@@ -224,6 +238,13 @@ fn spheroid_argument(value: Option<&Value>) -> SqlResult<eggdb_geo::Spheroid> {
             let text = value.to_text().unwrap_or_default();
             eggdb_geo::Spheroid::parse(&text).map_err(argument_error)
         }
+    }
+}
+
+fn point_at(spatial: &Spatial) -> SqlResult<Coord> {
+    match spatial.geometry {
+        Geometry::Point(Some(point)) => Ok(point),
+        _ => Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "a point is expected")),
     }
 }
 
@@ -734,6 +755,105 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                     srid: source.srid,
                     geometry: Geometry::Point(Some(*point)),
                 }),
+                None => Value::Null,
+            }
+        }
+        ("st_rotate", [_, angle, origin @ ..]) => {
+            let source = spatial(0)?;
+            let origin = match origin {
+                [] => Coord { x: 0.0, y: 0.0 },
+                [x, y] => Coord { x: number(x)?, y: number(y)? },
+                [_] => point_at(&spatial(2)?)?,
+                _ => return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "ST_Rotate takes a geometry, an angle and an optional origin")),
+            };
+            geometry_value(&Spatial { srid: source.srid, geometry: eggdb_geo::rotated(&source.geometry, number(angle)?, origin) })
+        }
+        ("st_affine", [_, a, b, d, e, x_offset, y_offset]) => {
+            let source = spatial(0)?;
+            let matrix = [number(a)?, number(b)?, number(d)?, number(e)?, number(x_offset)?, number(y_offset)?];
+            geometry_value(&Spatial { srid: source.srid, geometry: eggdb_geo::affine(&source.geometry, matrix) })
+        }
+        ("st_snaptogrid", [_, size]) => {
+            let source = spatial(0)?;
+            geometry_value(&Spatial { srid: source.srid, geometry: eggdb_geo::snapped_to_grid(&source.geometry, number(size)?) })
+        }
+        ("st_removerepeatedpoints", [_]) => {
+            let source = spatial(0)?;
+            geometry_value(&Spatial { srid: source.srid, geometry: eggdb_geo::without_repeated_points(&source.geometry) })
+        }
+        ("st_expand", [_, amount]) => {
+            let source = spatial(0)?;
+            match eggdb_geo::expanded(&source.geometry, number(amount)?) {
+                Some(geometry) => geometry_value(&Spatial { srid: source.srid, geometry }),
+                None => geometry_value(&source),
+            }
+        }
+        ("st_boundary", [_]) => {
+            let source = spatial(0)?;
+            geometry_value(&Spatial { srid: source.srid, geometry: eggdb_geo::boundary(&source.geometry) })
+        }
+        ("st_segmentize", [_, most]) => {
+            let source = spatial(0)?;
+            let geometry = eggdb_geo::segmentized(&source.geometry, number(most)?).map_err(argument_error)?;
+            geometry_value(&Spatial { srid: source.srid, geometry })
+        }
+        ("st_multi", [_]) => {
+            let source = spatial(0)?;
+            geometry_value(&Spatial { srid: source.srid, geometry: eggdb_geo::as_multi(&source.geometry) })
+        }
+        ("st_force2d", [_]) => geometry_value(&spatial(0)?),
+        ("st_makepolygon", [_]) => {
+            let source = spatial(0)?;
+            let Geometry::LineString(points) = source.geometry else {
+                return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "ST_MakePolygon takes a line string"));
+            };
+            if points.len() < 4 || points.first() != points.last() {
+                return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "shell must have at least 4 points and be closed"));
+            }
+            geometry_value(&Spatial { srid: source.srid, geometry: Geometry::Polygon(vec![points]) })
+        }
+        ("st_addpoint" | "st_removepoint" | "st_setpoint", [_, rest @ ..]) => {
+            let source = spatial(0)?;
+            let Geometry::LineString(mut points) = source.geometry else {
+                return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("{} takes a line string", name.to_uppercase())));
+            };
+            let out_of_range = || SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "point index is out of range");
+            let index_of = |value: &Value, size: usize| -> SqlResult<usize> {
+                let index = value.as_integer().ok_or_else(out_of_range)?;
+                let index = if index < 0 { i64::try_from(size).unwrap_or(i64::MAX) + index } else { index };
+                usize::try_from(index).ok().filter(|index| *index < size).ok_or_else(out_of_range)
+            };
+            match (name, rest) {
+                ("st_addpoint", [_]) => points.push(point_at(&spatial(1)?)?),
+                ("st_addpoint", [_, position]) => {
+                    let point = point_at(&spatial(1)?)?;
+                    match position.as_integer() {
+                        Some(-1) => points.push(point),
+                        _ => {
+                            let at = index_of(position, points.len() + 1)?;
+                            points.insert(at, point);
+                        }
+                    }
+                }
+                ("st_removepoint", [index]) => {
+                    if points.len() < 3 {
+                        return Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "can't remove points from a single segment line"));
+                    }
+                    let at = index_of(index, points.len())?;
+                    points.remove(at);
+                }
+                ("st_setpoint", [index, _]) => {
+                    let at = index_of(index, points.len())?;
+                    points[at] = point_at(&spatial(2)?)?;
+                }
+                _ => return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("function {name} does not take these arguments"))),
+            }
+            geometry_value(&Spatial { srid: source.srid, geometry: Geometry::LineString(points) })
+        }
+        ("st_azimuth", [_, _]) => {
+            let (from, to) = pair()?;
+            match eggdb_geo::azimuth(point_at(&from)?, point_at(&to)?) {
+                Some(angle) => Value::Double(angle),
                 None => Value::Null,
             }
         }

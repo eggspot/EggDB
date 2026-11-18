@@ -1296,3 +1296,4 @@ its full title with its status.
 - [D1269](decisions/D1269.md) Code-only batch 925 (M4): the original ispell affix format
 - [D1270](decisions/D1270.md) Code-only batch 926 (M4): flag aliases in the ispell template
 - [D1271](decisions/D1271.md) Code-only batch 927 (M4): DBMS_METADATA.GET_DEPENDENT_DDL
+- [D1272](decisions/D1272.md) Code-only batch 928 (M4): geometry editing functions

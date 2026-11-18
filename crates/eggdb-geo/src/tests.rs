@@ -1,7 +1,8 @@
 use crate::{
     Coord, Geometry, area, centroid, contains, convex_hull, distance, envelope, from_wkb, from_wkt,
     intersects, invalidity, length, parts, perimeter, simplified, sphere_distance, to_geojson,
-    to_wkb, to_wkt, translated,
+    to_wkb, to_wkt, translated, affine, as_multi, azimuth, boundary, expanded, rotated, segmentized,
+    snapped_to_grid, without_repeated_points,
 };
 
 fn geometry(text: &str) -> Geometry {
@@ -197,4 +198,32 @@ fn centroids_hulls_validity_and_simplification_follow_postgis() {
         Geometry::LineString(vec![Coord { x: 1.0, y: 1.0 }, Coord { x: 3.0, y: 1.0 }])
     );
     assert_eq!(parts(&points).len(), 5);
+}
+
+#[test]
+fn rotation_affine_maps_and_grid_snapping_move_the_points() {
+    let point = geometry("POINT(1 0)");
+    let Geometry::Point(Some(turned)) = rotated(&point, std::f64::consts::FRAC_PI_2, Coord { x: 0.0, y: 0.0 }) else {
+        panic!("a point");
+    };
+    assert!((turned.x).abs() < 1e-12 && (turned.y - 1.0).abs() < 1e-12);
+    assert_eq!(affine(&point, [2.0, 0.0, 0.0, 3.0, 1.0, 1.0]), geometry("POINT(3 1)"));
+    assert_eq!(snapped_to_grid(&geometry("LINESTRING(0.1 0.1,0.2 0.2,1.4 0.9)"), 1.0), geometry("LINESTRING(0 0,1 1)"));
+    assert_eq!(without_repeated_points(&geometry("MULTIPOINT(1 1,2 2,1 1)")), geometry("MULTIPOINT(1 1,2 2)"));
+}
+
+#[test]
+fn boundaries_boxes_multis_segments_and_azimuths() {
+    assert_eq!(boundary(&geometry("LINESTRING(0 0,1 1,2 0)")), geometry("MULTIPOINT(0 0,2 0)"));
+    assert_eq!(boundary(&geometry("POLYGON((0 0,0 1,1 1,0 0))")), geometry("LINESTRING(0 0,0 1,1 1,0 0)"));
+    assert_eq!(
+        expanded(&geometry("LINESTRING(0 0,2 1)"), 1.0),
+        Some(geometry("POLYGON((-1 -1,-1 2,3 2,3 -1,-1 -1))"))
+    );
+    assert_eq!(as_multi(&geometry("POINT(1 2)")), geometry("MULTIPOINT(1 2)"));
+    assert_eq!(segmentized(&geometry("LINESTRING(0 0,4 0)"), 1.5).unwrap(), geometry("LINESTRING(0 0,1.3333333333333333 0,2.6666666666666665 0,4 0)"));
+    assert!(segmentized(&geometry("LINESTRING(0 0,4 0)"), 0.0).is_err());
+    assert_eq!(azimuth(Coord { x: 0.0, y: 0.0 }, Coord { x: 0.0, y: 1.0 }), Some(0.0));
+    assert_eq!(azimuth(Coord { x: 0.0, y: 0.0 }, Coord { x: 1.0, y: 0.0 }), Some(std::f64::consts::FRAC_PI_2));
+    assert_eq!(azimuth(Coord { x: 1.0, y: 1.0 }, Coord { x: 1.0, y: 1.0 }), None);
 }
