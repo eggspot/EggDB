@@ -18,6 +18,10 @@ workspace = true
 [dependencies]
 eggdb-capi = { path = "../eggdb-capi" }
 
+[dev-dependencies]
+eggdb = { path = "../eggdb" }
+eggdb-pgwire = { path = "../eggdb-pgwire" }
+
 [[test]]
 name = "all"
 path = "tests/all/main.rs"

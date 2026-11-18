@@ -1285,3 +1285,4 @@ its full title with its status.
 - [D1258](decisions/D1258.md) Code-only batch 914 (M4): DBMS_METADATA synonyms and role grants
 - [D1259](decisions/D1259.md) Code-only batch 915 (M4): unnest(tsvector)
 - [D1260](decisions/D1260.md) Code-only batch 916 (M6): SQLNativeSqlW and SQLGetInfoW text answers in UTF-16
+- [D1261](decisions/D1261.md) Code-only batch 917 (M6): the ODBC driver connects to servers

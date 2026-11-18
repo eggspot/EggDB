@@ -1193,7 +1193,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-17, D1237); `SQLGetInfo`'s fixed answers (identifier lengths, terms, transaction and cursor
   behaviour, conformance): **code written, unbuilt** (code-only mode, 2026-11-17, D1238); `SQLTablePrivileges` and
   `SQLColumnPrivileges`: **code written, unbuilt** (code-only mode, 2026-11-17, D1239);
-  `SQLProcedureColumns`: **code written, unbuilt** (code-only mode, 2026-11-17, D1240). Plain indexes in `SQLStatistics`: **code written, unbuilt** (D1247). ODBC escape sequences and `SQLGetInfo`'s function bitmasks: **code written, unbuilt** (D1255); `SQLNativeSql` and the `SQL_CONVERT_*` bitmasks (D1256); interval, position, trigonometry and name escapes (D1257); `SQLNativeSqlW` and UTF-16 text answers (D1260). Left: server connections
+  `SQLProcedureColumns`: **code written, unbuilt** (code-only mode, 2026-11-17, D1240). Plain indexes in `SQLStatistics`: **code written, unbuilt** (D1247). ODBC escape sequences and `SQLGetInfo`'s function bitmasks: **code written, unbuilt** (D1255); `SQLNativeSql` and the `SQL_CONVERT_*` bitmasks (D1256); interval, position, trigonometry and name escapes (D1257); `SQLNativeSqlW` and UTF-16 text answers (D1260); server connections (D1261). Left: catalog calls over MySQL's protocol
   and the installer files for driver managers.
 - The `compatibility` job with DataGrip, MySQL Workbench, Redis Insight, MongoDB Compass, Kibana,
   Grafana, Metabase, Superset, Power BI, Airbyte, Liquibase and Alembic (D12, D239).

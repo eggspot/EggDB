@@ -1,7 +1,7 @@
 use eggdb_capi::{
     EggdbDb, EggdbOptions, EggdbParameter, EggdbResult, EggdbSql, EggdbValue, eggdb_close,
     eggdb_last_error, eggdb_last_sqlstate, eggdb_open, eggdb_sql_close,
-    eggdb_sql_execute_with_parameters, eggdb_sql_open,
+    eggdb_sql_connect, eggdb_sql_execute_with_parameters, eggdb_sql_open,
 };
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
@@ -107,9 +107,29 @@ impl Session {
         })
     }
 
+    /// A session on the server at `url` (`postgresql://...` or `mysql://...`), as
+    /// `eggdb_sql_connect` reads it (D1261); catalog calls run on the same session.
+    pub(crate) fn connect(url: &str) -> Result<Self, Failure> {
+        let url = CString::new(url).map_err(|_| Failure::new("HY090", "the server address holds a NUL character"))?;
+        let mut sql: *mut EggdbSql = ptr::null_mut();
+        // SAFETY: `url` is NUL-terminated and `sql` a live out-pointer.
+        let connected = unsafe { eggdb_sql_connect(url.as_ptr(), &raw mut sql) };
+        if connected != 0 {
+            return Err(last_failure(connected));
+        }
+        Ok(Self {
+            database: ptr::null_mut(),
+            sql,
+            catalog: ptr::null_mut(),
+        })
+    }
+
     fn catalog_session(&mut self) -> Result<*mut EggdbSql, Failure> {
         if !self.catalog.is_null() {
             return Ok(self.catalog);
+        }
+        if self.database.is_null() {
+            return Ok(self.sql);
         }
         let mut catalog: *mut EggdbSql = ptr::null_mut();
         // SAFETY: `database` is this session's open database, the dialect a NUL-terminated

@@ -249,22 +249,88 @@ pub extern "system" fn SQLGetEnvAttr(env: *mut c_void, attribute: i32, value: *m
     SQL_SUCCESS
 }
 
+/// The `key=value` pairs of a connection string, keys in lowercase; a value in braces may hold
+/// `;` and `=`, and `}}` stands for one `}` inside it (D1261).
+fn attributes(settings: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut characters = settings.chars().peekable();
+    loop {
+        let mut key = String::new();
+        let mut assigned = false;
+        for character in characters.by_ref() {
+            if character == '=' || character == ';' {
+                assigned = character == '=';
+                break;
+            }
+            key.push(character);
+        }
+        if !assigned {
+            if characters.peek().is_none() {
+                break;
+            }
+            continue;
+        }
+        let mut value = String::new();
+        while characters.peek().is_some_and(|character| *character == ' ') {
+            characters.next();
+        }
+        if characters.peek() == Some(&'{') {
+            characters.next();
+            while let Some(character) = characters.next() {
+                if character == '}' {
+                    if characters.peek() == Some(&'}') {
+                        characters.next();
+                        value.push('}');
+                        continue;
+                    }
+                    break;
+                }
+                value.push(character);
+            }
+            for character in characters.by_ref() {
+                if character == ';' {
+                    break;
+                }
+            }
+        } else {
+            for character in characters.by_ref() {
+                if character == ';' {
+                    break;
+                }
+                value.push(character);
+            }
+            value = value.trim().to_owned();
+        }
+        if !key.trim().is_empty() {
+            found.push((key.trim().to_ascii_lowercase(), value));
+        }
+    }
+    found
+}
+
 fn connect(dbc: &mut ConnectionHandle, settings: &str) -> SqlReturn {
     dbc.diagnostics.clear();
     let mut database = String::new();
     let mut dialect = "sqlite".to_owned();
     let mut read_only = false;
-    for pair in settings.split(';') {
-        let Some((key, value)) = pair.split_once('=') else {
-            continue;
-        };
-        let value = value.trim().trim_matches(|character| character == '{' || character == '}');
-        match key.trim().to_ascii_lowercase().as_str() {
+    let mut server = ServerAddress::default();
+    for (key, value) in attributes(settings) {
+        let value = value.as_str();
+        match key.as_str() {
             "database" | "dbq" | "data source" | "datasource" => database = value.to_owned(),
             "dialect" => dialect = value.to_ascii_lowercase(),
             "readonly" | "read only" => read_only = matches!(value, "1" | "true" | "yes"),
+            "server" | "host" | "servername" => server.host = value.to_owned(),
+            "port" => server.port = value.to_owned(),
+            "uid" | "user" | "user id" | "username" => server.user = value.to_owned(),
+            "pwd" | "password" => server.password = value.to_owned(),
+            "sslmode" => server.ssl_mode = value.to_ascii_lowercase(),
+            "url" => server.url = value.to_owned(),
             _ => {}
         }
+    }
+    if !server.url.is_empty() || !server.host.is_empty() {
+        return connect_to_server(dbc, &server, &database, &dialect, read_only);
     }
     if database.is_empty() {
         return failed(&mut dbc.diagnostics, Failure::new("08001", "the connection string names no Database"));
@@ -279,6 +345,81 @@ fn connect(dbc: &mut ConnectionHandle, settings: &str) -> SqlReturn {
         }
         Err(failure) => failed(&mut dbc.diagnostics, Failure { sqlstate: "08001".to_owned(), ..failure }),
     }
+}
+
+#[derive(Debug, Default)]
+struct ServerAddress {
+    url: String,
+    host: String,
+    port: String,
+    user: String,
+    password: String,
+    ssl_mode: String,
+}
+
+fn url_part(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => encoded.push(char::from(byte)),
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
+}
+
+impl ServerAddress {
+    fn url(&self, database: &str, dialect: &str) -> String {
+        if !self.url.is_empty() {
+            return self.url.clone();
+        }
+        let mysql = matches!(dialect, "mysql" | "mariadb");
+        let scheme = if mysql { "mysql" } else { "postgresql" };
+        let port = match (self.port.is_empty(), mysql) {
+            (false, _) => self.port.clone(),
+            (true, true) => "3306".to_owned(),
+            (true, false) => "5432".to_owned(),
+        };
+        let credentials = match (self.user.is_empty(), self.password.is_empty() || mysql) {
+            (true, _) => String::new(),
+            (false, true) => format!("{}@", url_part(&self.user)),
+            (false, false) => format!("{}:{}@", url_part(&self.user), url_part(&self.password)),
+        };
+        let mut url = format!("{scheme}://{credentials}{}:{port}/{}", self.host, url_part(database));
+        if !self.ssl_mode.is_empty() && !mysql {
+            url.push_str("?sslmode=");
+            url.push_str(&url_part(&self.ssl_mode));
+        }
+        url
+    }
+}
+
+fn server_dialect(url: &str) -> &'static str {
+    if url.starts_with("mysql://") || url.starts_with("mariadb://") { "mysql" } else { "postgresql" }
+}
+
+fn connect_to_server(dbc: &mut ConnectionHandle, server: &ServerAddress, database: &str, dialect: &str, read_only: bool) -> SqlReturn {
+    let url = server.url(database, dialect);
+    let mut session = match Session::connect(&url) {
+        Ok(session) => session,
+        Err(failure) => return failed(&mut dbc.diagnostics, Failure { sqlstate: "08001".to_owned(), ..failure }),
+    };
+    let dialect = server_dialect(&url);
+    if read_only {
+        let statement = match dialect {
+            "mysql" => "SET SESSION TRANSACTION READ ONLY",
+            _ => "SET default_transaction_read_only = on",
+        };
+        if let Err(failure) = session.run(statement, &[]) {
+            session.close();
+            return failed(&mut dbc.diagnostics, Failure { sqlstate: "08001".to_owned(), ..failure });
+        }
+    }
+    dbc.session = Some(session);
+    dbc.database = if database.is_empty() { server.host.clone() } else { database.to_owned() };
+    dbc.read_only = read_only;
+    dbc.dialect = dialect.to_owned();
+    SQL_SUCCESS
 }
 
 /// Connects to the database file named by the data source name, which this driver reads as a
@@ -1324,3 +1465,32 @@ pub extern "system" fn SQLProcedureColumns(
     )
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_strings_keep_braced_values_whole() {
+        let found = attributes("Driver={EggDB ODBC};SERVER=db.local; Port = 6543 ;PWD={a;b=}}c};Flag;Database=sales");
+        let pairs: Vec<(&str, &str)> = found.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+        assert_eq!(
+            pairs,
+            [("driver", "EggDB ODBC"), ("server", "db.local"), ("port", "6543"), ("pwd", "a;b=}c"), ("database", "sales")]
+        );
+    }
+
+    #[test]
+    fn a_server_address_becomes_a_url_with_its_parts_encoded() {
+        let server = ServerAddress {
+            host: "db.local".to_owned(),
+            user: "ann".to_owned(),
+            password: "p@ss word".to_owned(),
+            ssl_mode: "require".to_owned(),
+            ..ServerAddress::default()
+        };
+        assert_eq!(server.url("sales", "postgresql"), "postgresql://ann:p%40ss%20word@db.local:5432/sales?sslmode=require");
+        assert_eq!(server.url("sales", "mysql"), "mysql://ann@db.local:3306/sales");
+        assert_eq!(server_dialect("mysql://ann@db.local:3306/sales"), "mysql");
+    }
+}

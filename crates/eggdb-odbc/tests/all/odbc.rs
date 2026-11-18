@@ -219,3 +219,52 @@ fn procedure_columns_list_a_function_s_parameters_in_order() {
     SQLFreeHandle(SQL_HANDLE_DBC, dbc);
     SQLFreeHandle(SQL_HANDLE_ENV, env);
 }
+
+#[test]
+fn a_connection_string_with_a_server_connects_over_the_postgresql_protocol() {
+    let db = std::sync::Arc::new(eggdb::Database::in_memory().unwrap());
+    let listener = eggdb_pgwire::listen_on_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let config = eggdb_pgwire::ServerConfig {
+        user: "eggdb".to_owned(),
+        verifier: eggdb_pgwire::ScramVerifier::derive(b"odbc test;pw", b"0123456789abcdef", 4096),
+        database: "eggdb".to_owned(),
+        max_connections: 4,
+        authentication_timeout: std::time::Duration::from_secs(5),
+        idle_timeout: None,
+        memory_budget: std::sync::Arc::default(),
+        auth_rules: None,
+        tls: None,
+    };
+    let server_db = std::sync::Arc::clone(&db);
+    let server_stop = std::sync::Arc::clone(&stop);
+    let server = std::thread::spawn(move || {
+        let store = eggdb::sql::Store(&server_db);
+        let stopped = move || server_stop.load(std::sync::atomic::Ordering::Acquire);
+        eggdb_pgwire::serve(&store, &listener, &config, &stopped, &|_| {}).unwrap();
+    });
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = format!("Server=127.0.0.1;Port={port};Database=eggdb;UID=eggdb;PWD={{odbc test;pw}};SSLMode=disable\0");
+    let connected = SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0);
+    assert_eq!(connected, 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(run(stmt, "CREATE TABLE eggs (id INTEGER PRIMARY KEY, colour TEXT)"), 0);
+    assert_eq!(run(stmt, "INSERT INTO eggs VALUES (1, 'brown')"), 0);
+    assert_eq!(run(stmt, "SELECT {fn UCASE(colour)} FROM eggs"), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 1).as_deref(), Some("BROWN"));
+    assert_eq!(SQLFreeHandle(SQL_HANDLE_STMT, stmt), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    let eggs = b"eggs\0";
+    assert_eq!(SQLPrimaryKeys(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 4).as_deref(), Some("id"));
+    assert_eq!(SQLFreeHandle(SQL_HANDLE_STMT, stmt), 0);
+    assert_eq!(SQLDisconnect(dbc), 0);
+    let wrong = format!("Server=127.0.0.1;Port={port};Database=eggdb;UID=eggdb;PWD=wrong;SSLMode=disable\0");
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), wrong.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), SQL_ERROR);
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    server.join().unwrap();
+}

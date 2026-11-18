@@ -489,7 +489,9 @@ dependencies = [
 name = "eggdb-odbc"
 version = "0.5.0"
 dependencies = [
+ "eggdb",
  "eggdb-capi",
+ "eggdb-pgwire",
 ]
 
 [[package]]
