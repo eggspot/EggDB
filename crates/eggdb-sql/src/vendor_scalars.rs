@@ -1,6 +1,8 @@
-//! SQL Server's and Oracle's scalar functions with no PostgreSQL twin (D1292): SQL Server's
-//! `PATINDEX`, `QUOTENAME`, `ISNUMERIC` and `DATEFROMPARTS`, and Oracle's `BITAND`,
-//! `REMAINDER` and `NANVL`, each answered in its own dialect.
+//! Scalar functions one dialect has under its own name (D1292, D1295, D1296, D1299): SQL
+//! Server's `PATINDEX`, `QUOTENAME`, `ISNUMERIC`, the `...FROMPARTS` functions, `HASHBYTES`,
+//! `STRING_ESCAPE` and `APP_NAME`; Oracle's `BITAND`, `REMAINDER`, `NANVL`, `SYS_GUID`, hashes,
+//! LOB constructors and Unicode escapes; and PostgreSQL's `unistr`. Each is answered in its own
+//! dialect only.
 
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
@@ -45,6 +47,7 @@ fn dialect_has(name: &str) -> bool {
     match crate::constraints::current_dialect() {
         Dialect::SqlServer => SQLSERVER_FUNCTIONS.contains(&name),
         Dialect::Oracle => ORACLE_FUNCTIONS.contains(&name),
+        Dialect::PostgreSql => name == "unistr",
         _ => false,
     }
 }
@@ -229,11 +232,27 @@ fn unicode_unescaped(text: &str) -> SqlResult<String> {
             units.push(u16::from(b'\\'));
             continue;
         }
-        let digits: String = characters.by_ref().take(4).collect();
-        if digits.len() != 4 {
+        let width = match characters.peek() {
+            Some('+') => 6,
+            Some('u') => 4,
+            Some('U') => 8,
+            _ => 4,
+        };
+        if width != 4 || characters.peek() == Some(&'u') {
+            characters.next();
+        }
+        let digits: String = characters.by_ref().take(width).collect();
+        if digits.chars().count() != width {
             return Err(invalid());
         }
-        units.push(u16::from_str_radix(&digits, 16).map_err(|_| invalid())?);
+        if width == 4 {
+            units.push(u16::from_str_radix(&digits, 16).map_err(|_| invalid())?);
+        } else {
+            let point = u32::from_str_radix(&digits, 16).map_err(|_| invalid())?;
+            let character = char::from_u32(point).ok_or_else(invalid)?;
+            let mut buffer = [0u16; 2];
+            units.extend_from_slice(character.encode_utf16(&mut buffer));
+        }
     }
     String::from_utf16(&units).map_err(|_| invalid())
 }
@@ -435,5 +454,6 @@ mod tests {
         assert_eq!(ascii_escaped("ABÄC\\"), "AB\\00C4C\\005C");
         assert_eq!(unicode_unescaped("AB\\00C4C\\\\").unwrap(), "ABÄC\\");
         assert!(unicode_unescaped("\\12").is_err());
+        assert_eq!(unicode_unescaped("d\\0061t\\+000061 \\u0062 \\U0001F600").unwrap(), "data b \u{1F600}");
     }
 }
