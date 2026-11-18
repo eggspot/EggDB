@@ -193,6 +193,19 @@ fn mysql_columns_of_unsigned_year_bit_enum_and_set_types_load() {
 }
 
 #[test]
+fn mysql_enum_columns_sort_by_member_position() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::MySql);
+    last(&mut session, "CREATE TABLE shirts (size ENUM('small', 'medium', 'large'))");
+    last(&mut session, "INSERT INTO shirts VALUES ('large'), ('small'), ('medium')");
+    let sorted = last(&mut session, "SELECT size FROM shirts ORDER BY size");
+    let sizes: Vec<&str> = sorted.lines().skip(1).take(3).collect();
+    assert_eq!(sizes, ["small", "medium", "large"], "{sorted}");
+    let descending = last(&mut session, "SELECT size FROM shirts AS s ORDER BY s.size DESC");
+    assert_eq!(descending.lines().nth(1), Some("large"), "{descending}");
+}
+
+#[test]
 fn mysql_enum_members_unsigned_ranges_and_year_are_checked() {
     let store = MemoryStore::default();
     let mut session = Session::with_dialect(&store, Dialect::MySql);

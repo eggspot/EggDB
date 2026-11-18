@@ -562,6 +562,7 @@ impl<'a> Resolver<'a> {
         } = query;
         let ordered_with_body = if let SetExpr::Select(select) = &mut *body {
             self.walk_select_ordered(select, ctes, order_by)?;
+            self.order_mysql_enums(select, order_by)?;
             true
         } else {
             let mut bodies: Vec<&mut SetExpr> = vec![body];
@@ -591,6 +592,49 @@ impl<'a> Resolver<'a> {
             }
         }
         ctes.truncate(base);
+        Ok(())
+    }
+
+    fn order_mysql_enums(&mut self, select: &Select, order_by: &mut [crate::ast::OrderItem]) -> SqlResult<()> {
+        if order_by.is_empty() || crate::constraints::current_dialect() != crate::Dialect::MySql {
+            return Ok(());
+        }
+        let Some(from) = &select.from else {
+            return Ok(());
+        };
+        let first = &from.first;
+        if !from.joins.is_empty() || first.derived.is_some() || first.generated.is_some() {
+            return Ok(());
+        }
+        let Some(Relation::Table(table)) = self.tables.relation(self.reader, &first.name.text)? else {
+            return Ok(());
+        };
+        let own_name = crate::schemas::base_name(&table.name);
+        for item in order_by.iter_mut() {
+            let ExprKind::Column { qualifier, name } = &item.expr.kind else {
+                continue;
+            };
+            let named_here = qualifier
+                .as_deref()
+                .is_none_or(|written| Some(written) == first.alias.as_deref() || written == own_name);
+            let Some(members) = named_here.then(|| enum_members(&table, name)).flatten() else {
+                continue;
+            };
+            let position = item.expr.position;
+            let column = item.expr.clone();
+            item.expr = Expr {
+                kind: ExprKind::Function {
+                    name: crate::mysql_set::ENUM_POSITION_FUNCTION.to_owned(),
+                    arguments: std::iter::once(column)
+                        .chain(members.into_iter().map(|member| Expr {
+                            kind: ExprKind::Literal(crate::ast::Literal::String(member)),
+                            position,
+                        }))
+                        .collect(),
+                },
+                position,
+            };
+        }
         Ok(())
     }
 
@@ -2384,4 +2428,27 @@ impl Binding<'_> {
         }
         Ok(())
     }
+}
+
+/// The members of `column`'s MySQL `ENUM`, from the implicit `CHECK` its type made (D684).
+fn enum_members(table: &crate::encoding::TableDefinition, column: &str) -> Option<Vec<String>> {
+    table
+        .checks
+        .iter()
+        .filter(|check| check.dialect == crate::Dialect::MySql)
+        .filter_map(|check| crate::constraints::parse_check(check).ok())
+        .find_map(|expr| match expr.kind {
+            ExprKind::InList {
+                expr: checked,
+                list,
+                negated: false,
+            } if matches!(&checked.kind, ExprKind::Column { name, .. } if name == column) => list
+                .into_iter()
+                .map(|member| match member.kind {
+                    ExprKind::Literal(crate::ast::Literal::String(text)) => Some(text),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        })
 }

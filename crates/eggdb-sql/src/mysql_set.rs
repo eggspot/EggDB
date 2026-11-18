@@ -4,6 +4,9 @@ use crate::types::{SqlType, Value};
 /// The internal function a MySQL `SET` column's implicit check calls: whether every
 /// comma-separated element of the value is one of the members.
 pub(crate) const SET_MEMBERS_FUNCTION: &str = "eggdb_mysql_set_members";
+/// `ENUM` ordering (D1253): the position of its first argument among the others, from 1, 0
+/// when it is none of them, NULL for NULL, as MySQL sorts an `ENUM` by its member index.
+pub(crate) const ENUM_POSITION_FUNCTION: &str = "eggdb_mysql_enum_position";
 
 /// The internal function a `SET` column's write trigger calls to store a value as MySQL does.
 pub(crate) const SET_NORMALIZE_FUNCTION: &str = "eggdb_mysql_set_normalize";
@@ -65,11 +68,30 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     match name {
         SET_MEMBERS_FUNCTION => Some(SqlType::Boolean),
         SET_NORMALIZE_FUNCTION => Some(SqlType::Text),
+        ENUM_POSITION_FUNCTION => Some(SqlType::Integer),
         _ => None,
     }
 }
 
+/// The position of `values[0]` among `values[1..]` (D1253).
+pub(crate) fn enum_position(values: &[Value]) -> Value {
+    let Some((value, members)) = values.split_first() else {
+        return Value::Null;
+    };
+    let Some(value) = value.to_text() else {
+        return Value::Null;
+    };
+    let position = members
+        .iter()
+        .position(|member| member.to_text().is_some_and(|member| member.eq_ignore_ascii_case(&value)))
+        .map_or(0, |at| at + 1);
+    Value::Integer(i32::try_from(position).unwrap_or(i32::MAX))
+}
+
 pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
+    if name == ENUM_POSITION_FUNCTION {
+        return Some(Ok(enum_position(values)));
+    }
     if name == SET_NORMALIZE_FUNCTION {
         return Some(Ok(match values {
             [value, members] => match (value.to_text(), members.to_text()) {
@@ -94,6 +116,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_enum_value_sorts_by_its_member_position() {
+        let members = [Value::Text("small".to_owned()), Value::Text("Medium".to_owned()), Value::Text("large".to_owned())];
+        let at = |value: Value| enum_position(&std::iter::once(value).chain(members.iter().cloned()).collect::<Vec<_>>());
+        assert_eq!(at(Value::Text("large".to_owned())), Value::Integer(3));
+        assert_eq!(at(Value::Text("medium".to_owned())), Value::Integer(2));
+        assert_eq!(at(Value::Text("".to_owned())), Value::Integer(0));
+        assert_eq!(at(Value::Null), Value::Null);
+    }
 
     #[test]
     fn set_values_must_be_made_of_members() {
