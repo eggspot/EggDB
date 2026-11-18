@@ -433,6 +433,32 @@ mod tests {
             "symbol|at|cls\nEGG|1|NULL\nEGG|2|DOWN\nEGG|3|DOWN\nEGG|4|NULL\nEGG|5|NULL\nHEN|1|NULL\nHEN|2|NULL\nSELECT 7"
         );
         assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at ALL ROWS PER MATCH WITH UNMATCHED ROWS PATTERN ({- A -}) DEFINE A AS price > 1) AS mr").is_err());
-        assert!(run(&mut session, "SELECT * FROM ticks MATCH_RECOGNIZE (ORDER BY at ALL ROWS PER MATCH SHOW EMPTY MATCHES PATTERN (A) DEFINE A AS price > 1) AS mr").is_err());
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT symbol, at, cls, m FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at MEASURES CLASSIFIER() AS cls, MATCH_NUMBER() AS m \
+                 ALL ROWS PER MATCH SHOW EMPTY MATCHES PATTERN (DOWN*) DEFINE DOWN AS price < PREV(price)) AS mr ORDER BY symbol, at"
+            )
+            .unwrap(),
+            "symbol|at|cls|m\nEGG|1|NULL|1\nEGG|2|DOWN|2\nEGG|3|DOWN|2\nEGG|4|NULL|3\nEGG|5|NULL|4\nHEN|1|NULL|1\nHEN|2|NULL|2\nSELECT 7"
+        );
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT at FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at \
+                 ALL ROWS PER MATCH OMIT EMPTY MATCHES PATTERN (DOWN*) DEFINE DOWN AS price < PREV(price)) AS mr ORDER BY at"
+            )
+            .unwrap(),
+            "at\n2\n3\nSELECT 2"
+        );
+        assert_eq!(
+            run(
+                &mut session,
+                "SELECT count(*) AS matches FROM ticks MATCH_RECOGNIZE (PARTITION BY symbol ORDER BY at MEASURES FIRST(at) AS first_at \
+                 ONE ROW PER MATCH PATTERN (DOWN*) DEFINE DOWN AS price < PREV(price)) AS mr"
+            )
+            .unwrap(),
+            "matches\n6\nSELECT 1"
+        );
     }
 }

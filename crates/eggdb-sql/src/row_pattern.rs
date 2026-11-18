@@ -422,6 +422,13 @@ pub(crate) fn matches(rows_json: &str, pattern_text: &str) -> SqlResult<String> 
 /// An unknown `skip`, or a skip to a variable the match has no row of or to the match's own
 /// first row.
 pub(crate) fn matches_skipping(rows_json: &str, pattern_text: &str, skip: &str) -> SqlResult<String> {
+    matches_with(rows_json, pattern_text, skip, false)
+}
+
+/// `matches_skipping`, also listing each empty match when `show_empty` (D1262): a pattern that
+/// can match no rows matches there with `"end"` one before `"start"` and no classifiers, and
+/// the search goes on from the next row.
+pub(crate) fn matches_with(rows_json: &str, pattern_text: &str, skip: &str, show_empty: bool) -> SqlResult<String> {
     let invalid = |message: &str| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("row_pattern_matches: {message}"));
     if pattern_text.len() > MOST_PATTERN_BYTES {
         return Err(invalid("the pattern is too long"));
@@ -485,6 +492,14 @@ pub(crate) fn matches_skipping(rows_json: &str, pattern_text: &str, skip: &str) 
                     }
                 };
             }
+            Some((end, _)) if end == start && show_empty => {
+                if found > 0 {
+                    out.push_str(", ");
+                }
+                found += 1;
+                out.push_str(&format!("{{\"start\": {start}, \"end\": {}, \"classifiers\": []}}", start as i64 - 1));
+                start += 1;
+            }
             _ => start += 1,
         }
     }
@@ -505,6 +520,17 @@ mod tests {
         );
         assert_eq!(matches(rows, "DOWN{2} UP?").unwrap(), r#"[{"start": 1, "end": 3, "classifiers": ["DOWN", "DOWN", "UP"]}]"#);
         assert_eq!(matches(rows, "(UP | DOWN)+?").unwrap().matches("start").count(), 5);
+    }
+
+    #[test]
+    fn empty_matches_are_listed_only_when_asked() {
+        let rows = r#"[{"A": false}, {"A": true}, {"A": false}]"#;
+        assert_eq!(matches(rows, "A*").unwrap(), r#"[{"start": 1, "end": 1, "classifiers": ["A"]}]"#);
+        assert_eq!(
+            matches_with(rows, "A*", "past last row", true).unwrap(),
+            r#"[{"start": 0, "end": -1, "classifiers": []}, {"start": 1, "end": 1, "classifiers": ["A"]}, {"start": 2, "end": 1, "classifiers": []}]"#
+        );
+        assert_eq!(matches_with(rows, "A", "past last row", true).unwrap(), matches(rows, "A").unwrap());
     }
 
     #[test]

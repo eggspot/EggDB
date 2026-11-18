@@ -13,6 +13,7 @@ struct Recognition {
     measures: Vec<Measure>,
     all_rows: bool,
     unmatched_rows: bool,
+    show_empty: bool,
     skip: String,
     pattern: String,
     subsets: Vec<(String, Vec<String>)>,
@@ -365,6 +366,7 @@ impl Parser<'_> {
         }
         let mut all_rows = false;
         let mut unmatched_rows = false;
+        let mut show_empty = true;
         if self.take_word("one") {
             self.expect_word("row")?;
             self.expect_word("per")?;
@@ -377,12 +379,14 @@ impl Parser<'_> {
             if self.take_word("omit") {
                 self.expect_word("empty")?;
                 self.expect_word("matches")?;
+                show_empty = false;
             } else if self.take_word("with") {
                 self.expect_word("unmatched")?;
                 self.expect_word("rows")?;
                 unmatched_rows = true;
-            } else if self.is_word("show") {
-                return Err(self.not_supported("SHOW EMPTY MATCHES"));
+            } else if self.take_word("show") {
+                self.expect_word("empty")?;
+                self.expect_word("matches")?;
             }
         }
         let mut skip = "past last row".to_owned();
@@ -446,7 +450,7 @@ impl Parser<'_> {
         if unmatched_rows && pattern.contains("{-") {
             return Err(SqlError::syntax("pattern exclusion cannot be used with ALL ROWS PER MATCH WITH UNMATCHED ROWS", self.position()));
         }
-        Ok(Recognition { partitions, order, measures, all_rows, unmatched_rows, skip, pattern, subsets, definitions })
+        Ok(Recognition { partitions, order, measures, all_rows, unmatched_rows, show_empty, skip, pattern, subsets, definitions })
     }
 
     /// SQL:2016's `MATCH_RECOGNIZE` after a table or subquery whose SQL is `source`, with
@@ -500,7 +504,7 @@ impl Parser<'_> {
         };
         let running_rows = MatchRows {
             partition_join,
-            end: format!("mr_a.{hidden_row}"),
+            end: format!("CASE WHEN mr_a.{hidden_row} < {END} THEN mr_a.{hidden_row} ELSE {END} END"),
             subsets: recognition.subsets.clone(),
         };
         let mut selected: Vec<String> = if recognition.all_rows {
@@ -524,7 +528,7 @@ impl Parser<'_> {
                 .map(|column| format!(" AND mr_a.{column} IS NOT DISTINCT FROM mr_m.{column}"))
                 .collect();
             let joined_on = format!(
-                "mr_a.{hidden_row} BETWEEN {START} AND {END}{partition_on} \
+                "(mr_a.{hidden_row} BETWEEN {START} AND {END} OR (mr_a.{hidden_row} = {START} AND {END} < {START})){partition_on} \
                  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(mr_m.mr_found -> 'excluded') AS mr_x WHERE mr_x.value::bigint = mr_a.{hidden_row} - {START})"
             );
             (
@@ -550,11 +554,12 @@ impl Parser<'_> {
             "(WITH mr_numbered AS (SELECT mr_source.*, row_number() OVER ({window}) - 1 AS mr_row, jsonb_build_object({}) AS mr_flags FROM (SELECT * FROM {source}) AS mr_source), \
              mr_matches AS (SELECT {matched_columns}mr_e.value AS mr_found, row_number() OVER ({match_partition}ORDER BY (mr_e.value ->> 'start')::bigint) AS mr_match \
              FROM (SELECT {group_columns}jsonb_agg(mr_flags ORDER BY mr_row) AS mr_flag_list FROM mr_numbered{grouped}) AS mr_g \
-             CROSS JOIN LATERAL jsonb_array_elements(row_pattern_matches(mr_g.mr_flag_list, {}, {})) AS mr_e){all_rows_table} \
+             CROSS JOIN LATERAL jsonb_array_elements(row_pattern_matches(mr_g.mr_flag_list, {}, {}, {})) AS mr_e){all_rows_table} \
              SELECT {} FROM {from_clause}) AS {}",
             flags.join(", "),
             quoted_literal(&recognition.pattern),
             quoted_literal(&recognition.skip),
+            quoted_literal(if recognition.show_empty { "show empty matches" } else { "omit empty matches" }),
             selected.join(", "),
             Self::quoted_alias(self.dialect, &alias)
         );

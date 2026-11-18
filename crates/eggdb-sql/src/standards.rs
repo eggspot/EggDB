@@ -584,7 +584,12 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         return Some(match values {
             [Value::Jsonb(rows) | Value::Json(rows) | Value::Text(rows), Value::Text(pattern)] => crate::row_pattern::matches(rows, pattern).and_then(jsonb),
             [Value::Jsonb(rows) | Value::Json(rows) | Value::Text(rows), Value::Text(pattern), Value::Text(skip)] => crate::row_pattern::matches_skipping(rows, pattern, skip).and_then(jsonb),
-            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "row_pattern_matches takes the rows as jsonb, the pattern as text and optionally how AFTER MATCH SKIP goes on")),
+            [Value::Jsonb(rows) | Value::Json(rows) | Value::Text(rows), Value::Text(pattern), Value::Text(skip), Value::Text(empty)] => match empty.as_str() {
+                "show empty matches" => crate::row_pattern::matches_with(rows, pattern, skip, true).and_then(jsonb),
+                "omit empty matches" => crate::row_pattern::matches_with(rows, pattern, skip, false).and_then(jsonb),
+                _ => Err(SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "row_pattern_matches: empty matches are 'show empty matches' or 'omit empty matches'")),
+            },
+            _ => Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "row_pattern_matches takes the rows as jsonb, the pattern as text and optionally how AFTER MATCH SKIP goes on and whether empty matches show")),
         });
     }
     if name == "spreadsheet_recalculate" {
