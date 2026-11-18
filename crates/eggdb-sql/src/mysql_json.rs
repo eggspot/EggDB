@@ -7,7 +7,8 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::json::{self, Json, Node};
 use crate::types::{SqlType, Value};
 
-const FUNCTIONS: [&str; 15] = [
+const FUNCTIONS: [&str; 16] = [
+    "json_array_insert",
     "json_array_append",
     "json_search",
     "json_extract",
@@ -324,6 +325,31 @@ fn array_appended(values: &[Value]) -> SqlResult<Value> {
     written(&node).map(Value::Json)
 }
 
+fn array_inserted(values: &[Value]) -> SqlResult<Value> {
+    let mut node = document(&values[0], 1)?;
+    for pair in values[1..].chunks(2) {
+        let [path, item] = pair else {
+            return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, "Incorrect parameter count in the call to native function 'json_array_insert'"));
+        };
+        let path = path.to_text().unwrap_or_default();
+        let legs = legs_of(&path)?;
+        let Some((Leg::Index(index), parent)) = legs.split_last() else {
+            return Err(SqlError::new(SqlState::SYNTAX_ERROR, "A path expression is not a path to a cell in an array."));
+        };
+        if wildcard(parent) {
+            return Err(SqlError::new(SqlState::SYNTAX_ERROR, "In this situation, path expressions may not contain the * and ** tokens."));
+        }
+        let inserted = json_of(item)?;
+        if let Some(target) = located(&mut node, parent)
+            && let Json::Array(items) = &mut target.value
+        {
+            let at = (*index).min(items.len());
+            items.insert(at, inserted);
+        }
+    }
+    written(&node).map(Value::Json)
+}
+
 fn extracted(values: &[Value]) -> SqlResult<Value> {
     let node = document(&values[0], 1)?;
     let mut matches = Vec::new();
@@ -367,6 +393,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("json_extract", count) if count >= 2 => extracted(values),
         ("json_search", 3 | 4) => search(values),
         ("json_array_append", count) if count >= 3 && count % 2 == 1 => array_appended(values),
+        ("json_array_insert", count) if count >= 3 && count % 2 == 1 => array_inserted(values),
         ("json_unquote", 1) => Ok(Value::Text(unquoted(&values[0].to_text().unwrap_or_default()))),
         ("json_valid", 1) => Ok(Value::BigInt(i64::from(json::parse(&values[0].to_text().unwrap_or_default(), false).is_ok()))),
         ("json_type", 1) => document(&values[0], 1).map(|node| Value::Text(mysql_type(&node.value).to_owned())),
@@ -435,7 +462,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         return None;
     }
     Some(match name {
-        "json_extract" | "json_search" | "json_array_append" | "json_keys" | "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch" => SqlType::Json,
+        "json_extract" | "json_search" | "json_array_append" | "json_array_insert" | "json_keys" | "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch" => SqlType::Json,
         "json_quote" => SqlType::Text,
         "json_unquote" | "json_type" => SqlType::Text,
         _ => SqlType::BigInt,
@@ -472,6 +499,9 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(appended, Value::Json(r#"{"a": [1, 3], "b": [2, "x"]}"#.to_owned()));
+        let inserted = array_inserted(&[Value::Text("[1, 2]".to_owned()), Value::Text("$[1]".to_owned()), Value::Integer(9), Value::Text("$[9]".to_owned()), Value::Integer(7)]).unwrap();
+        assert_eq!(inserted, Value::Json("[1, 9, 2, 7]".to_owned()));
+        assert!(array_inserted(&[Value::Text("[1]".to_owned()), Value::Text("$.a".to_owned()), Value::Integer(1)]).is_err());
         assert!(legs_of("$.a[x]").is_err());
         assert_eq!(unquoted("\"a\\tb\""), "a\tb");
         assert_eq!(unquoted("plain"), "plain");
