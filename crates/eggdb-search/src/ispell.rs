@@ -221,11 +221,15 @@ impl Ispell {
         let original = original_format(affixes);
         let (mut suffixes, mut prefixes) = if original { original_rules(affixes)? } else { (Vec::new(), Vec::new()) };
         let mut cross_products: BTreeMap<(bool, String), bool> = BTreeMap::new();
+        let mut aliases: Vec<String> = Vec::new();
+        let mut alias_header = false;
         for line in affixes.lines().filter(|_| !original) {
             let fields: Vec<&str> = line.split_whitespace().collect();
             match fields.as_slice() {
                 ["FLAG", "long", ..] => format = FlagFormat::Long,
                 ["FLAG", "num", ..] => format = FlagFormat::Numeric,
+                ["AF", count, ..] if !alias_header && count.parse::<usize>().is_ok() => alias_header = true,
+                ["AF", flags, ..] => aliases.push((*flags).to_owned()),
                 [kind @ ("PFX" | "SFX"), flag, cross, count] if count.parse::<usize>().is_ok() && cross.len() == 1 => {
                     cross_products.insert((*kind == "PFX", (*flag).to_owned()), matches!(*cross, "Y" | "y"));
                 }
@@ -256,6 +260,15 @@ impl Ispell {
                 continue;
             }
             let (word, flags) = entry.split_once('/').unwrap_or((entry, ""));
+            let flags = match aliases.is_empty() || flags.is_empty() {
+                true => flags,
+                false => flags
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|number| aliases.get(number.checked_sub(1)?))
+                    .map(String::as_str)
+                    .ok_or_else(|| format!("the word \"{word}\" names flag alias {flags}, which the affix file does not define"))?,
+            };
             words.entry(word.to_lowercase()).or_default().extend(format.split(flags));
         }
         Ok(Self { words, suffixes, prefixes })
@@ -336,6 +349,16 @@ mod tests {
         assert_eq!(numeric.base_words("cats"), ["cat"]);
         assert!(Ispell::parse("", "SFX S 0 s .\n").is_err());
         assert!(Ispell::parse("", "SFX S Y 1\nSFX S 0 s [ab\n").is_err());
+    }
+
+    #[test]
+    fn flag_aliases_stand_for_the_flags_they_list() {
+        let affixes = "AF 2\nAF SU\nAF D\nPFX U Y 1\nPFX U 0 un .\nSFX S Y 1\nSFX S 0 s .\nSFX D Y 1\nSFX D 0 ed .\n";
+        let ispell = Ispell::parse("book/1\nwalk/2\n", affixes).unwrap();
+        assert_eq!(ispell.base_words("unbooks"), ["book"]);
+        assert_eq!(ispell.base_words("walked"), ["walk"]);
+        assert!(ispell.base_words("walks").is_empty());
+        assert!(Ispell::parse("cat/3\n", affixes).is_err());
     }
 
     #[test]

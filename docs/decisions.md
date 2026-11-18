@@ -1294,3 +1294,4 @@ its full title with its status.
 - [D1267](decisions/D1267.md) Code-only batch 923 (M6): the Django backend
 - [D1268](decisions/D1268.md) Code-only batch 924 (M4): ts_stat
 - [D1269](decisions/D1269.md) Code-only batch 925 (M4): the original ispell affix format
+- [D1270](decisions/D1270.md) Code-only batch 926 (M4): flag aliases in the ispell template
