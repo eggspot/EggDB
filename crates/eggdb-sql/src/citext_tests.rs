@@ -658,3 +658,18 @@ fn text_search_parser_functions_list_tokens_and_their_lexemes() {
     );
     assert!(run(&mut session, "SELECT * FROM ts_parse('nope', 'x')").is_err());
 }
+
+#[test]
+fn unnest_of_a_tsvector_lists_lexemes_with_positions_and_weights() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        ok(&mut session, "SELECT * FROM unnest('cat:3 fat:2,4 rat:5A ok'::tsvector)"),
+        "lexeme|positions|weights\ncat|{3}|{D}\nfat|{2,4}|{D,D}\nok|NULL|NULL\nrat|{5}|{A}\nSELECT 4"
+    );
+    assert_eq!(
+        ok(&mut session, "SELECT lexeme FROM unnest(to_tsvector('english', 'The fat cats')) WITH ORDINALITY ORDER BY ordinality"),
+        "lexeme\ncat\nfat\nSELECT 2"
+    );
+    assert_eq!(ok(&mut session, "SELECT * FROM unnest(ARRAY[1, 2])"), "unnest\n1\n2\nSELECT 2");
+}

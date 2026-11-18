@@ -723,9 +723,15 @@ fn series_rows(values: &[Value], sql_type: SqlType, sink: &mut RowSink<'_>) -> S
     Ok(())
 }
 
+fn unnests_vector(name: &str, types: &[Option<SqlType>]) -> bool {
+    name == "unnest"
+        && matches!(types, [Some(SqlType::Defined(defined))] if *defined == crate::types::DefinedType::TSVECTOR)
+}
+
 fn unnest_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
     match types {
         [Some(SqlType::Array(element))] => Ok(element.sql_type()),
+        _ if unnests_vector("unnest", types) => Ok(SqlType::Text),
         [None] => Err(not_unique("unnest", types)),
         _ => Err(does_not_exist("unnest", types)),
     }
@@ -1436,6 +1442,14 @@ fn function_columns(
         crate::sql_json::columns(found.name, &defined_names(function), types)
     } else if found.name == crate::xml_path::TABLE {
         crate::xml_path::columns(&defined_names(function), types)
+    } else if unnests_vector(found.name, types) {
+        crate::text_search::UNNEST_COLUMNS
+            .iter()
+            .map(|(column, sql_type)| OutputColumn {
+                name: (*column).to_owned(),
+                sql_type: Some(*sql_type),
+            })
+            .collect()
     } else if found.fields {
         record_columns(found.name)
     } else {
@@ -1591,7 +1605,7 @@ impl BoundFunction {
         store: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>,
     ) -> SqlResult<()> {
         let mut ordinal: i64 = 0;
-        if self.found.fields {
+        if self.found.fields || unnests_vector(self.found.name, &self.types) {
             let mut numbered = |mut record: Vec<Value>| {
                 ordinal += 1;
                 if self.ordinality {
@@ -1617,6 +1631,8 @@ impl BoundFunction {
                 )
             } else if self.found.name == crate::xml_path::TABLE {
                 crate::xml_path::rows(&self.values, &self.defined_names, &self.types, &mut numbered)
+            } else if unnests_vector(self.found.name, &self.types) {
+                crate::text_search::unnest_rows(&self.values, &mut numbered)
             } else {
                 record_rows(self.found.name, &self.values, &mut numbered)
             };

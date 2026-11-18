@@ -325,6 +325,12 @@ pub(crate) const PARSE_COLUMNS: [(&str, crate::types::SqlType); 2] = [
     ("tokid", crate::types::SqlType::Integer),
     ("token", crate::types::SqlType::Text),
 ];
+/// The columns of `unnest(tsvector)`.
+pub(crate) const UNNEST_COLUMNS: [(&str, crate::types::SqlType); 3] = [
+    ("lexeme", crate::types::SqlType::Text),
+    ("positions", crate::types::SqlType::Array(crate::arrays::ArrayElement::SmallInt)),
+    ("weights", crate::types::SqlType::Array(crate::arrays::ArrayElement::Text)),
+];
 /// The columns of `ts_debug`; the dictionary lists and lexemes are in array text form.
 pub(crate) const DEBUG_COLUMNS: [(&str, crate::types::SqlType); 6] = [
     ("alias", crate::types::SqlType::Text),
@@ -390,6 +396,48 @@ pub(crate) fn token_type_rows(values: &[Value], sink: &mut dyn FnMut(Vec<Value>)
             Value::Text((*alias).to_owned()),
             Value::Text((*description).to_owned()),
         ])?;
+    }
+    Ok(())
+}
+
+fn weight_letter(weight: Weight) -> &'static str {
+    match weight {
+        Weight::A => "A",
+        Weight::B => "B",
+        Weight::C => "C",
+        Weight::D => "D",
+    }
+}
+
+/// The rows of `unnest(tsvector)`: each lexeme in order with its positions and their weights,
+/// both NULL for a lexeme stored without positions.
+pub(crate) fn unnest_rows(values: &[Value], sink: &mut dyn FnMut(Vec<Value>) -> SqlResult<()>) -> SqlResult<()> {
+    let Some(written) = values.first().and_then(text) else {
+        return Ok(());
+    };
+    let vector = vector_of(&written);
+    for lexeme in vector.lexemes().keys() {
+        let weighted = vector.weighted_positions(lexeme, false);
+        let (positions, weights) = match weighted.is_empty() {
+            true => (Value::Null, Value::Null),
+            false => (
+                Value::Array(Box::new(crate::arrays::ArrayValue::new(
+                    crate::arrays::ArrayElement::SmallInt,
+                    weighted
+                        .iter()
+                        .map(|(position, _)| Value::SmallInt(i16::try_from(*position).unwrap_or(i16::MAX)))
+                        .collect(),
+                ))),
+                Value::Array(Box::new(crate::arrays::ArrayValue::new(
+                    crate::arrays::ArrayElement::Text,
+                    weighted
+                        .iter()
+                        .map(|(_, weight)| Value::Text(weight_letter(*weight).to_owned()))
+                        .collect(),
+                ))),
+            ),
+        };
+        sink(vec![Value::Text(lexeme.clone()), positions, weights])?;
     }
     Ok(())
 }
