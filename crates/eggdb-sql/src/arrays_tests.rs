@@ -761,3 +761,14 @@ fn pg_trigger_depth_counts_the_triggers_running() {
         "depth|outside\n1|0\nSELECT 1"
     );
 }
+
+#[test]
+fn shuffled_and_sampled_arrays_keep_their_elements() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(&mut session, "SELECT cardinality(array_shuffle(ARRAY[1, 2, 3])), cardinality(array_sample(ARRAY[1, 2, 3], 2)), (SELECT sum(x) FROM unnest(array_shuffle(ARRAY[1, 2, 3])) AS x)").unwrap(),
+        "cardinality|cardinality|sum\n3|2|6\nSELECT 1"
+    );
+    assert_eq!(state(&mut session, "SELECT array_sample(ARRAY[1], 2)"), "22023");
+}

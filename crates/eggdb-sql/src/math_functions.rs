@@ -10,8 +10,8 @@ use crate::numeric::Numeric;
 use crate::types::{SqlType, Value};
 
 /// The functions this module answers.
-pub(crate) const FUNCTIONS: [&str; 27] = [
-    "to_bin", "to_oct", "setseed", "factorial", "exp", "ln", "log", "log10", "log2", "power", "pow", "cbrt", "degrees", "radians", "pi", "sign", "mod", "div", "gcd", "lcm",
+pub(crate) const FUNCTIONS: [&str; 28] = [
+    "random_normal", "to_bin", "to_oct", "setseed", "factorial", "exp", "ln", "log", "log10", "log2", "power", "pow", "cbrt", "degrees", "radians", "pi", "sign", "mod", "div", "gcd", "lcm",
     "width_bucket", "atan2", "atan2d", "random", "erf", "erfc", "gamma",
 ];
 
@@ -274,7 +274,7 @@ fn split_mix(state: u64) -> (u64, u64) {
     (next, mixed ^ (mixed >> 31))
 }
 
-fn random_double() -> SqlResult<f64> {
+pub(crate) fn random_double() -> SqlResult<f64> {
     let word = match SEEDED.with(std::cell::Cell::get) {
         Some(state) => {
             let (next, word) = split_mix(state);
@@ -316,6 +316,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     Some(match (name, values) {
         ("pi", []) => Ok(Value::Double(std::f64::consts::PI)),
         ("random", []) => random_double().map(Value::Double),
+        ("random_normal", rest) if rest.len() <= 2 => {
+            let mean = number(0).unwrap_or(0.0);
+            let deviation = number(1).unwrap_or(1.0);
+            random_double().and_then(|first| {
+                random_double().map(|second| {
+                    let radius = (-2.0 * (1.0 - first).ln()).sqrt();
+                    Value::Double(mean + deviation * radius * (std::f64::consts::TAU * second).cos())
+                })
+            })
+        }
         ("setseed", [seed]) => {
             let seed = number(0)?;
             if !(-1.0..=1.0).contains(&seed) {

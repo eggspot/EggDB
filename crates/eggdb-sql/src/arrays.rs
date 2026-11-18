@@ -850,6 +850,17 @@ fn array_value(element: ArrayElement, items: Vec<Value>) -> SqlResult<Value> {
     Ok(Value::Array(Box::new(ArrayValue::new(element, items))))
 }
 
+fn shuffled(array: &ArrayValue, count: usize) -> SqlResult<Value> {
+    let mut items = array.items.clone();
+    for at in 0..count.min(items.len()) {
+        let remaining = items.len() - at;
+        let pick = (crate::math_functions::random_double()? * remaining as f64) as usize;
+        items.swap(at, at + pick.min(remaining - 1));
+    }
+    items.truncate(count);
+    array_value(array.element, items)
+}
+
 fn element_of_value(value: &Value) -> ArrayElement {
     value.sql_type().and_then(ArrayElement::of).unwrap_or(ArrayElement::Text)
 }
@@ -962,6 +973,15 @@ fn editing_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
             }
         }
         ("array_reverse", [Value::Array(array)]) => array_value(array.element, array.items.iter().rev().cloned().collect()),
+        ("array_shuffle" | "array_sample", [Value::Null, ..]) => Ok(Value::Null),
+        ("array_shuffle", [Value::Array(array)]) => shuffled(array, array.items.len()),
+        ("array_sample", [Value::Array(array), count]) => match count.as_integer().and_then(|count| usize::try_from(count).ok()) {
+            Some(count) if count <= array.items.len() => shuffled(array, count),
+            _ => Err(SqlError::new(
+                SqlState::INVALID_PARAMETER_VALUE,
+                format!("sample size must be between 0 and {}", array.items.len()),
+            )),
+        },
         ("array_dims", [Value::Array(array)]) if array.items.is_empty() => Ok(Value::Null),
         ("array_dims", [Value::Array(array)]) => Ok(Value::Text(format!(
             "[{}:{}]",
@@ -1476,7 +1496,8 @@ pub(crate) fn function_type(
             _ => None,
         },
         "array_any" | "array_all" => Some(SqlType::Boolean),
-        "array_append" | "array_cat" | "array_remove" | "array_replace" | "trim_array" | "array_reverse" => {
+        "array_append" | "array_cat" | "array_remove" | "array_replace" | "trim_array" | "array_reverse" | "array_shuffle"
+        | "array_sample" => {
             match arguments.first().and_then(|array| crate::typing::static_type(array, scope)) {
                 Some(SqlType::Array(element)) => Some(SqlType::Array(element)),
                 _ => match arguments.get(1).and_then(|other| crate::typing::static_type(other, scope)) {
