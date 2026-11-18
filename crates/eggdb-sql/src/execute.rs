@@ -776,6 +776,7 @@ pub(crate) fn drop_tables(
         constraints::unregister_references(writer, tables, &table)?;
         crate::sequences::drop_owned_by(writer, tables, &table.name, None)?;
         crate::sequences::forget_identity_mark(writer, table.id)?;
+        writer.delete(&crate::cdc::truncate_mark_key(table.id))?;
         crate::comments::forget_owner(writer, &table.name)?;
         crate::triggers::remove_table_triggers(writer, &table.name)?;
         crate::partitions::forget(writer, &table.name)?;
@@ -5227,6 +5228,7 @@ pub(crate) fn truncate(
         using: None,
     };
     delete_matching(writer, tables, &every_row, false, None)?;
+    crate::cdc::mark_truncated(writer, definition.id)?;
     if let Some(firing) = firing {
         firing.finish();
     }

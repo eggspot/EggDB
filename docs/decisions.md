@@ -1288,3 +1288,4 @@ its full title with its status.
 - [D1261](decisions/D1261.md) Code-only batch 917 (M6): the ODBC driver connects to servers
 - [D1262](decisions/D1262.md) Code-only batch 918 (M7): empty matches in MATCH_RECOGNIZE
 - [D1263](decisions/D1263.md) Code-only batch 919: binary tuples in pgoutput
+- [D1264](decisions/D1264.md) Code-only batch 920: TRUNCATE in logical replication

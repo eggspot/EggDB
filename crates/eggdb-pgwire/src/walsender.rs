@@ -261,6 +261,12 @@ fn change_message(change: &DecodedChange, binary: bool) -> Vec<u8> {
             out.push(b'O');
             tuple(&mut out, change.before.as_deref().unwrap_or_default(), None, types);
         }
+        DecodedOperation::Truncate => {
+            out.push(b'T');
+            out.extend_from_slice(&1u32.to_be_bytes());
+            out.push(0);
+            out.extend_from_slice(&change.table_id.to_be_bytes());
+        }
     }
     out
 }
@@ -417,5 +423,7 @@ mod tests {
         let text = change_message(&change, false);
         assert_eq!(text[8], b't');
         assert_eq!(&text[13..14], b"5");
+        let truncate = DecodedChange { operation: DecodedOperation::Truncate, after: None, ..change };
+        assert_eq!(change_message(&truncate, false), [b'T', 0, 0, 0, 1, 0, 0, 0, 0, 7]);
     }
 }

@@ -507,6 +507,7 @@ impl PublicationFilter {
             return true;
         }
         let row = match change.operation {
+            DecodedOperation::Truncate => return true,
             DecodedOperation::Delete => change.before.as_deref(),
             _ => change.after.as_deref(),
         };
@@ -529,6 +530,7 @@ impl PublicationFilter {
                     DecodedOperation::Insert => publication.publishes_insert(),
                     DecodedOperation::Update => publication.publishes_update(),
                     DecodedOperation::Delete => publication.publishes_delete(),
+                    DecodedOperation::Truncate => publication.publishes_truncate(),
                 }
                 && self.row_passes(at, &internal, change)
         })

@@ -21,6 +21,8 @@ pub enum DecodedOperation {
     Update,
     /// The row is gone.
     Delete,
+    /// Every row of the table is gone (`TRUNCATE`, D1264); no rows come with it.
+    Truncate,
 }
 
 /// One row change of a captured transaction, with what a subscriber needs to apply it.
@@ -162,7 +164,32 @@ pub fn decode_after(reader: &dyn KeyValueRead, after: u64, limit: usize) -> SqlR
     for (lsn, value) in records {
         let keys = crate::cdc::decode_capture_record(&value).ok_or_else(|| crate::encoding::corrupt("captured changes"))?;
         let mut changes = Vec::new();
+        let truncated: Vec<u32> = keys
+            .iter()
+            .filter(|(_, _, after)| after.is_some())
+            .filter_map(|(key, _, _)| crate::cdc::truncate_mark_table(key))
+            .collect();
+        for &id in &truncated {
+            let Some(definition) = tables.get(&id) else {
+                continue;
+            };
+            let schema = crate::schemas::schema_of(&definition.name);
+            let schema = if schema.is_empty() { crate::schemas::DEFAULT_SCHEMA } else { schema };
+            changes.push(DecodedChange {
+                table_id: id,
+                schema: schema.to_owned(),
+                table: crate::schemas::base_name(&definition.name).to_owned(),
+                columns: definition.columns.iter().map(|column| (column.name.clone(), column.sql_type)).collect(),
+                key_columns: definition.primary_key.clone(),
+                operation: DecodedOperation::Truncate,
+                before: None,
+                after: None,
+            });
+        }
         for (key, before, after) in keys {
+            if crate::cdc::truncate_mark_table(&key).is_some() {
+                continue;
+            }
             let Some(id) = key.get(id_at..id_at + 4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_be_bytes) else {
                 continue;
             };
@@ -171,12 +198,16 @@ pub fn decode_after(reader: &dyn KeyValueRead, after: u64, limit: usize) -> SqlR
             };
             let schema = crate::schemas::schema_of(&definition.name);
             let schema = if schema.is_empty() { crate::schemas::DEFAULT_SCHEMA } else { schema };
+            let emptied = truncated.contains(&id);
             let operation = match (&before, &after) {
+                (_, Some(_)) if emptied => DecodedOperation::Insert,
                 (None, Some(_)) => DecodedOperation::Insert,
                 (Some(_), Some(_)) => DecodedOperation::Update,
+                (Some(_), None) if emptied => continue,
                 (Some(_), None) => DecodedOperation::Delete,
                 (None, None) => continue,
             };
+            let before = if emptied { None } else { before };
             changes.push(DecodedChange {
                 table_id: id,
                 schema: schema.to_owned(),
@@ -191,4 +222,49 @@ pub fn decode_after(reader: &dyn KeyValueRead, after: u64, limit: usize) -> SqlR
         transactions.push(DecodedTransaction { lsn, changes });
     }
     Ok(transactions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory_store::MemoryStore;
+    use crate::store::{KeyValueStore, KeyValueWrite};
+
+    #[test]
+    fn a_truncate_mark_becomes_one_truncate_and_rows_written_after_it_inserts() {
+        let store = MemoryStore::default();
+        let mut session = crate::Session::new(&store);
+        for statement in ["CREATE TABLE eggs (id INTEGER PRIMARY KEY, colour TEXT)", "INSERT INTO eggs VALUES (1, 'brown'), (2, 'white')"] {
+            session.execute(statement, &mut |_| {}).unwrap();
+        }
+        let read = store.begin_read().unwrap();
+        let tables = crate::cdc::table_definitions(&read).unwrap();
+        let (&id, _) = tables.iter().find(|(_, definition)| definition.name == "eggs").unwrap();
+        let prefix = crate::encoding::rows_prefix(id);
+        let mut rows = Vec::new();
+        read.scan(&prefix, &prefix_end(&prefix), ScanDirection::Forward, &mut |key, value| {
+            rows.push((key.to_vec(), value.to_vec()));
+            Ok(true)
+        })
+        .unwrap();
+        drop(read);
+        assert_eq!(rows.len(), 2);
+        let keys = vec![
+            (rows[0].0.clone(), Some(rows[0].1.clone()), None),
+            (rows[1].0.clone(), Some(rows[1].1.clone()), Some(rows[1].1.clone())),
+            (crate::cdc::truncate_mark_key(id), None, Some(1u64.to_le_bytes().to_vec())),
+        ];
+        let mut record_key = CAPTURE_PREFIX.to_vec();
+        record_key.extend_from_slice(&1u64.to_be_bytes());
+        let mut writer = store.begin_write().unwrap();
+        writer.put(&record_key, &crate::cdc::encode_capture(&keys)).unwrap();
+        writer.commit().unwrap();
+        let read = store.begin_read().unwrap();
+        let decoded = decode_after(&read, 0, 10).unwrap();
+        let operations: Vec<DecodedOperation> = decoded[0].changes.iter().map(|change| change.operation).collect();
+        assert_eq!(operations, [DecodedOperation::Truncate, DecodedOperation::Insert]);
+        assert_eq!(decoded[0].changes[0].table, "eggs");
+        assert!(decoded[0].changes[1].before.is_none());
+        assert!(crate::cdc::is_row_key(&crate::cdc::truncate_mark_key(id)));
+    }
 }

@@ -585,9 +585,38 @@ pub const CAPTURE_PREFIX: &[u8] = b"\xffCOL\x00\x7fcapture\x00";
 /// One captured key: its stored bytes before the commit and after it, `None` when absent.
 pub type CapturedKey = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// Whether `key` holds a row of a SQL table, the keys capture without triggers records.
+const TRUNCATE_MARK_SPACE: u8 = 0x22;
+
+/// The key `TRUNCATE` counts a table's truncations under, so capture records a truncation
+/// as one change of its own (D1264).
+pub(crate) fn truncate_mark_key(table_id: u32) -> Vec<u8> {
+    let mut key = crate::encoding::NAMESPACE.to_vec();
+    key.push(TRUNCATE_MARK_SPACE);
+    key.extend_from_slice(&table_id.to_be_bytes());
+    key
+}
+
+/// The table a truncate mark key belongs to; `None` for every other key.
+pub(crate) fn truncate_mark_table(key: &[u8]) -> Option<u32> {
+    let rest = key.strip_prefix(crate::encoding::NAMESPACE)?.strip_prefix(&[TRUNCATE_MARK_SPACE])?;
+    Some(u32::from_be_bytes(rest.try_into().ok()?))
+}
+
+/// Counts one more truncation of the table `table_id` (D1264).
+pub(crate) fn mark_truncated(writer: &mut dyn crate::store::KeyValueWrite, table_id: u32) -> SqlResult<()> {
+    let key = truncate_mark_key(table_id);
+    let count = writer
+        .get(&key)?
+        .and_then(|bytes| bytes.get(..8).and_then(|bytes| bytes.try_into().ok()))
+        .map_or(0, u64::from_le_bytes);
+    writer.put(&key, &count.wrapping_add(1).to_le_bytes())
+}
+
+/// Whether `key` holds a row of a SQL table, or a table's truncate mark: the keys capture
+/// without triggers records.
 pub fn is_row_key(key: &[u8]) -> bool {
-    key.len() > crate::encoding::NAMESPACE.len() + 4 && key.starts_with(&crate::encoding::rows_prefix(0)[..crate::encoding::NAMESPACE.len() + 1])
+    (key.len() > crate::encoding::NAMESPACE.len() + 4 && key.starts_with(&crate::encoding::rows_prefix(0)[..crate::encoding::NAMESPACE.len() + 1]))
+        || truncate_mark_table(key).is_some()
 }
 
 /// The capture record of one commit's row changes.
@@ -693,6 +722,9 @@ fn captured_events(
     let mut events = Vec::new();
     let mut per_table: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     for (key, before, after) in keys {
+        if truncate_mark_table(key).is_some() {
+            continue;
+        }
         let Some(id) = key.get(id_at..id_at + 4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_be_bytes) else {
             continue;
         };
@@ -789,6 +821,9 @@ pub fn captured_changes_after<S: KeyValueStore>(
     for (sequence, value) in records {
         let keys = decode_capture_record(&value).ok_or_else(|| crate::encoding::corrupt("captured changes"))?;
         for (key, before, after) in &keys {
+            if truncate_mark_table(key).is_some() {
+                continue;
+            }
             let Some(id) = key.get(id_at..id_at + 4).and_then(|bytes| bytes.try_into().ok()).map(u32::from_be_bytes) else {
                 continue;
             };
