@@ -120,6 +120,18 @@ if __name__ == "__main__":
         self.assertIsNone(cursor.lastrowid)
         connection.close()
 
+    def test_row_factories_make_rows_read_by_name(self):
+        connection = eggdb.connect(":memory:")
+        connection.row_factory = eggdb.Row
+        cursor = connection.cursor()
+        cursor.execute("SELECT 1 AS id, 'egg' AS Name")
+        row = cursor.fetchone()
+        self.assertEqual((row[0], row["name"], row["NAME"], row.keys()), (1, "egg", "egg", ["id", "Name"]))
+        cursor.row_factory = lambda cursor, values: values[1]
+        cursor.execute("SELECT 1, 'two'")
+        self.assertEqual(cursor.fetchall(), ["two"])
+        connection.close()
+
 
 class KeyValueTest(unittest.TestCase):
     def test_collections_hold_keys_apart_and_rename_and_count(self):

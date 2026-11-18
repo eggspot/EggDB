@@ -411,6 +411,7 @@ class Connection:
             self._database = None
             self._session = session
             self._functions = {}
+            self.row_factory = None
             self._dialect = "postgresql"
             self._in_transaction = False
             self.autocommit = False
@@ -428,6 +429,7 @@ class Connection:
         self._database = database
         self._session = session
         self._functions = {}
+        self.row_factory = None
         self._dialect = dialect
         self._in_transaction = False
         self.autocommit = False
@@ -620,10 +622,52 @@ class Connection:
         return False
 
 
+class Row:
+    """A row read by column position or by name (any case), as `sqlite3.Row` is: set
+    `connection.row_factory = eggdb.Row` (or a cursor's) to get rows of this kind."""
+
+    __slots__ = ("_names", "_values")
+
+    def __init__(self, cursor, values):
+        self._names = [entry[0] for entry in (cursor.description or [])]
+        self._values = tuple(values)
+
+    def keys(self):
+        """The column names, in order."""
+        return list(self._names)
+
+    def __getitem__(self, key):
+        if isinstance(key, (int, slice)):
+            return self._values[key]
+        lowered = str(key).lower()
+        for name, value in zip(self._names, self._values):
+            if name.lower() == lowered:
+                return value
+        raise IndexError(f"no column named {key!r}")
+
+    def __len__(self):
+        return len(self._values)
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __eq__(self, other):
+        if isinstance(other, Row):
+            return self._names == other._names and self._values == other._values
+        return NotImplemented
+
+    def __hash__(self):
+        return hash((tuple(self._names), self._values))
+
+    def __repr__(self):
+        return f"<eggdb.Row {dict(zip(self._names, self._values))!r}>"
+
+
 class Cursor:
     """A DB-API cursor: runs statements and hands out their rows."""
 
     arraysize = 1
+    row_factory = None
 
     def __init__(self, connection):
         self.connection = connection
@@ -680,20 +724,24 @@ class Cursor:
         self.rowcount = total
         return self
 
+    def _made(self, row):
+        factory = self.row_factory if self.row_factory is not None else getattr(self.connection, "row_factory", None)
+        return row if factory is None else factory(self, row)
+
     def fetchone(self):
-        """The next row, or None."""
-        return self._rows.pop(0) if self._rows else None
+        """The next row, or None; made by the row factory when one is set."""
+        return self._made(self._rows.pop(0)) if self._rows else None
 
     def fetchmany(self, size=None):
         """Up to `size` rows (the cursor's arraysize by default)."""
         size = self.arraysize if size is None else size
         taken, self._rows = self._rows[:size], self._rows[size:]
-        return taken
+        return [self._made(row) for row in taken]
 
     def fetchall(self):
         """Every row left."""
         taken, self._rows = self._rows, []
-        return taken
+        return [self._made(row) for row in taken]
 
     def close(self):
         """Forgets the rows left."""
@@ -707,7 +755,7 @@ class Cursor:
 
     def __iter__(self):
         while self._rows:
-            yield self._rows.pop(0)
+            yield self._made(self._rows.pop(0))
 
 
 def _affected(tag):
