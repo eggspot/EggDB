@@ -2,7 +2,7 @@ use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
     SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLProcedureColumns, SQLPrepare, SQLPrimaryKeys,
-    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
+    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -296,4 +296,28 @@ fn several_result_sets_functions_and_diagnostic_fields() {
     let mut written = 0i16;
     assert_eq!(SQLGetDiagField(SQL_HANDLE_STMT, stmt, 1, 4, state.as_mut_ptr().cast(), 6, &raw mut written), 0);
     assert_eq!(written, 5);
+}
+
+#[test]
+fn block_fetches_fill_arrays_of_rows_column_wise() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=sqlite\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    let mut numbers = [0i32; 2];
+    let mut indicators = [0isize; 2];
+    let mut fetched = 0usize;
+    let mut statuses = [9u16; 2];
+    assert_eq!(SQLSetStmtAttr(stmt, 27, 2usize as *mut c_void, 0), 0);
+    assert_eq!(SQLSetStmtAttr(stmt, 26, (&raw mut fetched).cast(), 0), 0);
+    assert_eq!(SQLSetStmtAttr(stmt, 25, statuses.as_mut_ptr().cast(), 0), 0);
+    assert_eq!(run(stmt, "SELECT 10 UNION ALL SELECT 20 UNION ALL SELECT 30"), 0);
+    assert_eq!(SQLBindCol(stmt, 1, SQL_C_SLONG, numbers.as_mut_ptr().cast(), 4, indicators.as_mut_ptr()), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!((numbers, fetched, statuses), ([10, 20], 2, [0, 0]));
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!((numbers[0], fetched, statuses), (30, 1, [0, 3]));
+    assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
+    assert_eq!(fetched, 0);
 }

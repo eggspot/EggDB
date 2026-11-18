@@ -750,28 +750,33 @@ fn deliver_piece(bytes: &[u8], offset: usize, target: *mut u8, buffer_length: is
     }
 }
 
-/// Moves to the next row, filling the columns bound with [`SQLBindCol`].
-#[unsafe(no_mangle)]
-pub extern "system" fn SQLFetch(stmt: *mut c_void) -> SqlReturn {
-    let Some(stmt) = statement(stmt) else {
-        return SQL_INVALID_HANDLE;
-    };
-    stmt.diagnostics.clear();
-    let Some(row) = stmt.rows.get(stmt.next_row).cloned() else {
-        stmt.current = None;
-        return SQL_NO_DATA;
-    };
-    stmt.next_row += 1;
-    stmt.read_offsets = vec![0; stmt.columns.len()];
+fn element<T>(base: *mut T, element_bytes: usize, at: usize, offset: isize) -> *mut T {
+    if base.is_null() {
+        return base;
+    }
+    base.cast::<u8>()
+        .wrapping_add(element_bytes * at)
+        .wrapping_offset(offset)
+        .cast::<T>()
+}
+
+fn fill_row(stmt: &mut StatementHandle, row: &[crate::native::Cell], at: usize, offset: isize) -> SqlReturn {
+    let row_wise = stmt.block.row_bind_type;
     let mut outcome = SQL_SUCCESS;
     for (index, bound) in stmt.bound_columns.iter().enumerate() {
         let (Some(bound), Some(cell)) = (bound, row.get(index)) else {
             continue;
         };
+        let (target_step, indicator_step) = match row_wise {
+            0 => (usize::try_from(bound.buffer_length).unwrap_or(0), std::mem::size_of::<isize>()),
+            row_size => (row_size, row_size),
+        };
+        let target = element(bound.target, target_step, at, offset);
+        let indicator = element(bound.indicator, indicator_step, at, offset);
         match convert(cell, bound.target_type) {
             Ok(converted) => {
-                let (delivered, _) = deliver(converted, 0, bound.target, bound.buffer_length, bound.indicator);
-                if delivered == SQL_SUCCESS_WITH_INFO {
+                let (delivered, _) = deliver(converted, 0, target, bound.buffer_length, indicator);
+                if delivered == SQL_SUCCESS_WITH_INFO && outcome == SQL_SUCCESS {
                     outcome = SQL_SUCCESS_WITH_INFO;
                 }
             }
@@ -781,7 +786,55 @@ pub extern "system" fn SQLFetch(stmt: *mut c_void) -> SqlReturn {
             }
         }
     }
-    stmt.current = Some(row);
+    outcome
+}
+
+/// Moves to the next row, or the next `SQL_ATTR_ROW_ARRAY_SIZE` rows (D1279), filling the
+/// columns bound with [`SQLBindCol`].
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLFetch(stmt: *mut c_void) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    stmt.diagnostics.clear();
+    let block = stmt.block;
+    let size = block.row_array_size.max(1);
+    let offset = read(block.bind_offset).unwrap_or(0);
+    let mut fetched = 0usize;
+    let mut outcome = SQL_SUCCESS;
+    for at in 0..size {
+        let Some(row) = stmt.rows.get(stmt.next_row).cloned() else {
+            break;
+        };
+        stmt.next_row += 1;
+        let filled = fill_row(stmt, &row, at, offset);
+        let status = match filled {
+            SQL_SUCCESS => SQL_ROW_SUCCESS,
+            SQL_SUCCESS_WITH_INFO => SQL_ROW_SUCCESS_WITH_INFO,
+            _ => SQL_ROW_ERROR,
+        };
+        if !block.row_status.is_null() {
+            store(block.row_status.wrapping_add(at), status);
+        }
+        outcome = match (outcome, filled) {
+            (SQL_ERROR, _) | (_, SQL_ERROR) if size == 1 => SQL_ERROR,
+            (SQL_SUCCESS, SQL_SUCCESS) => SQL_SUCCESS,
+            _ => SQL_SUCCESS_WITH_INFO,
+        };
+        stmt.current = Some(row);
+        fetched += 1;
+    }
+    if !block.row_status.is_null() {
+        for at in fetched..size {
+            store(block.row_status.wrapping_add(at), SQL_ROW_NOROW);
+        }
+    }
+    store(block.rows_fetched, fetched);
+    if fetched == 0 {
+        stmt.current = None;
+        return SQL_NO_DATA;
+    }
+    stmt.read_offsets = vec![0; stmt.columns.len()];
     outcome
 }
 
@@ -922,9 +975,31 @@ pub extern "system" fn SQLGetConnectAttr(dbc: *mut c_void, attribute: i32, value
     failed(&mut dbc.diagnostics, Failure::new("HYC00", format!("connection attribute {attribute} is not supported")))
 }
 
-/// Sets a statement attribute; accepted and ignored.
+const SQL_ATTR_ROW_BIND_TYPE: i32 = 5;
+const SQL_ATTR_ROW_BIND_OFFSET_PTR: i32 = 23;
+const SQL_ATTR_ROW_STATUS_PTR: i32 = 25;
+const SQL_ATTR_ROWS_FETCHED_PTR: i32 = 26;
+const SQL_ATTR_ROW_ARRAY_SIZE: i32 = 27;
+const SQL_ROW_SUCCESS: u16 = 0;
+const SQL_ROW_NOROW: u16 = 3;
+const SQL_ROW_ERROR: u16 = 5;
+const SQL_ROW_SUCCESS_WITH_INFO: u16 = 6;
+
+/// Sets a statement attribute: the block fetch attributes are kept (D1279), the others are
+/// accepted and ignored.
 #[unsafe(no_mangle)]
-pub extern "system" fn SQLSetStmtAttr(_stmt: *mut c_void, _attribute: i32, _value: *mut c_void, _length: i32) -> SqlReturn {
+pub extern "system" fn SQLSetStmtAttr(stmt: *mut c_void, attribute: i32, value: *mut c_void, _length: i32) -> SqlReturn {
+    let Some(stmt) = statement(stmt) else {
+        return SQL_INVALID_HANDLE;
+    };
+    match attribute {
+        SQL_ATTR_ROW_ARRAY_SIZE => stmt.block.row_array_size = (value as usize).max(1),
+        SQL_ATTR_ROW_BIND_TYPE => stmt.block.row_bind_type = value as usize,
+        SQL_ATTR_ROWS_FETCHED_PTR => stmt.block.rows_fetched = value.cast(),
+        SQL_ATTR_ROW_STATUS_PTR => stmt.block.row_status = value.cast(),
+        SQL_ATTR_ROW_BIND_OFFSET_PTR => stmt.block.bind_offset = value.cast_const().cast(),
+        _ => {}
+    }
     SQL_SUCCESS
 }
 
@@ -1575,7 +1650,9 @@ pub extern "system" fn SQLGetStmtAttr(stmt: *mut c_void, attribute: i32, value: 
     stmt.diagnostics.clear();
     let answer: usize = match attribute {
         0 | 1 | 6 | -1 | -2 => 0,
-        7 | 27 => 1,
+        7 => 1,
+        SQL_ATTR_ROW_ARRAY_SIZE => stmt.block.row_array_size,
+        SQL_ATTR_ROW_BIND_TYPE => stmt.block.row_bind_type,
         14 => stmt.next_row,
         _ => return failed(&mut stmt.diagnostics, Failure::new("HY092", format!("statement attribute {attribute} is not supported"))),
     };

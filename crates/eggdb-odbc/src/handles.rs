@@ -97,6 +97,30 @@ pub(crate) struct BoundParameter {
     pub(crate) indicator: *const isize,
 }
 
+/// How [`crate::SQLFetch`] fills the bound columns (D1279): `row_array_size` rows a call,
+/// column-wise (`row_bind_type` 0: each column's buffer an array) or row-wise (`row_bind_type`
+/// the size of one row's structure), with the rows fetched and each row's status reported.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlockFetch {
+    pub(crate) row_array_size: usize,
+    pub(crate) row_bind_type: usize,
+    pub(crate) rows_fetched: *mut usize,
+    pub(crate) row_status: *mut u16,
+    pub(crate) bind_offset: *const isize,
+}
+
+impl Default for BlockFetch {
+    fn default() -> Self {
+        Self {
+            row_array_size: 1,
+            row_bind_type: 0,
+            rows_fetched: std::ptr::null_mut(),
+            row_status: std::ptr::null_mut(),
+            bind_offset: std::ptr::null(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct StatementHandle {
     pub(crate) connection: *mut ConnectionHandle,
@@ -111,6 +135,7 @@ pub(crate) struct StatementHandle {
     pub(crate) parameters: Vec<Option<BoundParameter>>,
     pub(crate) diagnostics: Diagnostics,
     pub(crate) pending: Vec<Outcome>,
+    pub(crate) block: BlockFetch,
 }
 
 impl StatementHandle {
@@ -128,6 +153,7 @@ impl StatementHandle {
             parameters: Vec::new(),
             diagnostics: Diagnostics::default(),
             pending: Vec::new(),
+            block: BlockFetch::default(),
         }
     }
 
