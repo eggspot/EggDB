@@ -6,7 +6,10 @@ use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::{SqlType, Value};
 
-const SQLSERVER_FUNCTIONS: [&str; 8] = [
+const SQLSERVER_FUNCTIONS: [&str; 11] = [
+    "hashbytes",
+    "string_escape",
+    "app_name",
     "patindex",
     "quotename",
     "isnumeric",
@@ -171,6 +174,29 @@ fn timestamp_from_parts(values: &[Value], seconds: f64) -> SqlResult<Value> {
     }
 }
 
+fn text_of(value: &Value) -> String {
+    value.to_text().unwrap_or_default()
+}
+
+fn json_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '/' => out.push_str("\\/"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if u32::from(control) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(control))),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn rounded_away(value: f64) -> f64 {
     value.round()
 }
@@ -221,6 +247,29 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
             let seconds = integer(2)? as f64 + integer(3)? as f64 / 10f64.powi(i32::try_from(precision).unwrap_or(0));
             crate::temporal::made_time(integer(0)?, integer(1)?, seconds).map(Value::Time).map_err(|_| parts_error("time"))
         }
+        ("hashbytes", [algorithm, input]) => {
+            let bytes = match input {
+                Value::Bytea(bytes) => bytes.clone(),
+                other => other.to_text().unwrap_or_default().into_bytes(),
+            };
+            Ok(match text_of(algorithm).to_ascii_uppercase().as_str() {
+                "MD5" => Value::Bytea(eggdb_crypto::md5_checksum(&bytes).to_vec()),
+                "SHA" | "SHA1" => Value::Bytea(eggdb_crypto::sha1(&bytes).to_vec()),
+                "SHA2_256" => Value::Bytea(eggdb_crypto::sha256(&bytes).to_vec()),
+                "SHA2_512" => Value::Bytea(eggdb_crypto::sha512(&bytes).to_vec()),
+                _ => Value::Null,
+            })
+        }
+        ("string_escape", [value, kind]) => {
+            if !text_of(kind).eq_ignore_ascii_case("json") {
+                return Some(Err(SqlError::new(
+                    SqlState::INVALID_PARAMETER_VALUE,
+                    "An invalid value was specified for argument 2: STRING_ESCAPE supports the type 'json'.",
+                )));
+            }
+            Ok(Value::Text(json_escaped(&text_of(value))))
+        }
+        ("app_name", []) => Ok(Value::Text(String::new())),
         ("bitand", [_, _]) => Ok(Value::BigInt(integer(0)? & integer(1)?)),
         ("remainder", [dividend, divisor]) => {
             let (n2, n1) = (dividend.as_float()?, divisor.as_float()?);
@@ -246,6 +295,8 @@ pub(crate) fn result_type(name: &str, first: Option<SqlType>) -> Option<SqlType>
     }
     Some(match name {
         "patindex" | "bitand" => SqlType::BigInt,
+        "hashbytes" => SqlType::Bytea,
+        "string_escape" | "app_name" => SqlType::Text,
         "isnumeric" => SqlType::Integer,
         "quotename" => SqlType::Text,
         "datefromparts" => SqlType::Date,
@@ -277,5 +328,6 @@ mod tests {
         assert!(looks_numeric("-"));
         assert!(!looks_numeric("12a"));
         assert!(!looks_numeric(""));
+        assert_eq!(json_escaped("a\"b\\c/d\n"), "a\\\"b\\\\c\\/d\\n");
     }
 }

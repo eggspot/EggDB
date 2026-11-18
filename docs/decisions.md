@@ -1319,3 +1319,4 @@ its full title with its status.
 - [D1292](decisions/D1292.md) Code-only batch 948 (M4): PATINDEX, QUOTENAME, ISNUMERIC, DATEFROMPARTS, BITAND, REMAINDER, NANVL
 - [D1293](decisions/D1293.md) Code-only batch 949 (M2): SQLite's likely, unlikely, likelihood and sqlite_source_id
 - [D1294](decisions/D1294.md) Code-only batch 950 (M4): to_reg*, array_to_json, timeofday, inet_ functions
+- [D1295](decisions/D1295.md) Code-only batch 951 (M4): HASHBYTES, STRING_ESCAPE and APP_NAME
