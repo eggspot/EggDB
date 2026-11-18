@@ -1284,3 +1284,4 @@ its full title with its status.
 - [D1257](decisions/D1257.md) Code-only batch 913 (M6): ODBC TIMESTAMPADD/DIFF, LOCATE from a start, trigonometry, DATABASE and USER
 - [D1258](decisions/D1258.md) Code-only batch 914 (M4): DBMS_METADATA synonyms and role grants
 - [D1259](decisions/D1259.md) Code-only batch 915 (M4): unnest(tsvector)
+- [D1260](decisions/D1260.md) Code-only batch 916 (M6): SQLNativeSqlW and SQLGetInfoW text answers in UTF-16

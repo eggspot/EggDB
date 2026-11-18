@@ -814,6 +814,26 @@ pub extern "system" fn SQLNativeSql(
     if truncated { SQL_SUCCESS_WITH_INFO } else { SQL_SUCCESS }
 }
 
+/// Whether [`SQLGetInfo`] answers `info` with text, which its UTF-16 form widens.
+pub(crate) fn answers_text(info: u16) -> bool {
+    matches!(
+        info,
+        SQL_DRIVER_NAME
+            | SQL_DRIVER_VER
+            | SQL_DBMS_NAME
+            | SQL_DBMS_VER
+            | SQL_DRIVER_ODBC_VER
+            | SQL_DATA_SOURCE_NAME
+            | SQL_SERVER_NAME
+            | SQL_DATABASE_NAME
+            | SQL_IDENTIFIER_QUOTE_CHAR
+            | SQL_DATA_SOURCE_READ_ONLY
+            | SQL_USER_NAME
+    ) || FIXED_INFO
+        .iter()
+        .any(|(known, answer)| *known == info && matches!(answer, InfoAnswer::Text(_)))
+}
+
 /// Answers the driver and database information applications ask for first.
 #[unsafe(no_mangle)]
 pub extern "system" fn SQLGetInfo(dbc: *mut c_void, info: u16, value: *mut c_void, capacity: i16, written: *mut i16) -> SqlReturn {

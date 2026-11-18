@@ -2,7 +2,7 @@
 
 use crate::api::{
     SQLColAttribute, SQLColumns, SQLConnect, SQLDescribeCol, SQLDriverConnect, SQLExecDirect,
-    SQLForeignKeys, SQLGetDiagRec, SQLGetInfo, SQLGetTypeInfo, SQLPrepare, SQLPrimaryKeys,
+    SQLForeignKeys, SQLGetDiagRec, SQLGetInfo, SQLGetTypeInfo, SQLNativeSql, SQLPrepare, SQLPrimaryKeys,
     SQLColumnPrivileges, SQLProcedureColumns, SQLProcedures, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use crate::memory::{SQL_NTS, store};
@@ -107,6 +107,26 @@ pub extern "system" fn SQLExecDirectW(stmt: *mut c_void, text: *const u16, lengt
     }
 }
 
+/// [`SQLNativeSql`] with UTF-16 text; lengths in characters (D1260).
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLNativeSqlW(dbc: *mut c_void, input: *const u16, input_length: i32, output: *mut u16, capacity: i32, written: *mut i32) -> SqlReturn {
+    let input = match narrowed(input, input_length as isize) {
+        Ok(input) => input,
+        Err(outcome) => return outcome,
+    };
+    let room = input.as_ref().map_or(0, |text| text.as_bytes().len()) * 2 + SCRATCH_BYTES;
+    let mut scratch = vec![0u8; room];
+    let mut length = 0i32;
+    let outcome = SQLNativeSql(dbc, pointer(&input), SQL_NTS as i32, scratch.as_mut_ptr(), i32::try_from(room).unwrap_or(i32::MAX), &raw mut length);
+    if outcome < 0 {
+        return outcome;
+    }
+    let shown = &scratch[..usize::try_from(length).unwrap_or(0).min(room)];
+    let (truncated, total) = widen_into(output, usize::try_from(capacity).unwrap_or(0), shown);
+    store(written, i32::try_from(total).unwrap_or(i32::MAX));
+    if truncated { SQL_SUCCESS_WITH_INFO } else { outcome }
+}
+
 /// [`SQLPrepare`] with UTF-16 text.
 #[unsafe(no_mangle)]
 pub extern "system" fn SQLPrepareW(stmt: *mut c_void, text: *const u16, length: i32) -> SqlReturn {
@@ -170,8 +190,7 @@ pub extern "system" fn SQLGetInfoW(dbc: *mut c_void, info: u16, value: *mut c_vo
     if outcome < 0 {
         return outcome;
     }
-    let textual = matches!(info, 2 | 6 | 7 | 13 | 17 | 18 | 29 | 77);
-    if !textual {
+    if !crate::api::answers_text(info) {
         let size = usize::try_from(length).unwrap_or(0).min(usize::try_from(capacity).unwrap_or(usize::MAX));
         crate::memory::copy_into(value.cast(), &scratch[..size]);
         store(written, length);

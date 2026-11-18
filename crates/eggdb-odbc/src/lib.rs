@@ -35,5 +35,5 @@ pub use wide::{
     SQLColAttributeW, SQLColumnsW, SQLConnectW, SQLDescribeColW, SQLDriverConnectW,
     SQLExecDirectW, SQLForeignKeysW, SQLGetDiagRecW, SQLGetInfoW, SQLGetTypeInfoW, SQLPrepareW,
     SQLPrimaryKeysW, SQLProceduresW, SQLSpecialColumnsW, SQLStatisticsW, SQLTablePrivilegesW, SQLTablesW,
-    SQLColumnPrivilegesW, SQLProcedureColumnsW,
+    SQLColumnPrivilegesW, SQLProcedureColumnsW, SQLNativeSqlW,
 };
