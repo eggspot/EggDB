@@ -276,10 +276,12 @@ fn located<'n>(node: &'n mut Node, legs: &[Leg]) -> Option<&'n mut Node> {
     let Some((leg, rest)) = legs.split_first() else {
         return Some(node);
     };
+    if *leg == Leg::Index(0) && !matches!(node.value, Json::Array(_)) {
+        return located(node, rest);
+    }
     let next = match (leg, &mut node.value) {
         (Leg::Key(key), Json::Object(members)) => members.iter_mut().rev().find(|(name, _)| name == key).map(|(_, value)| value)?,
         (Leg::Index(index), Json::Array(items)) => items.get_mut(*index)?,
-        (Leg::Index(0), _) => return located(node, rest),
         _ => return None,
     };
     located(next, rest)
