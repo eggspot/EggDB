@@ -481,12 +481,32 @@ pub extern "system" fn SQLDisconnect(dbc: *mut c_void) -> SqlReturn {
     SQL_SUCCESS
 }
 
-fn bound_parameters(stmt: &StatementHandle, text: &str) -> Result<(String, Vec<Option<String>>), Failure> {
+fn parameter_element(parameter: &BoundParameter, bind_type: usize, set: usize) -> BoundParameter {
+    if set == 0 {
+        return *parameter;
+    }
+    let (value_step, indicator_step) = match bind_type {
+        0 => (
+            fixed_size(parameter.value_type).unwrap_or_else(|| usize::try_from(parameter.buffer_length).unwrap_or(0)),
+            std::mem::size_of::<isize>(),
+        ),
+        row_size => (row_size, row_size),
+    };
+    let moved = |base: *const u8, step: usize| if base.is_null() { base } else { base.wrapping_add(step * set) };
+    BoundParameter {
+        value: moved(parameter.value, value_step),
+        indicator: moved(parameter.indicator.cast(), indicator_step).cast(),
+        ..*parameter
+    }
+}
+
+fn bound_parameters(stmt: &StatementHandle, text: &str, set: usize) -> Result<(String, Vec<Option<String>>), Failure> {
     let mut values = Vec::new();
     for (index, parameter) in stmt.parameters.iter().enumerate() {
         let Some(parameter) = parameter else {
             return Err(Failure::new("07002", format!("parameter {} is not bound", index + 1)));
         };
+        let parameter = &parameter_element(parameter, stmt.parameter_array.bind_type, set);
         let indicator = read(parameter.indicator).unwrap_or(SQL_NTS);
         if indicator == SQL_NULL_DATA {
             values.push(None);
@@ -547,7 +567,10 @@ fn execute(stmt: &mut StatementHandle, text: &str) -> SqlReturn {
         Ok(text) => text,
         Err(message) => return failed(&mut stmt.diagnostics, Failure::new("37000", message)),
     };
-    let (text, values) = match bound_parameters(stmt, &text) {
+    if stmt.parameter_array.size > 1 && !stmt.parameters.is_empty() {
+        return execute_sets(stmt, &text);
+    }
+    let (text, values) = match bound_parameters(stmt, &text, 0) {
         Ok(bound) => bound,
         Err(failure) => return failed(&mut stmt.diagnostics, failure),
     };
@@ -561,6 +584,53 @@ fn execute(stmt: &mut StatementHandle, text: &str) -> SqlReturn {
         }
         Err(failure) => failed(&mut stmt.diagnostics, failure),
     }
+}
+
+const SQL_PARAM_SUCCESS: u16 = 0;
+const SQL_PARAM_ERROR: u16 = 5;
+const SQL_PARAM_UNUSED: u16 = 7;
+const SQL_ATTR_PARAM_BIND_TYPE: i32 = 18;
+const SQL_ATTR_PARAM_STATUS_PTR: i32 = 20;
+const SQL_ATTR_PARAMS_PROCESSED_PTR: i32 = 21;
+const SQL_ATTR_PARAMSET_SIZE: i32 = 22;
+
+fn execute_sets(stmt: &mut StatementHandle, text: &str) -> SqlReturn {
+    let array = stmt.parameter_array;
+    let mark = |set: usize, status: u16| {
+        if !array.status.is_null() {
+            store(array.status.wrapping_add(set), status);
+        }
+    };
+    let mut changed: isize = 0;
+    let mut processed = 0usize;
+    let mut outcome = SQL_SUCCESS;
+    for set in 0..array.size {
+        let ran = bound_parameters(stmt, text, set).and_then(|(text, values)| {
+            owning_connection(stmt)
+                .ok_or_else(|| Failure::new("08003", "the connection is not open"))?
+                .run(&text, &values)
+        });
+        processed += 1;
+        match ran {
+            Ok(outcomes) => {
+                stmt.take_outcomes(outcomes);
+                changed += stmt.row_count.max(0);
+                mark(set, SQL_PARAM_SUCCESS);
+            }
+            Err(failure) => {
+                stmt.diagnostics.push(failure);
+                mark(set, SQL_PARAM_ERROR);
+                for unused in set + 1..array.size {
+                    mark(unused, SQL_PARAM_UNUSED);
+                }
+                outcome = if processed > 1 { SQL_SUCCESS_WITH_INFO } else { SQL_ERROR };
+                break;
+            }
+        }
+    }
+    store(array.processed, processed);
+    stmt.row_count = changed;
+    outcome
 }
 
 /// Runs a statement at once.
@@ -998,6 +1068,10 @@ pub extern "system" fn SQLSetStmtAttr(stmt: *mut c_void, attribute: i32, value: 
         SQL_ATTR_ROWS_FETCHED_PTR => stmt.block.rows_fetched = value.cast(),
         SQL_ATTR_ROW_STATUS_PTR => stmt.block.row_status = value.cast(),
         SQL_ATTR_ROW_BIND_OFFSET_PTR => stmt.block.bind_offset = value.cast_const().cast(),
+        SQL_ATTR_PARAMSET_SIZE => stmt.parameter_array.size = value.addr().max(1),
+        SQL_ATTR_PARAM_BIND_TYPE => stmt.parameter_array.bind_type = value.addr(),
+        SQL_ATTR_PARAMS_PROCESSED_PTR => stmt.parameter_array.processed = value.cast(),
+        SQL_ATTR_PARAM_STATUS_PTR => stmt.parameter_array.status = value.cast(),
         _ => {}
     }
     SQL_SUCCESS

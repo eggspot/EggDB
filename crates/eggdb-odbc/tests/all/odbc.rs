@@ -321,3 +321,28 @@ fn block_fetches_fill_arrays_of_rows_column_wise() {
     assert_eq!(SQLFetch(stmt), SQL_NO_DATA);
     assert_eq!(fetched, 0);
 }
+
+#[test]
+fn parameter_arrays_run_a_statement_once_per_set() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=sqlite\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(run(stmt, "CREATE TABLE eggs (id INTEGER PRIMARY KEY)"), 0);
+    let mut ids = [1i32, 2, 1];
+    let mut lengths = [4isize; 3];
+    let mut processed = 0usize;
+    let mut statuses = [9u16; 3];
+    assert_eq!(SQLSetStmtAttr(stmt, 22, ptr::without_provenance_mut(3), 0), 0);
+    assert_eq!(SQLSetStmtAttr(stmt, 21, (&raw mut processed).cast(), 0), 0);
+    assert_eq!(SQLSetStmtAttr(stmt, 20, statuses.as_mut_ptr().cast(), 0), 0);
+    SQLBindParameter(stmt, 1, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_INTEGER, 0, 0, ids.as_mut_ptr().cast(), 4, lengths.as_mut_ptr());
+    let insert = b"INSERT INTO eggs (id) VALUES (?)\0";
+    assert_eq!(SQLExecDirect(stmt, insert.as_ptr(), SQL_NTS), 1);
+    assert_eq!((processed, statuses), (3, [0, 0, 5]));
+    assert_eq!(SQLSetStmtAttr(stmt, 22, ptr::without_provenance_mut(1), 0), 0);
+    assert_eq!(run(stmt, "SELECT count(*) FROM eggs"), 0);
+    assert_eq!(SQLFetch(stmt), 0);
+    assert_eq!(text_column(stmt, 1).as_deref(), Some("2"));
+}

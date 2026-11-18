@@ -121,6 +121,28 @@ impl Default for BlockFetch {
     }
 }
 
+/// How a run binds parameters (D1280): `size` sets of values a run, column-wise (`bind_type` 0)
+/// or row-wise (`bind_type` the size of one set's structure), with the sets processed and each
+/// set's status reported.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ParameterArray {
+    pub(crate) size: usize,
+    pub(crate) bind_type: usize,
+    pub(crate) processed: *mut usize,
+    pub(crate) status: *mut u16,
+}
+
+impl Default for ParameterArray {
+    fn default() -> Self {
+        Self {
+            size: 1,
+            bind_type: 0,
+            processed: std::ptr::null_mut(),
+            status: std::ptr::null_mut(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct StatementHandle {
     pub(crate) connection: *mut ConnectionHandle,
@@ -136,6 +158,7 @@ pub(crate) struct StatementHandle {
     pub(crate) diagnostics: Diagnostics,
     pub(crate) pending: Vec<Outcome>,
     pub(crate) block: BlockFetch,
+    pub(crate) parameter_array: ParameterArray,
 }
 
 impl StatementHandle {
@@ -154,6 +177,7 @@ impl StatementHandle {
             diagnostics: Diagnostics::default(),
             pending: Vec::new(),
             block: BlockFetch::default(),
+            parameter_array: ParameterArray::default(),
         }
     }
 
