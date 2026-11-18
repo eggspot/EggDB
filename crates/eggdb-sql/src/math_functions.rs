@@ -10,8 +10,8 @@ use crate::numeric::Numeric;
 use crate::types::{SqlType, Value};
 
 /// The functions this module answers.
-pub(crate) const FUNCTIONS: [&str; 22] = [
-    "exp", "ln", "log", "log10", "power", "pow", "cbrt", "degrees", "radians", "pi", "sign", "mod", "div", "gcd", "lcm",
+pub(crate) const FUNCTIONS: [&str; 23] = [
+    "exp", "ln", "log", "log10", "log2", "power", "pow", "cbrt", "degrees", "radians", "pi", "sign", "mod", "div", "gcd", "lcm",
     "width_bucket", "atan2", "atan2d", "random", "erf", "erfc", "gamma",
 ];
 
@@ -285,6 +285,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("ln", [value]) => logarithm(number(0)?, None).and_then(|result| shaped(value, result)),
         ("log", [value]) if natural_log_dialect() => logarithm(number(0)?, None).and_then(|result| shaped(value, result)),
         ("log" | "log10", [value]) => logarithm(number(0)?, Some(10.0)).and_then(|result| shaped(value, result)),
+        ("log2", [value]) => logarithm(number(0)?, Some(2.0)).and_then(|result| shaped(value, result)),
         ("log", [first_value, second_value]) => {
             let (base, value, base_at, value_at) = match crate::constraints::current_dialect() {
                 crate::Dialect::SqlServer => (second_value, first_value, 1, 0),
@@ -408,7 +409,7 @@ pub(crate) fn result_type(name: &str, first: Option<SqlType>) -> Option<SqlType>
             _ => SqlType::Double,
         },
         "div" => SqlType::Numeric(None),
-        "exp" | "ln" | "log" | "log10" | "power" | "pow" | "cbrt" | "degrees" | "radians" | "sign" | "erf" | "erfc" if numeric => {
+        "exp" | "ln" | "log" | "log10" | "log2" | "power" | "pow" | "cbrt" | "degrees" | "radians" | "sign" | "erf" | "erfc" if numeric => {
             SqlType::Numeric(None)
         }
         _ => SqlType::Double,
