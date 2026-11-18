@@ -246,6 +246,93 @@ fn spheroid_argument(value: Option<&Value>) -> SqlResult<eggdb_geo::Spheroid> {
     }
 }
 
+/// `ST_Dump`: a geometry's parts with their paths (D1274).
+pub(crate) const DUMP: &str = "st_dump";
+/// `ST_DumpPoints`: a geometry's vertices with their paths.
+pub(crate) const DUMP_POINTS: &str = "st_dumppoints";
+/// The columns `ST_Dump` and `ST_DumpPoints` return.
+pub(crate) const DUMP_COLUMNS: [(&str, SqlType); 2] = [
+    ("path", SqlType::Array(crate::arrays::ArrayElement::Integer)),
+    ("geom", SqlType::Text),
+];
+
+fn deeper(path: &[i32], at: usize) -> Vec<i32> {
+    let mut deeper = path.to_vec();
+    deeper.push(i32::try_from(at + 1).unwrap_or(i32::MAX));
+    deeper
+}
+
+fn dumped(geometry: &Geometry, path: &[i32], out: &mut Vec<(Vec<i32>, Geometry)>) {
+    match geometry {
+        Geometry::Collection(items) => {
+            for (at, item) in items.iter().enumerate() {
+                dumped(item, &deeper(path, at), out);
+            }
+        }
+        Geometry::MultiPoint(_) | Geometry::MultiLineString(_) | Geometry::MultiPolygon(_) => {
+            for (at, part) in eggdb_geo::parts(geometry).into_iter().enumerate() {
+                out.push((deeper(path, at), part));
+            }
+        }
+        single => out.push((path.to_vec(), single.clone())),
+    }
+}
+
+fn dumped_line(points: &[Coord], path: &[i32], out: &mut Vec<(Vec<i32>, Geometry)>) {
+    for (at, point) in points.iter().enumerate() {
+        out.push((deeper(path, at), Geometry::Point(Some(*point))));
+    }
+}
+
+fn dumped_points(geometry: &Geometry, path: &[i32], out: &mut Vec<(Vec<i32>, Geometry)>) {
+    match geometry {
+        Geometry::Point(Some(point)) => out.push((path.to_vec(), Geometry::Point(Some(*point)))),
+        Geometry::Point(None) => {}
+        Geometry::LineString(points) | Geometry::MultiPoint(points) => dumped_line(points, path, out),
+        Geometry::Polygon(lines) | Geometry::MultiLineString(lines) => {
+            for (at, line) in lines.iter().enumerate() {
+                dumped_line(line, &deeper(path, at), out);
+            }
+        }
+        Geometry::MultiPolygon(polygons) => {
+            for (at, rings) in polygons.iter().enumerate() {
+                let polygon_path = deeper(path, at);
+                for (ring_at, ring) in rings.iter().enumerate() {
+                    dumped_line(ring, &deeper(&polygon_path, ring_at), out);
+                }
+            }
+        }
+        Geometry::Collection(items) => {
+            for (at, item) in items.iter().enumerate() {
+                dumped_points(item, &deeper(path, at), out);
+            }
+        }
+    }
+}
+
+/// The rows of `ST_Dump(geometry)` or `ST_DumpPoints(geometry)`: each part or vertex with its
+/// path (1-based positions down the geometry's nesting, empty for a single geometry dumped
+/// whole), keeping the SRID.
+pub(crate) fn dump_records(name: &str, values: &[Value], sink: &mut crate::json_functions::RecordSink<'_>) -> SqlResult<()> {
+    let Some(source) = values.first().map(spatial_of).transpose()?.flatten() else {
+        return Ok(());
+    };
+    let mut found = Vec::new();
+    if name == DUMP_POINTS {
+        dumped_points(&source.geometry, &[], &mut found);
+    } else {
+        dumped(&source.geometry, &[], &mut found);
+    }
+    for (path, geometry) in found {
+        let path = Value::Array(Box::new(crate::arrays::ArrayValue::new(
+            crate::arrays::ArrayElement::Integer,
+            path.into_iter().map(Value::Integer).collect(),
+        )));
+        sink(vec![path, geometry_value(&Spatial { srid: source.srid, geometry })])?;
+    }
+    Ok(())
+}
+
 fn point_at(spatial: &Spatial) -> SqlResult<Coord> {
     match spatial.geometry {
         Geometry::Point(Some(point)) => Ok(point),

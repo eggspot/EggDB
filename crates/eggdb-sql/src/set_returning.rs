@@ -183,6 +183,18 @@ const FUNCTIONS: [SetReturningFunction; 54] = [
         fields: true,
     },
     SetReturningFunction {
+        name: crate::geo_functions::DUMP,
+        result_type: text_search_type,
+        rows: geo_dump_rows,
+        fields: true,
+    },
+    SetReturningFunction {
+        name: crate::geo_functions::DUMP_POINTS,
+        result_type: text_search_type,
+        rows: geo_dump_points_rows,
+        fields: true,
+    },
+    SetReturningFunction {
         name: crate::text_search::DEBUG_FUNCTION,
         result_type: text_search_type,
         rows: debug_rows,
@@ -280,6 +292,18 @@ fn parse_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult
     crate::text_search::parse_rows(values, &mut |record| sink(crate::json_functions::record_text(&record)))
 }
 
+fn geo_dump_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::geo_functions::dump_records(crate::geo_functions::DUMP, values, &mut |record| {
+        sink(crate::json_functions::record_text(&record))
+    })
+}
+
+fn geo_dump_points_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    crate::geo_functions::dump_records(crate::geo_functions::DUMP_POINTS, values, &mut |record| {
+        sink(crate::json_functions::record_text(&record))
+    })
+}
+
 fn debug_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
     crate::text_search::debug_rows(values, &mut |record| sink(crate::json_functions::record_text(&record)))
 }
@@ -344,6 +368,7 @@ fn record_columns(name: &str) -> Vec<OutputColumn> {
         crate::text_search::TOKEN_TYPES_FUNCTION => Some(&crate::text_search::TOKEN_TYPE_COLUMNS),
         crate::text_search::PARSE_FUNCTION => Some(&crate::text_search::PARSE_COLUMNS),
         crate::text_search::DEBUG_FUNCTION => Some(&crate::text_search::DEBUG_COLUMNS),
+        crate::geo_functions::DUMP | crate::geo_functions::DUMP_POINTS => Some(&crate::geo_functions::DUMP_COLUMNS),
         _ => None,
     };
     if let Some(columns) = text_search_columns {
@@ -391,6 +416,14 @@ fn record_rows(
         crate::event_triggers::dropped_object_records(values, sink)
     } else if name == crate::sqlite_json::EACH || name == crate::sqlite_json::TREE {
         crate::sqlite_json::each_records(name, values, sink)
+    } else if name == crate::geo_functions::DUMP || name == crate::geo_functions::DUMP_POINTS {
+        crate::geo_functions::dump_records(name, values, sink)
+    } else if name == crate::text_search::TOKEN_TYPES_FUNCTION {
+        crate::text_search::token_type_rows(values, sink)
+    } else if name == crate::text_search::PARSE_FUNCTION {
+        crate::text_search::parse_rows(values, sink)
+    } else if name == crate::text_search::DEBUG_FUNCTION {
+        crate::text_search::debug_rows(values, sink)
     } else if name == crate::json_functions::OPENJSON_PAIRS {
         crate::json_functions::openjson_pair_rows(values, sink)
     } else {

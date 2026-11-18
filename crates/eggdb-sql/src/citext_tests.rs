@@ -690,3 +690,21 @@ fn ts_stat_counts_the_documents_and_occurrences_of_each_lexeme() {
     );
     assert!(run(&mut session, "SELECT * FROM ts_stat('SELECT v FROM docs', 'a')").is_err());
 }
+
+#[test]
+fn st_dump_and_st_dumppoints_list_parts_and_vertices_with_their_paths() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        ok(&mut session, "SELECT path, ST_AsText(geom) AS geom FROM ST_Dump('MULTIPOINT(1 2,3 4)')"),
+        "path|geom\n{1}|POINT(1 2)\n{2}|POINT(3 4)\nSELECT 2"
+    );
+    assert_eq!(
+        ok(&mut session, "SELECT path, ST_AsText(geom) AS geom FROM ST_Dump('POINT(5 6)')"),
+        "path|geom\n{}|POINT(5 6)\nSELECT 1"
+    );
+    assert_eq!(
+        ok(&mut session, "SELECT path FROM ST_DumpPoints('POLYGON((0 0,0 1,1 1,0 0))') WITH ORDINALITY ORDER BY ordinality"),
+        "path\n{1,1}\n{1,2}\n{1,3}\n{1,4}\nSELECT 4"
+    );
+}
