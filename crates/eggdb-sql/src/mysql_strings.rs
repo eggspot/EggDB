@@ -8,8 +8,10 @@ use crate::error::SqlResult;
 use crate::types::{SqlType, Value};
 
 /// The functions this module answers in MySQL's dialect.
-pub(crate) const FUNCTIONS: [&str; 12] = [
+pub(crate) const FUNCTIONS: [&str; 22] = [
     "locate", "substring_index", "find_in_set", "elt", "mid", "strcmp", "ord", "bin", "conv", "crc32", "unhex", "rand",
+    "inet_aton", "inet_ntoa", "is_ipv4", "is_ipv6", "uuid_to_bin", "bin_to_uuid", "sha1", "sha2", "to_base64",
+    "from_base64",
 ];
 
 fn text(value: &Value) -> Option<String> {
@@ -126,6 +128,54 @@ fn ord(text: &str) -> i64 {
     first.encode_utf8(&mut buffer).bytes().fold(0i64, |code, byte| code * 256 + i64::from(byte))
 }
 
+fn ipv4(text: &str) -> Option<u32> {
+    let parts: Vec<&str> = text.trim().split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut numbers = Vec::with_capacity(parts.len());
+    for part in &parts {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        numbers.push(part.parse::<u32>().ok()?);
+    }
+    let (last, leading) = numbers.split_last()?;
+    if leading.iter().any(|number| *number > 255) {
+        return None;
+    }
+    let width = 8 * (4 - u32::try_from(leading.len()).ok()?);
+    if width < 32 && *last >= 1 << width {
+        return None;
+    }
+    let mut address = 0u32;
+    for (at, number) in leading.iter().enumerate() {
+        address |= number << (24 - 8 * at);
+    }
+    Some(address | last)
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn uuid_bytes(text: &str) -> Option<Vec<u8>> {
+    let digits: String = text.trim().trim_start_matches('{').trim_end_matches('}').chars().filter(|character| *character != '-').collect();
+    if digits.len() != 32 {
+        return None;
+    }
+    unhex(&digits)
+}
+
+fn swapped_time(mut bytes: Vec<u8>, to_binary: bool) -> Vec<u8> {
+    if bytes.len() == 16 {
+        let order: [usize; 8] = if to_binary { [6, 7, 4, 5, 0, 1, 2, 3] } else { [4, 5, 6, 7, 2, 3, 0, 1] };
+        let head: Vec<u8> = order.iter().map(|at| bytes[*at]).collect();
+        bytes[..8].copy_from_slice(&head);
+    }
+    bytes
+}
+
 fn seeded_rand(seed: i64) -> f64 {
     let mut state = (seed as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
     state = (state ^ (state >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -201,6 +251,42 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         },
         ("crc32", 1) => string(0).map_or(Value::Null, |text| Value::BigInt(i64::from(crc32(text.as_bytes())))),
         ("unhex", 1) => string(0).and_then(|text| unhex(&text)).map_or(Value::Null, Value::Bytea),
+        ("inet_aton", 1) => string(0).and_then(|text| ipv4(&text)).map_or(Value::Null, |address| Value::BigInt(i64::from(address))),
+        ("inet_ntoa", 1) => match integer(0).and_then(|number| u32::try_from(number).ok()) {
+            Some(address) => Value::Text(std::net::Ipv4Addr::from(address).to_string()),
+            None => Value::Null,
+        },
+        ("is_ipv4", 1) => Value::BigInt(i64::from(string(0).is_some_and(|text| text.parse::<std::net::Ipv4Addr>().is_ok()))),
+        ("is_ipv6", 1) => Value::BigInt(i64::from(string(0).is_some_and(|text| text.parse::<std::net::Ipv6Addr>().is_ok()))),
+        ("uuid_to_bin", 1 | 2) => match string(0).and_then(|text| uuid_bytes(&text)) {
+            Some(bytes) => Value::Bytea(swapped_time(bytes, integer(1).unwrap_or(0) != 0)),
+            None => return Some(Err(crate::error::SqlError::new(crate::error::SqlState::INVALID_PARAMETER_VALUE, "Incorrect string value for function uuid_to_bin"))),
+        },
+        ("bin_to_uuid", 1 | 2) => match values.first() {
+            Some(Value::Bytea(bytes)) if bytes.len() == 16 => {
+                let bytes = if integer(1).unwrap_or(0) != 0 { swapped_time(bytes.clone(), false) } else { bytes.clone() };
+                let hex = hex_of(&bytes);
+                Value::Text(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
+            }
+            _ => return Some(Err(crate::error::SqlError::new(crate::error::SqlState::INVALID_PARAMETER_VALUE, "Incorrect string value for function bin_to_uuid"))),
+        },
+        ("sha1", 1) => string(0).map_or(Value::Null, |text| Value::Text(hex_of(&eggdb_crypto::sha1(text.as_bytes())))),
+        ("sha2", 2) => match (string(0), integer(1)) {
+            (Some(text), Some(256 | 0)) => Value::Text(hex_of(&eggdb_crypto::sha256(text.as_bytes()))),
+            (Some(text), Some(384)) => Value::Text(hex_of(&eggdb_crypto::sha384(text.as_bytes()))),
+            (Some(text), Some(512)) => Value::Text(hex_of(&eggdb_crypto::sha512(text.as_bytes()))),
+            _ => Value::Null,
+        },
+        ("to_base64", 1) => Value::Text(eggdb_crypto::base64_encode(&match &values[0] {
+            Value::Bytea(bytes) => bytes.clone(),
+            other => text(other).unwrap_or_default().into_bytes(),
+        })),
+        ("from_base64", 1) => string(0)
+            .and_then(|text| {
+                let compact: String = text.chars().filter(|character| !character.is_whitespace()).collect();
+                eggdb_crypto::base64_decode(compact.as_bytes()).ok()
+            })
+            .map_or(Value::Null, Value::Bytea),
         _ => return None,
     }))
 }
@@ -212,7 +298,8 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     }
     Some(match name {
         "locate" | "find_in_set" | "strcmp" | "ord" | "crc32" => SqlType::BigInt,
-        "unhex" => SqlType::Bytea,
+        "unhex" | "uuid_to_bin" | "from_base64" => SqlType::Bytea,
+        "inet_aton" | "is_ipv4" | "is_ipv6" => SqlType::BigInt,
         "rand" => SqlType::Double,
         _ => SqlType::Text,
     })
@@ -239,5 +326,11 @@ mod tests {
         assert_eq!(ord("2"), 50);
         assert!((0.0..1.0).contains(&seeded_rand(3)));
         assert_eq!(seeded_rand(3), seeded_rand(3));
+        assert_eq!(ipv4("10.0.5.9"), Some(167_773_449));
+        assert_eq!(ipv4("127.1"), Some(2_130_706_433));
+        assert_eq!(ipv4("256.1.1.1"), None);
+        let uuid = "6ccd780c-baba-1026-9564-5b8c656024db";
+        assert_eq!(hex_of(&swapped_time(uuid_bytes(uuid).unwrap(), true)), "1026baba6ccd780c95645b8c656024db");
+        assert_eq!(swapped_time(swapped_time(uuid_bytes(uuid).unwrap(), true), false), uuid_bytes(uuid).unwrap());
     }
 }
