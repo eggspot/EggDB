@@ -27,6 +27,7 @@ const ORACLE_ROWID: (&str, &str) = ("rowid", "\u{2}rowid");
 const ROWID_DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub(crate) const ROW_VERSION_FUNCTION: &str = "\u{2}row_version";
+pub(crate) const ORACLE_ROWID_FUNCTION: &str = "\u{2}oracle_rowid";
 pub(crate) const ROW_VERSION_TYPE: SqlType = XID;
 
 const MAX_HEAP_TUPLES_PER_PAGE: u64 = 291;
@@ -163,13 +164,35 @@ fn tuple_place(table: &TableDefinition, prefix: &[u8], key: &[u8]) -> (u64, u64)
         .ok()
         .filter(|_| table.primary_key.is_empty())
         .map(u64::from_be_bytes);
-    let number = match hidden_row_id {
-        Some(row_id) => row_id.saturating_sub(1),
-        None => fnv64(suffix) % (u64::from(u32::MAX) * MAX_HEAP_TUPLES_PER_PAGE),
+    match hidden_row_id {
+        Some(row_id) => place_of(row_id.saturating_sub(1)),
+        None => keyed_place(suffix),
+    }
+}
+
+fn keyed_place(suffix: &[u8]) -> (u64, u64) {
+    place_of(fnv64(suffix) % (u64::from(u32::MAX) * MAX_HEAP_TUPLES_PER_PAGE))
+}
+
+fn place_of(number: u64) -> (u64, u64) {
+    (number / MAX_HEAP_TUPLES_PER_PAGE, number % MAX_HEAP_TUPLES_PER_PAGE + 1)
+}
+
+/// The Oracle `ROWID` of the row whose primary key holds `values[1..]` in the table whose OID
+/// is `values[0]`: the address a query of the table shows for it (D1251).
+pub(crate) fn oracle_rowid_of(values: &[Value]) -> Value {
+    let Some((Value::Oid(table_oid), key)) = values.split_first().map(|(first, rest)| (first.clone(), rest)) else {
+        return Value::Null;
     };
-    let block = number / MAX_HEAP_TUPLES_PER_PAGE;
-    let offset = number % MAX_HEAP_TUPLES_PER_PAGE + 1;
-    (block, offset)
+    if key.iter().any(Value::is_null) {
+        return Value::Null;
+    }
+    let mut suffix = Vec::new();
+    for value in key {
+        crate::encoding::encode_key_value(&mut suffix, value);
+    }
+    let (block, offset) = keyed_place(&suffix);
+    Value::Text(oracle_rowid(table_oid, block, offset))
 }
 
 fn row_version(row: &[Value]) -> u32 {
@@ -227,11 +250,14 @@ fn plain_table(
     tables: &mut TableCache,
     name: &str,
 ) -> SqlResult<Option<std::sync::Arc<TableDefinition>>> {
-    if crate::constraints::current_dialect() != crate::Dialect::PostgreSql {
+    let dialect = crate::constraints::current_dialect();
+    if dialect != crate::Dialect::PostgreSql && dialect != crate::Dialect::Oracle {
         return Ok(None);
     }
     Ok(match tables.relation(reader, name)? {
-        Some(Relation::Table(table)) => Some(table),
+        Some(Relation::Table(table)) if dialect == crate::Dialect::PostgreSql || !table.primary_key.is_empty() => {
+            Some(table)
+        }
         _ => None,
     })
 }
@@ -260,6 +286,7 @@ fn returned(returning: &Option<Vec<SelectItem>>) -> impl Iterator<Item = &Expr> 
 struct Replacements {
     table_oid: u32,
     columns: Vec<String>,
+    oracle_key: Option<Vec<String>>,
 }
 
 impl Replacements {
@@ -269,11 +296,12 @@ impl Replacements {
         returning: &Option<Vec<SelectItem>>,
         filter: Option<&Expr>,
     ) -> SqlResult<Self> {
+        let oracle = crate::constraints::current_dialect() == crate::Dialect::Oracle;
         let names_table_oid = filter
             .into_iter()
             .chain(returned(returning))
             .any(|expr| names_column(expr, "tableoid"));
-        let table_oid = if names_table_oid {
+        let table_oid = if names_table_oid || oracle {
             crate::pg_catalog::snapshot_for(reader)?
                 .table_oid(&table.name)
                 .unwrap_or(0)
@@ -283,6 +311,13 @@ impl Replacements {
         Ok(Self {
             table_oid,
             columns: table.columns.iter().map(|column| column.name.clone()).collect(),
+            oracle_key: oracle.then(|| {
+                table
+                    .primary_key
+                    .iter()
+                    .map(|at| table.columns[*at].name.clone())
+                    .collect()
+            }),
         })
     }
 
@@ -306,6 +341,24 @@ impl Replacements {
             },
             position,
         };
+        let column = |name: &str| Expr {
+            kind: ExprKind::Column {
+                qualifier: None,
+                name: name.to_owned(),
+            },
+            position,
+        };
+        if let Some(key) = &self.oracle_key {
+            return (name == ORACLE_ROWID.0).then(|| Expr {
+                kind: ExprKind::Function {
+                    name: ORACLE_ROWID_FUNCTION.to_owned(),
+                    arguments: std::iter::once(constant(OID, self.table_oid))
+                        .chain(key.iter().map(|name| column(name)))
+                        .collect(),
+                },
+                position,
+            });
+        }
         Some(match name {
             "tableoid" => constant(OID, self.table_oid),
             "xmax" => constant(XID, 0),

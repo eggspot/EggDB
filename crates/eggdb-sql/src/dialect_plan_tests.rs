@@ -569,4 +569,10 @@ fn rowid_is_an_eighteen_character_pseudo_column_that_star_leaves_out() {
     let found = last(&mut session, &format!("SELECT name FROM emp WHERE ROWID = '{}'", rowids[1]));
     assert!(found.contains("\ngrace\n"), "{found}");
     assert!(!last(&mut session, "SELECT * FROM emp").to_ascii_lowercase().contains("rowid"));
+    last(&mut session, &format!("UPDATE emp SET name = 'ada' WHERE ROWID = '{}'", rowids[1]));
+    let renamed = last(&mut session, "SELECT name FROM emp WHERE id = 2");
+    assert!(renamed.contains("\nada\n"), "{renamed}");
+    last(&mut session, &format!("DELETE FROM emp WHERE ROWID = '{}'", rowids[1]));
+    let left = last(&mut session, "SELECT count(*) AS n FROM emp");
+    assert!(left.contains("\n1\n"), "{left}");
 }

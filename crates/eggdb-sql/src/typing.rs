@@ -368,6 +368,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if name == crate::system_columns::ROW_VERSION_FUNCTION {
         return Some(crate::system_columns::ROW_VERSION_TYPE);
     }
+    if name == crate::system_columns::ORACLE_ROWID_FUNCTION {
+        return Some(SqlType::Text);
+    }
     if name == crate::sqlserver_ddl_triggers::EVENT_DATA_FUNCTION {
         return Some(SqlType::Text);
     }
