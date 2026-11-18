@@ -201,12 +201,7 @@ fn inserted_plan(
     insert: &crate::ast::Insert,
     with_subplans: bool,
 ) -> SqlResult<(ExplainedQuery, ModifiedNode)> {
-    let table = tables.require(reader, &insert.table.name)?;
-    let relation = match &insert.table.alias {
-        Some(alias) => format!("{} {alias}", table.name),
-        None => table.name.clone(),
-    };
-    let line = format!("Insert on {relation}");
+    let line = written_line(reader, tables, "Insert", &insert.table)?;
     let (query, child) = match &insert.source {
         crate::ast::InsertSource::Values(rows) if rows.len() > 1 => {
             (ExplainedQuery::default(), Some("Values Scan on \"*VALUES*\"".to_owned()))
@@ -222,6 +217,14 @@ fn inserted_plan(
         },
     };
     Ok((query, ModifiedNode { line, child }))
+}
+
+fn written_line(reader: &dyn KeyValueRead, tables: &mut TableCache, verb: &str, target: &TableReference) -> SqlResult<String> {
+    let table = tables.require(reader, &target.name)?;
+    Ok(match &target.alias {
+        Some(alias) => format!("{verb} on {} {alias}", table.name),
+        None => format!("{verb} on {}", table.name),
+    })
 }
 
 fn under_modified(modified: Option<&ModifiedNode>, lines: Vec<String>) -> Vec<String> {
@@ -313,11 +316,22 @@ pub(crate) fn plan(
 ) -> SqlResult<Planned> {
     let with_subplans = shows_subplans(style, dialect);
     let mysql = dialect == Dialect::MySql;
+    let postgresql_text = dialect == Dialect::PostgreSql && style == ExplainStyle::Plan;
     let mut inserted = None;
     let (query, write) = match statement {
-        Statement::Insert(insert) if dialect == Dialect::PostgreSql && style == ExplainStyle::Plan => {
+        Statement::Insert(insert) if postgresql_text => {
             let (query, node) = inserted_plan(reader, tables, insert, with_subplans)?;
             inserted = Some(node);
+            (query, None)
+        }
+        Statement::Update(Update { table, from: Some(joined), filter, .. }) if postgresql_text => {
+            let query = joined_write_plan(reader, tables, table, joined, filter.as_ref(), with_subplans)?;
+            inserted = Some(ModifiedNode { line: written_line(reader, tables, "Update", table)?, child: None });
+            (query, None)
+        }
+        Statement::Delete(crate::ast::Delete { table, using: Some(joined), filter, .. }) if postgresql_text => {
+            let query = joined_write_plan(reader, tables, table, joined, filter.as_ref(), with_subplans)?;
+            inserted = Some(ModifiedNode { line: written_line(reader, tables, "Delete", table)?, child: None });
             (query, None)
         }
         Statement::Update(update) if mysql => {

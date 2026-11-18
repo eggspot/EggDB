@@ -778,6 +778,12 @@ fn update_and_delete_show_the_subplans_of_their_conditions_and_assignments() {
         ["Insert on onek", "  ->  Values Scan on \"*VALUES*\"", "EXPLAIN"]
     );
     assert_eq!(plan(&mut session, "EXPLAIN INSERT INTO onek SELECT * FROM onek"), ["Insert on onek", "  ->  Seq Scan on onek", "EXPLAIN"]);
+    let joined = plan(&mut session, "EXPLAIN UPDATE tenk1 t SET ten = o.ten FROM onek o WHERE o.unique1 = t.unique1");
+    assert_eq!(joined[0], "Update on tenk1 t");
+    assert!(joined[1].starts_with("  ->  "), "{joined:?}");
+    assert!(joined.iter().any(|line| line.contains("on onek o")), "{joined:?}");
+    let deleted = plan(&mut session, "EXPLAIN DELETE FROM tenk1 t USING onek o WHERE o.unique1 = t.unique1");
+    assert_eq!(deleted[0], "Delete on tenk1 t");
     assert_eq!(
         plan(
             &mut session,
