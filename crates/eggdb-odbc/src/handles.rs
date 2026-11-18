@@ -234,6 +234,24 @@ impl StatementHandle {
         self.rowset_start = None;
     }
 
+    /// The longest value of `column` in bytes (text, binary data, or a number's digits), at
+    /// least 1 (D1283).
+    pub(crate) fn longest(&self, column: usize) -> usize {
+        self.rows
+            .iter()
+            .filter_map(|row| row.get(column))
+            .map(|cell| match cell {
+                Cell::Null => 0,
+                Cell::Integer(number) => number.to_string().len(),
+                Cell::Real(number) => number.to_string().len(),
+                Cell::Text(text) => text.len(),
+                Cell::Blob(bytes) => bytes.len(),
+            })
+            .max()
+            .unwrap_or(0)
+            .max(1)
+    }
+
     pub(crate) fn sql_type_of(&self, column: usize) -> i16 {
         for row in &self.rows {
             match row.get(column) {

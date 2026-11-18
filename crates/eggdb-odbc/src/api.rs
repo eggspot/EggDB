@@ -871,10 +871,117 @@ pub extern "system" fn SQLColAttribute(
             store(text_length, i16::try_from(column.len()).unwrap_or(i16::MAX));
         }
         SQL_DESC_TYPE => store(numeric, isize::from(stmt.sql_type_of(index.saturating_sub(1)))),
-        SQL_DESC_NULLABLE => store(numeric, isize::from(SQL_NULLABLE_UNKNOWN)),
-        _ => return failed(&mut stmt.diagnostics, Failure::new("HYC00", format!("column attribute {field} is not supported"))),
+        SQL_DESC_NULLABLE | SQL_COLUMN_NULLABLE => store(numeric, isize::from(SQL_NULLABLE_UNKNOWN)),
+        SQL_COLUMN_COUNT => store(numeric, isize::try_from(stmt.columns.len()).unwrap_or(isize::MAX)),
+        _ => {
+            if index == 0 || index > stmt.columns.len() {
+                return failed(&mut stmt.diagnostics, Failure::new("07009", format!("there is no column {number}")));
+            }
+            let column = index - 1;
+            let sql_type = stmt.sql_type_of(column);
+            let longest = isize::try_from(stmt.longest(column)).unwrap_or(isize::MAX);
+            let described = describe_column(sql_type, longest);
+            let name = stmt.columns.get(column).cloned().unwrap_or_default();
+            let answer = match field {
+                SQL_DESC_CONCISE_TYPE => ColumnAnswer::Number(isize::from(sql_type)),
+                SQL_DESC_DISPLAY_SIZE => ColumnAnswer::Number(described.display_size),
+                SQL_DESC_LENGTH | SQL_DESC_OCTET_LENGTH | SQL_COLUMN_LENGTH => ColumnAnswer::Number(described.octet_length),
+                SQL_DESC_PRECISION | SQL_COLUMN_PRECISION => ColumnAnswer::Number(described.precision),
+                SQL_DESC_SCALE | SQL_COLUMN_SCALE | SQL_DESC_FIXED_PREC_SCALE | SQL_DESC_AUTO_UNIQUE_VALUE | SQL_DESC_UNNAMED => {
+                    ColumnAnswer::Number(0)
+                }
+                SQL_DESC_UNSIGNED => ColumnAnswer::Number(isize::from(!described.numeric)),
+                SQL_DESC_CASE_SENSITIVE => ColumnAnswer::Number(isize::from(sql_type == SQL_VARCHAR_TYPE)),
+                SQL_DESC_SEARCHABLE => ColumnAnswer::Number(if sql_type == SQL_VARBINARY_TYPE { SQL_PRED_BASIC } else { SQL_PRED_SEARCHABLE }),
+                SQL_DESC_UPDATABLE => ColumnAnswer::Number(SQL_ATTR_READWRITE_UNKNOWN),
+                SQL_DESC_NUM_PREC_RADIX => ColumnAnswer::Number(described.radix),
+                SQL_DESC_TYPE_NAME | SQL_DESC_LOCAL_TYPE_NAME => ColumnAnswer::Text(described.type_name.to_owned()),
+                SQL_DESC_BASE_COLUMN_NAME => ColumnAnswer::Text(name),
+                SQL_DESC_TABLE_NAME | SQL_DESC_BASE_TABLE_NAME | SQL_DESC_SCHEMA_NAME | SQL_DESC_CATALOG_NAME => ColumnAnswer::Text(String::new()),
+                SQL_DESC_LITERAL_PREFIX | SQL_DESC_LITERAL_SUFFIX => {
+                    ColumnAnswer::Text(if sql_type == SQL_VARCHAR_TYPE { "'".to_owned() } else { String::new() })
+                }
+                _ => return failed(&mut stmt.diagnostics, Failure::new("HY091", format!("column attribute {field} is not supported"))),
+            };
+            match answer {
+                ColumnAnswer::Number(value) => store(numeric, value),
+                ColumnAnswer::Text(value) => {
+                    let truncated = write_text(text.cast(), isize::from(text_capacity), value.as_bytes(), 1);
+                    store(text_length, i16::try_from(value.len()).unwrap_or(i16::MAX));
+                    if truncated {
+                        return SQL_SUCCESS_WITH_INFO;
+                    }
+                }
+            }
+        }
     }
     SQL_SUCCESS
+}
+
+const SQL_COLUMN_COUNT: u16 = 0;
+const SQL_DESC_CONCISE_TYPE: u16 = 2;
+const SQL_COLUMN_LENGTH: u16 = 3;
+const SQL_COLUMN_PRECISION: u16 = 4;
+const SQL_COLUMN_SCALE: u16 = 5;
+const SQL_DESC_DISPLAY_SIZE: u16 = 6;
+const SQL_COLUMN_NULLABLE: u16 = 7;
+const SQL_DESC_UNSIGNED: u16 = 8;
+const SQL_DESC_FIXED_PREC_SCALE: u16 = 9;
+const SQL_DESC_UPDATABLE: u16 = 10;
+const SQL_DESC_AUTO_UNIQUE_VALUE: u16 = 11;
+const SQL_DESC_CASE_SENSITIVE: u16 = 12;
+const SQL_DESC_SEARCHABLE: u16 = 13;
+const SQL_DESC_TYPE_NAME: u16 = 14;
+const SQL_DESC_TABLE_NAME: u16 = 15;
+const SQL_DESC_SCHEMA_NAME: u16 = 16;
+const SQL_DESC_CATALOG_NAME: u16 = 17;
+const SQL_DESC_BASE_COLUMN_NAME: u16 = 22;
+const SQL_DESC_BASE_TABLE_NAME: u16 = 23;
+const SQL_DESC_LITERAL_PREFIX: u16 = 27;
+const SQL_DESC_LITERAL_SUFFIX: u16 = 28;
+const SQL_DESC_LOCAL_TYPE_NAME: u16 = 29;
+const SQL_DESC_NUM_PREC_RADIX: u16 = 32;
+const SQL_DESC_LENGTH: u16 = 1003;
+const SQL_DESC_PRECISION: u16 = 1005;
+const SQL_DESC_SCALE: u16 = 1006;
+const SQL_DESC_UNNAMED: u16 = 1012;
+const SQL_DESC_OCTET_LENGTH: u16 = 1013;
+const SQL_PRED_BASIC: isize = 2;
+const SQL_PRED_SEARCHABLE: isize = 3;
+const SQL_ATTR_READWRITE_UNKNOWN: isize = 2;
+const SQL_VARCHAR_TYPE: i16 = 12;
+const SQL_VARBINARY_TYPE: i16 = -3;
+
+enum ColumnAnswer {
+    Number(isize),
+    Text(String),
+}
+
+struct DescribedColumn {
+    type_name: &'static str,
+    display_size: isize,
+    octet_length: isize,
+    precision: isize,
+    radix: isize,
+    numeric: bool,
+}
+
+/// What `SQLColAttribute` says of a column of ODBC type `sql_type` whose longest value has
+/// `longest` bytes (D1283).
+fn describe_column(sql_type: i16, longest: isize) -> DescribedColumn {
+    match sql_type {
+        -5 => DescribedColumn { type_name: "BIGINT", display_size: 20, octet_length: 8, precision: 19, radix: 10, numeric: true },
+        8 => DescribedColumn { type_name: "DOUBLE PRECISION", display_size: 24, octet_length: 8, precision: 15, radix: 2, numeric: true },
+        SQL_VARBINARY_TYPE => DescribedColumn {
+            type_name: "VARBINARY",
+            display_size: longest.saturating_mul(2),
+            octet_length: longest,
+            precision: longest,
+            radix: 0,
+            numeric: false,
+        },
+        _ => DescribedColumn { type_name: "VARCHAR", display_size: longest, octet_length: longest, precision: longest, radix: 0, numeric: false },
+    }
 }
 
 fn deliver(converted: Converted, offset: usize, target: *mut u8, buffer_length: isize, indicator: *mut isize) -> (SqlReturn, usize) {

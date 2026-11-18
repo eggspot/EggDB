@@ -2,7 +2,7 @@ use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
     SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLProcedureColumns, SQLPrepare, SQLPrimaryKeys,
-    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLParamData, SQLPutData, SQLFetchScroll, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
+    SQLGetInfoW, SQLNativeSql, SQLNativeSqlW, SQLRowCount, SQLGetFunctions, SQLMoreResults, SQLGetDiagField, SQLBindCol, SQLSetStmtAttr, SQLParamData, SQLPutData, SQLFetchScroll, SQLColAttribute, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -392,4 +392,26 @@ fn a_static_cursor_scrolls_in_every_direction() {
     assert_eq!(seen, ["30", "20", "10", "20", "30", "20"]);
     assert_eq!(SQLFetchScroll(stmt, 5, 0), SQL_NO_DATA);
     assert_eq!(SQLFetchScroll(stmt, 5, 9), SQL_NO_DATA);
+}
+
+#[test]
+fn column_attributes_describe_names_types_and_sizes() {
+    let env = handle(SQL_HANDLE_ENV, ptr::null_mut());
+    let dbc = handle(SQL_HANDLE_DBC, env);
+    let settings = b"Database=:memory:;Dialect=sqlite\0";
+    assert_eq!(SQLDriverConnect(dbc, ptr::null_mut(), settings.as_ptr(), -3, ptr::null_mut(), 0, ptr::null_mut(), 0), 0);
+    let stmt = handle(SQL_HANDLE_STMT, dbc);
+    assert_eq!(run(stmt, "SELECT 'abc' AS word, 42 AS number"), 0);
+    let mut name = [0u8; 32];
+    let mut length = 0i16;
+    let mut numeric = 0isize;
+    assert_eq!(SQLColAttribute(stmt, 1, 14, name.as_mut_ptr().cast(), 32, &raw mut length, &raw mut numeric), 0);
+    assert_eq!(&name[..usize::try_from(length).unwrap_or(0)], b"VARCHAR");
+    assert_eq!(SQLColAttribute(stmt, 1, 1013, ptr::null_mut(), 0, ptr::null_mut(), &raw mut numeric), 0);
+    assert_eq!(numeric, 3);
+    assert_eq!(SQLColAttribute(stmt, 2, 6, ptr::null_mut(), 0, ptr::null_mut(), &raw mut numeric), 0);
+    assert_eq!(numeric, 20);
+    assert_eq!(SQLColAttribute(stmt, 2, 8, ptr::null_mut(), 0, ptr::null_mut(), &raw mut numeric), 0);
+    assert_eq!(numeric, 0);
+    assert_eq!(SQLColAttribute(stmt, 3, 14, name.as_mut_ptr().cast(), 32, &raw mut length, &raw mut numeric), SQL_ERROR);
 }
