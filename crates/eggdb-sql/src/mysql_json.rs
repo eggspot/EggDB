@@ -7,7 +7,30 @@ use crate::error::{SqlError, SqlResult, SqlState};
 use crate::json::{self, Json, Node};
 use crate::types::{SqlType, Value};
 
-const FUNCTIONS: [&str; 7] = ["json_extract", "json_unquote", "json_length", "json_keys", "json_contains", "json_valid", "json_type"];
+const FUNCTIONS: [&str; 13] = [
+    "json_extract",
+    "json_unquote",
+    "json_length",
+    "json_keys",
+    "json_contains",
+    "json_valid",
+    "json_type",
+    "json_set",
+    "json_insert",
+    "json_replace",
+    "json_remove",
+    "json_merge_patch",
+    "json_quote",
+];
+
+const EDITING: [(&str, &str); 6] = [
+    ("json_set", "sqlite_json_set"),
+    ("json_insert", "sqlite_json_insert"),
+    ("json_replace", "sqlite_json_replace"),
+    ("json_remove", "sqlite_json_remove"),
+    ("json_merge_patch", "sqlite_json_patch"),
+    ("json_quote", "sqlite_json_quote"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Leg {
@@ -117,7 +140,7 @@ fn found<'n>(node: &'n Node, legs: &[Leg], out: &mut Vec<&'n Node>) {
 
 fn document(value: &Value, argument: usize) -> SqlResult<Node> {
     let text = value.to_text().unwrap_or_default();
-    json::parse(&text, false).map_err(|_| {
+    json::parse(&text, true).map_err(|_| {
         SqlError::new(SqlState::INVALID_PARAMETER_VALUE, format!("Invalid JSON text in argument {argument} to function."))
     })
 }
@@ -188,8 +211,20 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     if !FUNCTIONS.contains(&name) || crate::constraints::current_dialect() != Dialect::MySql {
         return None;
     }
-    if values.iter().any(Value::is_null) {
+    if values.iter().any(Value::is_null) && name != "json_set" && name != "json_insert" && name != "json_replace" {
         return Some(Ok(Value::Null));
+    }
+    if let Some((_, internal)) = EDITING.iter().find(|(public, _)| *public == name) {
+        if values.first().is_some_and(Value::is_null) {
+            return Some(Ok(Value::Null));
+        }
+        if name != "json_quote" && let Err(error) = document(&values[0], 1) {
+            return Some(Err(error));
+        }
+        return Some(crate::sqlite_json::call(internal, values)?.and_then(|edited| match edited {
+            Value::Json(text) | Value::Text(text) if name != "json_quote" => json::normalize(&text).map(Value::Json),
+            other => Ok(other),
+        }));
     }
     Some(match (name, values.len()) {
         ("json_extract", count) if count >= 2 => extracted(values),
@@ -261,7 +296,8 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         return None;
     }
     Some(match name {
-        "json_extract" | "json_keys" => SqlType::Json,
+        "json_extract" | "json_keys" | "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch" => SqlType::Json,
+        "json_quote" => SqlType::Text,
         "json_unquote" | "json_type" => SqlType::Text,
         _ => SqlType::BigInt,
     })
