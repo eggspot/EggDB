@@ -1855,3 +1855,10 @@ SELECT 2
 
 ok
 DROP TABLE gc376
+
+rows
+SELECT JSON_EXTRACT('{"a": {"b": [1, 2]}}', '$.a.b[1]') AS e, '{"a": "x"}'->>'$.a' AS u, JSON_LENGTH('[1, 2, 3]') AS l, JSON_KEYS('{"a": 1, "b": 2}') AS k, JSON_CONTAINS('[1, 2]', '2') AS c, LOCATE('b', 'abc') AS p, SUBSTRING_INDEX('a.b.c', '.', 2) AS s
+----
+e|u|l|k|c|p|s
+2|x|3|["a", "b"]|1|2|a.b
+SELECT 1
