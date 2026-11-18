@@ -117,6 +117,87 @@ impl AffixRule {
     }
 }
 
+fn original_format(affixes: &str) -> bool {
+    let first_word = |line: &str| line.split_whitespace().next().map(str::to_ascii_lowercase);
+    !affixes.lines().any(|line| matches!(line.split_whitespace().next(), Some("PFX" | "SFX")))
+        && affixes
+            .lines()
+            .any(|line| matches!(first_word(line).as_deref(), Some("prefixes" | "suffixes")))
+}
+
+fn without_spaces(text: &str) -> String {
+    text.chars().filter(|character| !character.is_whitespace()).collect::<String>().to_lowercase()
+}
+
+fn original_rule(line: &str, flag: &str, cross_product: bool) -> Result<AffixRule, String> {
+    let malformed = || format!("malformed affix rule \"{line}\"");
+    let (condition_text, change) = line.split_once('>').ok_or_else(malformed)?;
+    let change = without_spaces(change);
+    let (strip, affix) = match change.strip_prefix('-') {
+        Some(rest) => {
+            let (strip, affix) = rest.split_once(',').ok_or_else(malformed)?;
+            (strip.to_owned(), if affix == "-" { String::new() } else { affix.to_owned() })
+        }
+        None => (String::new(), change),
+    };
+    if affix.is_empty() && strip.is_empty() {
+        return Err(malformed());
+    }
+    Ok(AffixRule {
+        flag: flag.to_owned(),
+        cross_product,
+        strip,
+        affix,
+        condition: condition(&without_spaces(condition_text))?,
+    })
+}
+
+/// The suffix and prefix rules of an affix file in the original ispell format: `prefixes` and
+/// `suffixes` sections of `flag *X:` blocks (`*` allowing cross products), each rule a
+/// condition, `>` and the affix, or `-strip,affix`; `#` starts a comment.
+fn original_rules(affixes: &str) -> Result<(Vec<AffixRule>, Vec<AffixRule>), String> {
+    let mut suffixes = Vec::new();
+    let mut prefixes = Vec::new();
+    let mut section: Option<bool> = None;
+    let mut current: Option<(String, bool)> = None;
+    for raw in affixes.lines() {
+        let line = raw.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        match line.to_ascii_lowercase().as_str() {
+            "prefixes" => {
+                section = Some(true);
+                current = None;
+                continue;
+            }
+            "suffixes" => {
+                section = Some(false);
+                current = None;
+                continue;
+            }
+            _ => {}
+        }
+        let head = line.get(..4).unwrap_or_default();
+        if head.eq_ignore_ascii_case("flag") && line.ends_with(':') {
+            let name = line[4..].trim().trim_end_matches(':').trim();
+            let cross_product = name.starts_with('*');
+            let name = name.trim_start_matches(['*', '~']).trim();
+            if name.chars().count() != 1 {
+                return Err(format!("malformed flag line \"{raw}\""));
+            }
+            current = Some((name.to_owned(), cross_product));
+            continue;
+        }
+        let (Some(prefix), Some((flag, cross_product))) = (section, &current) else {
+            continue;
+        };
+        let rule = original_rule(line, flag, *cross_product)?;
+        if prefix { prefixes.push(rule) } else { suffixes.push(rule) }
+    }
+    Ok((suffixes, prefixes))
+}
+
 /// An `ispell` dictionary: a word list with affix flags and the affix rules that build the
 /// other forms of each word, in the Hunspell format (`.dic` and `.aff`) PostgreSQL's
 /// `ispell` template reads. A known form is reduced to its base word.
@@ -129,17 +210,18 @@ pub struct Ispell {
 
 impl Ispell {
     /// Reads a dictionary (one `word/FLAGS` per line; a leading count line is skipped) and its
-    /// affix rules (`FLAG`, `PFX` and `SFX` lines). Words are lower cased.
+    /// affix rules: Hunspell's `FLAG`, `PFX` and `SFX` lines, or the original ispell format's
+    /// `prefixes` and `suffixes` sections (D1269). Words are lower cased.
     ///
     /// # Errors
     ///
     /// A malformed `PFX` or `SFX` line, or a condition with an unclosed bracket.
     pub fn parse(dictionary: &str, affixes: &str) -> Result<Self, String> {
         let mut format = FlagFormat::Character;
-        let mut suffixes = Vec::new();
-        let mut prefixes = Vec::new();
+        let original = original_format(affixes);
+        let (mut suffixes, mut prefixes) = if original { original_rules(affixes)? } else { (Vec::new(), Vec::new()) };
         let mut cross_products: BTreeMap<(bool, String), bool> = BTreeMap::new();
-        for line in affixes.lines() {
+        for line in affixes.lines().filter(|_| !original) {
             let fields: Vec<&str> = line.split_whitespace().collect();
             match fields.as_slice() {
                 ["FLAG", "long", ..] => format = FlagFormat::Long,
@@ -254,5 +336,18 @@ mod tests {
         assert_eq!(numeric.base_words("cats"), ["cat"]);
         assert!(Ispell::parse("", "SFX S 0 s .\n").is_err());
         assert!(Ispell::parse("", "SFX S Y 1\nSFX S 0 s [ab\n").is_err());
+    }
+
+    #[test]
+    fn the_original_ispell_affix_format_reduces_words_too() {
+        let affixes = "# english.affix\nprefixes\nflag *U:\n    .  >  UN   # un-\nsuffixes\nflag *S:\n    [^AEIOU] Y  >  -Y,IES\n    [^Y]  >  S\nflag D:\n    E  >  D\n    [^E]  >  ED\n";
+        let ispell = Ispell::parse("book/SU\ncity/S\nbake/D\n", affixes).unwrap();
+        assert_eq!(ispell.base_words("books"), ["book"]);
+        assert_eq!(ispell.base_words("cities"), ["city"]);
+        assert_eq!(ispell.base_words("unbooks"), ["book"]);
+        assert_eq!(ispell.base_words("baked"), ["bake"]);
+        assert!(ispell.base_words("bakes").is_empty());
+        assert!(Ispell::parse("", "suffixes\nflag S:\n    Y > \n").is_err());
+        assert!(Ispell::parse("", "suffixes\nflag ST:\n").is_err());
     }
 }
