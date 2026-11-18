@@ -981,6 +981,12 @@ impl Drop for ActiveScope {
     }
 }
 
+/// How many triggers are running, one inside another, on this thread: PostgreSQL's
+/// `pg_trigger_depth()` (D1301).
+pub(crate) fn active_depth() -> usize {
+    STATE.with(|state| state.try_borrow().map_or(0, |state| state.active.len()))
+}
+
 pub(crate) fn enter_active(table: &str, trigger: &TriggerDefinition) -> SqlResult<ActiveScope> {
     crate::stack_depth::check()?;
     STATE.with(|state| {

@@ -3,14 +3,16 @@
 //! them: `pg_size_bytes`, `pg_column_size`, `pg_column_compression`, `pg_relation_filepath`,
 //! `pg_relation_filenode`, `pg_blocking_pids`, `pg_safe_snapshot_blocking_pids`,
 //! `pg_notification_queue_usage`, `pg_jit_available`, `pg_reload_conf`, `pg_current_logfile`,
-//! `pg_my_temp_schema` and `pg_is_other_temp_schema`.
+//! `pg_my_temp_schema` and `pg_is_other_temp_schema`; and `pg_trigger_depth`, counted from the
+//! triggers running.
 
 use crate::arrays::{ArrayElement, ArrayValue};
 use crate::dialect::Dialect;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::types::{SqlType, Value};
 
-const FUNCTIONS: [&str; 13] = [
+const FUNCTIONS: [&str; 14] = [
+    "pg_trigger_depth",
     "pg_size_bytes",
     "pg_column_size",
     "pg_column_compression",
@@ -101,6 +103,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("pg_blocking_pids" | "pg_safe_snapshot_blocking_pids", [_]) => Ok(empty_integers()),
         ("pg_notification_queue_usage", []) => Ok(Value::Double(0.0)),
         ("pg_jit_available", []) => Ok(Value::Boolean(false)),
+        ("pg_trigger_depth", []) => Ok(Value::Integer(i32::try_from(crate::triggers::active_depth()).unwrap_or(i32::MAX))),
         ("pg_reload_conf", []) => Ok(Value::Boolean(true)),
         ("pg_my_temp_schema", []) => Ok(Value::Oid(0)),
         ("pg_is_other_temp_schema", [_]) => Ok(Value::Boolean(false)),
@@ -115,7 +118,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     }
     Some(match name {
         "pg_size_bytes" => SqlType::BigInt,
-        "pg_column_size" => SqlType::Integer,
+        "pg_column_size" | "pg_trigger_depth" => SqlType::Integer,
         "pg_blocking_pids" | "pg_safe_snapshot_blocking_pids" => SqlType::Array(ArrayElement::Integer),
         "pg_notification_queue_usage" => SqlType::Double,
         "pg_jit_available" | "pg_reload_conf" | "pg_is_other_temp_schema" => SqlType::Boolean,
