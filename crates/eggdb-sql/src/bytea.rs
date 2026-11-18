@@ -413,6 +413,52 @@ pub(crate) fn random_uuid(mut bytes: [u8; 16]) -> [u8; 16] {
     bytes
 }
 
+const MICROS_FROM_UNIX_TO_2000: i64 = 946_684_800_000_000;
+const GREGORIAN_TO_UNIX_100NS: i64 = 0x01B2_1DD2_1381_4000;
+
+fn time_ordered_uuid(unix_millis: u64, mut bytes: [u8; 16]) -> [u8; 16] {
+    bytes[..6].copy_from_slice(&unix_millis.to_be_bytes()[2..]);
+    bytes[6] = (bytes[6] & 0x0F) | 0x70;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    bytes
+}
+
+fn unix_millis_now() -> u64 {
+    eggdb_platform_core::time::SystemTime::now()
+        .duration_since(eggdb_platform_core::time::UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn uuid_version(bytes: &[u8; 16]) -> Option<u8> {
+    (bytes[8] & 0xC0 == 0x80).then_some(bytes[6] >> 4)
+}
+
+fn uuid_timestamp(bytes: &[u8; 16]) -> Option<i64> {
+    let unix_micros = match uuid_version(bytes)? {
+        1 => {
+            let high = i64::from(bytes[6] & 0x0F) << 56 | i64::from(bytes[7]) << 48;
+            let middle = i64::from(bytes[4]) << 40 | i64::from(bytes[5]) << 32;
+            let low = i64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+            (high | middle | low).checked_sub(GREGORIAN_TO_UNIX_100NS)? / 10
+        }
+        7 => {
+            let mut millis = [0u8; 8];
+            millis[2..].copy_from_slice(&bytes[..6]);
+            i64::from_be_bytes(millis).checked_mul(1000)?
+        }
+        _ => return None,
+    };
+    unix_micros.checked_sub(MICROS_FROM_UNIX_TO_2000)
+}
+
+fn uuid_argument(value: &Value) -> SqlResult<Option<[u8; 16]>> {
+    match value {
+        Value::Uuid(bytes) => Ok(Some(*bytes)),
+        Value::Text(text) => parse_uuid(text).map(Some),
+        _ => Ok(None),
+    }
+}
+
 fn character(value: &Value) -> Option<&str> {
     match value {
         Value::Text(text) => Some(text.as_str()),
@@ -502,10 +548,20 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         }
         ("inet_server_addr" | "inet_server_port" | "inet_client_addr" | "inet_client_port", []) => Ok(Value::Null),
         ("timeofday", []) => Ok(Value::Text(crate::datetime::time_of_day_text())),
-        ("gen_random_uuid" | "uuid_generate_v4", []) => {
+        ("gen_random_uuid" | "uuid_generate_v4" | "uuidv4", []) => {
             let mut bytes = [0u8; 16];
             crate::random::fill(&mut bytes).map(|()| Value::Uuid(random_uuid(bytes)))
         }
+        ("uuidv7", []) => {
+            let mut bytes = [0u8; 16];
+            crate::random::fill(&mut bytes).map(|()| Value::Uuid(time_ordered_uuid(unix_millis_now(), bytes)))
+        }
+        ("uuid_extract_version", [value]) => uuid_argument(value).map(|bytes| {
+            bytes.and_then(|bytes| uuid_version(&bytes)).map_or(Value::Null, |version| Value::SmallInt(i16::from(version)))
+        }),
+        ("uuid_extract_timestamp", [value]) => uuid_argument(value).map(|bytes| {
+            bytes.and_then(|bytes| uuid_timestamp(&bytes)).map_or(Value::Null, Value::TimestampTz)
+        }),
         ("bit_length", [Value::Null]) | ("bit_count", [Value::Null]) => Ok(Value::Null),
         ("bit_length", [Value::Bytea(bytes)]) => integer_value(bytes.len() as i64 * 8, SqlType::Integer),
         ("bit_length", [Value::Text(text) | Value::Bpchar(text)]) => integer_value(text.len() as i64 * 8, SqlType::Integer),
@@ -519,6 +575,21 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_based_uuids_give_back_their_version_and_timestamp() {
+        let rfc_time = 698_872_942_000_000;
+        let version_seven = parse_uuid("017F22E2-79B0-7CC3-98C4-DC0C0C07398F").unwrap();
+        let version_one = parse_uuid("C232AB00-9414-11EC-B3C8-9F6BDECED846").unwrap();
+        assert_eq!(uuid_version(&version_seven), Some(7));
+        assert_eq!(uuid_timestamp(&version_seven), Some(rfc_time));
+        assert_eq!(uuid_version(&version_one), Some(1));
+        assert_eq!(uuid_timestamp(&version_one), Some(rfc_time));
+        assert_eq!(uuid_timestamp(&random_uuid([7; 16])), None);
+        let made = time_ordered_uuid(1_645_557_742_000, [0xFF; 16]);
+        assert_eq!(uuid_version(&made), Some(7));
+        assert_eq!(uuid_timestamp(&made), Some(rfc_time));
+    }
 
     #[test]
     fn hex_and_escape_input_read_as_postgresql_reads_them() {

@@ -457,7 +457,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         }
         ("current_time", []) => Some(SqlType::TimeTz(None)),
         ("localtime" | "mysql_curtime", []) => Some(SqlType::Time(None)),
-        ("gen_random_uuid" | "uuid_generate_v4", []) => Some(SqlType::Uuid),
+        ("gen_random_uuid" | "uuid_generate_v4" | "uuidv4" | "uuidv7", []) => Some(SqlType::Uuid),
+        ("uuid_extract_version", [_]) => Some(SqlType::SmallInt),
+        ("uuid_extract_timestamp", [_]) => Some(SqlType::TimestampTz(None)),
         ("date_add" | "date_subtract", [_, _] | [_, _, _]) => Some(SqlType::TimestampTz(None)),
         ("inet_server_addr" | "inet_client_addr", []) => Some(SqlType::Text),
         ("inet_server_port" | "inet_client_port", []) => Some(SqlType::Integer),

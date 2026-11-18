@@ -38,6 +38,8 @@ const CHANGING_FUNCTIONS: &[&str] = &[
     "gen_random_uuid",
     "uuid",
     "uuid_generate_v4",
+    "uuidv4",
+    "uuidv7",
     "uuid_short",
     "sysdate",
     "systimestamp",
