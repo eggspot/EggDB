@@ -1292,3 +1292,4 @@ its full title with its status.
 - [D1265](decisions/D1265.md) Code-only batch 921: Update, Delete and Insert nodes in PostgreSQL's plans of writes, EXPLAIN INSERT
 - [D1266](decisions/D1266.md) Code-only batch 922 (M6): functions the program defines, in the C API and the Python driver
 - [D1267](decisions/D1267.md) Code-only batch 923 (M6): the Django backend
+- [D1268](decisions/D1268.md) Code-only batch 924 (M4): ts_stat

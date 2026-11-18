@@ -38,6 +38,35 @@ fn no_operator(symbol: &str, position: usize) -> SqlError {
 }
 
 impl Parser<'_> {
+    /// PostgreSQL's `ts_stat('query')` in `FROM` (D1259's follow-up, D1268): each lexeme of the
+    /// `tsvector` the query's first column holds, with `ndoc` the rows holding it and `nentry`
+    /// its occurrences, as a derived table over `unnest(tsvector)`.
+    pub(super) fn ts_stat(&mut self) -> SqlResult<TableReference> {
+        let position = self.position();
+        self.at += 1;
+        self.expect(&TokenKind::LeftParen)?;
+        let query = match self.peek_kind() {
+            TokenKind::String(text) => text.trim().trim_end_matches(';').to_owned(),
+            _ => return Err(SqlError::syntax("ts_stat takes its query as a string literal", position)),
+        };
+        self.at += 1;
+        if self.take(&TokenKind::Comma) {
+            return Err(self.not_supported("ts_stat with weights"));
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let alias = if self.take_word("as") || self.at_bare_alias() { self.name()?.text } else { "ts_stat".to_owned() };
+        let text = format!(
+            "(SELECT ts_stat_u.lexeme AS word, CAST(count(*) AS integer) AS ndoc, \
+             CAST(sum(coalesce(cardinality(ts_stat_u.positions), 1)) AS integer) AS nentry \
+             FROM ({query}) AS ts_stat_q(ts_stat_v) CROSS JOIN LATERAL unnest(ts_stat_q.ts_stat_v) AS ts_stat_u \
+             GROUP BY ts_stat_u.lexeme) AS \"{}\"",
+            alias.replace('"', "\"\"")
+        );
+        let tokens = crate::lexer::tokenize_in(&text, self.dialect)?;
+        let mut parser = Parser::new(&text, &tokens).in_dialect(self.dialect);
+        parser.derived_table()
+    }
+
     pub(super) fn prefix_operator_function(&self) -> Option<&'static str> {
         let TokenKind::Operator(symbol) = self.peek_kind() else {
             return None;

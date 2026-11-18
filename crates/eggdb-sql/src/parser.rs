@@ -3149,6 +3149,9 @@ impl<'t> Parser<'t> {
         if self.at_xml_table() {
             return self.xml_table();
         }
+        if self.postgresql() && self.is_word("ts_stat") && self.peek_kind_at(1) == &TokenKind::LeftParen {
+            return self.ts_stat();
+        }
         if self.postgresql() && self.at_table_function() {
             return self.table_function();
         }

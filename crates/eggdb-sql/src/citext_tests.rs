@@ -673,3 +673,20 @@ fn unnest_of_a_tsvector_lists_lexemes_with_positions_and_weights() {
     );
     assert_eq!(ok(&mut session, "SELECT * FROM unnest(ARRAY[1, 2])"), "unnest\n1\n2\nSELECT 2");
 }
+
+#[test]
+fn ts_stat_counts_the_documents_and_occurrences_of_each_lexeme() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    ok(&mut session, "CREATE TABLE docs (id integer PRIMARY KEY, v tsvector)");
+    ok(&mut session, "INSERT INTO docs VALUES (1, 'cat:1 fat:2,3'), (2, 'cat:4')");
+    assert_eq!(
+        ok(&mut session, "SELECT * FROM ts_stat('SELECT v FROM docs') ORDER BY word"),
+        "word|ndoc|nentry\ncat|2|2\nfat|1|2\nSELECT 2"
+    );
+    assert_eq!(
+        ok(&mut session, "SELECT s.word FROM ts_stat('SELECT v FROM docs WHERE id = 2;') AS s"),
+        "word\ncat\nSELECT 1"
+    );
+    assert!(run(&mut session, "SELECT * FROM ts_stat('SELECT v FROM docs', 'a')").is_err());
+}
