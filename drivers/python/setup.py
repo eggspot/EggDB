@@ -10,7 +10,7 @@ setup(
     name="eggdb",
     version="0.1.0",
     description="EggDB's Python driver: DB-API 2.0 on EggDB's C API, embedded in the process.",
-    packages=["eggdb"],
+    packages=["eggdb", "eggdb.django"],
     ext_modules=[
         Extension(
             "eggdb._native",
