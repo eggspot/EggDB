@@ -2,7 +2,7 @@ use crate::{
     Coord, Geometry, area, centroid, contains, convex_hull, distance, envelope, from_wkb, from_wkt,
     intersects, invalidity, length, parts, perimeter, simplified, sphere_distance, to_geojson,
     to_wkb, to_wkt, translated, affine, as_multi, azimuth, boundary, expanded, rotated, segmentized,
-    snapped_to_grid, without_repeated_points,
+    snapped_to_grid, without_repeated_points, hausdorff_distance, longest_line, shortest_line,
 };
 
 fn geometry(text: &str) -> Geometry {
@@ -226,4 +226,19 @@ fn boundaries_boxes_multis_segments_and_azimuths() {
     assert_eq!(azimuth(Coord { x: 0.0, y: 0.0 }, Coord { x: 0.0, y: 1.0 }), Some(0.0));
     assert_eq!(azimuth(Coord { x: 0.0, y: 0.0 }, Coord { x: 1.0, y: 0.0 }), Some(std::f64::consts::FRAC_PI_2));
     assert_eq!(azimuth(Coord { x: 1.0, y: 1.0 }, Coord { x: 1.0, y: 1.0 }), None);
+}
+
+#[test]
+fn nearest_and_farthest_positions_and_the_hausdorff_distance() {
+    let line = geometry("LINESTRING(0 0,10 0)");
+    let point = geometry("POINT(3 4)");
+    assert_eq!(shortest_line(&point, &line), Some((Coord { x: 3.0, y: 4.0 }, Coord { x: 3.0, y: 0.0 })));
+    let crossing = geometry("LINESTRING(5 -1,5 1)");
+    assert_eq!(shortest_line(&line, &crossing), Some((Coord { x: 5.0, y: 0.0 }, Coord { x: 5.0, y: 0.0 })));
+    let square = geometry("POLYGON((0 0,0 10,10 10,10 0,0 0))");
+    let inside = geometry("POINT(5 5)");
+    assert_eq!(shortest_line(&inside, &square), Some((Coord { x: 5.0, y: 5.0 }, Coord { x: 5.0, y: 5.0 })));
+    assert_eq!(longest_line(&point, &line), Some((Coord { x: 3.0, y: 4.0 }, Coord { x: 10.0, y: 0.0 })));
+    assert_eq!(hausdorff_distance(&geometry("LINESTRING(0 0,10 0)"), &geometry("LINESTRING(0 1,10 1)")), Some(1.0));
+    assert_eq!(shortest_line(&geometry("POINT EMPTY"), &line), None);
 }

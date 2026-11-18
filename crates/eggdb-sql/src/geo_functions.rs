@@ -6,7 +6,12 @@ use eggdb_geo::{Coord, Geometry, Spatial};
 const GEOGRAPHY_SRID: i32 = 4326;
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 84] = [
+pub(crate) const FUNCTIONS: [&str; 89] = [
+    "st_closestpoint",
+    "st_shortestline",
+    "st_longestline",
+    "st_maxdistance",
+    "st_hausdorffdistance",
     "st_rotate",
     "st_affine",
     "st_snaptogrid",
@@ -101,7 +106,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "s2_cellidtotoken" => SqlType::Text,
         "st_x" | "st_y" | "st_distance" | "sqlserver_stdistance" | "st_area" | "st_length" | "st_distancesphere"
         | "st_distancespheroid" | "st_lengthspheroid"
-        | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" | "st_linelocatepoint" | "st_azimuth" => SqlType::Double,
+        | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" | "st_linelocatepoint" | "st_azimuth" | "st_maxdistance" | "st_hausdorffdistance" => SqlType::Double,
         "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" => {
             SqlType::Integer
         }
@@ -849,6 +854,30 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
                 _ => return Err(SqlError::new(SqlState::UNDEFINED_FUNCTION, format!("function {name} does not take these arguments"))),
             }
             geometry_value(&Spatial { srid: source.srid, geometry: Geometry::LineString(points) })
+        }
+        ("st_closestpoint" | "st_shortestline" | "st_longestline", [_, _]) => {
+            let (left, right) = pair()?;
+            let found = if name == "st_longestline" {
+                eggdb_geo::longest_line(&left.geometry, &right.geometry)
+            } else {
+                eggdb_geo::shortest_line(&left.geometry, &right.geometry)
+            };
+            match found {
+                None => Value::Null,
+                Some((near, _)) if name == "st_closestpoint" => geometry_value(&Spatial { srid: left.srid, geometry: Geometry::Point(Some(near)) }),
+                Some((from, to)) => geometry_value(&Spatial { srid: left.srid, geometry: Geometry::LineString(vec![from, to]) }),
+            }
+        }
+        ("st_maxdistance", [_, _]) => {
+            let (left, right) = pair()?;
+            match eggdb_geo::longest_line(&left.geometry, &right.geometry) {
+                Some((from, to)) => Value::Double((to.x - from.x).hypot(to.y - from.y)),
+                None => Value::Null,
+            }
+        }
+        ("st_hausdorffdistance", [_, _]) => {
+            let (left, right) = pair()?;
+            eggdb_geo::hausdorff_distance(&left.geometry, &right.geometry).map_or(Value::Null, Value::Double)
         }
         ("st_azimuth", [_, _]) => {
             let (from, to) = pair()?;

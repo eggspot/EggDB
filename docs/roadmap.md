@@ -1684,7 +1684,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A stored geometry type (hex EWKB, the binary wire format, a catalog entry) (D204). **Code written, unbuilt** (code-only mode, 2026-11-12,
   D845); typmods (`geometry(Point, 4326)`) as checks: **code written, unbuilt** (code-only mode, 2026-11-12, D846).
   Geometry editing functions (`ST_Rotate`, `ST_Affine`, `ST_SnapToGrid`, `ST_Boundary`, `ST_Segmentize`, the line edits and
-  more): **code written, unbuilt** (code-only mode, 2026-11-18, D1272). Left: `geography`, Z and M subtypes, and the overlay
+  more): **code written, unbuilt** (code-only mode, 2026-11-18, D1272); nearest and farthest positions (`ST_ClosestPoint`, `ST_ShortestLine`,
+  `ST_LongestLine`, `ST_MaxDistance`, `ST_HausdorffDistance`): **code written, unbuilt** (D1273). Left: `geography`, Z and M subtypes, and the overlay
   functions (`ST_Buffer`, `ST_Union`, `ST_Difference`).
 - R-tree spatial indexes, with MySQL's `SPATIAL` keys (D204, sql.md).
 - Z and M coordinates, and geography on the WGS 84 spheroid (D204). Distances and lengths on the spheroid (`ST_DistanceSpheroid`,

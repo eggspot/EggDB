@@ -302,3 +302,126 @@ pub fn sphere_distance(left: &Geometry, right: &Geometry) -> Result<f64, GeoErro
     let h = (dphi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (dlambda / 2.0).sin().powi(2);
     Ok(2.0 * EARTH_RADIUS_METRES * h.sqrt().min(1.0).asin())
 }
+
+fn vertices(geometry: &Geometry) -> Vec<Coord> {
+    match geometry {
+        Geometry::Point(point) => point.iter().copied().collect(),
+        Geometry::LineString(points) | Geometry::MultiPoint(points) => points.clone(),
+        Geometry::Polygon(rings) | Geometry::MultiLineString(rings) => rings.iter().flatten().copied().collect(),
+        Geometry::MultiPolygon(polygons) => polygons.iter().flatten().flatten().copied().collect(),
+        Geometry::Collection(items) => items.iter().flat_map(vertices).collect(),
+    }
+}
+
+fn closest_on(point: Coord, (a, b): (Coord, Coord)) -> Coord {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length = dx * dx + dy * dy;
+    if length == 0.0 {
+        return a;
+    }
+    let t = (((point.x - a.x) * dx + (point.y - a.y) * dy) / length).clamp(0.0, 1.0);
+    Coord {
+        x: a.x + t * dx,
+        y: a.y + t * dy,
+    }
+}
+
+fn crossing_point((a, b): (Coord, Coord), (c, d): (Coord, Coord)) -> Coord {
+    let denominator = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
+    if denominator == 0.0 {
+        return [a, b].into_iter().find(|end| point_segment(*end, (c, d)) == 0.0).unwrap_or(c);
+    }
+    let t = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / denominator;
+    Coord {
+        x: a.x + t * (b.x - a.x),
+        y: a.y + t * (b.y - a.y),
+    }
+}
+
+fn nearest_pair(first: (Coord, Coord), second: (Coord, Coord)) -> (Coord, Coord) {
+    if segments_cross(first, second) {
+        let meeting = crossing_point(first, second);
+        return (meeting, meeting);
+    }
+    [
+        (first.0, closest_on(first.0, second)),
+        (first.1, closest_on(first.1, second)),
+        (closest_on(second.0, first), second.0),
+        (closest_on(second.1, first), second.1),
+    ]
+    .into_iter()
+    .min_by(|x, y| point_distance(x.0, x.1).total_cmp(&point_distance(y.0, y.1)))
+    .unwrap_or((first.0, second.0))
+}
+
+/// The two nearest positions of the geometries, the first on `left` (`ST_ShortestLine`,
+/// `ST_ClosestPoint`, D1273); the same position twice when they meet; `None` when one is empty.
+pub fn shortest_line(left: &Geometry, right: &Geometry) -> Option<(Coord, Coord)> {
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    let mut best: Option<(f64, Coord, Coord)> = None;
+    let mut offer = |a: Coord, b: Coord| {
+        let found = point_distance(a, b);
+        if best.is_none_or(|(known, _, _)| found < known) {
+            best = Some((found, a, b));
+        }
+    };
+    for vertex in vertices(left) {
+        if polygons(right).iter().any(|rings| in_polygon(vertex, rings)) {
+            offer(vertex, vertex);
+        }
+    }
+    for vertex in vertices(right) {
+        if polygons(left).iter().any(|rings| in_polygon(vertex, rings)) {
+            offer(vertex, vertex);
+        }
+    }
+    let (left_segments, right_segments) = (segments(left), segments(right));
+    let (left_points, right_points) = (points(left), points(right));
+    for a in &left_points {
+        for b in &right_points {
+            offer(*a, *b);
+        }
+        for segment in &right_segments {
+            offer(*a, closest_on(*a, *segment));
+        }
+    }
+    for b in &right_points {
+        for segment in &left_segments {
+            offer(closest_on(*b, *segment), *b);
+        }
+    }
+    for first in &left_segments {
+        for second in &right_segments {
+            let (a, b) = nearest_pair(*first, *second);
+            offer(a, b);
+        }
+    }
+    best.map(|(_, a, b)| (a, b))
+}
+
+/// The two farthest vertices of the geometries, the first of `left` (`ST_LongestLine`,
+/// `ST_MaxDistance`); `None` when one is empty.
+pub fn longest_line(left: &Geometry, right: &Geometry) -> Option<(Coord, Coord)> {
+    let right_vertices = vertices(right);
+    vertices(left)
+        .into_iter()
+        .flat_map(|a| right_vertices.iter().map(move |b| (a, *b)))
+        .max_by(|x, y| point_distance(x.0, x.1).total_cmp(&point_distance(y.0, y.1)))
+}
+
+/// The discrete Hausdorff distance: the farthest any vertex of one geometry is from the other
+/// geometry, both ways (`ST_HausdorffDistance`); `None` when one is empty.
+pub fn hausdorff_distance(left: &Geometry, right: &Geometry) -> Option<f64> {
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    let one_way = |from: &Geometry, to: &Geometry| -> Option<f64> {
+        vertices(from)
+            .into_iter()
+            .map(|vertex| distance(&Geometry::Point(Some(vertex)), to))
+            .try_fold(0.0_f64, |most, found| Some(most.max(found?)))
+    };
+    Some(one_way(left, right)?.max(one_way(right, left)?))
+}

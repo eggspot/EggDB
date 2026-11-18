@@ -16,7 +16,10 @@ mod tiles;
 mod wkb;
 mod wkt;
 
-pub use algorithms::{area, contains, distance, envelope, intersects, length, sphere_distance};
+pub use algorithms::{
+    area, contains, distance, envelope, hausdorff_distance, intersects, length, longest_line, shortest_line,
+    sphere_distance,
+};
 pub use geodesic::{Spheroid, coord_spheroid_distance, spheroid_distance, spheroid_length};
 pub use geojson::to_geojson;
 pub use linear::{line_crossings, line_interpolate_point, line_locate_point, line_split, line_substring};
