@@ -67,7 +67,7 @@ const CONVERTS_FROM_TEXT: u32 = CVT_TEXT | CVT_NUMBERS | CVT_DATES | CVT_BINARY;
 const CONVERTS_FROM_DATES: u32 = CVT_TEXT | CVT_DATES;
 const CONVERTS_FROM_BINARY: u32 = CVT_TEXT | CVT_BINARY;
 
-const FIXED_INFO: [(u16, InfoAnswer); 69] = [
+const FIXED_INFO: [(u16, InfoAnswer); 71] = [
     (0, InfoAnswer::Short(0)),
     (8, InfoAnswer::Long(1)),
     (9, InfoAnswer::Short(1)),
@@ -101,6 +101,8 @@ const FIXED_INFO: [(u16, InfoAnswer); 69] = [
     (50, InfoAnswer::Long(crate::escapes::STRING_FUNCTIONS)),
     (51, InfoAnswer::Long(crate::escapes::SYSTEM_FUNCTIONS)),
     (52, InfoAnswer::Long(crate::escapes::TIMEDATE_FUNCTIONS)),
+    (109, InfoAnswer::Long(crate::escapes::TIMESTAMP_INTERVALS)),
+    (110, InfoAnswer::Long(crate::escapes::TIMESTAMP_INTERVALS)),
     (53, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
     (54, InfoAnswer::Long(CONVERTS_FROM_BINARY)),
     (55, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
