@@ -2,7 +2,7 @@ use crate::ast::{Name, SynonymCommand};
 use crate::encoding::NAMESPACE;
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::session::QueryResult;
-use crate::store::{KeyValueRead, KeyValueWrite};
+use crate::store::{KeyValueRead, KeyValueWrite, ScanDirection};
 
 pub(crate) const SYNONYM_SPACE: u8 = 0x17;
 const RECORD_VERSION: u8 = 1;
@@ -31,6 +31,51 @@ fn decode(bytes: &[u8]) -> SqlResult<String> {
             .map(str::to_owned)
             .map_err(|_| crate::encoding::corrupt("synonym")),
         _ => Err(crate::encoding::corrupt("synonym")),
+    }
+}
+
+/// A stored synonym: its name (schema-qualified for a private one), whether it is public and
+/// the object it stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSynonym {
+    pub(crate) name: String,
+    pub(crate) public: bool,
+    pub(crate) target: String,
+}
+
+/// Every synonym the store holds, private ones first.
+pub(crate) fn every_synonym(reader: &dyn KeyValueRead) -> SqlResult<Vec<StoredSynonym>> {
+    let mut prefix = NAMESPACE.to_vec();
+    prefix.push(SYNONYM_SPACE);
+    let mut found = Vec::new();
+    let mut failure = None;
+    reader.scan(&prefix, &crate::encoding::prefix_end(&prefix), ScanDirection::Forward, &mut |key, value| {
+        let rest = key.get(prefix.len()..).unwrap_or_default();
+        let (public, name) = match rest.split_first() {
+            Some((&PUBLIC_MARK, name)) => (true, name),
+            _ => (false, rest),
+        };
+        match decode(value) {
+            Ok(target) => {
+                found.push(StoredSynonym {
+                    name: String::from_utf8_lossy(name).into_owned(),
+                    public,
+                    target,
+                });
+                Ok(true)
+            }
+            Err(error) => {
+                failure = Some(error);
+                Ok(false)
+            }
+        }
+    })?;
+    match failure {
+        Some(error) => Err(error),
+        None => {
+            found.sort_by_key(|synonym| synonym.public);
+            Ok(found)
+        }
     }
 }
 

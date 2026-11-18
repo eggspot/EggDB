@@ -359,6 +359,7 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
         object_type.as_str(),
         "TABLE" | "VIEW" | "INDEX" | "SEQUENCE" | "TRIGGER" | "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE_SPEC" | "PACKAGE_BODY"
             | "USER"
+            | "SYNONYM"
     ) {
         return Err(metadata_error(
             ORACLE_METADATA_INVALID_INPUT,
@@ -380,6 +381,10 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
             ),
         )
     };
+    if object_type == "SYNONYM" {
+        let ddl = synonym_ddl(&snapshot, text(2).as_deref(), &internal_name).ok_or_else(not_found)?;
+        return crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl));
+    }
     if object_type == "USER" {
         let role = snapshot
             .stored_roles
@@ -466,15 +471,61 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
     crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl))
 }
 
+fn owned_name(internal: &str, user: &str) -> String {
+    let owner = match crate::schemas::is_qualified(internal) {
+        true => crate::lexer::swap_uniform_case(crate::schemas::schema_of(internal)),
+        false => user.to_uppercase(),
+    };
+    format!(
+        "\"{owner}\".\"{}\"",
+        crate::lexer::swap_uniform_case(crate::schemas::base_name(internal))
+    )
+}
+
+fn synonym_ddl(snapshot: &crate::pg_catalog::CatalogSnapshot, owner: Option<&str>, internal_name: &str) -> Option<String> {
+    let public = owner.is_some_and(|owner| owner.eq_ignore_ascii_case("PUBLIC"));
+    let wanted = match owner.filter(|owner| !public && !owner.eq_ignore_ascii_case(&snapshot.user)) {
+        Some(owner) => crate::schemas::qualified(&crate::lexer::swap_uniform_case(owner), internal_name),
+        None => internal_name.to_owned(),
+    };
+    let synonym = snapshot
+        .synonyms
+        .iter()
+        .find(|synonym| synonym.public == public && synonym.name == wanted)?;
+    let target = owned_name(&synonym.target, &snapshot.user);
+    Some(match public {
+        true => format!(
+            "CREATE OR REPLACE PUBLIC SYNONYM \"{}\" FOR {target};",
+            crate::lexer::swap_uniform_case(&synonym.name)
+        ),
+        false => format!(
+            "CREATE OR REPLACE EDITIONABLE SYNONYM {} FOR {target};",
+            owned_name(&synonym.name, &snapshot.user)
+        ),
+    })
+}
+
+fn role_grants(snapshot: &crate::pg_catalog::CatalogSnapshot, grantee: &str) -> Vec<String> {
+    let internal = crate::lexer::swap_uniform_case(grantee);
+    snapshot
+        .stored_roles
+        .iter()
+        .filter(|role| role.name == internal)
+        .flat_map(|role| role.member_of.iter())
+        .map(|granted| format!("  GRANT \"{}\" TO \"{grantee}\"", crate::lexer::swap_uniform_case(granted)))
+        .collect()
+}
+
 /// `DBMS_METADATA.GET_GRANTED_DDL('OBJECT_GRANT', grantee)` (D1254): one `GRANT` statement a
-/// table privilege the grantee holds, `WITH GRANT OPTION` where it may pass it on.
+/// table privilege the grantee holds, `WITH GRANT OPTION` where it may pass it on;
+/// `'ROLE_GRANT'` (D1258): one per role the grantee is a member of.
 fn get_granted_ddl(values: &[Value]) -> SqlResult<Value> {
     let text = |at: usize| values.get(at).filter(|value| !matches!(value, Value::Null)).and_then(Value::to_text);
     let Some(object_type) = text(0) else {
         return Ok(Value::Null);
     };
     let object_type = object_type.trim().to_ascii_uppercase();
-    if object_type != "OBJECT_GRANT" {
+    if object_type != "OBJECT_GRANT" && object_type != "ROLE_GRANT" {
         return Err(metadata_error(
             ORACLE_METADATA_INVALID_INPUT,
             format!("invalid input value {object_type} for parameter OBJECT_TYPE in function GET_GRANTED_DDL"),
@@ -485,8 +536,11 @@ fn get_granted_ddl(values: &[Value]) -> SqlResult<Value> {
     })?;
     let grantee = text(1).unwrap_or_else(|| snapshot.user.to_uppercase());
     let internal = crate::lexer::swap_uniform_case(&grantee);
-    let mut statements = Vec::new();
-    for grant in snapshot.grants.iter().filter(|grant| grant.grantee == internal) {
+    let mut statements = match object_type.as_str() {
+        "ROLE_GRANT" => role_grants(&snapshot, &grantee),
+        _ => Vec::new(),
+    };
+    for grant in snapshot.grants.iter().filter(|grant| object_type == "OBJECT_GRANT" && grant.grantee == internal) {
         for privilege in crate::roles::Privilege::ALL {
             if grant.privileges & privilege.bit() == 0 {
                 continue;
@@ -503,7 +557,7 @@ fn get_granted_ddl(values: &[Value]) -> SqlResult<Value> {
     if statements.is_empty() {
         return Err(metadata_error(
             ORACLE_METADATA_NOT_FOUND,
-            format!("object \"{grantee}\" of type OBJECT_GRANT not found"),
+            format!("object \"{grantee}\" of type {object_type} not found"),
         ));
     }
     let ddl = statements.join(";\n") + ";";

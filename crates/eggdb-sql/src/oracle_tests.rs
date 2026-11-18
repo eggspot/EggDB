@@ -1140,6 +1140,28 @@ fn dbms_metadata_get_ddl_writes_tables_and_views_in_oracle_form() {
     assert!(granted.contains("GRANT UPDATE ON \"EMP\" TO \"SCOTT\""), "{granted}");
     let none = failure(&mut session, "SELECT DBMS_METADATA.GET_GRANTED_DDL('OBJECT_GRANT', 'NOBODY') FROM dual");
     assert!(none.message().starts_with("ORA-31603"), "{none}");
+    values(&mut session, "CREATE ROLE clerk");
+    values(&mut session, "GRANT clerk TO scott");
+    let roles = values(&mut session, "SELECT DBMS_METADATA.GET_GRANTED_DDL('ROLE_GRANT', 'SCOTT') FROM dual");
+    let Value::Text(roles) = &roles[0][0] else {
+        panic!("text DDL: {roles:?}");
+    };
+    assert!(roles.contains("GRANT \"CLERK\" TO \"SCOTT\""), "{roles}");
+    assert!(!roles.contains(" ON "), "{roles}");
+    values(&mut session, "CREATE SYNONYM staff FOR emp");
+    values(&mut session, "CREATE PUBLIC SYNONYM everyone FOR emp");
+    let private = values(&mut session, "SELECT DBMS_METADATA.GET_DDL('SYNONYM', 'STAFF') FROM dual");
+    let Value::Text(private) = &private[0][0] else {
+        panic!("text DDL: {private:?}");
+    };
+    assert!(private.starts_with("CREATE OR REPLACE EDITIONABLE SYNONYM "), "{private}");
+    assert!(private.contains(".\"STAFF\" FOR ") && private.ends_with(".\"EMP\";"), "{private}");
+    let public = values(&mut session, "SELECT DBMS_METADATA.GET_DDL('SYNONYM', 'EVERYONE', 'PUBLIC') FROM dual");
+    let Value::Text(public) = &public[0][0] else {
+        panic!("text DDL: {public:?}");
+    };
+    assert!(public.starts_with("CREATE OR REPLACE PUBLIC SYNONYM \"EVERYONE\" FOR "), "{public}");
+    failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('SYNONYM', 'EVERYONE') FROM dual");
     values(
         &mut session,
         "CREATE OR REPLACE FUNCTION double_it(n NUMBER) RETURN NUMBER IS BEGIN RETURN n * 2; END;",

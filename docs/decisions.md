@@ -1282,3 +1282,4 @@ its full title with its status.
 - [D1255](decisions/D1255.md) Code-only batch 911 (M6): ODBC escape sequences and the function bitmasks
 - [D1256](decisions/D1256.md) Code-only batch 912 (M6): SQLNativeSql and the SQL_CONVERT bitmasks
 - [D1257](decisions/D1257.md) Code-only batch 913 (M6): ODBC TIMESTAMPADD/DIFF, LOCATE from a start, trigonometry, DATABASE and USER
+- [D1258](decisions/D1258.md) Code-only batch 914 (M4): DBMS_METADATA synonyms and role grants
