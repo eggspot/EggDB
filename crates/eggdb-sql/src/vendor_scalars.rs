@@ -300,7 +300,7 @@ fn formatted_message(format: &str, arguments: &[Value]) -> String {
             out.push('%');
             break;
         };
-        let argument = || next.next().filter(|value| !value.is_null());
+        let mut argument = || next.next().filter(|value| !value.is_null());
         match kind {
             '%' => out.push('%'),
             's' | 'S' => out.push_str(&argument().map_or_else(|| "(null)".to_owned(), text_of)),
