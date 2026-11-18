@@ -706,3 +706,14 @@ fn arrays_are_built_edited_and_searched_as_postgresql_does() {
     assert_eq!(state(&mut session, "SELECT trim_array(ARRAY[1], 2)"), "2202E");
     assert_eq!(run(&mut session, "SELECT array_position(ARRAY[1], 5)").unwrap(), "array_position\nNULL\nSELECT 1");
 }
+
+#[test]
+fn bit_lengths_null_counts_and_uuid_ossp_names() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(&mut session, "SELECT bit_length('ab'), bit_count('\\x0f01'::bytea), num_nulls(1, NULL, NULL), num_nonnulls(1, NULL, 'x')").unwrap(),
+        "bit_length|bit_count|num_nulls|num_nonnulls\n16|5|2|2\nSELECT 1"
+    );
+    assert_eq!(run(&mut session, "SELECT length(uuid_generate_v4()::text)").unwrap(), "length\n36\nSELECT 1");
+}

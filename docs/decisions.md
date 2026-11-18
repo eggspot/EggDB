@@ -1314,3 +1314,4 @@ its full title with its status.
 - [D1287](decisions/D1287.md) Code-only batch 943 (M4): ST_Touches, ST_Crosses and ST_Overlaps
 - [D1288](decisions/D1288.md) Code-only batch 944 (M4): PostgreSQL's array editing functions
 - [D1289](decisions/D1289.md) Code-only batch 945 (M4): PostgreSQL's mathematical functions
+- [D1290](decisions/D1290.md) Code-only batch 946 (M4): bit_length, bit_count, num_nulls, num_nonnulls, uuid_generate_v4

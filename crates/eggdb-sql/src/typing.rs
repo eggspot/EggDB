@@ -440,7 +440,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         }
         ("current_time", []) => Some(SqlType::TimeTz(None)),
         ("localtime" | "mysql_curtime", []) => Some(SqlType::Time(None)),
-        ("gen_random_uuid", []) => Some(SqlType::Uuid),
+        ("gen_random_uuid" | "uuid_generate_v4", []) => Some(SqlType::Uuid),
+        ("bit_length" | "num_nulls" | "num_nonnulls", _) => Some(SqlType::Integer),
+        ("bit_count", [_]) => Some(SqlType::BigInt),
         ("encode", [_, _]) => Some(SqlType::Text),
         ("sha256" | "sha512", [_]) => Some(SqlType::Bytea),
         ("decode", [_, _]) => Some(SqlType::Bytea),

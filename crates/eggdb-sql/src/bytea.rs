@@ -498,10 +498,16 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
                 other => sliced_text(character(other)?, start, count),
             }
         }
-        ("gen_random_uuid", []) => {
+        ("gen_random_uuid" | "uuid_generate_v4", []) => {
             let mut bytes = [0u8; 16];
             crate::random::fill(&mut bytes).map(|()| Value::Uuid(random_uuid(bytes)))
         }
+        ("bit_length", [Value::Null]) | ("bit_count", [Value::Null]) => Ok(Value::Null),
+        ("bit_length", [Value::Bytea(bytes)]) => integer_value(bytes.len() as i64 * 8, SqlType::Integer),
+        ("bit_length", [Value::Text(text) | Value::Bpchar(text)]) => integer_value(text.len() as i64 * 8, SqlType::Integer),
+        ("bit_count", [Value::Bytea(bytes)]) => Ok(Value::BigInt(bytes.iter().map(|byte| i64::from(byte.count_ones())).sum())),
+        ("num_nulls", values) => integer_value(values.iter().filter(|value| value.is_null()).count() as i64, SqlType::Integer),
+        ("num_nonnulls", values) => integer_value(values.iter().filter(|value| !value.is_null()).count() as i64, SqlType::Integer),
         _ => return None,
     })
 }
