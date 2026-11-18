@@ -1316,3 +1316,4 @@ its full title with its status.
 - [D1289](decisions/D1289.md) Code-only batch 945 (M4): PostgreSQL's mathematical functions
 - [D1290](decisions/D1290.md) Code-only batch 946 (M4): bit_length, bit_count, num_nulls, num_nonnulls, uuid_generate_v4
 - [D1291](decisions/D1291.md) Code-only batch 947 (M4): MySQL's missing string and number functions
+- [D1292](decisions/D1292.md) Code-only batch 948 (M4): PATINDEX, QUOTENAME, ISNUMERIC, DATEFROMPARTS, BITAND, REMAINDER, NANVL

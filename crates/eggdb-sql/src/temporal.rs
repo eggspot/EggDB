@@ -353,7 +353,7 @@ fn time_field_error(hour: i64, minute: i64, seconds: f64) -> SqlError {
     )
 }
 
-fn made_date(year: i64, month: i64, day: i64) -> SqlResult<i64> {
+pub(crate) fn made_date(year: i64, month: i64, day: i64) -> SqlResult<i64> {
     let astronomical = match year {
         0 => return Err(date_field_error(year, month, day)),
         year if year < 0 => year + 1,

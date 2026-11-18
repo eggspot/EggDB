@@ -252,6 +252,7 @@ mod sqlserver_types;
 mod square_root;
 mod math_functions;
 mod mysql_strings;
+mod vendor_scalars;
 mod stack_depth;
 mod dictionaries;
 mod xsd;
