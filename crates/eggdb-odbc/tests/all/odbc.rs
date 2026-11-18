@@ -309,7 +309,7 @@ fn block_fetches_fill_arrays_of_rows_column_wise() {
     let mut indicators = [0isize; 2];
     let mut fetched = 0usize;
     let mut statuses = [9u16; 2];
-    assert_eq!(SQLSetStmtAttr(stmt, 27, 2usize as *mut c_void, 0), 0);
+    assert_eq!(SQLSetStmtAttr(stmt, 27, ptr::without_provenance_mut(2), 0), 0);
     assert_eq!(SQLSetStmtAttr(stmt, 26, (&raw mut fetched).cast(), 0), 0);
     assert_eq!(SQLSetStmtAttr(stmt, 25, statuses.as_mut_ptr().cast(), 0), 0);
     assert_eq!(run(stmt, "SELECT 10 UNION ALL SELECT 20 UNION ALL SELECT 30"), 0);

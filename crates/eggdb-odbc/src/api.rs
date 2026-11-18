@@ -993,8 +993,8 @@ pub extern "system" fn SQLSetStmtAttr(stmt: *mut c_void, attribute: i32, value: 
         return SQL_INVALID_HANDLE;
     };
     match attribute {
-        SQL_ATTR_ROW_ARRAY_SIZE => stmt.block.row_array_size = (value as usize).max(1),
-        SQL_ATTR_ROW_BIND_TYPE => stmt.block.row_bind_type = value as usize,
+        SQL_ATTR_ROW_ARRAY_SIZE => stmt.block.row_array_size = value.addr().max(1),
+        SQL_ATTR_ROW_BIND_TYPE => stmt.block.row_bind_type = value.addr(),
         SQL_ATTR_ROWS_FETCHED_PTR => stmt.block.rows_fetched = value.cast(),
         SQL_ATTR_ROW_STATUS_PTR => stmt.block.row_status = value.cast(),
         SQL_ATTR_ROW_BIND_OFFSET_PTR => stmt.block.bind_offset = value.cast_const().cast(),
