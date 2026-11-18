@@ -235,6 +235,26 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
     })
 }
 
+/// MySQL's `doc->'$.path'` (`JSON_EXTRACT`) and `doc->>'$.path'` (`JSON_UNQUOTE` of it), in
+/// MySQL's dialect when the selector is a path; `None` otherwise, for the PostgreSQL operators.
+pub(crate) fn arrow(document: &Value, selector: &Value, unquote: bool) -> Option<SqlResult<Value>> {
+    if crate::constraints::current_dialect() != Dialect::MySql {
+        return None;
+    }
+    let path = selector.to_text()?;
+    if !path.trim_start().starts_with('$') {
+        return None;
+    }
+    if document.is_null() {
+        return Some(Ok(Value::Null));
+    }
+    let extracted = extracted(&[document.clone(), Value::Text(path)]);
+    Some(match (extracted, unquote) {
+        (Ok(Value::Json(text)), true) => Ok(Value::Text(unquoted(&text))),
+        (other, _) => other,
+    })
+}
+
 /// The result type of one of these functions in MySQL's dialect.
 pub(crate) fn result_type(name: &str) -> Option<SqlType> {
     if !FUNCTIONS.contains(&name) || crate::constraints::current_dialect() != Dialect::MySql {

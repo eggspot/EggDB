@@ -4436,6 +4436,13 @@ impl<'t> Parser<'t> {
                     let right = self.expression_above(Level::Additive)?;
                     return Ok(Self::binary(left, operator, right));
                 }
+                if self.mysql()
+                    && let Some(operator @ (BinaryOperator::JsonField | BinaryOperator::JsonFieldText)) = self.json_operator()
+                {
+                    self.at += 1;
+                    let right = self.expression_above(Level::Additive)?;
+                    return Ok(Self::binary(left, operator, right));
+                }
                 if self.postgresql()
                     && let Some(operator) = self.json_operator()
                 {

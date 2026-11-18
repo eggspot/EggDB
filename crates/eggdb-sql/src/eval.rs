@@ -1023,6 +1023,11 @@ impl Evaluator<'_> {
                 {
                     return crate::hstore_functions::fetch(&document, &selector);
                 }
+                if matches!(operator, BinaryOperator::JsonField | BinaryOperator::JsonFieldText)
+                    && let Some(result) = crate::mysql_json::arrow(&document, &selector, operator == BinaryOperator::JsonFieldText)
+                {
+                    return result;
+                }
                 json_select(operator, &document, &selector)
             }
         }
