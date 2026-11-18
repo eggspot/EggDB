@@ -28,10 +28,15 @@ impl Parser<'_> {
                     }
                     self.expect(&TokenKind::RightParen)?;
                 }
-                tables.push(PublishedTable { name, columns });
-                if self.is_word("where") {
-                    return Err(self.not_supported("row filters in publications"));
+                let mut filter = None;
+                if self.take_word("where") {
+                    self.expect(&TokenKind::LeftParen)?;
+                    let first = self.at;
+                    self.expression()?;
+                    filter = Some(self.source_text(first));
+                    self.expect(&TokenKind::RightParen)?;
                 }
+                tables.push(PublishedTable { name, columns, filter });
             }
             if !self.take(&TokenKind::Comma) {
                 break;
