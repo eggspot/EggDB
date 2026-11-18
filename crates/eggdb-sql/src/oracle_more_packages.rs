@@ -7,6 +7,7 @@ const ORACLE_INVALID_QUALIFIED_NAME: u16 = 44_004;
 const ORACLE_NUMERIC_OR_VALUE: u16 = 6_502;
 const ORACLE_METADATA_INVALID_INPUT: u16 = 31_600;
 const ORACLE_METADATA_NOT_FOUND: u16 = 31_603;
+const ORACLE_METADATA_NO_DEPENDENTS: u16 = 31_608;
 const JARO_WINKLER_PREFIX: usize = 4;
 const LONGEST_RANDOM_BYTES: usize = 32_767;
 const GET_TIME_WRAP: i64 = 1 << 31;
@@ -84,6 +85,7 @@ pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static s
         ("utl_compress", "lz_uncompress") => ("oracle_utl_compress_lz_uncompress", 1, 1),
         ("dbms_metadata", "get_ddl") => ("oracle_dbms_metadata_get_ddl", 2, 4),
         ("dbms_metadata", "get_granted_ddl") => ("oracle_dbms_metadata_get_granted_ddl", 1, 3),
+        ("dbms_metadata", "get_dependent_ddl") => ("oracle_dbms_metadata_get_dependent_ddl", 2, 4),
         _ => return None,
     })
 }
@@ -129,7 +131,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_assert_enquote_name"
         | "oracle_dbms_assert_enquote_literal" => SqlType::Text,
         "oracle_utl_i18n_raw_to_char" | "oracle_utl_url_escape" | "oracle_utl_url_unescape" => SqlType::Text,
-        "oracle_dbms_metadata_get_ddl" | "oracle_dbms_metadata_get_granted_ddl" => SqlType::Text,
+        "oracle_dbms_metadata_get_ddl" | "oracle_dbms_metadata_get_granted_ddl" | "oracle_dbms_metadata_get_dependent_ddl" => SqlType::Text,
         "oracle_utl_encode_base64_encode"
         | "oracle_utl_encode_base64_decode"
         | "oracle_utl_i18n_string_to_raw"
@@ -471,6 +473,90 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
     crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl))
 }
 
+/// `DBMS_METADATA.GET_DEPENDENT_DDL(object_type, table[, schema])` (D1271): the `CREATE`
+/// statements of a table's indexes (`'INDEX'`) or triggers (`'TRIGGER'`), or the `GRANT`
+/// statements of its privileges (`'OBJECT_GRANT'`), one after another.
+fn get_dependent_ddl(values: &[Value]) -> SqlResult<Value> {
+    let text = |at: usize| values.get(at).filter(|value| !matches!(value, Value::Null)).and_then(Value::to_text);
+    let (Some(object_type), Some(table_name)) = (text(0), text(1)) else {
+        return Ok(Value::Null);
+    };
+    let object_type = object_type.trim().to_ascii_uppercase();
+    if !matches!(object_type.as_str(), "INDEX" | "TRIGGER" | "OBJECT_GRANT") {
+        return Err(metadata_error(
+            ORACLE_METADATA_INVALID_INPUT,
+            format!("invalid input value {object_type} for parameter OBJECT_TYPE in function GET_DEPENDENT_DDL"),
+        ));
+    }
+    let snapshot = crate::pg_catalog::current_snapshot().ok_or_else(|| {
+        SqlError::new(SqlState::INTERNAL_ERROR, "DBMS_METADATA.GET_DEPENDENT_DDL ran without the catalog loaded")
+    })?;
+    let schema = text(2).filter(|schema| !schema.eq_ignore_ascii_case(&snapshot.user));
+    let internal_schema = schema.as_deref().map(crate::lexer::swap_uniform_case);
+    let internal_name = crate::lexer::swap_uniform_case(&table_name);
+    let table_at = snapshot
+        .find_relation(internal_schema.as_deref(), &internal_name)
+        .filter(|at| {
+            snapshot
+                .relations
+                .get(*at)
+                .is_some_and(|entry| matches!(entry.source, crate::pg_catalog::RelationSource::Table(_)))
+        })
+        .ok_or_else(|| {
+            metadata_error(
+                ORACLE_METADATA_NOT_FOUND,
+                format!(
+                    "object \"{table_name}\" of type TABLE not found in schema \"{}\"",
+                    schema.clone().unwrap_or_else(|| snapshot.user.to_uppercase())
+                ),
+            )
+        })?;
+    let mut statements = Vec::new();
+    match object_type.as_str() {
+        "INDEX" => {
+            for entry in snapshot.relations.iter().filter(
+                |entry| matches!(entry.source, crate::pg_catalog::RelationSource::Index { table, .. } if table == table_at),
+            ) {
+                let mut arguments = vec![Value::Text("INDEX".to_owned()), Value::Text(crate::lexer::swap_uniform_case(&entry.name))];
+                arguments.extend(values.get(2).cloned());
+                if let Value::Text(ddl) = get_ddl(&arguments)? {
+                    statements.push(format!("  {ddl}"));
+                }
+            }
+        }
+        "TRIGGER" => {
+            for trigger in snapshot.triggers.iter().filter(|trigger| trigger.relation == table_at) {
+                statements.push(format!("  {}", as_statement(&trigger.definition.text)));
+            }
+        }
+        _ => {
+            let table = snapshot.relations.get(table_at).map(|entry| entry.internal.clone()).unwrap_or_default();
+            for grant in snapshot.grants.iter().filter(|grant| grant.table == table) {
+                for privilege in crate::roles::Privilege::ALL {
+                    if grant.privileges & privilege.bit() == 0 {
+                        continue;
+                    }
+                    statements.push(format!(
+                        "  GRANT {} ON \"{}\" TO \"{}\"{};",
+                        privilege.keyword().to_ascii_uppercase(),
+                        crate::lexer::swap_uniform_case(&internal_name),
+                        crate::lexer::swap_uniform_case(&grant.grantee),
+                        if grant.grantable & privilege.bit() != 0 { " WITH GRANT OPTION" } else { "" }
+                    ));
+                }
+            }
+        }
+    }
+    if statements.is_empty() {
+        return Err(metadata_error(
+            ORACLE_METADATA_NO_DEPENDENTS,
+            format!("specified object of type {object_type} not found"),
+        ));
+    }
+    let ddl = statements.join("\n");
+    crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl))
+}
+
 fn owned_name(internal: &str, user: &str) -> String {
     let owner = match crate::schemas::is_qualified(internal) {
         true => crate::lexer::swap_uniform_case(crate::schemas::schema_of(internal)),
@@ -570,6 +656,9 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     }
     if name == "oracle_dbms_metadata_get_granted_ddl" {
         return Some(get_granted_ddl(values));
+    }
+    if name == "oracle_dbms_metadata_get_dependent_ddl" {
+        return Some(get_dependent_ddl(values));
     }
     if name.starts_with("oracle_dbms_rowid_") {
         return Some(rowid_part(name, values));

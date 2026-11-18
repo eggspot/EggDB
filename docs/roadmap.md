@@ -1536,7 +1536,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-13, D998); `GET_DDL` for indexes and sequences: **code written, unbuilt** (code-only mode,
   2026-11-17, D1234); triggers, functions, procedures and packages: **code written, unbuilt** (code-only mode, 2026-11-17,
   D1235); users and object grants: **code written, unbuilt** (code-only mode, 2026-11-18, D1254); synonyms and role grants:
-  **code written, unbuilt** (D1258). Left: system grants in `DBMS_METADATA`, `UTL_FILE` and the rest.
+  **code written, unbuilt** (D1258); `GET_DEPENDENT_DDL` for indexes, triggers and grants: **code written, unbuilt** (D1271). Left: system grants in `DBMS_METADATA`, `UTL_FILE` and the rest.
 - PL/SQL: autonomous transactions (after concurrent writers, M3), compound triggers, the
   mutating-table check, `IS A SET`, `IS EMPTY`, `MULTISET`, `MULTISET (subquery)`, `SET()` and
   `TABLE()` correlated in a join (roadmap item 33e). `IS A SET` and `IS EMPTY`: **code written, unbuilt** (code-only mode,

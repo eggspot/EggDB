@@ -1162,6 +1162,18 @@ fn dbms_metadata_get_ddl_writes_tables_and_views_in_oracle_form() {
     };
     assert!(public.starts_with("CREATE OR REPLACE PUBLIC SYNONYM \"EVERYONE\" FOR "), "{public}");
     failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('SYNONYM', 'EVERYONE') FROM dual");
+    let indexes = values(&mut session, "SELECT DBMS_METADATA.GET_DEPENDENT_DDL('INDEX', 'EMP') FROM dual");
+    let Value::Text(indexes) = &indexes[0][0] else {
+        panic!("text DDL: {indexes:?}");
+    };
+    assert!(indexes.contains("CREATE UNIQUE INDEX \"EMP_NAME_IX\" ON \"EMP\" (\"NAME\");"), "{indexes}");
+    let grants = values(&mut session, "SELECT DBMS_METADATA.GET_DEPENDENT_DDL('OBJECT_GRANT', 'EMP') FROM dual");
+    let Value::Text(grants) = &grants[0][0] else {
+        panic!("text DDL: {grants:?}");
+    };
+    assert!(grants.contains("GRANT SELECT ON \"EMP\" TO \"SCOTT\";"), "{grants}");
+    let none = failure(&mut session, "SELECT DBMS_METADATA.GET_DEPENDENT_DDL('OBJECT_GRANT', 'EMP_NAMES') FROM dual");
+    assert!(none.message().starts_with("ORA-31603"), "{none}");
     values(
         &mut session,
         "CREATE OR REPLACE FUNCTION double_it(n NUMBER) RETURN NUMBER IS BEGIN RETURN n * 2; END;",
