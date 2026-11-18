@@ -707,4 +707,12 @@ fn st_dump_and_st_dumppoints_list_parts_and_vertices_with_their_paths() {
         ok(&mut session, "SELECT path FROM ST_DumpPoints('POLYGON((0 0,0 1,1 1,0 0))') WITH ORDINALITY ORDER BY ordinality"),
         "path\n{1,1}\n{1,2}\n{1,3}\n{1,4}\nSELECT 4"
     );
+    assert_eq!(
+        ok(
+            &mut session,
+            "SELECT ST_AsText(ST_Collect('POINT(1 2)', 'POINT(3 4)')) AS c, ST_Dimension('POLYGON((0 0,0 1,1 1,0 0))') AS d, \
+             CASE WHEN ST_IsClosed('LINESTRING(0 0,1 1,0 0)') THEN 1 ELSE 0 END AS closed, ST_NumPoints('LINESTRING(0 0,1 1)') AS n"
+        ),
+        "c|d|closed|n\nMULTIPOINT(1 2,3 4)|2|1|2\nSELECT 1"
+    );
 }

@@ -1299,3 +1299,4 @@ its full title with its status.
 - [D1272](decisions/D1272.md) Code-only batch 928 (M4): geometry editing functions
 - [D1273](decisions/D1273.md) Code-only batch 929 (M4): ST_ClosestPoint, ST_ShortestLine, ST_LongestLine, ST_MaxDistance, ST_HausdorffDistance
 - [D1274](decisions/D1274.md) Code-only batch 930 (M4): ST_Dump and ST_DumpPoints; ts_parse rows in FROM wired
+- [D1275](decisions/D1275.md) Code-only batch 931 (M4): ST_Collect, ST_Points and geometry properties

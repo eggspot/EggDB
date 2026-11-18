@@ -6,7 +6,15 @@ use eggdb_geo::{Coord, Geometry, Spatial};
 const GEOGRAPHY_SRID: i32 = 4326;
 
 /// The spatial functions EggDB answers, PostGIS's names (also MySQL's `ST_` functions).
-pub(crate) const FUNCTIONS: [&str; 89] = [
+pub(crate) const FUNCTIONS: [&str; 97] = [
+    "st_collect",
+    "st_points",
+    "st_isclosed",
+    "st_iscollection",
+    "st_dimension",
+    "st_ndims",
+    "st_coorddim",
+    "st_numpoints",
     "st_closestpoint",
     "st_shortestline",
     "st_longestline",
@@ -107,11 +115,12 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         "st_x" | "st_y" | "st_distance" | "sqlserver_stdistance" | "st_area" | "st_length" | "st_distancesphere"
         | "st_distancespheroid" | "st_lengthspheroid"
         | "st_perimeter" | "st_xmin" | "st_xmax" | "st_ymin" | "st_ymax" | "st_linelocatepoint" | "st_azimuth" | "st_maxdistance" | "st_hausdorffdistance" => SqlType::Double,
-        "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" => {
+        "st_srid" | "st_npoints" | "st_numgeometries" | "st_numinteriorrings" | "st_dimension" | "st_ndims"
+        | "st_coorddim" | "st_numpoints" => {
             SqlType::Integer
         }
         "st_dwithin" | "st_contains" | "st_within" | "st_intersects" | "st_disjoint"
-        | "st_isempty" | "st_equals" | "st_isvalid" => SqlType::Boolean,
+        | "st_isempty" | "st_equals" | "st_isvalid" | "st_isclosed" | "st_iscollection" => SqlType::Boolean,
         name if FUNCTIONS.contains(&name) => SqlType::Text,
         _ => return None,
     })
@@ -331,6 +340,51 @@ pub(crate) fn dump_records(name: &str, values: &[Value], sink: &mut crate::json_
         sink(vec![path, geometry_value(&Spatial { srid: source.srid, geometry })])?;
     }
     Ok(())
+}
+
+fn collected(geometries: Vec<Geometry>) -> Geometry {
+    if geometries.iter().all(|geometry| matches!(geometry, Geometry::Point(Some(_)))) {
+        return Geometry::MultiPoint(geometries.iter().flat_map(Geometry::coords).collect());
+    }
+    if geometries.iter().all(|geometry| matches!(geometry, Geometry::LineString(_))) {
+        return Geometry::MultiLineString(
+            geometries.into_iter().filter_map(|geometry| match geometry {
+                Geometry::LineString(points) => Some(points),
+                _ => None,
+            }).collect(),
+        );
+    }
+    if geometries.iter().all(|geometry| matches!(geometry, Geometry::Polygon(_))) {
+        return Geometry::MultiPolygon(
+            geometries.into_iter().filter_map(|geometry| match geometry {
+                Geometry::Polygon(rings) => Some(rings),
+                _ => None,
+            }).collect(),
+        );
+    }
+    Geometry::Collection(geometries)
+}
+
+fn line_closed(points: &[Coord]) -> bool {
+    points.len() >= 2 && points.first() == points.last()
+}
+
+fn closed(geometry: &Geometry) -> bool {
+    match geometry {
+        Geometry::LineString(points) => line_closed(points),
+        Geometry::MultiLineString(lines) => !lines.is_empty() && lines.iter().all(|line| line_closed(line)),
+        Geometry::Collection(items) => items.iter().all(closed),
+        _ => true,
+    }
+}
+
+fn dimension(geometry: &Geometry) -> i32 {
+    match geometry {
+        Geometry::Point(_) | Geometry::MultiPoint(_) => 0,
+        Geometry::LineString(_) | Geometry::MultiLineString(_) => 1,
+        Geometry::Polygon(_) | Geometry::MultiPolygon(_) => 2,
+        Geometry::Collection(items) => items.iter().map(dimension).max().unwrap_or(0),
+    }
 }
 
 fn point_at(spatial: &Spatial) -> SqlResult<Coord> {
@@ -615,6 +669,43 @@ pub(crate) fn function(name: &str, arguments: &[Value]) -> SqlResult<Value> {
             let spheroid = spheroid_argument(arguments.get(1))?;
             Value::Double(eggdb_geo::spheroid_length(&spatial(0)?.geometry, spheroid).map_err(argument_error)?)
         }
+        ("st_collect", [Value::Array(array)]) => {
+            let mut found: Vec<Spatial> = Vec::new();
+            for item in array.items.iter().filter(|item| !matches!(item, Value::Null)) {
+                if let Some(spatial) = spatial_of(item)? {
+                    if let Some(first) = found.first() {
+                        same_srid(first, &spatial)?;
+                    }
+                    found.push(spatial);
+                }
+            }
+            match found.first().map(|first| first.srid) {
+                None => Value::Null,
+                Some(srid) => geometry_value(&Spatial { srid, geometry: collected(found.into_iter().map(|spatial| spatial.geometry).collect()) }),
+            }
+        }
+        ("st_collect", [_, _]) => {
+            let (left, right) = pair()?;
+            geometry_value(&Spatial { srid: left.srid, geometry: collected(vec![left.geometry, right.geometry]) })
+        }
+        ("st_points", [_]) => {
+            let source = spatial(0)?;
+            geometry_value(&Spatial { srid: source.srid, geometry: Geometry::MultiPoint(source.geometry.coords()) })
+        }
+        ("st_isclosed", [_]) => Value::Boolean(closed(&spatial(0)?.geometry)),
+        ("st_iscollection", [_]) => Value::Boolean(matches!(
+            spatial(0)?.geometry,
+            Geometry::MultiPoint(_) | Geometry::MultiLineString(_) | Geometry::MultiPolygon(_) | Geometry::Collection(_)
+        )),
+        ("st_dimension", [_]) => Value::Integer(dimension(&spatial(0)?.geometry)),
+        ("st_ndims" | "st_coorddim", [_]) => {
+            spatial(0)?;
+            Value::Integer(2)
+        }
+        ("st_numpoints", [_]) => match spatial(0)?.geometry {
+            Geometry::LineString(points) => Value::Integer(i32::try_from(points.len()).unwrap_or(i32::MAX)),
+            _ => Value::Null,
+        },
         ("st_npoints", [_]) => {
             Value::Integer(i32::try_from(spatial(0)?.geometry.coords().len()).unwrap_or(i32::MAX))
         }
