@@ -21,7 +21,9 @@ const SQLSERVER_FUNCTIONS: [&str; 11] = [
     "smalldatetimefromparts",
     "timefromparts",
 ];
-const ORACLE_FUNCTIONS: [&str; 17] = [
+const ORACLE_FUNCTIONS: [&str; 19] = [
+    "to_multi_byte",
+    "to_single_byte",
     "bitand",
     "remainder",
     "nanvl",
@@ -257,6 +259,24 @@ fn unicode_unescaped(text: &str) -> SqlResult<String> {
     String::from_utf16(&units).map_err(|_| invalid())
 }
 
+const FULL_WIDTH_OFFSET: u32 = 0xFEE0;
+
+fn full_width(character: char) -> char {
+    match character {
+        ' ' => '\u{3000}',
+        '!'..='~' => char::from_u32(u32::from(character) + FULL_WIDTH_OFFSET).unwrap_or(character),
+        other => other,
+    }
+}
+
+fn half_width(character: char) -> char {
+    match character {
+        '\u{3000}' => ' ',
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(u32::from(character) - FULL_WIDTH_OFFSET).unwrap_or(character),
+        other => other,
+    }
+}
+
 fn text_of(value: &Value) -> String {
     value.to_text().unwrap_or_default()
 }
@@ -388,6 +408,8 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         ("vsize", [value]) => Ok(Value::BigInt(i64::try_from(hashed_bytes(value).len()).unwrap_or(i64::MAX))),
         ("lnnvl", [condition]) => Ok(Value::Boolean(!matches!(condition, Value::Boolean(true)))),
         ("asciistr", [text]) => Ok(Value::Text(ascii_escaped(&text_of(text)))),
+        ("to_multi_byte", [text]) => Ok(Value::Text(text_of(text).chars().map(full_width).collect())),
+        ("to_single_byte", [text]) => Ok(Value::Text(text_of(text).chars().map(half_width).collect())),
         ("unistr", [text]) => unicode_unescaped(&text_of(text)).map(Value::Text),
         ("bitand", [_, _]) => Ok(Value::BigInt(integer(0)? & integer(1)?)),
         ("remainder", [dividend, divisor]) => {
@@ -417,7 +439,8 @@ pub(crate) fn result_type(name: &str, first: Option<SqlType>) -> Option<SqlType>
         "hashbytes" | "sys_guid" | "standard_hash" | "to_blob" | "empty_blob" => SqlType::Bytea,
         "ora_hash" | "vsize" => SqlType::BigInt,
         "lnnvl" => SqlType::Boolean,
-        "nls_upper" | "nls_lower" | "nls_initcap" | "to_clob" | "empty_clob" | "asciistr" | "unistr" => SqlType::Text,
+        "nls_upper" | "nls_lower" | "nls_initcap" | "to_clob" | "empty_clob" | "asciistr" | "unistr" | "to_multi_byte"
+        | "to_single_byte" => SqlType::Text,
         "string_escape" | "app_name" => SqlType::Text,
         "isnumeric" => SqlType::Integer,
         "quotename" => SqlType::Text,
@@ -454,6 +477,8 @@ mod tests {
         assert_eq!(ascii_escaped("ABÄC\\"), "AB\\00C4C\\005C");
         assert_eq!(unicode_unescaped("AB\\00C4C\\\\").unwrap(), "ABÄC\\");
         assert!(unicode_unescaped("\\12").is_err());
+        assert_eq!("Ab 1".chars().map(full_width).collect::<String>(), "\u{FF21}\u{FF42}\u{3000}\u{FF11}");
+        assert_eq!("\u{FF21}\u{FF42}\u{3000}\u{FF11}".chars().map(half_width).collect::<String>(), "Ab 1");
         assert_eq!(unicode_unescaped("d\\0061t\\+000061 \\u0062 \\U0001F600").unwrap(), "data b \u{1F600}");
     }
 }
