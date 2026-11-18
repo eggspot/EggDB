@@ -742,3 +742,22 @@ fn date_add_and_date_subtract_shift_instants_in_a_zone() {
         "a|s\n2021-11-01 00:00:00+00|2021-10-31 00:00:00+00\nSELECT 1"
     );
 }
+
+#[test]
+fn pg_trigger_depth_counts_the_triggers_running() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        "CREATE TABLE eggs (id integer PRIMARY KEY, depth integer); \
+         CREATE FUNCTION note_depth() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN NEW.depth := pg_trigger_depth(); RETURN NEW; END $$; \
+         CREATE TRIGGER noted BEFORE INSERT ON eggs FOR EACH ROW EXECUTE FUNCTION note_depth()",
+    )
+    .unwrap();
+    run(&mut session, "INSERT INTO eggs (id) VALUES (1)").unwrap();
+    assert_eq!(
+        run(&mut session, "SELECT depth, pg_trigger_depth() AS outside FROM eggs").unwrap(),
+        "depth|outside\n1|0\nSELECT 1"
+    );
+}
