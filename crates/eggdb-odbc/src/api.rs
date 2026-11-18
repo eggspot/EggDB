@@ -58,8 +58,16 @@ enum InfoAnswer {
 }
 
 const IDENTIFIER_BYTES: u16 = 63;
+const CVT_TEXT: u32 = 0x1 | 0x100 | 0x200;
+const CVT_NUMBERS: u32 = 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x1000 | 0x2000 | 0x4000;
+const CVT_DATES: u32 = 0x8000 | 0x1_0000 | 0x2_0000;
+const CVT_BINARY: u32 = 0x400 | 0x800 | 0x4_0000;
+const CONVERTS_FROM_NUMBERS: u32 = CVT_TEXT | CVT_NUMBERS;
+const CONVERTS_FROM_TEXT: u32 = CVT_TEXT | CVT_NUMBERS | CVT_DATES | CVT_BINARY;
+const CONVERTS_FROM_DATES: u32 = CVT_TEXT | CVT_DATES;
+const CONVERTS_FROM_BINARY: u32 = CVT_TEXT | CVT_BINARY;
 
-const FIXED_INFO: [(u16, InfoAnswer); 50] = [
+const FIXED_INFO: [(u16, InfoAnswer); 69] = [
     (0, InfoAnswer::Short(0)),
     (8, InfoAnswer::Long(1)),
     (9, InfoAnswer::Short(1)),
@@ -93,6 +101,25 @@ const FIXED_INFO: [(u16, InfoAnswer); 50] = [
     (50, InfoAnswer::Long(crate::escapes::STRING_FUNCTIONS)),
     (51, InfoAnswer::Long(crate::escapes::SYSTEM_FUNCTIONS)),
     (52, InfoAnswer::Long(crate::escapes::TIMEDATE_FUNCTIONS)),
+    (53, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (54, InfoAnswer::Long(CONVERTS_FROM_BINARY)),
+    (55, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (56, InfoAnswer::Long(CONVERTS_FROM_TEXT)),
+    (57, InfoAnswer::Long(CONVERTS_FROM_DATES)),
+    (58, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (59, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (60, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (61, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (62, InfoAnswer::Long(CONVERTS_FROM_TEXT)),
+    (63, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (64, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (65, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (66, InfoAnswer::Long(CONVERTS_FROM_DATES)),
+    (67, InfoAnswer::Long(CONVERTS_FROM_DATES)),
+    (68, InfoAnswer::Long(CONVERTS_FROM_NUMBERS)),
+    (69, InfoAnswer::Long(CONVERTS_FROM_BINARY)),
+    (70, InfoAnswer::Long(CONVERTS_FROM_TEXT)),
+    (71, InfoAnswer::Long(CONVERTS_FROM_BINARY)),
     (72, InfoAnswer::Long(2 | 4 | 8)),
     (74, InfoAnswer::Short(2)),
     (75, InfoAnswer::Short(1)),
@@ -756,6 +783,33 @@ pub extern "system" fn SQLGetConnectAttr(dbc: *mut c_void, attribute: i32, value
 #[unsafe(no_mangle)]
 pub extern "system" fn SQLSetStmtAttr(_stmt: *mut c_void, _attribute: i32, _value: *mut c_void, _length: i32) -> SqlReturn {
     SQL_SUCCESS
+}
+
+/// The statement text as the driver runs it: ODBC's escape sequences translated for the
+/// connection's dialect (D1256).
+#[unsafe(no_mangle)]
+pub extern "system" fn SQLNativeSql(
+    dbc: *mut c_void,
+    input: *const u8,
+    input_length: i32,
+    output: *mut u8,
+    capacity: i32,
+    written: *mut i32,
+) -> SqlReturn {
+    let Some(dbc) = connection(dbc) else {
+        return SQL_INVALID_HANDLE;
+    };
+    dbc.diagnostics.clear();
+    let Some(text) = input_text(input, isize::try_from(input_length).unwrap_or(-1)) else {
+        return failed(&mut dbc.diagnostics, Failure::new("HY009", "no statement text was given"));
+    };
+    let translated = match crate::escapes::translated(&text, crate::escapes::Family::of(&dbc.dialect)) {
+        Ok(translated) => translated,
+        Err(message) => return failed(&mut dbc.diagnostics, Failure::new("37000", message)),
+    };
+    let truncated = write_text(output, isize::try_from(capacity).unwrap_or(0), translated.as_bytes(), 1);
+    store(written, i32::try_from(translated.len()).unwrap_or(i32::MAX));
+    if truncated { SQL_SUCCESS_WITH_INFO } else { SQL_SUCCESS }
 }
 
 /// Answers the driver and database information applications ask for first.

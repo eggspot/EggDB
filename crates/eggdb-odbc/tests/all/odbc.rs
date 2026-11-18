@@ -2,7 +2,7 @@ use eggdb_odbc::{
     SQLAllocHandle, SQLBindParameter, SQLDescribeCol, SQLDisconnect, SQLDriverConnect,
     SQLEndTran, SQLExecDirect, SQLExecute, SQLFetch, SQLFreeHandle, SQLGetData, SQLGetDiagRec,
     SQLColumns, SQLForeignKeys, SQLGetInfo, SQLGetTypeInfo, SQLNumResultCols, SQLProcedureColumns, SQLPrepare, SQLPrimaryKeys,
-    SQLRowCount, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
+    SQLNativeSql, SQLRowCount, SQLSetConnectAttr, SQLSpecialColumns, SQLStatistics, SQLTablePrivileges, SQLTables,
 };
 use std::ffi::c_void;
 use std::ptr;
@@ -124,6 +124,14 @@ fn primary_keys_foreign_keys_and_type_info_are_listed() {
     assert_eq!(SQLGetInfo(dbc, 25, term.as_mut_ptr().cast(), 16, &raw mut written), 0);
     assert_eq!(&term[..1], b"N");
     assert_eq!(SQLGetInfo(dbc, 9999, term.as_mut_ptr().cast(), 16, &raw mut written), SQL_ERROR);
+    let mut long = 0u32;
+    assert_eq!(SQLGetInfo(dbc, 50, (&raw mut long).cast(), 4, &raw mut written), 0);
+    assert_ne!(long & 0x40, 0);
+    let mut native = [0u8; 64];
+    let mut native_length = 0i32;
+    let escaped = b"SELECT {fn LCASE('A')}\0";
+    assert_eq!(SQLNativeSql(dbc, escaped.as_ptr(), SQL_NTS, native.as_mut_ptr(), 64, &raw mut native_length), 0);
+    assert_eq!(&native[..usize::try_from(native_length).unwrap_or(0)], b"SELECT lower('A')");
     let eggs = b"eggs\0";
     assert_eq!(SQLPrimaryKeys(stmt, ptr::null(), 0, ptr::null(), 0, eggs.as_ptr(), -3), 0);
     assert_eq!(SQLFetch(stmt), 0);
