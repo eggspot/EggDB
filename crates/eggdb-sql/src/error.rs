@@ -134,6 +134,10 @@ impl SqlState {
     pub const INVALID_ESCAPE_CHARACTER: Self = Self(*b"22019");
     /// `2201F` invalid_argument_for_power_function.
     pub const INVALID_ARGUMENT_FOR_POWER: Self = Self(*b"2201F");
+    /// `2201E` invalid_argument_for_logarithm.
+    pub const INVALID_ARGUMENT_FOR_LOGARITHM: Self = Self(*b"2201E");
+    /// `2201G` invalid_argument_for_width_bucket_function.
+    pub const INVALID_ARGUMENT_FOR_WIDTH_BUCKET: Self = Self(*b"2201G");
     /// `2201W` invalid_row_count_in_limit_clause.
     pub const INVALID_ROW_COUNT_IN_LIMIT_CLAUSE: Self = Self(*b"2201W");
     /// `2201X` invalid_row_count_in_result_offset_clause.

@@ -385,6 +385,11 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if let Some(sql_type) = crate::arrays::function_type(name, arguments, scope) {
         return sql_type;
     }
+    if let Some(sql_type) =
+        crate::math_functions::result_type(name, arguments.first().and_then(|argument| static_type(argument, scope)))
+    {
+        return Some(sql_type);
+    }
     if crate::hstore_functions::is_populate(name) || crate::sql_json::SCALAR_POPULATE.contains(&name) {
         if matches!(arguments.first().map(|argument| &argument.kind), Some(ExprKind::Function { name: marker, .. }) if marker == crate::sql_json::ROW_TYPE) {
             return Some(SqlType::Defined(crate::types::DefinedType::RECORD));

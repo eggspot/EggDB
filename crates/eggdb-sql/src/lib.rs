@@ -250,6 +250,7 @@ mod sqlserver_numbers;
 mod sqlserver_strings;
 mod sqlserver_types;
 mod square_root;
+mod math_functions;
 mod stack_depth;
 mod dictionaries;
 mod xsd;
