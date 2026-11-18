@@ -96,6 +96,12 @@ const FUNCTIONS: [SetReturningFunction; 54] = [
         rows: regexp_split_rows,
         fields: false,
     },
+    SetReturningFunction {
+        name: "string_to_table",
+        result_type: string_to_table_type,
+        rows: string_to_table_rows,
+        fields: false,
+    },
     json_records("json_each", json_record_type, json_each_rows),
     json_records("jsonb_each", jsonb_record_type, jsonb_each_rows),
     json_records("json_each_text", json_record_type, json_each_text_rows),
@@ -659,6 +665,27 @@ fn regexp_matches_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> 
         &crate::citext::regexp_arguments("regexp_matches", values),
         sink,
     )
+}
+
+fn string_to_table_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
+    match types.len() {
+        2 | 3 => Ok(SqlType::Text),
+        _ => Err(does_not_exist("string_to_table", types)),
+    }
+}
+
+/// The rows of `string_to_table(text, delimiter[, null_text])` (D1298): the pieces
+/// `string_to_array` gives, one per row.
+fn string_to_table_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
+    let Some(text) = values.first().and_then(Value::to_text) else {
+        return Ok(());
+    };
+    let delimiter = values.get(1).and_then(Value::to_text);
+    let null_text = values.get(2).and_then(Value::to_text);
+    for piece in crate::arrays::split_text(&text, delimiter.as_deref(), null_text.as_deref()) {
+        sink(piece)?;
+    }
+    Ok(())
 }
 
 fn regexp_split_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {

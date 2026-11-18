@@ -717,3 +717,13 @@ fn bit_lengths_null_counts_and_uuid_ossp_names() {
     );
     assert_eq!(run(&mut session, "SELECT length(uuid_generate_v4()::text)").unwrap(), "length\n36\nSELECT 1");
 }
+
+#[test]
+fn string_to_table_gives_a_row_per_piece() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        run(&mut session, "SELECT * FROM string_to_table('a,b,,c', ',', '') WITH ORDINALITY").unwrap(),
+        "string_to_table|ordinality\na|1\nb|2\nNULL|3\nc|4\nSELECT 4"
+    );
+}

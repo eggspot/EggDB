@@ -854,7 +854,7 @@ fn element_of_value(value: &Value) -> ArrayElement {
     value.sql_type().and_then(ArrayElement::of).unwrap_or(ArrayElement::Text)
 }
 
-fn split_text(text: &str, delimiter: Option<&str>, null_text: Option<&str>) -> Vec<Value> {
+pub(crate) fn split_text(text: &str, delimiter: Option<&str>, null_text: Option<&str>) -> Vec<Value> {
     let pieces: Vec<String> = match delimiter {
         _ if text.is_empty() => Vec::new(),
         None => text.chars().map(String::from).collect(),
