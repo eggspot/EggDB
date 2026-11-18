@@ -255,8 +255,6 @@ pub extern "system" fn SQLGetEnvAttr(env: *mut c_void, attribute: i32, value: *m
     SQL_SUCCESS
 }
 
-/// The `key=value` pairs of a connection string, keys in lowercase; a value in braces may hold
-/// `;` and `=`, and `}}` stands for one `}` inside it (D1261).
 fn attributes(settings: &str) -> Vec<(String, String)> {
     let mut found = Vec::new();
     let mut characters = settings.chars().peekable();
@@ -974,8 +972,6 @@ struct DescribedColumn {
     numeric: bool,
 }
 
-/// What `SQLColAttribute` says of a column of ODBC type `sql_type` whose longest value has
-/// `longest` bytes (D1283).
 fn describe_column(sql_type: i16, longest: isize) -> DescribedColumn {
     match sql_type {
         -5 => DescribedColumn { type_name: "BIGINT", display_size: 20, octet_length: 8, precision: 19, radix: 10, numeric: true },

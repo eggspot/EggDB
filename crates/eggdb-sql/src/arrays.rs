@@ -867,9 +867,6 @@ pub(crate) fn split_text(text: &str, delimiter: Option<&str>, null_text: Option<
         .collect()
 }
 
-/// PostgreSQL's functions that build and edit arrays (D1288): `array_append`,
-/// `array_prepend`, `array_cat`, `array_remove`, `array_replace`, `array_position(s)`,
-/// `trim_array`, `array_reverse`, `array_dims` and `string_to_array`.
 fn editing_function(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     let result = match (name, values) {
         ("array_append", [Value::Null, Value::Null]) | ("array_prepend", [Value::Null, Value::Null]) => Ok(Value::Null),

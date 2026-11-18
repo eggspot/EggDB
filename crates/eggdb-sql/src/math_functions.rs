@@ -15,7 +15,6 @@ pub(crate) const FUNCTIONS: [&str; 25] = [
     "width_bucket", "atan2", "atan2d", "random", "erf", "erfc", "gamma",
 ];
 
-/// The trigonometric and hyperbolic functions of one argument.
 const TRIGONOMETRIC: [&str; 21] = [
     "sin", "cos", "tan", "cot", "asin", "acos", "atan", "sind", "cosd", "tand", "cotd", "asind", "acosd", "atand", "sinh",
     "cosh", "tanh", "asinh", "acosh", "atanh", "lgamma",

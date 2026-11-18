@@ -2430,7 +2430,6 @@ impl Binding<'_> {
     }
 }
 
-/// The members of `column`'s MySQL `ENUM`, from the implicit `CHECK` its type made (D684).
 fn enum_members(table: &crate::encoding::TableDefinition, column: &str) -> Option<Vec<String>> {
     table
         .checks

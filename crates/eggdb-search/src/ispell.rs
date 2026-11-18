@@ -152,9 +152,6 @@ fn original_rule(line: &str, flag: &str, cross_product: bool) -> Result<AffixRul
     })
 }
 
-/// The suffix and prefix rules of an affix file in the original ispell format: `prefixes` and
-/// `suffixes` sections of `flag *X:` blocks (`*` allowing cross products), each rule a
-/// condition, `>` and the affix, or `-strip,affix`; `#` starts a comment.
 fn original_rules(affixes: &str) -> Result<(Vec<AffixRule>, Vec<AffixRule>), String> {
     let mut suffixes = Vec::new();
     let mut prefixes = Vec::new();

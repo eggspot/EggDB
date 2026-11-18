@@ -131,9 +131,6 @@ fn like(parts: &[PatternPart], text: &[char]) -> bool {
     parts[p.min(parts.len())..].iter().all(|part| *part == PatternPart::Any)
 }
 
-/// `PATINDEX(pattern, text)`: the position (from 1) where `pattern` first matches, its leading
-/// `%` letting the match start anywhere; 0 when it never does. Case-insensitive, as SQL Server's
-/// default collation is.
 fn pattern_index(pattern: &str, text: &str) -> i64 {
     let parts = pattern_parts(pattern);
     let characters: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();

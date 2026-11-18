@@ -99,9 +99,6 @@ fn written_in(value: u64, base: u32) -> String {
     digits.iter().rev().collect()
 }
 
-/// `CONV(n, from_base, to_base)`: `n` read in `from_base` and written in `to_base` (2 to 36;
-/// a negative `to_base` writes a negative number with its sign, else as its unsigned 64-bit
-/// form, as MySQL does); NULL for a base out of range.
 fn conv(text: &str, from: i64, to: i64) -> Option<String> {
     let (from_base, to_base) = (u32::try_from(from.unsigned_abs()).ok()?, u32::try_from(to.unsigned_abs()).ok()?);
     if !(2..=36).contains(&from_base) || !(2..=36).contains(&to_base) {

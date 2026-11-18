@@ -91,7 +91,6 @@ impl StoredPublication {
         self.actions & PUBLISHES_TRUNCATE != 0
     }
 
-    /// The columns this publication sends of the table `internal`: `None` for all of them.
     fn columns_of(&self, internal: &str) -> Option<&[String]> {
         if self.all_tables || self.schemas.iter().any(|schema| schema == crate::schemas::schema_of(internal)) {
             return None;

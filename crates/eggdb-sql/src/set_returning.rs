@@ -674,8 +674,6 @@ fn string_to_table_type(types: &[Option<SqlType>]) -> SqlResult<SqlType> {
     }
 }
 
-/// The rows of `string_to_table(text, delimiter[, null_text])` (D1298): the pieces
-/// `string_to_array` gives, one per row.
 fn string_to_table_rows(values: &[Value], _: SqlType, sink: &mut RowSink<'_>) -> SqlResult<()> {
     let Some(text) = values.first().and_then(Value::to_text) else {
         return Ok(());

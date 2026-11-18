@@ -473,9 +473,6 @@ fn get_ddl(values: &[Value]) -> SqlResult<Value> {
     crate::memory::check_value_bytes(ddl.len()).map(|()| Value::Text(ddl))
 }
 
-/// `DBMS_METADATA.GET_DEPENDENT_DDL(object_type, table[, schema])` (D1271): the `CREATE`
-/// statements of a table's indexes (`'INDEX'`) or triggers (`'TRIGGER'`), or the `GRANT`
-/// statements of its privileges (`'OBJECT_GRANT'`), one after another.
 fn get_dependent_ddl(values: &[Value]) -> SqlResult<Value> {
     let text = |at: usize| values.get(at).filter(|value| !matches!(value, Value::Null)).and_then(Value::to_text);
     let (Some(object_type), Some(table_name)) = (text(0), text(1)) else {
@@ -634,9 +631,6 @@ fn role_grants(snapshot: &crate::pg_catalog::CatalogSnapshot, grantee: &str) -> 
         .collect()
 }
 
-/// `DBMS_METADATA.GET_GRANTED_DDL('OBJECT_GRANT', grantee)` (D1254): one `GRANT` statement a
-/// table privilege the grantee holds, `WITH GRANT OPTION` where it may pass it on;
-/// `'ROLE_GRANT'` (D1258): one per role the grantee is a member of.
 fn get_granted_ddl(values: &[Value]) -> SqlResult<Value> {
     let text = |at: usize| values.get(at).filter(|value| !matches!(value, Value::Null)).and_then(Value::to_text);
     let Some(object_type) = text(0) else {
@@ -724,8 +718,6 @@ fn rowid_number(digits: &str) -> Option<i64> {
     })
 }
 
-/// A part of an extended `ROWID` (`DBMS_ROWID`, D1252): its object number, relative file
-/// number, block number or row number, or its type (1, extended).
 fn rowid_part(name: &str, values: &[Value]) -> SqlResult<Value> {
     let Some(rowid) = values.first() else {
         return Ok(Value::Null);
