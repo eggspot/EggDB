@@ -96,7 +96,12 @@ pub(crate) fn publication_names(options: &[(String, String)]) -> Result<Vec<Stri
 /// `transaction` with only the changes `filter` publishes; `None` when none is left, since
 /// an empty transaction is not sent.
 pub(crate) fn published(transaction: &DecodedTransaction, filter: &eggdb_sql::PublicationFilter) -> Option<DecodedTransaction> {
-    let changes: Vec<_> = transaction.changes.iter().filter(|change| filter.publishes(change)).cloned().collect();
+    let changes: Vec<_> = transaction
+        .changes
+        .iter()
+        .filter(|change| filter.publishes(change))
+        .map(|change| filter.narrowed(change))
+        .collect();
     (!changes.is_empty()).then(|| DecodedTransaction {
         lsn: transaction.lsn,
         changes,

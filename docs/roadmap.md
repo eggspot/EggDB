@@ -1836,8 +1836,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-13, D1031): `--pg-replication` with slots and `pgoutput` version 1; versions 2 to 4
   accepted (whole transactions, as they allow) and others refused: **code written, unbuilt** (code-only mode, 2026-11-17,
   D1243); publications (`CREATE`, `ALTER` and `DROP PUBLICATION`, `pg_publication`, `pg_publication_rel`) filtering
-  what is sent: **code written, unbuilt** (code-only mode, 2026-11-17, D1245). Left: column lists and row filters in
-  publications, truncates, streamed and two-phase transactions, and binary tuples.
+  what is sent: **code written, unbuilt** (code-only mode, 2026-11-17, D1245); column lists (D1248): **code written, unbuilt**. Left:
+  row filters in publications, truncates, streamed and two-phase transactions, and binary tuples.
 - Change streams to Kafka topics, AMQP exchanges, MQTT and NATS, and `https://` webhooks;
   `--cdc-queue` already feeds AMQP, STOMP and SQS queues (D28, D210, D217).
   Kafka topics (`--cdc-topic`): **code written, unbuilt** (code-only mode, 2026-11-11, D527).

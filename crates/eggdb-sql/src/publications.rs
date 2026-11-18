@@ -23,18 +23,25 @@ pub(crate) enum TableChange {
     Set,
 }
 
+/// A table a publication lists, with the columns it sends (all of them when empty).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishedTable {
+    pub(crate) name: Name,
+    pub(crate) columns: Vec<Name>,
+}
+
 /// What a publication publishes from: every table, or the tables and schemas listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PublishedFrom {
     AllTables,
-    Listed { tables: Vec<Name>, schemas: Vec<Name> },
+    Listed { tables: Vec<PublishedTable>, schemas: Vec<Name> },
 }
 
 /// A publication statement (PostgreSQL's `CREATE`, `ALTER` and `DROP PUBLICATION`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PublicationCommand {
     Create { name: Name, from: PublishedFrom, publish: Option<String> },
-    AlterTables { name: Name, change: TableChange, tables: Vec<Name>, schemas: Vec<Name> },
+    AlterTables { name: Name, change: TableChange, tables: Vec<PublishedTable>, schemas: Vec<Name> },
     AlterPublish { name: Name, publish: String },
     Rename { name: Name, to: Name },
     Owner { name: Name },
@@ -59,6 +66,8 @@ pub(crate) struct StoredPublication {
     pub(crate) tables: Vec<String>,
     pub(crate) schemas: Vec<String>,
     actions: u8,
+    /// The tables listed with a column list, and the columns each sends (D1248).
+    pub(crate) column_lists: Vec<(String, Vec<String>)>,
 }
 
 impl StoredPublication {
@@ -76,6 +85,17 @@ impl StoredPublication {
 
     pub(crate) fn publishes_truncate(&self) -> bool {
         self.actions & PUBLISHES_TRUNCATE != 0
+    }
+
+    /// The columns this publication sends of the table `internal`: `None` for all of them.
+    fn columns_of(&self, internal: &str) -> Option<&[String]> {
+        if self.all_tables || self.schemas.iter().any(|schema| schema == crate::schemas::schema_of(internal)) {
+            return None;
+        }
+        self.column_lists
+            .iter()
+            .find(|(table, _)| table == internal)
+            .map(|(_, columns)| columns.as_slice())
     }
 
     fn covers(&self, internal: &str) -> bool {
@@ -123,6 +143,13 @@ fn encode(publication: &StoredPublication) -> Vec<u8> {
     let mut out = vec![RECORD_VERSION, flags];
     push_texts(&mut out, &publication.tables);
     push_texts(&mut out, &publication.schemas);
+    if !publication.column_lists.is_empty() {
+        let tables: Vec<String> = publication.column_lists.iter().map(|(table, _)| table.clone()).collect();
+        push_texts(&mut out, &tables);
+        for (_, columns) in &publication.column_lists {
+            push_texts(&mut out, columns);
+        }
+    }
     out
 }
 
@@ -133,12 +160,19 @@ fn decode(name: &str, bytes: &[u8]) -> SqlResult<StoredPublication> {
     let mut at = 0;
     let tables = read_texts(rest, &mut at)?;
     let schemas = read_texts(rest, &mut at)?;
+    let mut column_lists = Vec::new();
+    if at < rest.len() {
+        for table in read_texts(rest, &mut at)? {
+            column_lists.push((table, read_texts(rest, &mut at)?));
+        }
+    }
     Ok(StoredPublication {
         name: name.to_owned(),
         all_tables: flags & ALL_TABLES != 0,
         tables,
         schemas,
         actions: flags & EVERY_ACTION,
+        column_lists,
     })
 }
 
@@ -197,15 +231,44 @@ fn actions_of(publish: Option<&str>) -> SqlResult<u8> {
     Ok(actions)
 }
 
-fn table_names(reader: &dyn KeyValueRead, tables: &mut TableCache, names: &[Name]) -> SqlResult<Vec<String>> {
-    let mut resolved = Vec::with_capacity(names.len());
-    for name in names {
-        let definition = tables.require(reader, name)?;
+type ColumnLists = Vec<(String, Vec<String>)>;
+
+fn table_names(reader: &dyn KeyValueRead, tables: &mut TableCache, listed: &[PublishedTable]) -> SqlResult<(Vec<String>, ColumnLists)> {
+    let mut resolved = Vec::with_capacity(listed.len());
+    let mut column_lists = Vec::new();
+    for table in listed {
+        let definition = tables.require(reader, &table.name)?;
         if !resolved.contains(&definition.name) {
             resolved.push(definition.name.clone());
         }
+        if table.columns.is_empty() {
+            continue;
+        }
+        let mut columns = Vec::with_capacity(table.columns.len());
+        for column in &table.columns {
+            if !definition.columns.iter().any(|own| own.name == column.text) {
+                return Err(SqlError::new(
+                    SqlState::UNDEFINED_COLUMN,
+                    format!(
+                        "column \"{}\" of relation \"{}\" does not exist",
+                        column.text,
+                        crate::schemas::base_name(&definition.name)
+                    ),
+                )
+                .at(column.position));
+            }
+            if columns.contains(&column.text) {
+                return Err(SqlError::new(
+                    SqlState::DUPLICATE_OBJECT,
+                    format!("duplicate column \"{}\" in publication column list", column.text),
+                )
+                .at(column.position));
+            }
+            columns.push(column.text.clone());
+        }
+        column_lists.push((definition.name.clone(), columns));
     }
-    Ok(resolved)
+    Ok((resolved, column_lists))
 }
 
 fn schema_names(reader: &dyn KeyValueRead, names: &[Name]) -> SqlResult<Vec<String>> {
@@ -233,8 +296,8 @@ pub(crate) fn run(writer: &mut dyn KeyValueWrite, tables: &mut TableCache, comma
                 )
                 .at(name.position));
             }
-            let (all_tables, listed, schemas) = match from {
-                PublishedFrom::AllTables => (true, Vec::new(), Vec::new()),
+            let (all_tables, (listed, column_lists), schemas) = match from {
+                PublishedFrom::AllTables => (true, (Vec::new(), Vec::new()), Vec::new()),
                 PublishedFrom::Listed { tables: listed, schemas } => {
                     (false, table_names(writer, tables, listed)?, schema_names(writer, schemas)?)
                 }
@@ -245,6 +308,7 @@ pub(crate) fn run(writer: &mut dyn KeyValueWrite, tables: &mut TableCache, comma
                 tables: listed,
                 schemas,
                 actions: actions_of(publish.as_deref())?,
+                column_lists,
             };
             writer.put(&key(&name.text), &encode(&publication))?;
         }
@@ -258,12 +322,13 @@ pub(crate) fn run(writer: &mut dyn KeyValueWrite, tables: &mut TableCache, comma
                 .with_detail("Tables cannot be added to or dropped from FOR ALL TABLES publications.")
                 .at(name.position));
             }
-            let listed = table_names(writer, tables, listed)?;
+            let (listed, column_lists) = table_names(writer, tables, listed)?;
             let schemas = schema_names(writer, schemas)?;
             match change {
                 TableChange::Set => {
                     publication.tables = listed;
                     publication.schemas = schemas;
+                    publication.column_lists = column_lists;
                 }
                 TableChange::Add => {
                     for table in listed {
@@ -279,6 +344,7 @@ pub(crate) fn run(writer: &mut dyn KeyValueWrite, tables: &mut TableCache, comma
                         }
                         publication.tables.push(table);
                     }
+                    publication.column_lists.extend(column_lists);
                     for schema in schemas {
                         if !publication.schemas.contains(&schema) {
                             publication.schemas.push(schema);
@@ -298,6 +364,7 @@ pub(crate) fn run(writer: &mut dyn KeyValueWrite, tables: &mut TableCache, comma
                         }
                     }
                     publication.tables.retain(|table| !listed.contains(table));
+                    publication.column_lists.retain(|(table, _)| !listed.contains(table));
                     publication.schemas.retain(|schema| !schemas.contains(schema));
                 }
             }
@@ -365,6 +432,44 @@ impl PublicationFilter {
                 }
         })
     }
+
+    /// `change` with only the columns the publications covering its table send (D1248): all
+    /// of them when any covering publication has no column list for it, else the union of
+    /// the lists, in the table's order, the key columns always kept.
+    pub fn narrowed(&self, change: &DecodedChange) -> DecodedChange {
+        let internal = crate::schemas::qualified(&change.schema, &change.table);
+        let mut wanted: Vec<&str> = Vec::new();
+        for publication in self.publications.iter().filter(|publication| publication.covers(&internal)) {
+            match publication.columns_of(&internal) {
+                None => return change.clone(),
+                Some(columns) => wanted.extend(columns.iter().map(String::as_str)),
+            }
+        }
+        let kept: Vec<usize> = (0..change.columns.len())
+            .filter(|at| change.key_columns.contains(at) || wanted.contains(&change.columns[*at].0.as_str()))
+            .collect();
+        if kept.len() == change.columns.len() {
+            return change.clone();
+        }
+        let pick = |row: &Option<Vec<crate::Value>>| {
+            row.as_ref()
+                .map(|values| kept.iter().filter_map(|at| values.get(*at).cloned()).collect())
+        };
+        DecodedChange {
+            table_id: change.table_id,
+            schema: change.schema.clone(),
+            table: change.table.clone(),
+            columns: kept.iter().map(|at| change.columns[*at].clone()).collect(),
+            key_columns: change
+                .key_columns
+                .iter()
+                .filter_map(|key| kept.iter().position(|at| at == key))
+                .collect(),
+            operation: change.operation,
+            before: pick(&change.before),
+            after: pick(&change.after),
+        }
+    }
 }
 
 /// The filter of the publications `names`.
@@ -395,6 +500,7 @@ mod tests {
             tables: vec!["orders".to_owned(), "sales\0items".to_owned()],
             schemas: vec!["audit".to_owned()],
             actions: actions_of(Some("insert, update")).unwrap(),
+            column_lists: vec![("orders".to_owned(), vec!["id".to_owned(), "total".to_owned()])],
         };
         let decoded = decode("orders_feed", &encode(&publication)).unwrap();
         assert_eq!(decoded, publication);
@@ -456,5 +562,37 @@ mod tests {
         run_sql(&mut session, "ALTER PUBLICATION feed RENAME TO orders_feed").unwrap();
         run_sql(&mut session, "DROP PUBLICATION IF EXISTS orders_feed, missing").unwrap();
         assert_eq!(run_sql(&mut session, "SELECT count(*) AS left_over FROM pg_publication").unwrap(), "left_over\n1\nSELECT 1");
+    }
+
+    #[test]
+    fn a_column_list_narrows_the_changes_sent() {
+        let store = crate::memory_store::MemoryStore::default();
+        let mut session = crate::Session::new(&store);
+        for sql in [
+            "CREATE TABLE orders (id integer PRIMARY KEY, total integer, secret text)",
+            "CREATE PUBLICATION totals FOR TABLE orders (id, total)",
+        ] {
+            run_sql(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+        assert!(run_sql(&mut session, "CREATE PUBLICATION broken FOR TABLE orders (nowhere)").is_err());
+        assert!(run_sql(&mut session, "CREATE PUBLICATION twice FOR TABLE orders (id, id)").is_err());
+        let full = DecodedChange {
+            columns: vec![
+                ("id".to_owned(), crate::SqlType::Integer),
+                ("total".to_owned(), crate::SqlType::Integer),
+                ("secret".to_owned(), crate::SqlType::Text),
+            ],
+            key_columns: vec![0],
+            after: Some(vec![crate::Value::Integer(1), crate::Value::Integer(20), crate::Value::Text("x".to_owned())]),
+            ..change("orders", DecodedOperation::Insert)
+        };
+        let totals = session.publication_filter(&["totals".to_owned()]).unwrap();
+        let sent = totals.narrowed(&full);
+        assert_eq!(sent.columns.len(), 2);
+        assert_eq!(sent.after, Some(vec![crate::Value::Integer(1), crate::Value::Integer(20)]));
+        assert_eq!(sent.key_columns, vec![0]);
+        run_sql(&mut session, "CREATE PUBLICATION everything FOR ALL TABLES").unwrap();
+        let both = session.publication_filter(&["totals".to_owned(), "everything".to_owned()]).unwrap();
+        assert_eq!(both.narrowed(&full), full);
     }
 }

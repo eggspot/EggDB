@@ -1272,3 +1272,4 @@ its full title with its status.
 - [D1245](decisions/D1245.md) Code-only batch 901 (M14): Publications, and the replication stream filtered by them
 - [D1246](decisions/D1246.md) Code-only batch 902 (M6f): EggDB's own GORM dialector
 - [D1247](decisions/D1247.md) Code-only batch 903 (M6): ODBC's SQLStatistics lists every index
+- [D1248](decisions/D1248.md) Code-only batch 904 (M14): Column lists in publications

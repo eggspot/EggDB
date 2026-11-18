@@ -2,10 +2,10 @@ use super::Parser;
 use crate::ast::{Name, Statement};
 use crate::error::SqlResult;
 use crate::lexer::TokenKind;
-use crate::publications::{PublicationCommand, PublishedFrom, TableChange};
+use crate::publications::{PublicationCommand, PublishedFrom, PublishedTable, TableChange};
 
 impl Parser<'_> {
-    fn publication_tables(&mut self) -> SqlResult<(Vec<Name>, Vec<Name>)> {
+    fn publication_tables(&mut self) -> SqlResult<(Vec<PublishedTable>, Vec<Name>)> {
         let mut tables = Vec::new();
         let mut schemas = Vec::new();
         loop {
@@ -16,11 +16,19 @@ impl Parser<'_> {
             } else {
                 self.take_word("table");
                 self.take_word("only");
-                tables.push(self.table_name()?);
+                let name = self.table_name()?;
                 self.take_operator("*");
-                if self.peek_kind() == &TokenKind::LeftParen {
-                    return Err(self.not_supported("column lists in publications"));
+                let mut columns = Vec::new();
+                if self.take(&TokenKind::LeftParen) {
+                    loop {
+                        columns.push(self.name()?);
+                        if !self.take(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&TokenKind::RightParen)?;
                 }
+                tables.push(PublishedTable { name, columns });
                 if self.is_word("where") {
                     return Err(self.not_supported("row filters in publications"));
                 }
