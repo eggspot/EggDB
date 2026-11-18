@@ -1274,3 +1274,4 @@ its full title with its status.
 - [D1247](decisions/D1247.md) Code-only batch 903 (M6): ODBC's SQLStatistics lists every index
 - [D1248](decisions/D1248.md) Code-only batch 904 (M14): Column lists in publications
 - [D1249](decisions/D1249.md) Code-only batch 905 (M14): Row filters in publications
+- [D1250](decisions/D1250.md) Code-only batch 906 (M14): pg_publication_rel shows column lists and row filters

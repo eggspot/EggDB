@@ -1826,11 +1826,38 @@ fn publication_rel_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
             let Some(relation) = snapshot.table_oid(table) else {
                 continue;
             };
+            let definition = snapshot
+                .table_named(table)
+                .and_then(|at| snapshot.relations.get(at))
+                .and_then(|entry| entry.table());
+            let attributes = publication
+                .column_lists
+                .iter()
+                .find(|(listed, _)| listed == table)
+                .zip(definition)
+                .map(|((_, columns), definition)| {
+                    vector(
+                        ArrayElement::Int2Vector,
+                        columns
+                            .iter()
+                            .filter_map(|column| definition.columns.iter().position(|own| own.name == *column))
+                            .map(|at| small(at as i64 + 1))
+                            .collect(),
+                    )
+                })
+                .unwrap_or(Value::Null);
+            let qualifier = publication
+                .row_filters
+                .iter()
+                .find(|(filtered, _)| filtered == table)
+                .map_or(Value::Null, |(_, expression)| text(expression));
             rows.push(
                 Row::new(CatalogRelation::PublicationRel)
                     .set("oid", oid(hashed_oid(PUBLICATION_REL_OIDS, &format!("{}\0{table}", publication.name))))
                     .set("prpubid", oid(hashed_oid(PUBLICATION_OIDS, &publication.name)))
                     .set("prrelid", oid(relation))
+                    .set("prqual", qualifier)
+                    .set("prattrs", attributes)
                     .done(),
             );
         }

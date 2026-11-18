@@ -690,6 +690,7 @@ mod tests {
         ] {
             run_sql(&mut session, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
         }
+        assert_eq!(run_sql(&mut session, "SELECT prattrs FROM pg_publication_rel").unwrap(), "prattrs\n1 2\nSELECT 1");
         assert!(run_sql(&mut session, "CREATE PUBLICATION broken FOR TABLE orders (nowhere)").is_err());
         assert!(run_sql(&mut session, "CREATE PUBLICATION twice FOR TABLE orders (id, id)").is_err());
         let full = DecodedChange {
