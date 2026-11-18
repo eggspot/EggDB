@@ -47,6 +47,11 @@ const JARO_WINKLER_SCALE: f64 = 0.1;
 pub(crate) fn internal_name(package: &str, function: &str) -> Option<(&'static str, usize, usize)> {
     Some(match (package, function) {
         ("dbms_random", "value") => ("oracle_dbms_random_value", 0, 2),
+        ("dbms_rowid", "rowid_object") => ("oracle_dbms_rowid_object", 1, 1),
+        ("dbms_rowid", "rowid_relative_fno") => ("oracle_dbms_rowid_relative_fno", 1, 1),
+        ("dbms_rowid", "rowid_block_number") => ("oracle_dbms_rowid_block_number", 1, 2),
+        ("dbms_rowid", "rowid_row_number") => ("oracle_dbms_rowid_row_number", 1, 1),
+        ("dbms_rowid", "rowid_type") => ("oracle_dbms_rowid_type", 1, 1),
         ("dbms_random", "normal") => ("oracle_dbms_random_normal", 0, 0),
         ("dbms_random", "random") => ("oracle_dbms_random_random", 0, 0),
         ("dbms_random", "string") => ("oracle_dbms_random_string", 2, 2),
@@ -107,6 +112,11 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         | "oracle_dbms_random_normal"
         | "oracle_utl_match_jaro_winkler" => SqlType::Double,
         "oracle_dbms_random_random"
+        | "oracle_dbms_rowid_object"
+        | "oracle_dbms_rowid_relative_fno"
+        | "oracle_dbms_rowid_block_number"
+        | "oracle_dbms_rowid_row_number"
+        | "oracle_dbms_rowid_type"
         | "oracle_dbms_utility_get_time"
         | "oracle_utl_match_edit_distance"
         | "oracle_utl_match_edit_distance_similarity"
@@ -444,6 +454,9 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
     if name == "oracle_dbms_metadata_get_ddl" {
         return Some(get_ddl(values));
     }
+    if name.starts_with("oracle_dbms_rowid_") {
+        return Some(rowid_part(name, values));
+    }
     if !name.starts_with("oracle_dbms_random_")
         && !name.starts_with("oracle_dbms_assert_")
         && !name.starts_with("oracle_utl_match_")
@@ -460,6 +473,47 @@ pub(crate) fn call(name: &str, values: &[Value]) -> Option<SqlResult<Value>> {
         return Some(result);
     }
     Some(evaluate(name, values))
+}
+
+const ROWID_DIGITS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const ORACLE_INVALID_ROWID: u16 = 1_410;
+const EXTENDED_ROWID: i64 = 1;
+
+fn rowid_number(digits: &str) -> Option<i64> {
+    digits.chars().try_fold(0i64, |number, digit| {
+        let value = ROWID_DIGITS.find(digit)?;
+        Some(number * 64 + value as i64)
+    })
+}
+
+/// A part of an extended `ROWID` (`DBMS_ROWID`, D1252): its object number, relative file
+/// number, block number or row number, or its type (1, extended).
+fn rowid_part(name: &str, values: &[Value]) -> SqlResult<Value> {
+    let Some(rowid) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if rowid.is_null() {
+        return Ok(Value::Null);
+    }
+    let text = rowid.character_text().unwrap_or_default().to_owned();
+    let invalid = || SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "invalid ROWID").with_oracle_code(ORACLE_INVALID_ROWID);
+    if text.len() != 18 || !text.is_ascii() {
+        return Err(invalid());
+    }
+    let (object, rest) = text.split_at(6);
+    let (file, rest) = rest.split_at(3);
+    let (block, row) = rest.split_at(6);
+    let part = match name {
+        "oracle_dbms_rowid_object" => object,
+        "oracle_dbms_rowid_relative_fno" => file,
+        "oracle_dbms_rowid_block_number" => block,
+        "oracle_dbms_rowid_row_number" => row,
+        _ => {
+            rowid_number(&text).ok_or_else(invalid)?;
+            return Ok(number(EXTENDED_ROWID));
+        }
+    };
+    Ok(number(rowid_number(part).ok_or_else(invalid)?))
 }
 
 const URL_UNRESERVED: &str = "-_.!~*'()";
@@ -994,5 +1048,19 @@ mod tests {
             text_value("'O''Brien'")
         );
         assert!(evaluate("oracle_dbms_assert_enquote_literal", &[text_value("O'Brien")]).is_err());
+    }
+
+    #[test]
+    fn dbms_rowid_reads_the_parts_of_an_extended_rowid() {
+        let rowid = text_value("AAAAAQAABAAAAACAAD");
+        assert_eq!(rowid_part("oracle_dbms_rowid_object", std::slice::from_ref(&rowid)).unwrap(), number(16));
+        assert_eq!(rowid_part("oracle_dbms_rowid_relative_fno", std::slice::from_ref(&rowid)).unwrap(), number(1));
+        assert_eq!(rowid_part("oracle_dbms_rowid_block_number", std::slice::from_ref(&rowid)).unwrap(), number(2));
+        assert_eq!(rowid_part("oracle_dbms_rowid_row_number", std::slice::from_ref(&rowid)).unwrap(), number(3));
+        assert_eq!(rowid_part("oracle_dbms_rowid_type", std::slice::from_ref(&rowid)).unwrap(), number(1));
+        assert!(rowid_part("oracle_dbms_rowid_object", &[text_value("short")]).is_err());
+        assert!(rowid_part("oracle_dbms_rowid_object", &[text_value("AAAAA*AABAAAAACAAD")]).is_err());
+        assert_eq!(rowid_part("oracle_dbms_rowid_object", &[Value::Null]).unwrap(), Value::Null);
+        assert_eq!(internal_name("dbms_rowid", "rowid_block_number"), Some(("oracle_dbms_rowid_block_number", 1, 2)));
     }
 }

@@ -1276,3 +1276,4 @@ its full title with its status.
 - [D1249](decisions/D1249.md) Code-only batch 905 (M14): Row filters in publications
 - [D1250](decisions/D1250.md) Code-only batch 906 (M14): pg_publication_rel shows column lists and row filters
 - [D1251](decisions/D1251.md) Code-only batch 907 (M10): Oracle's ROWID in UPDATE and DELETE
+- [D1252](decisions/D1252.md) Code-only batch 908 (M10): Oracle's DBMS_ROWID
