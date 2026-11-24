@@ -268,6 +268,80 @@ fn functions_a_program_defines_run_in_its_sql() {
     unsafe { sqlite3_close(db) };
 }
 
+unsafe extern "C" fn squares_step(
+    context: *mut Sqlite3Context,
+    _count: c_int,
+    arguments: *mut *mut Sqlite3Value,
+) {
+    // SAFETY: SQLite passes one argument for this call.
+    let value = unsafe { *arguments };
+    // SAFETY: the running function's value.
+    let number = unsafe { sqlite3_value_int64(value) };
+    // SAFETY: the running xStep's context; the group's memory holds one i64.
+    let total = unsafe { sqlite3_aggregate_context(context, 8) }.cast::<i64>();
+    // SAFETY: the group's zeroed, aligned memory of one i64, alive during this call.
+    unsafe { *total += number * number };
+}
+
+unsafe extern "C" fn squares_final(context: *mut Sqlite3Context) {
+    // SAFETY: the running xFinal's context; 0 bytes only finds memory a step made.
+    let total = unsafe { sqlite3_aggregate_context(context, 0) }.cast::<i64>();
+    if total.is_null() {
+        // SAFETY: the running xFinal's context.
+        unsafe { sqlite3_result_null(context) };
+        return;
+    }
+    // SAFETY: the group's memory of one i64 that a step made.
+    let value = unsafe { *total };
+    // SAFETY: the running xFinal's context.
+    unsafe { sqlite3_result_int64(context, value) };
+}
+
+#[test]
+fn aggregates_a_program_defines_run_per_group() {
+    let mut db = ptr::null_mut();
+    let name = CString::new(":memory:").unwrap();
+    // SAFETY: a NUL-terminated name and memory for one pointer.
+    assert_eq!(unsafe { sqlite3_open(name.as_ptr(), &mut db) }, SQLITE_OK);
+    let aggregate = CString::new("sum_of_squares").unwrap();
+    // SAFETY: a live connection, a NUL-terminated name and callbacks that follow the contract.
+    let created = unsafe {
+        sqlite3_create_function_v2(
+            db,
+            aggregate.as_ptr(),
+            1,
+            1,
+            ptr::null_mut(),
+            None,
+            Some(squares_step),
+            Some(squares_final),
+            None,
+        )
+    };
+    assert_eq!(created, SQLITE_OK);
+    let script = CString::new(
+        "CREATE TABLE points (side TEXT, n INTEGER); \
+         INSERT INTO points VALUES ('a', 1), ('a', 2), ('b', 3);",
+    )
+    .unwrap();
+    // SAFETY: a live connection and a NUL-terminated script.
+    let code = unsafe { sqlite3_exec(db, script.as_ptr(), None, ptr::null_mut(), ptr::null_mut()) };
+    assert_eq!(code, SQLITE_OK);
+    assert_eq!(single_text(db, "SELECT sum_of_squares(n) FROM points").as_deref(), Some("14"));
+    assert_eq!(
+        single_text(db, "SELECT group_concat(s) FROM (SELECT sum_of_squares(n) AS s FROM points GROUP BY side ORDER BY side)").as_deref(),
+        Some("5,9")
+    );
+    assert_eq!(single_text(db, "SELECT sum_of_squares(n) FROM points WHERE n > 5"), None);
+    // SAFETY: removing the aggregate: every callback NULL.
+    let removed = unsafe {
+        sqlite3_create_function_v2(db, aggregate.as_ptr(), 1, 1, ptr::null_mut(), None, None, None, None)
+    };
+    assert_eq!(removed, SQLITE_OK);
+    // SAFETY: a live connection, used no more.
+    unsafe { sqlite3_close(db) };
+}
+
 #[test]
 fn the_interface_reports_text_state_and_completeness() {
     // SAFETY: SQLite's static texts.

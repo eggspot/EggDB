@@ -1,8 +1,8 @@
 use crate::{
-    Destructor, SQLITE_BLOB, SQLITE_ERROR, SQLITE_FLOAT, SQLITE_INTEGER, SQLITE_MISUSE,
+    Destructor, SQLITE_BLOB, SQLITE_FLOAT, SQLITE_INTEGER, SQLITE_MISUSE,
     SQLITE_NULL, SQLITE_OK, SQLITE_TEXT, Sqlite3, text_of,
 };
-use eggdb::sql::{NativeFunction, Value};
+use eggdb::sql::{NativeAggregate, NativeAggregateState, NativeFunction, Value};
 use std::cell::RefCell;
 use std::ffi::{CString, c_char, c_double, c_int, c_void};
 use std::sync::Arc;
@@ -24,6 +24,7 @@ pub struct Sqlite3Context {
     error: Option<String>,
     user_data: *mut c_void,
     db: *mut Sqlite3,
+    memory: *mut Vec<u64>,
 }
 
 /// A user function's body: `xFunc` in SQLite's interface.
@@ -56,33 +57,97 @@ impl Drop for Callback {
     }
 }
 
-impl Callback {
-    fn call(&self, values: &[Value]) -> Result<Value, String> {
-        let mut arguments: Vec<Sqlite3Value> = values
-            .iter()
-            .map(|value| Sqlite3Value {
-                value: value.clone(),
-                bytes: RefCell::new(None),
-            })
-            .collect();
-        let mut pointers: Vec<*mut Sqlite3Value> = arguments
-            .iter_mut()
-            .map(|argument| argument as *mut Sqlite3Value)
-            .collect();
-        let mut context = Sqlite3Context {
+type ArgumentCallback = unsafe extern "C" fn(*mut Sqlite3Context, c_int, *mut *mut Sqlite3Value);
+
+fn call_with_arguments(
+    function: ArgumentCallback,
+    mut context: Sqlite3Context,
+    values: &[Value],
+) -> Result<Value, String> {
+    let mut arguments: Vec<Sqlite3Value> = values
+        .iter()
+        .map(|value| Sqlite3Value {
+            value: value.clone(),
+            bytes: RefCell::new(None),
+        })
+        .collect();
+    let mut pointers: Vec<*mut Sqlite3Value> = arguments
+        .iter_mut()
+        .map(|argument| argument as *mut Sqlite3Value)
+        .collect();
+    let count = c_int::try_from(pointers.len()).unwrap_or(c_int::MAX);
+    // SAFETY: the context and every argument live until the callback returns, as SQLite's
+    // contract promises them, and the callback follows that contract.
+    unsafe { function(&mut context, count, pointers.as_mut_ptr()) };
+    context.into_answer()
+}
+
+impl Sqlite3Context {
+    fn new(user_data: *mut c_void, db: *mut Sqlite3, memory: *mut Vec<u64>) -> Self {
+        Self {
             result: Value::Null,
             error: None,
-            user_data: self.user_data,
-            db: self.db,
-        };
-        let count = c_int::try_from(pointers.len()).unwrap_or(c_int::MAX);
-        // SAFETY: the context and every argument live until the callback returns, as SQLite's
-        // contract promises them, and the callback follows that contract.
-        unsafe { (self.function)(&mut context, count, pointers.as_mut_ptr()) };
-        match context.error {
-            Some(message) => Err(message),
-            None => Ok(context.result),
+            user_data,
+            db,
+            memory,
         }
+    }
+
+    fn into_answer(self) -> Result<Value, String> {
+        match self.error {
+            Some(message) => Err(message),
+            None => Ok(self.result),
+        }
+    }
+}
+
+impl Callback {
+    fn call(&self, values: &[Value]) -> Result<Value, String> {
+        let context = Sqlite3Context::new(self.user_data, self.db, std::ptr::null_mut());
+        call_with_arguments(self.function, context, values)
+    }
+}
+
+struct AggregateCallbacks {
+    step: ArgumentCallback,
+    last: unsafe extern "C" fn(*mut Sqlite3Context),
+    user_data: *mut c_void,
+    destroy: Destructor,
+    db: *mut Sqlite3,
+}
+
+// SAFETY: as for `Callback`: used only on the thread running the connection's statement.
+unsafe impl Send for AggregateCallbacks {}
+// SAFETY: as above.
+unsafe impl Sync for AggregateCallbacks {}
+
+impl Drop for AggregateCallbacks {
+    fn drop(&mut self) {
+        if let Some(destroy) = self.destroy {
+            // SAFETY: SQLite calls xDestroy once, with the user data, when the aggregate is
+            // replaced, removed or its connection closes, which is when its last copy drops.
+            unsafe { destroy(self.user_data) };
+        }
+    }
+}
+
+struct AggregateGroup {
+    callbacks: Arc<AggregateCallbacks>,
+    memory: Vec<u64>,
+}
+
+impl NativeAggregateState for AggregateGroup {
+    fn step(&mut self, values: &[Value]) -> Result<(), String> {
+        let context = Sqlite3Context::new(self.callbacks.user_data, self.callbacks.db, &raw mut self.memory);
+        call_with_arguments(self.callbacks.step, context, values).map(drop)
+    }
+
+    fn finish(mut self: Box<Self>) -> Result<Value, String> {
+        let mut context = Sqlite3Context::new(self.callbacks.user_data, self.callbacks.db, &raw mut self.memory);
+        // SAFETY: the context and the group's memory live until xFinal returns, as SQLite's
+        // contract promises them.
+        unsafe { (self.callbacks.last)(&mut context) };
+        context.into_answer()
     }
 }
 
@@ -94,9 +159,9 @@ fn destroy_now(destroy: Destructor, user_data: *mut c_void) {
 }
 
 /// Defines (or, with every callback NULL, removes) the SQL function `name` taking `arguments`
-/// arguments (-1 for any number) on the connection. Scalar functions only: an aggregate
-/// (`xStep`/`xFinal`) is refused with `SQLITE_ERROR` and its `xDestroy` called, as SQLite does
-/// when registration fails.
+/// arguments (-1 for any number) on the connection: a scalar function with `xFunc`, or an
+/// aggregate with `xStep` and `xFinal`, whose groups keep their state in
+/// `sqlite3_aggregate_context`. Aggregates cannot be window functions yet (D1305).
 ///
 /// # Safety
 /// `db` is a live connection, `name` a NUL-terminated string, and the callbacks follow SQLite's
@@ -133,14 +198,25 @@ pub unsafe extern "C" fn sqlite3_create_function_v2(
         return connection.record(SQLITE_MISUSE, "bad parameters");
     }
     let count = usize::try_from(arguments).ok();
-    if step.is_some() {
-        destroy_now(destroy, user_data);
-        return connection.record(
-            SQLITE_ERROR,
-            "user-defined aggregate functions are not supported yet",
-        );
-    }
     let functions = Arc::make_mut(&mut connection.functions);
+    if let (Some(step), Some(last)) = (step, last) {
+        let callbacks = Arc::new(AggregateCallbacks {
+            step,
+            last,
+            user_data,
+            destroy,
+            db,
+        });
+        let aggregate: NativeAggregate = Arc::new(move || {
+            Box::new(AggregateGroup {
+                callbacks: Arc::clone(&callbacks),
+                memory: Vec::new(),
+            }) as Box<dyn NativeAggregateState>
+        });
+        functions.define_aggregate(written, count, aggregate);
+        connection.succeeded();
+        return SQLITE_OK;
+    }
     let Some(function) = function else {
         functions.remove(written, count);
         connection.succeeded();
@@ -532,6 +608,32 @@ pub unsafe extern "C" fn sqlite3_result_value(
 pub unsafe extern "C" fn sqlite3_user_data(context: *mut Sqlite3Context) -> *mut c_void {
     // SAFETY: the caller passes the running function's context.
     unsafe { context_of(context) }.map_or(std::ptr::null_mut(), |context| context.user_data)
+}
+
+/// The running aggregate group's own memory: `bytes` zeroed bytes, aligned to 8, made by the
+/// first call with `bytes` above 0 and the same memory at every later call of the group's
+/// `xStep` and `xFinal`; NULL when none was made and `bytes` is 0 or below, or outside an
+/// aggregate.
+///
+/// # Safety
+/// `context` is the context handed to the running `xStep` or `xFinal`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sqlite3_aggregate_context(context: *mut Sqlite3Context, bytes: c_int) -> *mut c_void {
+    // SAFETY: the caller passes the running function's context.
+    let Some(context) = (unsafe { context_of(context) }) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: an aggregate's context points at its group's memory, alive during the callback.
+    let Some(memory) = (unsafe { context.memory.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    if memory.is_empty() {
+        let Some(bytes) = usize::try_from(bytes).ok().filter(|bytes| *bytes > 0) else {
+            return std::ptr::null_mut();
+        };
+        memory.resize(bytes.div_ceil(8), 0);
+    }
+    memory.as_mut_ptr().cast()
 }
 
 /// The connection running the function.

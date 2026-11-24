@@ -1027,7 +1027,8 @@ mod functions;
 mod interface;
 
 pub use functions::{
-    FinalCallback, ScalarCallback, Sqlite3Context, Sqlite3Value, sqlite3_context_db_handle,
+    FinalCallback, ScalarCallback, Sqlite3Context, Sqlite3Value, sqlite3_aggregate_context,
+    sqlite3_context_db_handle,
     sqlite3_create_function, sqlite3_create_function_v2, sqlite3_result_blob,
     sqlite3_result_double, sqlite3_result_error, sqlite3_result_error_nomem,
     sqlite3_result_error_toobig, sqlite3_result_int, sqlite3_result_int64, sqlite3_result_null,

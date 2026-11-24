@@ -109,6 +109,7 @@ void sqlite3_result_error_toobig(sqlite3_context *context);
 void sqlite3_result_value(sqlite3_context *context, sqlite3_value *value);
 void *sqlite3_user_data(sqlite3_context *context);
 sqlite3 *sqlite3_context_db_handle(sqlite3_context *context);
+void *sqlite3_aggregate_context(sqlite3_context *context, int bytes);
 
 const char *sqlite3_errstr(int code);
 int sqlite3_extended_errcode(sqlite3 *db);

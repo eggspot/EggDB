@@ -694,12 +694,11 @@ unsafe extern "C" fn longest_final(context: *mut EggdbFunctionContext, _: *mut s
 
 fn integer_column(results: &[EggdbResult]) -> Vec<Option<i64>> {
     let result = results.iter().find(|result| result.column_count > 0).expect("a result with rows");
-    (0..result.row_count)
-        .map(|row| {
-            // SAFETY: the session lends the result's values until its next call.
-            let value = unsafe { *result.values.add(row * result.column_count) };
-            (value.kind == EGGDB_INTEGER).then_some(value.integer)
-        })
+    // SAFETY: the session lends the result's `row_count × column_count` values until its next call.
+    let values = unsafe { std::slice::from_raw_parts(result.values, result.row_count * result.column_count) };
+    values
+        .chunks(result.column_count.max(1))
+        .map(|row| (row[0].kind == EGGDB_INTEGER).then_some(row[0].integer))
         .collect()
 }
 
