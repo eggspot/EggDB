@@ -1330,3 +1330,4 @@ its full title with its status.
 - [D1303](decisions/D1303.md) Code-only batch 959 (M4): SHA-224, and PostgreSQL's sha224 and sha384
 - [D1304](decisions/D1304.md) Code-only batch 960 (M4): jsonb_set_lax
 - [D1305](decisions/D1305.md) Code-only batch 961 (M6): aggregates the program defines (C API, Python create_aggregate), and any_value
+- [D1306](decisions/D1306.md) Code-only batch 962 (M4): the thesaurus text search template

@@ -22,6 +22,7 @@ mod russian;
 mod scandinavian;
 mod segment;
 mod spanish;
+mod thesaurus;
 mod turkish;
 mod headline;
 mod query;
@@ -30,6 +31,7 @@ mod vector;
 
 pub use english::{is_stop_word, stem};
 pub use ispell::Ispell;
+pub use thesaurus::Thesaurus;
 pub use query::TsQuery;
 pub use rank::{DEFAULT_RANK_WEIGHTS, bm25, ts_rank, ts_rank_weighted};
 pub use headline::{HeadlineOptions, headline};

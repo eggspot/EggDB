@@ -260,6 +260,15 @@ pub trait Lexer: Copy {
     fn words<'t>(self, text: &'t str) -> Vec<&'t str>;
     /// The lexeme `word` becomes, or `None` when it is dropped.
     fn lexeme(self, word: &str) -> Option<String>;
+    /// The lexemes of `words` in order, each with the index of the word it stands at; a
+    /// phrase replaced as a whole puts its lexemes at the indexes from its first word on.
+    fn lexemes(self, words: &[&str]) -> Vec<(usize, String)> {
+        words
+            .iter()
+            .enumerate()
+            .filter_map(|(index, word)| self.lexeme(word).map(|lexeme| (index, lexeme)))
+            .collect()
+    }
     /// Whether text written without spaces is cut into pieces.
     fn segments(self) -> bool;
 }
@@ -295,13 +304,11 @@ impl TsVector {
     /// The vector of `text` under `config`, as `to_tsvector` makes it.
     pub fn from_text(config: impl Lexer, text: &str) -> Self {
         let mut lexemes: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-        for (index, word) in config.words(text).into_iter().enumerate() {
-            let position = (index as u32 + 1).min(MAX_POSITION);
-            if let Some(lexeme) = config.lexeme(word) {
-                let positions = lexemes.entry(lexeme).or_default();
-                if positions.last() != Some(&position) {
-                    positions.push(position);
-                }
+        for (index, lexeme) in config.lexemes(&config.words(text)) {
+            let position = u32::try_from(index + 1).unwrap_or(MAX_POSITION).min(MAX_POSITION);
+            let positions = lexemes.entry(lexeme).or_default();
+            if positions.last() != Some(&position) {
+                positions.push(position);
             }
         }
         Self { lexemes }

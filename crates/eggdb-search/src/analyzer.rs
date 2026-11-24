@@ -1,5 +1,6 @@
 use crate::ispell::Ispell;
 use crate::segment::segmented_words;
+use crate::thesaurus::Thesaurus;
 use crate::vector::{Config, Lexer, words};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -128,6 +129,12 @@ pub enum Dictionary {
         /// Whether words are matched as written.
         case_sensitive: bool,
     },
+    /// The `thesaurus` template: a listed phrase becomes its substitute lexemes; other words
+    /// are left to the next dictionary.
+    Thesaurus {
+        /// The rules and the subdictionary normalizing them.
+        thesaurus: Box<Thesaurus>,
+    },
 }
 
 impl Dictionary {
@@ -168,6 +175,7 @@ impl Dictionary {
                     None => Recognition::Unknown,
                 }
             }
+            Self::Thesaurus { thesaurus } => thesaurus.recognize(word),
         }
     }
 }
@@ -226,6 +234,22 @@ impl Analyzer {
     pub fn word_types() -> &'static [&'static str] {
         &WORD_TYPES
     }
+
+    fn phrase_at(&self, words: &[&str], index: usize) -> Option<(usize, Vec<String>)> {
+        let dictionaries = self.mappings.get(token_type_of(words[index]))?;
+        for dictionary in dictionaries {
+            if let Dictionary::Thesaurus { thesaurus } = dictionary {
+                if let Some(found) = thesaurus.longest_match(&words[index..]) {
+                    return Some(found);
+                }
+                continue;
+            }
+            if dictionary.recognize(words[index]) != Recognition::Unknown {
+                return None;
+            }
+        }
+        None
+    }
 }
 
 impl Lexer for &Analyzer {
@@ -247,6 +271,31 @@ impl Lexer for &Analyzer {
             }
         }
         None
+    }
+
+    fn lexemes(self, words: &[&str]) -> Vec<(usize, String)> {
+        let mut found = Vec::new();
+        let mut index = 0;
+        while index < words.len() {
+            match self.phrase_at(words, index) {
+                Some((covered, substitute)) => {
+                    found.extend(
+                        substitute
+                            .into_iter()
+                            .enumerate()
+                            .map(|(offset, lexeme)| (index + offset, lexeme)),
+                    );
+                    index += covered.max(1);
+                }
+                None => {
+                    if let Some(lexeme) = self.lexeme(words[index]) {
+                        found.push((index, lexeme));
+                    }
+                    index += 1;
+                }
+            }
+        }
+        found
     }
 
     fn segments(self) -> bool {

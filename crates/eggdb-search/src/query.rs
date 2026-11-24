@@ -257,10 +257,9 @@ impl TsQuery {
     /// `plainto_tsquery`: every word, all required.
     pub fn plain(config: impl Lexer, text: &str) -> Self {
         config
-            .words(text)
+            .lexemes(&config.words(text))
             .into_iter()
-            .filter_map(|word| config.lexeme(word))
-            .map(|lexeme| Self::Term {
+            .map(|(_, lexeme)| Self::Term {
                 lexeme,
                 prefix: false,
             })
@@ -272,10 +271,9 @@ impl TsQuery {
     /// `phraseto_tsquery`: the words in order, each next to the one before.
     pub fn phrase(config: impl Lexer, text: &str) -> Self {
         config
-            .words(text)
+            .lexemes(&config.words(text))
             .into_iter()
-            .filter_map(|word| config.lexeme(word))
-            .map(|lexeme| Self::Term {
+            .map(|(_, lexeme)| Self::Term {
                 lexeme,
                 prefix: false,
             })

@@ -1286,7 +1286,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-17, D1212); `tsvector_to_array`, `array_to_tsvector`, `ts_delete`, `ts_filter`,
   `numnode`, `querytree` and `tsquery_phrase`: **code written, unbuilt** (code-only mode, 2026-11-17, D1230). `unnest(tsvector)` in
   `FROM`: **code written, unbuilt** (D1259). `ts_stat`: **code written, unbuilt** (D1268). The original ispell affix format: **code written, unbuilt**
-  (D1269). Left: the `thesaurus` template;
+  (D1269). The `thesaurus` template: **code written, unbuilt** (D1306);
   `ts_token_type`, `ts_parse` and `ts_debug`: **code written, unbuilt** (code-only mode, 2026-11-17, D1231).
 - MySQL's `MATCH ... AGAINST` with `FULLTEXT` keys, SQL Server's `CONTAINS` and `FREETEXT`, and
   SQLite's FTS5 (D10, D195). `MATCH ... AGAINST` without keys: **code written, unbuilt** (code-only

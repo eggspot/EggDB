@@ -147,6 +147,7 @@ enum Template {
     Snowball,
     Synonym,
     Ispell,
+    Thesaurus,
 }
 
 impl Template {
@@ -156,6 +157,7 @@ impl Template {
             "snowball" => Some(Self::Snowball),
             "synonym" => Some(Self::Synonym),
             "ispell" => Some(Self::Ispell),
+            "thesaurus" => Some(Self::Thesaurus),
             _ => None,
         }
     }
@@ -166,6 +168,7 @@ impl Template {
             Self::Snowball => "snowball",
             Self::Synonym => "synonym",
             Self::Ispell => "ispell",
+            Self::Thesaurus => "thesaurus",
         }
     }
 }
@@ -324,6 +327,7 @@ fn missing_file(name: &str, extension: &str) -> SqlError {
                 "stop" => "StopWordList",
                 "dict" => "DictList",
                 "affix" => "AffixList",
+                "ths" => "DictList",
                 _ => "SynonymList",
             }
         ),
@@ -336,8 +340,41 @@ fn boolean_option(value: Option<&String>, default: bool) -> bool {
     })
 }
 
+fn built_in_dictionary(name: &str) -> Option<Dictionary> {
+    if base(name) == SIMPLE_DICTIONARY {
+        return Some(Dictionary::Simple {
+            stop_words: StopWords::None,
+            accept: true,
+        });
+    }
+    let language = built_in_language(name)?;
+    Some(Dictionary::Snowball {
+        language,
+        stop_words: StopWords::Of(language),
+    })
+}
+
+fn subdictionary(stored: Option<StoredDictionary>, name: &str) -> SqlResult<Dictionary> {
+    match stored {
+        Some(stored) if stored.template == Template::Thesaurus => Err(SqlError::new(
+            SqlState::INVALID_PARAMETER_VALUE,
+            format!("text search dictionary "{}" is a thesaurus and cannot be the subdictionary of one", base(name)),
+        )),
+        Some(stored) => stored.dictionary(&|_| Err(missing(TextSearchKind::Dictionary, name))),
+        None => built_in_dictionary(name).ok_or_else(|| missing(TextSearchKind::Dictionary, name)),
+    }
+}
+
+fn stored_subdictionary(reader: &dyn KeyValueRead, name: &str) -> SqlResult<Dictionary> {
+    let stored = reader
+        .get(&object_key(TextSearchKind::Dictionary, name))?
+        .map(|bytes| decode_dictionary(&bytes))
+        .transpose()?;
+    subdictionary(stored, name)
+}
+
 impl StoredDictionary {
-    fn dictionary(&self) -> SqlResult<Dictionary> {
+    fn dictionary(&self, resolve: &dyn Fn(&str) -> SqlResult<Dictionary>) -> SqlResult<Dictionary> {
         let option = |name: &str| self.options.get(name);
         let stop_words = match option("stopwordlist") {
             Some(listed) => StopWords::Listed(eggdb_search::word_list(listed)),
@@ -398,6 +435,26 @@ impl StoredDictionary {
                     stop_words,
                 }
             }
+            Template::Thesaurus => {
+                let rules = match (option("dictlist"), option("dictfile")) {
+                    (Some(listed), _) => listed,
+                    (None, Some(file)) => return Err(missing_file(file, "ths")),
+                    (None, None) => {
+                        return Err(SqlError::new(
+                            SqlState::INVALID_PARAMETER_VALUE,
+                            "missing DictFile parameter",
+                        ));
+                    }
+                };
+                let sub = option("dictionary").ok_or_else(|| {
+                    SqlError::new(SqlState::INVALID_PARAMETER_VALUE, "missing Dictionary parameter")
+                })?;
+                let thesaurus = eggdb_search::Thesaurus::parse(rules, resolve(sub)?)
+                    .map_err(|message| SqlError::new(SqlState::INVALID_PARAMETER_VALUE, message))?;
+                Dictionary::Thesaurus {
+                    thesaurus: Box::new(thesaurus),
+                }
+            }
         })
     }
 }
@@ -440,19 +497,9 @@ impl Catalog {
 
     fn dictionary(&self, name: &str) -> SqlResult<Dictionary> {
         if let Some(stored) = self.dictionaries.get(base(name)) {
-            return stored.dictionary();
+            return stored.dictionary(&|sub| subdictionary(self.dictionaries.get(base(sub)).cloned(), sub));
         }
-        if base(name) == SIMPLE_DICTIONARY {
-            return Ok(Dictionary::Simple {
-                stop_words: StopWords::None,
-                accept: true,
-            });
-        }
-        let language = built_in_language(name).ok_or_else(|| missing(TextSearchKind::Dictionary, name))?;
-        Ok(Dictionary::Snowball {
-            language,
-            stop_words: StopWords::Of(language),
-        })
+        built_in_dictionary(name).ok_or_else(|| missing(TextSearchKind::Dictionary, name))
     }
 
     /// The analyzer of the configuration named `name`, or `None` when the database defines
@@ -623,12 +670,14 @@ fn create_dictionary(writer: &mut dyn KeyValueWrite, name: &Name, options: &[(Na
     let template = Template::named(&template_name).ok_or_else(|| {
         SqlError::new(
             SqlState::FEATURE_NOT_SUPPORTED,
-            format!("text search template \"{template_name}\" is not supported yet: EggDB has the simple, snowball, synonym and ispell templates"),
+            format!("text search template \"{template_name}\" is not supported yet: EggDB has the simple, snowball, synonym, ispell and thesaurus templates"),
         )
         .at(name.position)
     })?;
     let stored = StoredDictionary { template, options };
-    stored.dictionary().map_err(|error| error.at(name.position))?;
+    stored
+        .dictionary(&|sub| stored_subdictionary(&*writer, sub))
+        .map_err(|error| error.at(name.position))?;
     writer.put(&key, &encode_dictionary(&stored))
 }
 
@@ -652,7 +701,9 @@ fn alter_dictionary(writer: &mut dyn KeyValueWrite, name: &Name, options: &[(Nam
             None => stored.options.remove(&option),
         };
     }
-    stored.dictionary().map_err(|error| error.at(name.position))?;
+    stored
+        .dictionary(&|sub| stored_subdictionary(&*writer, sub))
+        .map_err(|error| error.at(name.position))?;
     writer.put(&key, &encode_dictionary(&stored))
 }
 
@@ -822,6 +873,15 @@ fn rename_in_mappings(writer: &mut dyn KeyValueWrite, from: &str, to: &str) -> S
             )?;
         }
     }
+    for (name, dictionary) in &catalog.dictionaries {
+        if dictionary.template == Template::Thesaurus
+            && dictionary.options.get("dictionary").is_some_and(|sub| base(sub) == from)
+        {
+            let mut changed = dictionary.clone();
+            changed.options.insert("dictionary".to_owned(), to.to_owned());
+            writer.put(&object_key(TextSearchKind::Dictionary, name), &encode_dictionary(&changed))?;
+        }
+    }
     Ok(())
 }
 
@@ -856,6 +916,19 @@ fn drop_objects(
                     SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
                     format!(
                         "cannot drop text search dictionary {} because text search configuration {user} depends on it",
+                        base(&name.text)
+                    ),
+                )
+                .at(name.position));
+            }
+            if let Some((user, _)) = catalog.dictionaries.iter().find(|(_, dictionary)| {
+                dictionary.template == Template::Thesaurus
+                    && dictionary.options.get("dictionary").is_some_and(|sub| base(sub) == base(&name.text))
+            }) {
+                return Err(SqlError::new(
+                    SqlState::DEPENDENT_OBJECTS_STILL_EXIST,
+                    format!(
+                        "cannot drop text search dictionary {} because text search dictionary {user} depends on it",
                         base(&name.text)
                     ),
                 )
@@ -1087,12 +1160,43 @@ mod tests {
             ("affixlist", "SFX S Y 1\nSFX S 0 s ."),
             ("stopwordlist", "the"),
         ]);
-        let dictionary = listed.dictionary().unwrap();
+        let dictionary = listed.dictionary(&no_subdictionary).unwrap();
         assert_eq!(dictionary.recognize("Books"), eggdb_search::Recognition::Lexeme("book".to_owned()));
         assert_eq!(dictionary.recognize("the"), eggdb_search::Recognition::Stop);
         assert_eq!(dictionary.recognize("cars"), eggdb_search::Recognition::Unknown);
-        let from_file = ispell(&[("dictfile", "english"), ("afffile", "english")]).dictionary();
+        let from_file = ispell(&[("dictfile", "english"), ("afffile", "english")]).dictionary(&no_subdictionary);
         assert!(from_file.unwrap_err().to_string().contains("DictList"));
-        assert!(ispell(&[("dictlist", "book/S")]).dictionary().is_err());
+        assert!(ispell(&[("dictlist", "book/S")]).dictionary(&no_subdictionary).is_err());
+    }
+
+    fn no_subdictionary(name: &str) -> SqlResult<Dictionary> {
+        Err(missing(TextSearchKind::Dictionary, name))
+    }
+
+    #[test]
+    fn a_thesaurus_needs_its_rules_and_a_subdictionary_that_is_not_one() {
+        let thesaurus = |options: &[(&str, &str)]| StoredDictionary {
+            template: Template::Thesaurus,
+            options: options
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        };
+        let mut catalog = Catalog::default();
+        catalog.dictionaries.insert(
+            "astro".to_owned(),
+            thesaurus(&[("dictlist", "supernovae stars : sn"), ("dictionary", "english_stem")]),
+        );
+        catalog.dictionaries.insert(
+            "nested".to_owned(),
+            thesaurus(&[("dictlist", "a b : c"), ("dictionary", "astro")]),
+        );
+        let astro = catalog.dictionary("astro").unwrap();
+        assert_eq!(astro.recognize("stars"), eggdb_search::Recognition::Unknown);
+        assert!(catalog.dictionary("nested").unwrap_err().to_string().contains("cannot be the subdictionary"));
+        let from_file = thesaurus(&[("dictfile", "thesaurus_astro"), ("dictionary", "english_stem")]);
+        assert!(from_file.dictionary(&no_subdictionary).unwrap_err().to_string().contains("DictList"));
+        let without = thesaurus(&[("dictlist", "supernovae stars : sn")]);
+        assert!(without.dictionary(&no_subdictionary).unwrap_err().to_string().contains("Dictionary"));
     }
 }

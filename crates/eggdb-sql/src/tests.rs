@@ -3016,6 +3016,44 @@ fn text_search_configurations_map_token_types_to_dictionaries() {
 }
 
 #[test]
+fn a_thesaurus_dictionary_replaces_phrases_in_vectors_and_queries() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    for statement in [
+        "CREATE TEXT SEARCH DICTIONARY astro_words (TEMPLATE = simple, StopWordList = 'of, the')",
+        "CREATE TEXT SEARCH DICTIONARY astro (TEMPLATE = thesaurus, DictList = 'supernovae stars : sn, crab nebulae : crab', Dictionary = astro_words)",
+        "CREATE TEXT SEARCH CONFIGURATION astro_search (COPY = english)",
+        "ALTER TEXT SEARCH CONFIGURATION astro_search ALTER MAPPING FOR asciiword WITH astro, english_stem",
+    ] {
+        run(&mut session, statement).unwrap();
+    }
+    assert_eq!(
+        last(
+            &mut session,
+            "SELECT to_tsvector('astro_search', 'Bright supernovae stars of the crab nebulae') AS v, plainto_tsquery('astro_search', 'supernovae stars') AS q"
+        ),
+        "v|q
+'bright':1 'crab':6 'sn':2|'sn'
+SELECT 1"
+    );
+    assert_eq!(state(&mut session, "DROP TEXT SEARCH DICTIONARY astro_words"), "2BP01");
+    assert_eq!(
+        state(
+            &mut session,
+            "CREATE TEXT SEARCH DICTIONARY broken (TEMPLATE = thesaurus, DictList = 'the stars : sn', Dictionary = astro_words)"
+        ),
+        "22023"
+    );
+    run(&mut session, "ALTER TEXT SEARCH DICTIONARY astro_words RENAME TO sky_words").unwrap();
+    assert_eq!(
+        last(&mut session, "SELECT to_tsvector('astro_search', 'crab nebulae') AS v"),
+        "v
+'crab':1
+SELECT 1"
+    );
+}
+
+#[test]
 fn explain_analyze_runs_the_statement_and_reports_rows_and_times() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
