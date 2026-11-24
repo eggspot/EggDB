@@ -244,6 +244,12 @@ fn is_system_schema(name: &str) -> bool {
     name == CATALOG_SCHEMA || name == INFORMATION_SCHEMA
 }
 
+/// Whether every role may use schema `name` without a grant (D1311): `public` and the system
+/// schemas, as PostgreSQL gives `PUBLIC` `USAGE` on them; other schemas need `USAGE` granted.
+pub(crate) fn used_by_every_role(name: &str) -> bool {
+    name == DEFAULT_SCHEMA || is_system_schema(name)
+}
+
 fn default_path() -> SharedPath {
     Arc::from([DEFAULT_SCHEMA.to_owned()])
 }

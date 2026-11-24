@@ -538,27 +538,27 @@ pub(crate) fn item_input(text: &str) -> SqlResult<Value> {
 }
 
 /// `pg_namespace.nspacl`: what the engine enforces on a schema, written as PostgreSQL's ACL: the
-/// owner holds `USAGE` and `CREATE`, and `PUBLIC` holds `USAGE` (every role may use every
-/// schema); `pg_toast` keeps PostgreSQL's NULL.
+/// owner holds `USAGE` and `CREATE`, `PUBLIC` holds `USAGE` on `public` and the system schemas
+/// (D1311), and the stored grants follow; `pg_toast` keeps PostgreSQL's NULL.
 pub(crate) fn schema_acl(snapshot: &CatalogSnapshot, schema: &SchemaEntry) -> Value {
     if schema.oid == oids::PG_TOAST {
         return Value::Null;
     }
     let roles = Roles { snapshot };
-    let mut items = vec![
-        AclItem {
-            grantee: schema.owner,
-            grantor: schema.owner,
-            rights: USAGE | CREATE,
-            grant_options: NO_RIGHTS,
-        },
-        AclItem {
+    let mut items = vec![AclItem {
+        grantee: schema.owner,
+        grantor: schema.owner,
+        rights: USAGE | CREATE,
+        grant_options: NO_RIGHTS,
+    }];
+    if crate::schemas::used_by_every_role(&schema.name) {
+        items.push(AclItem {
             grantee: PUBLIC_GRANTEE,
             grantor: schema.owner,
             rights: USAGE,
             grant_options: NO_RIGHTS,
-        },
-    ];
+        });
+    }
     let stored = crate::roles::object_grants_on(
         &snapshot.access,
         crate::roles::ObjectKind::Schema,

@@ -423,3 +423,32 @@ fn sequences_are_used_only_with_their_privileges() {
     run(&mut admin, "CREATE SEQUENCE hidden").unwrap();
     assert!(run(&mut clerk, "SELECT setval('hidden', 5)").is_err());
 }
+
+#[test]
+fn a_table_in_another_schema_needs_usage_on_that_schema() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE SCHEMA sales",
+        "CREATE TABLE sales.orders (id integer)",
+        "INSERT INTO sales.orders VALUES (7)",
+        "GRANT SELECT ON sales.orders TO clerk",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    let error = run(&mut clerk, "SELECT id FROM sales.orders").unwrap_err();
+    assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE);
+    assert!(error.to_string().contains("permission denied for schema sales"), "{error}");
+    assert_eq!(
+        run(&mut clerk, "SELECT has_schema_privilege('sales', 'USAGE') AS u, has_schema_privilege('public', 'USAGE') AS p").unwrap(),
+        "u|p\nf|t\nSELECT 1"
+    );
+    run(&mut admin, "GRANT USAGE ON SCHEMA sales TO readers").unwrap();
+    assert_eq!(run(&mut clerk, "SELECT id FROM sales.orders").unwrap(), "id\n7\nSELECT 1");
+    run(&mut admin, "REVOKE USAGE ON SCHEMA sales FROM readers").unwrap();
+    assert!(run(&mut clerk, "SELECT id FROM sales.orders").is_err());
+    assert_eq!(run(&mut clerk, "SELECT owner FROM accounts").unwrap(), "owner\nada\nSELECT 1");
+}

@@ -534,9 +534,14 @@ impl Inquiry<'_> {
         let wanted = parse_privileges(&written_name(list), &SCHEMA_PRIVILEGES, &[GRANT_OPTION])?;
         answer(schema.as_ref(), |schema| {
             for wanted in &wanted {
-                if holds_object_privilege(holder, *wanted, false)
-                    || self.granted(holder, ObjectKind::Schema, schema, *wanted)?
-                {
+                let open_to_every_role = wanted.asked == Asked::Usage
+                    && !wanted.with_option
+                    && crate::schemas::used_by_every_role(schema);
+                let held_without_grant = match wanted.asked {
+                    Asked::Usage => open_to_every_role,
+                    _ => holds_object_privilege(holder, *wanted, false),
+                };
+                if held_without_grant || self.granted(holder, ObjectKind::Schema, schema, *wanted)? {
                     return Ok(true);
                 }
             }

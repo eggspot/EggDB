@@ -1206,11 +1206,36 @@ pub(crate) fn check_table(
     table: &str,
     privilege: Privilege,
 ) -> SqlResult<()> {
+    check_schema_usage(reader, settings.checked_role.as_deref(), table)?;
     if holds_table_privilege(reader, settings.checked_role.as_deref(), table, privilege)? {
         Ok(())
     } else {
         Err(permission_denied(table))
     }
+}
+
+/// Checks that `checked_role` may use the schema `table` lives in (D1311): always for a
+/// superuser session and a temporary table, for `public` and the system schemas, and otherwise
+/// when the role, a role it belongs to or `PUBLIC` holds `USAGE` on the schema.
+pub(crate) fn check_schema_usage(
+    reader: &dyn KeyValueRead,
+    checked_role: Option<&str>,
+    table: &str,
+) -> SqlResult<()> {
+    let Some(role) = checked_role else {
+        return Ok(());
+    };
+    let schema = crate::schemas::schema_of(table);
+    if crate::temporary::is_temporary_name(table)
+        || crate::schemas::used_by_every_role(schema)
+        || holds_object_grant(reader, role, ObjectKind::Schema, schema, ObjectPrivilege::Usage, false)?
+    {
+        return Ok(());
+    }
+    Err(SqlError::new(
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        format!("permission denied for schema {schema}"),
+    ))
 }
 
 /// Whether `checked_role` holds `privilege` on the whole of `table`, by the rule every statement

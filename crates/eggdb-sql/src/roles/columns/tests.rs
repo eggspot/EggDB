@@ -448,6 +448,7 @@ fn a_table_named_like_a_schema_keeps_only_its_own_grants_and_policies() {
         &store,
         &[
             "CREATE SCHEMA s",
+            "GRANT USAGE ON SCHEMA s TO PUBLIC",
             "CREATE TABLE s.t (id integer, x integer)",
             "INSERT INTO s.t VALUES (1, 10)",
             "CREATE TABLE s (id integer, t integer, x integer)",
@@ -582,6 +583,7 @@ fn a_renamed_view_keeps_its_grants_and_leaves_none_behind() {
         &[
             "CREATE USER eve LOGIN",
             "CREATE SCHEMA s",
+            "GRANT USAGE ON SCHEMA s TO PUBLIC",
             "CREATE VIEW v AS SELECT id FROM teams",
             "GRANT SELECT (id) ON v TO eve",
             "GRANT SELECT ON v TO clerk",

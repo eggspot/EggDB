@@ -797,7 +797,7 @@ fn nspacl_writes_what_every_schema_allows() {
         ),
         "nspname|nspacl\n\
          information_schema|{eggdb=UC/eggdb,=U/eggdb}\n\
-         myschema|{eggdb=UC/eggdb,=U/eggdb}\n\
+         myschema|{eggdb=UC/eggdb}\n\
          public|{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}\nSELECT 3"
     );
 }
@@ -946,7 +946,7 @@ fn schema_type_parameter_and_tablespace_grants_are_stored_and_answered() {
             &mut admin,
             "SELECT nspacl FROM pg_catalog.pg_namespace WHERE nspname = 'myschema'"
         ),
-        "nspacl\n{eggdb=UC/eggdb,=U/eggdb,joe=C*/eggdb}\nSELECT 1"
+        "nspacl\n{eggdb=UC/eggdb,joe=C*/eggdb}\nSELECT 1"
     );
     let mut joe = as_role(&store, "joe");
     assert_eq!(
