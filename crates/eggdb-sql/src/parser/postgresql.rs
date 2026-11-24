@@ -26,6 +26,32 @@ fn ordered(argument: Expr, order: Vec<crate::ast::OrderItem>) -> Expr {
     }
 }
 
+fn ts_stat_weights(text: &str) -> SqlResult<Option<String>> {
+    let mut letters: Vec<char> = Vec::new();
+    for letter in text.chars() {
+        let upper = letter.to_ascii_uppercase();
+        if !matches!(upper, 'A'..='D') {
+            return Err(SqlError::new(
+                SqlState::SYNTAX_ERROR,
+                format!("unrecognized weight: \"{letter}\""),
+            ));
+        }
+        if !letters.contains(&upper) {
+            letters.push(upper);
+        }
+    }
+    if letters.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        letters
+            .iter()
+            .map(|letter| format!("'{letter}'"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
+}
+
 fn no_operator(symbol: &str, position: usize) -> SqlError {
     SqlError::new(
         SqlState::UNDEFINED_FUNCTION,
@@ -38,9 +64,10 @@ fn no_operator(symbol: &str, position: usize) -> SqlError {
 }
 
 impl Parser<'_> {
-    /// PostgreSQL's `ts_stat('query')` in `FROM` (D1259's follow-up, D1268): each lexeme of the
-    /// `tsvector` the query's first column holds, with `ndoc` the rows holding it and `nentry`
-    /// its occurrences, as a derived table over `unnest(tsvector)`.
+    /// PostgreSQL's `ts_stat('query'[, 'weights'])` in `FROM` (D1259's follow-up, D1268,
+    /// D1308): each lexeme of the `tsvector` the query's first column holds, with `ndoc` the
+    /// rows holding it and `nentry` its occurrences, as a derived table over
+    /// `unnest(tsvector)`; with weights, only positions of those weights count.
     pub(super) fn ts_stat(&mut self) -> SqlResult<TableReference> {
         let position = self.position();
         self.at += 1;
@@ -50,18 +77,36 @@ impl Parser<'_> {
             _ => return Err(SqlError::syntax("ts_stat takes its query as a string literal", position)),
         };
         self.at += 1;
-        if self.take(&TokenKind::Comma) {
-            return Err(self.not_supported("ts_stat with weights"));
-        }
+        let weights = if self.take(&TokenKind::Comma) {
+            let weights_position = self.position();
+            let TokenKind::String(text) = self.peek_kind() else {
+                return Err(SqlError::syntax("ts_stat takes its weights as a string literal", weights_position));
+            };
+            let weights = ts_stat_weights(text).map_err(|error| error.at(weights_position))?;
+            self.at += 1;
+            weights
+        } else {
+            None
+        };
         self.expect(&TokenKind::RightParen)?;
         let alias = if self.take_word("as") || self.at_bare_alias() { self.name()?.text } else { "ts_stat".to_owned() };
-        let text = format!(
-            "(SELECT ts_stat_u.lexeme AS word, CAST(count(*) AS integer) AS ndoc, \
-             CAST(sum(coalesce(cardinality(ts_stat_u.positions), 1)) AS integer) AS nentry \
-             FROM ({query}) AS ts_stat_q(ts_stat_v) CROSS JOIN LATERAL unnest(ts_stat_q.ts_stat_v) AS ts_stat_u \
-             GROUP BY ts_stat_u.lexeme) AS \"{}\"",
-            alias.replace('"', "\"\"")
-        );
+        let alias = alias.replace('"', "\"\"");
+        let text = match weights {
+            None => format!(
+                "(SELECT ts_stat_u.lexeme AS word, CAST(count(*) AS integer) AS ndoc, \
+                 CAST(sum(coalesce(cardinality(ts_stat_u.positions), 1)) AS integer) AS nentry \
+                 FROM ({query}) AS ts_stat_q(ts_stat_v) CROSS JOIN LATERAL unnest(ts_stat_q.ts_stat_v) AS ts_stat_u \
+                 GROUP BY ts_stat_u.lexeme) AS \"{alias}\""
+            ),
+            Some(weights) => format!(
+                "(SELECT ts_stat_m.lexeme AS word, CAST(count(*) AS integer) AS ndoc, \
+                 CAST(sum(ts_stat_m.matched) AS integer) AS nentry \
+                 FROM (SELECT ts_stat_u.lexeme, \
+                 (SELECT count(*) FROM unnest(ts_stat_u.weights) AS ts_stat_w(letter) WHERE ts_stat_w.letter IN ({weights})) AS matched \
+                 FROM ({query}) AS ts_stat_q(ts_stat_v) CROSS JOIN LATERAL unnest(ts_stat_q.ts_stat_v) AS ts_stat_u) AS ts_stat_m \
+                 WHERE ts_stat_m.matched > 0 GROUP BY ts_stat_m.lexeme) AS \"{alias}\""
+            ),
+        };
         let tokens = crate::lexer::tokenize_in(&text, self.dialect)?;
         let mut parser = Parser::new(&text, &tokens).in_dialect(self.dialect);
         parser.derived_table()

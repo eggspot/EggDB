@@ -688,7 +688,20 @@ fn ts_stat_counts_the_documents_and_occurrences_of_each_lexeme() {
         ok(&mut session, "SELECT s.word FROM ts_stat('SELECT v FROM docs WHERE id = 2;') AS s"),
         "word\ncat\nSELECT 1"
     );
-    assert!(run(&mut session, "SELECT * FROM ts_stat('SELECT v FROM docs', 'a')").is_err());
+    ok(&mut session, "INSERT INTO docs VALUES (3, 'cat:5A,6B fat:7 dog')");
+    assert_eq!(
+        ok(&mut session, "SELECT * FROM ts_stat('SELECT v FROM docs', 'ab') ORDER BY word"),
+        "word|ndoc|nentry\ncat|1|2\nSELECT 1"
+    );
+    assert_eq!(
+        ok(&mut session, "SELECT * FROM ts_stat('SELECT v FROM docs WHERE id = 3', 'Ad') ORDER BY word"),
+        "word|ndoc|nentry\ncat|1|1\nfat|1|1\nSELECT 2"
+    );
+    assert_eq!(
+        ok(&mut session, "SELECT count(*) AS n FROM ts_stat('SELECT v FROM docs', '')"),
+        "n\n3\nSELECT 1"
+    );
+    assert!(run(&mut session, "SELECT * FROM ts_stat('SELECT v FROM docs', 'x')").is_err());
 }
 
 #[test]

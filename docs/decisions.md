@@ -1332,3 +1332,4 @@ its full title with its status.
 - [D1305](decisions/D1305.md) Code-only batch 961 (M6): aggregates the program defines (C API, Python create_aggregate), and any_value
 - [D1306](decisions/D1306.md) Code-only batch 962 (M4): the thesaurus text search template
 - [D1307](decisions/D1307.md) Code-only batch 963 (M4): PostgreSQL's current_query()
+- [D1308](decisions/D1308.md) Code-only batch 964 (M4): ts_stat with weights
