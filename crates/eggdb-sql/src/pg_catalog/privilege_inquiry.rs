@@ -654,20 +654,41 @@ impl Inquiry<'_> {
         object: &Value,
         list: &Value,
     ) -> SqlResult<Value> {
-        let exists = match object_oid(object) {
-            Some(oid) => {
-                self.snapshot.routine(oid).is_some()
-                    || oids::BUILTIN_FUNCTIONS
+        let (exists, granted_object) = match object_oid(object) {
+            Some(oid) => match self.snapshot.routine(oid) {
+                Some(routine) => (true, Some(format!("{}.{}", routine.schema, routine.name))),
+                None => (
+                    oids::BUILTIN_FUNCTIONS
                         .iter()
-                        .any(|function| function.oid == oid)
+                        .any(|function| function.oid == oid),
+                    None,
+                ),
+            },
+            None => {
+                let written = written_name(object);
+                let exists = self.function_exists(&written)?;
+                (exists, Some(routine_grant_object(&written)))
             }
-            None => self.function_exists(&written_name(object))?,
         };
         let wanted = parse_privileges(&written_name(list), &FUNCTION_PRIVILEGES, &[GRANT_OPTION])?;
         answer(exists.then_some(()), |()| {
-            Ok(wanted
-                .iter()
-                .any(|wanted| holds_object_privilege(holder, *wanted, false)))
+            for wanted in &wanted {
+                let held = match (holder, &granted_object) {
+                    (Holder::Role(role), Some(object)) if !wanted.with_option => crate::roles::holds_object_grant(
+                        &self.snapshot.access,
+                        role,
+                        ObjectKind::Routine,
+                        object,
+                        crate::roles::ObjectPrivilege::Execute,
+                        false,
+                    )?,
+                    _ => holds_object_privilege(holder, *wanted, false),
+                };
+                if held {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         })
     }
 
@@ -882,6 +903,14 @@ fn holds_object_privilege(holder: &Holder, wanted: Wanted, connected_here: bool)
         | Asked::Member
         | Asked::Set
         | Asked::AlterSystem => false,
+    }
+}
+
+fn routine_grant_object(written: &str) -> String {
+    let name = written.split('(').next().unwrap_or_default().trim();
+    match name.split_once('.') {
+        Some((schema, routine)) => format!("{}.{}", schema.trim_matches('"'), routine.trim_matches('"')),
+        None => format!("{}.{}", crate::schemas::DEFAULT_SCHEMA, name.trim_matches('"')),
     }
 }
 

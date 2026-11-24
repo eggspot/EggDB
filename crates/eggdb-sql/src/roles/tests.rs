@@ -452,3 +452,35 @@ fn a_table_in_another_schema_needs_usage_on_that_schema() {
     assert!(run(&mut clerk, "SELECT id FROM sales.orders").is_err());
     assert_eq!(run(&mut clerk, "SELECT owner FROM accounts").unwrap(), "owner\nada\nSELECT 1");
 }
+
+#[test]
+fn routines_run_with_execute_which_public_holds_until_it_is_revoked() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE FUNCTION add_one(x integer) RETURNS integer LANGUAGE plpgsql AS $$ BEGIN RETURN x + 1; END $$",
+        "CREATE PROCEDURE touch() LANGUAGE plpgsql AS $$ BEGIN NULL; END $$",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    assert_eq!(run(&mut clerk, "SELECT add_one(1) AS n").unwrap(), "n\n2\nSELECT 1");
+    run(&mut clerk, "CALL touch()").unwrap();
+    run(&mut admin, "REVOKE EXECUTE ON FUNCTION add_one(integer) FROM PUBLIC").unwrap();
+    run(&mut admin, "REVOKE EXECUTE ON PROCEDURE touch FROM PUBLIC").unwrap();
+    for sql in ["SELECT add_one(1)", "CALL touch()"] {
+        let error = run(&mut clerk, sql).expect_err(sql);
+        assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE, "{sql}: {error}");
+    }
+    assert_eq!(
+        run(&mut clerk, "SELECT has_function_privilege('add_one(integer)', 'EXECUTE') AS e").unwrap(),
+        "e\nf\nSELECT 1"
+    );
+    run(&mut admin, "GRANT EXECUTE ON FUNCTION add_one TO readers").unwrap();
+    assert_eq!(run(&mut clerk, "SELECT add_one(2) AS n").unwrap(), "n\n3\nSELECT 1");
+    assert_eq!(run(&mut admin, "SELECT add_one(3) AS n").unwrap(), "n\n4\nSELECT 1");
+    run(&mut admin, "GRANT EXECUTE ON PROCEDURE touch TO PUBLIC").unwrap();
+    run(&mut clerk, "CALL touch()").unwrap();
+}

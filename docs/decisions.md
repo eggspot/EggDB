@@ -1336,3 +1336,4 @@ its full title with its status.
 - [D1309](decisions/D1309.md) Code-only batch 965 (M5): changes written back into SQLite files through the rollback journal
 - [D1310](decisions/D1310.md) Code-only batch 966 (M8): sequence privileges
 - [D1311](decisions/D1311.md) Code-only batch 967 (M8): schema USAGE checked in statements
+- [D1312](decisions/D1312.md) Code-only batch 968 (M8): routine EXECUTE checked in statements

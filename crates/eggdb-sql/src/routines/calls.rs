@@ -296,6 +296,8 @@ pub(crate) fn call_procedure_outputs(
     call: &CallRoutine,
 ) -> SqlResult<(QueryResult, Vec<Option<usize>>)> {
     let chosen = chosen_procedure(writer, tables, settings, call)?;
+    crate::roles::check_execute(&*writer, settings.checked_role.as_deref(), &chosen.definition.name)
+        .map_err(|error| error.at_if_unplaced(call.name.position))?;
     let returned = crate::plpgsql::invoke(
         writer,
         tables,
@@ -317,6 +319,8 @@ pub(crate) fn call_procedure_nonatomic(
     call: &CallRoutine,
 ) -> SqlResult<(QueryResult, Vec<Option<usize>>)> {
     let chosen = chosen_procedure(&mut *control, tables, settings, call)?;
+    crate::roles::check_execute(&*control, settings.checked_role.as_deref(), &chosen.definition.name)
+        .map_err(|error| error.at_if_unplaced(call.name.position))?;
     let returned = crate::plpgsql::invoke_nonatomic(
         control,
         tables,
@@ -928,6 +932,7 @@ fn call_function(
     call: NamedArguments<'_>,
 ) -> SqlResult<(Returned, Arc<RoutineDefinition>)> {
     let chosen = choose(&*writer, tables, RoutineKind::Function, name, call)?;
+    crate::roles::check_execute(&*writer, settings.checked_role.as_deref(), &chosen.definition.name)?;
     let returned = crate::plpgsql::invoke(
         writer,
         tables,

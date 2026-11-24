@@ -180,13 +180,28 @@ pub(crate) fn change(writer: &mut dyn KeyValueWrite, change: &ObjectChange<'_>) 
                 (false, true) => (held, grantable & !bits),
                 (false, false) => (held & !bits, grantable & !bits),
             };
+            let keeps_revoked_default = held == 0 && public_holds_by_default(change.kind, grantee);
             match held {
-                0 => writer.delete(&key)?,
+                0 if !keeps_revoked_default => writer.delete(&key)?,
                 _ => writer.put(&key, &[RECORD_VERSION, held, grantable & held])?,
             }
         }
     }
     Ok(())
+}
+
+/// Whether `PUBLIC` holds `EXECUTE` on routines before any grant, as in PostgreSQL (D1312): a
+/// revoke from `PUBLIC` is then kept as a record holding nothing, so the default stays gone.
+fn public_holds_by_default(kind: ObjectKind, grantee: &str) -> bool {
+    kind == ObjectKind::Routine && grantee == PUBLIC
+}
+
+fn read_held(reader: &dyn KeyValueRead, kind: ObjectKind, object: &str, grantee: &str) -> SqlResult<(u8, u8)> {
+    let key = key(kind, object, grantee);
+    if public_holds_by_default(kind, grantee) && reader.get(&key)?.is_none() {
+        return Ok((ObjectPrivilege::Execute.bit(), 0));
+    }
+    read(reader, &key)
 }
 
 /// Every grant stored on `object`, in grantee order.
@@ -231,13 +246,31 @@ pub(crate) fn holds(
 ) -> SqlResult<bool> {
     let held: BTreeSet<String> = role_closure(reader, role)?;
     for member in &held {
-        let (privileges, grantable) = read(reader, &key(kind, object, member))?;
+        let (privileges, grantable) = read_held(reader, kind, object, member)?;
         let bits = if with_option { grantable } else { privileges };
         if bits & privilege.bit() != 0 {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Checks that `checked_role` may run `routine` (D1312): always for a superuser session, else
+/// when the role, a role it belongs to or `PUBLIC` holds `EXECUTE` on it, `PUBLIC` holding it
+/// until it is revoked.
+pub(crate) fn check_execute(reader: &dyn KeyValueRead, checked_role: Option<&str>, routine: &str) -> SqlResult<()> {
+    let Some(role) = checked_role else {
+        return Ok(());
+    };
+    let schema = crate::schemas::schema_of(routine);
+    let object = format!("{schema}.{}", crate::schemas::base_name(routine));
+    if holds(reader, role, ObjectKind::Routine, &object, ObjectPrivilege::Execute, false)? {
+        return Ok(());
+    }
+    Err(SqlError::new(
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        format!("permission denied for function {}", crate::schemas::base_name(routine)),
+    ))
 }
 
 /// The privileges on sequence `sequence` that a role whose role closure is `held` may use,

@@ -1464,7 +1464,7 @@ mod object_grants;
 pub(crate) use access_records::AccessRecords;
 pub(crate) use object_grants::{
     OBJECT_GRANT_SPACE, ObjectChange, ObjectKind, ObjectPrivilege, forget as forget_object_grants,
-    grants_on as object_grants_on, holds as holds_object_grant, sequence_privileges,
+    check_execute, grants_on as object_grants_on, holds as holds_object_grant, sequence_privileges,
 };
 pub(crate) use columns::{
     COLUMN_DENY_SPACE, COLUMN_GRANT_SPACE, COLUMN_PRIVILEGES, ColumnGrant, ColumnReach, check_columns,

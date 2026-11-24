@@ -336,8 +336,8 @@ fn default_grants<'a>(snapshot: &'a CatalogSnapshot, viewer: &Viewer) -> Vec<Def
     grants
 }
 
-/// `routine_privileges` (with `PUBLIC`'s default `EXECUTE` on every routine, which EggDB does
-/// not check, and, for a superuser session, the owner's own `EXECUTE` with its grant option)
+/// `routine_privileges` (with `PUBLIC`'s default `EXECUTE` on every routine until it is
+/// revoked (D1312), and, for a superuser session, the owner's own `EXECUTE` with its grant option)
 /// and `role_routine_grants` (without them): then each stored `GRANT EXECUTE` (D1191) whose
 /// grantee is an enabled role of the current user.
 pub(super) fn routine_privileges_rows(snapshot: &CatalogSnapshot, shown: Shown) -> Vec<Vec<Value>> {
@@ -360,13 +360,17 @@ pub(super) fn routine_privileges_rows(snapshot: &CatalogSnapshot, shown: Shown) 
             &object,
         )
         .unwrap_or_default();
+        let public_revoked = stored
+            .iter()
+            .any(|grant| grant.grantee == crate::roles::PUBLIC && grant.privileges == 0);
         let granted = defaults
             .iter()
+            .filter(|grant| !(public_revoked && grant.grantee == "PUBLIC"))
             .map(|grant| (grant.grantee.to_owned(), grant.is_grantable))
             .chain(
                 stored
                     .into_iter()
-                    .filter(|grant| viewer.sees(&grant.grantee, shown))
+                    .filter(|grant| grant.privileges != 0 && viewer.sees(&grant.grantee, shown))
                     .map(|grant| {
                         let grantable = grant.grantable & crate::roles::ObjectPrivilege::Execute.bit() != 0;
                         (String::from(shown_grantee(&grant.grantee)), grantable)
