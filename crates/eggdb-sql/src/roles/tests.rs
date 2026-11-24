@@ -484,3 +484,40 @@ fn routines_run_with_execute_which_public_holds_until_it_is_revoked() {
     run(&mut admin, "GRANT EXECUTE ON PROCEDURE touch TO PUBLIC").unwrap();
     run(&mut clerk, "CALL touch()").unwrap();
 }
+
+#[test]
+fn alter_role_set_gives_a_role_its_settings_when_it_logs_in() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "ALTER ROLE clerk SET search_path TO audit_schema, public",
+        "ALTER ROLE ALL IN DATABASE eggdb SET application_name = 'everyone'",
+        "ALTER ROLE clerk IN DATABASE eggdb SET application_name = 'clerk desk'",
+        "ALTER USER clerk SET datestyle = 'German'",
+    ] {
+        assert_eq!(run(&mut admin, sql).unwrap(), "ALTER ROLE", "{sql}");
+    }
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    assert_eq!(
+        run(&mut clerk, "SELECT current_setting('application_name') AS a, current_setting('search_path') AS p").unwrap(),
+        "a|p\nclerk desk|audit_schema, public\nSELECT 1"
+    );
+    run(&mut admin, "ALTER ROLE clerk IN DATABASE eggdb RESET application_name").unwrap();
+    run(&mut admin, "ALTER ROLE clerk RESET ALL").unwrap();
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    assert_eq!(
+        run(&mut clerk, "SELECT current_setting('application_name') AS a").unwrap(),
+        "a\neveryone\nSELECT 1"
+    );
+    assert!(run(&mut admin, "ALTER ROLE nobody SET search_path TO public").is_err());
+    run(&mut admin, "CREATE USER temp_user LOGIN").unwrap();
+    run(&mut admin, "ALTER ROLE temp_user SET work_mem = '64MB'").unwrap();
+    run(&mut admin, "DROP ROLE temp_user").unwrap();
+    let left = admin
+        .read(|reader, _| crate::roles::every_role_setting(reader))
+        .unwrap();
+    assert!(left.iter().all(|(role, _, _)| role != "temp_user"));
+}

@@ -29,9 +29,57 @@ impl Parser<'_> {
 
     pub(super) fn alter_role(&mut self) -> SqlResult<Statement> {
         self.at += 2;
+        let every_role = self.postgresql() && self.is_word("all") && self.at_role_setting_after(1);
+        if every_role {
+            self.at += 1;
+            return self.role_setting(None);
+        }
         let name = self.role_name()?;
+        if self.postgresql() && self.at_role_setting_after(0) {
+            return self.role_setting(Some(name.text));
+        }
         let options = self.role_options()?;
         Ok(Statement::Role(RoleStatement::Alter { name, options }))
+    }
+
+    fn at_role_setting_after(&self, ahead: usize) -> bool {
+        self.is_word_at(ahead, "set")
+            || self.is_word_at(ahead, "reset")
+            || (self.is_word_at(ahead, "in") && self.is_word_at(ahead + 1, "database"))
+    }
+
+    fn role_setting(&mut self, role: Option<String>) -> SqlResult<Statement> {
+        let database = if self.take_word("in") {
+            self.expect_word("database")?;
+            Some(self.name()?.text)
+        } else {
+            None
+        };
+        let change = if self.take_word("reset") {
+            if self.take_word("all") {
+                crate::roles::SettingChange::ResetAll
+            } else {
+                crate::roles::SettingChange::Reset { name: self.parameter_name()? }
+            }
+        } else {
+            self.expect_word("set")?;
+            let name = self.parameter_name()?;
+            if self.take_word("from") {
+                return Err(self.not_supported("ALTER ROLE ... SET ... FROM CURRENT"));
+            }
+            if !self.take_word("to") && !self.take_operator("=") {
+                return Err(self.unexpected());
+            }
+            match self.setting_value()? {
+                Some(value) => crate::roles::SettingChange::Set { name, value },
+                None => crate::roles::SettingChange::Reset { name },
+            }
+        };
+        Ok(Statement::Role(RoleStatement::Settings(crate::roles::RoleSettingStatement {
+            role,
+            database,
+            change,
+        })))
     }
 
     pub(super) fn drop_role(&mut self) -> SqlResult<Statement> {

@@ -1162,6 +1162,7 @@ impl<'s> Session<'s> {
             ));
         };
         let limits = self.read(|reader, _| crate::roles::role_limits(reader, &role.name))?;
+        let login_settings = self.read(|reader, _| crate::roles::login_settings(reader, &role.name, database))?;
         let open_connection = crate::admission::connect(
             database,
             &role.name,
@@ -1176,6 +1177,12 @@ impl<'s> Session<'s> {
         settings.set_superuser(role.superuser);
         settings.login_role = Some(role.name);
         settings.role_limits = limits;
+        for (name, value) in login_settings {
+            if is_dialect_setting(&name) {
+                continue;
+            }
+            let _ = settings.set(&name, Some(&value));
+        }
         Ok(())
     }
 

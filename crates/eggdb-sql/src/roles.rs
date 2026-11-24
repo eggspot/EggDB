@@ -162,13 +162,14 @@ pub(crate) enum RoleStatement {
         role: Option<String>,
         reset: bool,
     },
+    Settings(RoleSettingStatement),
 }
 
 impl RoleStatement {
     pub(crate) fn tag(&self) -> &'static str {
         match self {
             Self::Create { .. } => "CREATE ROLE",
-            Self::Alter { .. } => "ALTER ROLE",
+            Self::Alter { .. } | Self::Settings(_) => "ALTER ROLE",
             Self::Drop { .. } => "DROP ROLE",
             Self::Privileges { granting: true, .. }
             | Self::Membership { granting: true, .. }
@@ -744,6 +745,7 @@ pub(crate) fn run(
             change_role_limits(writer, &role.name, options.limits)?;
         }
         RoleStatement::Drop { names, if_exists } => drop_roles(writer, names, *if_exists)?,
+        RoleStatement::Settings(statement) => role_settings::change(writer, statement)?,
         RoleStatement::Deny {
             privileges,
             columns: denied_columns,
@@ -885,6 +887,7 @@ fn drop_roles(writer: &mut dyn KeyValueWrite, names: &[Name], if_exists: bool) -
         }
         writer.delete(&role_key(&name.text))?;
         writer.delete(&role_limit_key(&name.text))?;
+        role_settings::forget_role(writer, &name.text)?;
         for mut role in stored_roles(writer)? {
             let before = role.member_of.len();
             role.member_of.retain(|parent| parent != &name.text);
@@ -1460,8 +1463,13 @@ pub fn login_verifier(reader: &dyn KeyValueRead, user: &str) -> SqlResult<Option
 mod access_records;
 mod columns;
 mod object_grants;
+mod role_settings;
 
 pub(crate) use access_records::AccessRecords;
+pub(crate) use role_settings::{
+    ROLE_SETTING_SPACE, RoleSettingStatement, SettingChange, every_setting as every_role_setting,
+    login_settings,
+};
 pub(crate) use object_grants::{
     OBJECT_GRANT_SPACE, ObjectChange, ObjectKind, ObjectPrivilege, forget as forget_object_grants,
     check_execute, grants_on as object_grants_on, holds as holds_object_grant, sequence_privileges,
