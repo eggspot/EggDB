@@ -121,6 +121,7 @@ mod mysql_spatial;
 mod mysql_variables;
 mod name_resolution;
 mod wasm_routines;
+mod current_query;
 mod native_functions;
 mod image_metadata;
 mod netcdf;

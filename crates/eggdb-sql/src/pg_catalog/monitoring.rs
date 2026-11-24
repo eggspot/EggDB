@@ -1408,7 +1408,7 @@ pub(crate) fn result_type(name: &str) -> Option<SqlType> {
         crate::event_triggers::TABLE_REWRITE_OID => SqlType::Catalog(super::CatalogType::Oid),
         "pg_stat_statements_reset" => SqlType::VOID,
         "pg_postmaster_start_time" | "pg_conf_load_time" => STAMP,
-        "pg_size_pretty" | "pg_tablespace_location" | "pg_current_wal_lsn" => SqlType::Text,
+        "pg_size_pretty" | "pg_tablespace_location" | "pg_current_wal_lsn" | "current_query" => SqlType::Text,
         "pg_database_size"
         | "pg_total_relation_size"
         | "pg_relation_size"
@@ -1477,6 +1477,7 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
         )),
         "pg_postmaster_start_time" | "pg_conf_load_time" => Ok(started_at().clone()),
         "pg_tablespace_location" => Ok(Value::Text(String::new())),
+        "current_query" => Ok(crate::current_query::current().map_or(Value::Null, Value::Text)),
         "pg_current_wal_lsn" => Ok(Value::Text("0/0".to_owned())),
         "pg_size_pretty" => match values {
             [Value::Null] => Ok(Value::Null),

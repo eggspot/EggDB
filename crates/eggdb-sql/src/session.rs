@@ -2023,6 +2023,7 @@ impl<'s> Session<'s> {
         on_result: &mut dyn FnMut(QueryResult) -> bool,
         client: &mut Client<'_>,
     ) -> SqlResult<()> {
+        let _client_text = crate::current_query::enter(text);
         if self.prepare_workload(text, on_result)? {
             return Ok(());
         }

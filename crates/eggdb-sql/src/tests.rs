@@ -3016,6 +3016,22 @@ fn text_search_configurations_map_token_types_to_dictionaries() {
 }
 
 #[test]
+fn current_query_answers_the_text_the_client_sent() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    assert_eq!(
+        last(&mut session, "SELECT 1 AS one; SELECT current_query() AS q"),
+        "q\nSELECT 1 AS one; SELECT current_query() AS q\nSELECT 1"
+    );
+    run(
+        &mut session,
+        "CREATE FUNCTION asked() RETURNS text LANGUAGE sql AS 'SELECT current_query()'",
+    )
+    .unwrap();
+    assert_eq!(last(&mut session, "SELECT asked() AS q"), "q\nSELECT asked() AS q\nSELECT 1");
+}
+
+#[test]
 fn a_thesaurus_dictionary_replaces_phrases_in_vectors_and_queries() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);

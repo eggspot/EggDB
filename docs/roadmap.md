@@ -1397,8 +1397,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   network, UUID, hash and base64 functions (D1291, D1302) and JSON functions with `->`/`->>` (D1297); SQL Server's
   `PATINDEX`, `QUOTENAME`, `ISNUMERIC`, `...FROMPARTS`, `HASHBYTES`, `STRING_ESCAPE`, `FORMATMESSAGE` (D1292, D1295);
   Oracle's `BITAND`, `REMAINDER`, `NANVL`, `SYS_GUID`, `STANDARD_HASH`, `ORA_HASH`, `UNISTR` and more (D1292, D1296);
-  SQLite's planner hints (D1293): **code written, unbuilt** (code-only mode, 2026-11-18). Left: user-defined aggregates
-  (`any_value`, `create_aggregate`), `current_query`, MySQL's `JSON_TABLE`, and a sweep of the remaining names.
+  SQLite's planner hints (D1293): **code written, unbuilt** (code-only mode, 2026-11-18). User-defined aggregates
+  (`any_value`, `create_aggregate`): **code written, unbuilt** (D1305); `current_query` (D1307): **code written, unbuilt**; MySQL's `JSON_TABLE` was
+  already there (D425). Left: a sweep of the remaining names.
 - MySQL's types: `BIGINT UNSIGNED` and unsigned ranges, `ENUM`, `SET`, `YEAR`, `BIT`, the spatial
   types, zero dates and the full `TIME` range (D19, sql.md). Columns of `BIGINT UNSIGNED`, `YEAR`, `BIT`,
   `ENUM` and `SET` accepted on the nearest stored type: **code written, unbuilt** (code-only mode, 2026-11-12,
