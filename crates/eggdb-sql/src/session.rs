@@ -2627,6 +2627,7 @@ impl<'s> Session<'s> {
             std::mem::take(&mut self.sequence_values),
             self.dialect,
             uses_sequences,
+            self.settings.checked_role.clone(),
         );
     }
 

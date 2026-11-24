@@ -387,3 +387,39 @@ fn connection_limits_refuse_logins_past_the_open_sessions_and_free_them_on_close
     let limits = role_limits(&store.begin_read().unwrap(), "few_logins").unwrap();
     assert_eq!((limits.connections, limits.connections_per_hour), (3, 5));
 }
+
+#[test]
+fn sequences_are_used_only_with_their_privileges() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE SEQUENCE tickets",
+        "CREATE SEQUENCE hidden",
+        "GRANT USAGE ON SEQUENCE tickets TO clerk",
+        "GRANT SELECT ON SEQUENCE public.hidden TO readers",
+    ] {
+        run(&mut admin, sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    assert_eq!(run(&mut clerk, "SELECT nextval('tickets') AS n").unwrap(), "n\n1\nSELECT 1");
+    assert_eq!(run(&mut clerk, "SELECT currval('tickets') AS n").unwrap(), "n\n1\nSELECT 1");
+    for sql in ["SELECT setval('tickets', 10)", "SELECT nextval('hidden')", "SELECT setval('hidden', 5)"] {
+        let error = run(&mut clerk, sql).expect_err(sql);
+        assert_eq!(error.state(), SqlState::INSUFFICIENT_PRIVILEGE, "{sql}: {error}");
+        assert!(error.to_string().contains("permission denied for sequence"), "{error}");
+    }
+    run(&mut admin, "GRANT UPDATE ON SEQUENCE hidden TO clerk").unwrap();
+    assert_eq!(run(&mut clerk, "SELECT setval('hidden', 5) AS n").unwrap(), "n\n5\nSELECT 1");
+    run(&mut admin, "REVOKE USAGE ON SEQUENCE tickets FROM clerk").unwrap();
+    assert!(run(&mut clerk, "SELECT nextval('tickets')").is_err());
+    assert_eq!(
+        run(&mut admin, "GRANT EXECUTE ON SEQUENCE tickets TO clerk").unwrap_err().state(),
+        SqlState::INVALID_GRANT_OPERATION
+    );
+    assert!(run(&mut admin, "GRANT USAGE ON SEQUENCE missing TO clerk").is_err());
+    run(&mut admin, "DROP SEQUENCE hidden").unwrap();
+    run(&mut admin, "CREATE SEQUENCE hidden").unwrap();
+    assert!(run(&mut clerk, "SELECT setval('hidden', 5)").is_err());
+}

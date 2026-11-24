@@ -14,6 +14,7 @@ pub(crate) enum ObjectKind {
     Parameter,
     Tablespace,
     Routine,
+    Sequence,
 }
 
 impl ObjectKind {
@@ -24,6 +25,7 @@ impl ObjectKind {
             Self::Parameter => 3,
             Self::Tablespace => 4,
             Self::Routine => 5,
+            Self::Sequence => 6,
         }
     }
 
@@ -35,6 +37,7 @@ impl ObjectKind {
             Self::Parameter => &[ObjectPrivilege::Set, ObjectPrivilege::AlterSystem],
             Self::Tablespace => &[ObjectPrivilege::Create],
             Self::Routine => &[ObjectPrivilege::Execute],
+            Self::Sequence => &[ObjectPrivilege::Usage, ObjectPrivilege::Select, ObjectPrivilege::Update],
         }
     }
 
@@ -46,6 +49,7 @@ impl ObjectKind {
             Self::Parameter => "parameter",
             Self::Tablespace => "tablespace",
             Self::Routine => "function",
+            Self::Sequence => "sequence",
         }
     }
 }
@@ -58,6 +62,8 @@ pub(crate) enum ObjectPrivilege {
     Set,
     AlterSystem,
     Execute,
+    Select,
+    Update,
 }
 
 impl ObjectPrivilege {
@@ -68,6 +74,8 @@ impl ObjectPrivilege {
             Self::Set => 4,
             Self::AlterSystem => 8,
             Self::Execute => 16,
+            Self::Select => 32,
+            Self::Update => 64,
         }
     }
 
@@ -79,6 +87,8 @@ impl ObjectPrivilege {
             Self::Set => "SET",
             Self::AlterSystem => "ALTER SYSTEM",
             Self::Execute => "EXECUTE",
+            Self::Select => "SELECT",
+            Self::Update => "UPDATE",
         }
     }
 }
@@ -152,6 +162,12 @@ pub(crate) fn change(writer: &mut dyn KeyValueWrite, change: &ObjectChange<'_>) 
                 format!("schema \"{object}\" does not exist"),
             ));
         }
+        if change.kind == ObjectKind::Sequence && crate::sequences::read(writer, object)?.is_none() {
+            return Err(SqlError::new(
+                SqlState::UNDEFINED_TABLE,
+                format!("relation \"{}\" does not exist", crate::schemas::display(object)),
+            ));
+        }
         for grantee in change.grantees {
             if grantee != PUBLIC && stored_role(writer, grantee)?.is_none() {
                 return Err(missing_role(grantee));
@@ -222,6 +238,31 @@ pub(crate) fn holds(
         }
     }
     Ok(false)
+}
+
+/// The privileges on sequence `sequence` that a role whose role closure is `held` may use,
+/// as `ObjectPrivilege` bits (D1310): all of them when one of the roles owns the table the
+/// sequence belongs to (`OWNED BY`, as a `serial` column's sequence does), else those granted
+/// to one of them or to `PUBLIC`.
+pub(crate) fn sequence_privileges(
+    reader: &dyn KeyValueRead,
+    held: &BTreeSet<String>,
+    sequence: &str,
+    owning_table: Option<&str>,
+) -> SqlResult<u8> {
+    if let Some(table) = owning_table
+        && super::owner_of(reader, table)?.is_some_and(|owner| held.contains(&owner))
+    {
+        return Ok(ObjectKind::Sequence
+            .privileges()
+            .iter()
+            .fold(0, |bits, privilege| bits | privilege.bit()));
+    }
+    let mut bits = 0u8;
+    for member in held {
+        bits |= read(reader, &key(ObjectKind::Sequence, sequence, member))?.0;
+    }
+    Ok(bits)
 }
 
 /// Forgets every grant on `object`: when it is dropped, so one made later under its name starts

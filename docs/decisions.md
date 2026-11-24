@@ -1334,3 +1334,4 @@ its full title with its status.
 - [D1307](decisions/D1307.md) Code-only batch 963 (M4): PostgreSQL's current_query()
 - [D1308](decisions/D1308.md) Code-only batch 964 (M4): ts_stat with weights
 - [D1309](decisions/D1309.md) Code-only batch 965 (M5): changes written back into SQLite files through the rollback journal
+- [D1310](decisions/D1310.md) Code-only batch 966 (M8): sequence privileges

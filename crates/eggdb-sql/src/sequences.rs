@@ -1,5 +1,6 @@
 use crate::ast::{AlterSequence, CreateSequence, Expr, ExprKind, Literal, Name, SequenceOptions};
 use crate::dialect::Dialect;
+use crate::roles::ObjectPrivilege;
 use crate::encoding::{
     SequenceDefinition, TableDefinition, integer_type_range, prefix_end, sequence_key,
     sequences_prefix, table_key,
@@ -41,6 +42,8 @@ struct StatementSequences {
     memory: WorkMemory,
     missing: Option<String>,
     identities: Option<HashMap<String, IdentityCounter>>,
+    checked_role: Option<String>,
+    usable: HashMap<String, u8>,
 }
 
 struct IdentityCounter {
@@ -101,7 +104,7 @@ thread_local! {
     static STATEMENT: RefCell<Vec<StatementSequences>> = const { RefCell::new(Vec::new()) };
 }
 
-pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool) {
+pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool, checked_role: Option<String>) {
     STATEMENT.with(|state| {
         state.borrow_mut().push(StatementSequences {
             dialect,
@@ -115,6 +118,8 @@ pub(crate) fn enter(session: SessionSequences, dialect: Dialect, wanted: bool) {
             memory: WorkMemory::new(),
             missing: None,
             identities: None,
+            checked_role,
+            usable: HashMap::new(),
         });
     });
 }
@@ -258,7 +263,21 @@ pub(crate) fn load_all(reader: &dyn KeyValueRead) -> SqlResult<()> {
     if let Some(error) = failure {
         return Err(error);
     }
+    let checked_role =
+        STATEMENT.with(|state| state.borrow().last().and_then(|state| state.checked_role.clone()));
+    let mut usable = HashMap::new();
+    if let Some(role) = checked_role {
+        let held = crate::roles::role_closure(reader, &role)?;
+        for (name, sequence) in &found {
+            let owning_table = sequence.owned_by.as_ref().map(|(table, _)| table.as_str());
+            usable.insert(
+                name.clone(),
+                crate::roles::sequence_privileges(reader, &held, name, owning_table)?,
+            );
+        }
+    }
     with_state(|state| {
+        state.usable.extend(usable);
         for (name, sequence) in found {
             state.memory.charge(name.len() + 128)?;
             if !state.loaded.contains_key(&name) {
@@ -1123,6 +1142,7 @@ pub(crate) fn drop_sequences(
         let owner = read(writer, &name.text)?.and_then(|sequence| sequence.owned_by);
         writer.delete(&sequence_key(&name.text))?;
         crate::comments::forget_owner(writer, &name.text)?;
+        crate::roles::forget_object_grants(writer, crate::roles::ObjectKind::Sequence, &name.text)?;
         if let Some((owner, _)) = owner {
             crate::constraints::refresh_flags(writer, tables, &owner)?;
         }
@@ -1143,6 +1163,7 @@ pub(crate) fn drop_owned_by(
             && column.is_none_or(|column| column == owner_column)
         {
             writer.delete(&sequence_key(&name))?;
+            crate::roles::forget_object_grants(writer, crate::roles::ObjectKind::Sequence, &name)?;
         }
     }
     forget_loaded();
@@ -1407,6 +1428,25 @@ fn next_value(name: &str, sequence: &mut SequenceDefinition, dialect: Dialect) -
     Ok(value)
 }
 
+fn permission_denied_for_sequence(name: &str) -> SqlError {
+    SqlError::new(
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        format!("permission denied for sequence {}", crate::schemas::display(name)),
+    )
+}
+
+fn check_use(state: &StatementSequences, name: &str, any_of: &[ObjectPrivilege]) -> SqlResult<()> {
+    if state.checked_role.is_none() || crate::temporary::is_temporary_name(name) {
+        return Ok(());
+    }
+    let held = state.usable.get(name).copied().unwrap_or(0);
+    if any_of.iter().any(|privilege| held & privilege.bit() != 0) {
+        Ok(())
+    } else {
+        Err(permission_denied_for_sequence(name))
+    }
+}
+
 fn nextval(name: &str) -> SqlResult<Value> {
     with_state(|state| {
         if let Some(counter) = state
@@ -1423,6 +1463,8 @@ fn nextval(name: &str) -> SqlResult<Value> {
             return Ok(Value::BigInt(value));
         }
         let dialect = state.dialect;
+        loaded(state, name)?;
+        check_use(state, name, &[ObjectPrivilege::Usage, ObjectPrivilege::Update])?;
         let sequence = loaded(state, name)?;
         let value = next_value(name, sequence, dialect)?;
         mark_changed(state, name, NEXTVAL);
@@ -1437,6 +1479,7 @@ fn currval(name: &str) -> SqlResult<Value> {
         let dialect = state.dialect;
         if identity_counter(state, name).is_none() {
             loaded(state, name)?;
+            check_use(state, name, &[ObjectPrivilege::Usage, ObjectPrivilege::Select])?;
         }
         match state.session.currval.get(name) {
             Some(&value) => Ok(Value::BigInt(value)),
@@ -1473,6 +1516,9 @@ fn lastval() -> SqlResult<Value> {
         };
         if !exists {
             return Err(undefined());
+        }
+        if identity_counter(state, &name).is_none() {
+            check_use(state, &name, &[ObjectPrivilege::Usage, ObjectPrivilege::Select])?;
         }
         state
             .session
@@ -1532,6 +1578,8 @@ fn setval(name: &str, value: &Value, is_called: &Value) -> SqlResult<Value> {
             }
             return Ok(Value::BigInt(number));
         }
+        loaded(state, name)?;
+        check_use(state, name, &[ObjectPrivilege::Update])?;
         let sequence = loaded(state, name)?;
         if number < sequence.min || number > sequence.max {
             return Err(SqlError::new(

@@ -220,6 +220,7 @@ impl Parser<'_> {
             "parameter" => Some(ObjectKind::Parameter),
             "tablespace" => Some(ObjectKind::Tablespace),
             "function" | "procedure" | "routine" => Some(ObjectKind::Routine),
+            "sequence" => Some(ObjectKind::Sequence),
             _ => None,
         }
     }
@@ -249,6 +250,10 @@ impl Parser<'_> {
                 privileges.push(ObjectPrivilege::AlterSystem);
             } else if self.take_word("execute") {
                 privileges.push(ObjectPrivilege::Execute);
+            } else if self.take_word("select") {
+                privileges.push(ObjectPrivilege::Select);
+            } else if self.take_word("update") {
+                privileges.push(ObjectPrivilege::Update);
             } else {
                 return Err(self.unexpected());
             }
@@ -289,6 +294,12 @@ impl Parser<'_> {
 
     fn granted_object(&mut self, kind: ObjectKind) -> SqlResult<String> {
         let first = self.name()?.text;
+        if kind == ObjectKind::Sequence {
+            return Ok(match self.take(&TokenKind::Dot) {
+                true => crate::schemas::qualified(&first, &self.name()?.text),
+                false => first,
+            });
+        }
         if kind != ObjectKind::Routine {
             return Ok(first);
         }
