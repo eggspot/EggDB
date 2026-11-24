@@ -36,6 +36,7 @@ struct Call {
 pub(crate) const ORDERED_ARGUMENTS: &str = "ordered_aggregate_arguments";
 pub(crate) const FILTERED_ARGUMENTS: &str = "filtered_aggregate_arguments";
 pub(crate) const ORDERED_SET_ARGUMENTS: &str = "ordered_set_arguments";
+pub(crate) const MYSQL_ANY_VALUE: &str = "mysql_any_value";
 
 pub(crate) fn filtered(expr: Expr, condition: Expr) -> Expr {
     let ExprKind::Aggregate {
@@ -428,6 +429,8 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
         | AggregateFunction::Corr
         | AggregateFunction::CorrS
         | AggregateFunction::CorrK => Some(SqlType::Double),
+        AggregateFunction::AnyValue => argument.map(SqlType::without_modifier),
+        AggregateFunction::Native => None,
     }
 }
 
@@ -821,6 +824,18 @@ impl Analyzer<'_> {
             ExprKind::Function { name, arguments } if crate::grouping_sets::is_operation(name) => {
                 self.grouping_operation(name, arguments, expr.position)
             }
+            ExprKind::Function { name, arguments }
+                if name == MYSQL_ANY_VALUE && arguments.len() == 1 =>
+            {
+                self.rewrite(&Expr {
+                    kind: ExprKind::Aggregate {
+                        function: AggregateFunction::AnyValue,
+                        argument: Some(Box::new(arguments[0].clone())),
+                        distinct: false,
+                    },
+                    position: expr.position,
+                })
+            }
             ExprKind::Aggregate {
                 function,
                 argument,
@@ -1118,6 +1133,7 @@ pub(crate) enum Accumulator {
     Moments(crate::statistical_aggregates::Moments),
     Standing(crate::hypothetical_set::Standing),
     Paired(crate::bivariate_aggregates::PairSums),
+    NativeRows { rows: Vec<Vec<Value>>, bytes: usize },
 }
 
 struct Group {
@@ -1151,6 +1167,7 @@ impl Accumulator {
                 })
                 .sum(),
             Self::Paired(sums) => sums.held_bytes(),
+            Self::NativeRows { bytes, .. } => *bytes,
             _ => 0,
         }
     }
@@ -1189,7 +1206,13 @@ impl Call {
                 sum: Sum::Empty,
                 count: 0,
             },
-            AggregateFunction::Min | AggregateFunction::Max => Accumulator::Extreme(Value::Null),
+            AggregateFunction::Min | AggregateFunction::Max | AggregateFunction::AnyValue => {
+                Accumulator::Extreme(Value::Null)
+            }
+            AggregateFunction::Native => Accumulator::NativeRows {
+                rows: Vec::new(),
+                bytes: 0,
+            },
             AggregateFunction::StringAgg => Accumulator::Joined(None),
             AggregateFunction::JsonAgg
             | AggregateFunction::JsonbAgg
@@ -1502,13 +1525,13 @@ impl Call {
                 *count += 1;
             }
             Accumulator::Extreme(best) => {
-                let replace = best.is_null() || {
-                    let ordering = compare_values(&value, best);
-                    match self.function {
-                        AggregateFunction::Min => ordering == Ordering::Less,
-                        _ => ordering == Ordering::Greater,
-                    }
-                };
+                let ordering = || compare_values(&value, best);
+                let replace = best.is_null()
+                    || match self.function {
+                        AggregateFunction::AnyValue => false,
+                        AggregateFunction::Min => ordering() == Ordering::Less,
+                        _ => ordering() == Ordering::Greater,
+                    };
                 if replace {
                     *best = value;
                 }
@@ -1536,7 +1559,8 @@ impl Call {
             | Accumulator::JsonParts(_)
             | Accumulator::Ordered(_)
             | Accumulator::Standing(_)
-            | Accumulator::Paired(_) => {}
+            | Accumulator::Paired(_)
+            | Accumulator::NativeRows { .. } => {}
         }
         Ok(())
     }
@@ -1668,6 +1692,20 @@ impl Call {
             Accumulator::Moments(moments) => moments.finish(self.function)?,
             Accumulator::Standing(standing) => standing.result(self.function),
             Accumulator::Paired(sums) => sums.finish(self.function),
+            Accumulator::NativeRows { rows, .. } => {
+                let Some((name, inputs)) = self
+                    .argument
+                    .as_ref()
+                    .and_then(unfiltered)
+                    .and_then(crate::native_functions::aggregate_parts)
+                else {
+                    return Err(SqlError::new(
+                        SqlState::INTERNAL_ERROR,
+                        "an aggregate the program defines lost its arguments",
+                    ));
+                };
+                crate::native_functions::finish_aggregate(name, inputs.len(), &rows)?
+            }
         })
     }
 }
@@ -1993,6 +2031,13 @@ impl Grouping {
                 }
                 continue;
             }
+            if call.function == AggregateFunction::Native {
+                if let Some(argument) = argument {
+                    Self::step_native(call, argument, group, number, evaluator, memory, distinct_key)
+                    .map_err(|error| error.at_if_unplaced(call.position))?;
+                }
+                continue;
+            }
             let Some(argument) = argument else {
                 if let Accumulator::Count(count) = &mut group.accumulators[number] {
                     *count += 1;
@@ -2084,6 +2129,48 @@ impl Grouping {
             }
         }
         Ok(())
+    }
+
+    fn step_native(
+        call: &Call,
+        argument: &Expr,
+        group: &mut Group,
+        number: usize,
+        evaluator: &Evaluator<'_>,
+        memory: &mut WorkMemory,
+        distinct_key: &mut Vec<u8>,
+    ) -> SqlResult<()> {
+        let Some((_, inputs)) = crate::native_functions::aggregate_parts(argument) else {
+            return Ok(());
+        };
+        let values = inputs
+            .iter()
+            .map(|input| evaluator.eval(input, None))
+            .collect::<SqlResult<Vec<Value>>>()?;
+        if call.distinct {
+            if values.iter().all(Value::is_null) {
+                return Ok(());
+            }
+            distinct_key.clear();
+            for value in &values {
+                equality_key(distinct_key, value);
+            }
+            if group.seen[number].contains(distinct_key.as_slice()) {
+                return Ok(());
+            }
+            memory.charge(distinct_key.len() + 32)?;
+            group.seen[number].insert(distinct_key.clone());
+        }
+        let Accumulator::NativeRows { rows, bytes } = &mut group.accumulators[number] else {
+            return Ok(());
+        };
+        let grown = values.iter().map(crate::memory::held_bytes).sum::<usize>() + 24;
+        let total = bytes.saturating_add(grown);
+        crate::memory::check_value_bytes(total)?;
+        *bytes = total;
+        rows.push(values);
+        group.held.add_bytes(grown)?;
+        memory.charge(grown)
     }
 
     fn finished_rows(

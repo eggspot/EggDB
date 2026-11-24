@@ -29,7 +29,7 @@
 use crate::{Database, Error, ErrorKind, ReadTransaction, WriteTransaction};
 use eggdb_sql::StoreFailure;
 pub use eggdb_sql::{
-    CancelSignal, FileReader, NativeFunction, NativeFunctions, NewFileWriter, ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck,
+    CancelSignal, FileReader, NativeAggregate, NativeAggregateState, NativeFunction, NativeFunctions, NewFileWriter, ColumnSchema, CopyChannel, CopyFormat, CopyStart, Dialect, IndexCheck,
     IndexColumnOrder, IndexSchema, Interval, IntervalFields, Numeric, NumericModifier,
     OneStatementError, OneStatementRefusal, OutputColumn, Parameter, QueryResult,
     RESERVED_KEY_PREFIX, Session, SqlError, SqlResult, SqlState, SqlType, TableSchema,

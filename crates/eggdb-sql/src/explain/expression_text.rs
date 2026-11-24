@@ -385,6 +385,12 @@ impl ExpressionText<'_> {
                 } else {
                     ""
                 };
+                if let Some((called, inputs)) = argument
+                    .as_deref()
+                    .and_then(crate::native_functions::aggregate_parts)
+                {
+                    return format!("{called}({distinct}{})", self.joined(inputs, ", ", depth));
+                }
                 let argument = match argument.as_deref().map(|argument| &argument.kind) {
                     None => "*".to_owned(),
                     Some(ExprKind::Function { name, arguments })

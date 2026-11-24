@@ -93,6 +93,11 @@ class AsyncConnection:
         connection's worker thread."""
         await self._run(lambda: self._connection.create_function(name, narg, func, deterministic=deterministic))
 
+    async def create_aggregate(self, name, n_arg, aggregate_class):
+        """Defines a SQL aggregate as ``Connection.create_aggregate`` does; it runs on the
+        connection's worker thread."""
+        await self._run(lambda: self._connection.create_aggregate(name, n_arg, aggregate_class))
+
     async def executescript(self, script):
         """Runs a script as ``Connection.executescript`` does."""
         cursor = await self._run(self._connection.executescript, script)

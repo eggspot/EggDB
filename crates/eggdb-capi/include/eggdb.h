@@ -244,6 +244,11 @@ void eggdb_function_result_double(eggdb_function_context *context, double value)
 void eggdb_function_result_text(eggdb_function_context *context, const uint8_t *data, size_t len);
 void eggdb_function_result_blob(eggdb_function_context *context, const uint8_t *data, size_t len);
 void eggdb_function_result_error(eggdb_function_context *context, const char *message);
+typedef void (*eggdb_aggregate_final)(eggdb_function_context *context, void *user_data);
+int eggdb_sql_create_aggregate(eggdb_sql *sql, const char *name, int arguments,
+                               eggdb_function step, eggdb_aggregate_final finish,
+                               void *user_data, eggdb_destroy destroy);
+void *eggdb_aggregate_context(eggdb_function_context *context, size_t bytes);
 
 int eggdb_sql_prepare(eggdb_sql *sql, const char *text, size_t len, eggdb_stmt **stmt);
 int eggdb_stmt_parameter_count(eggdb_stmt *stmt, size_t *count);

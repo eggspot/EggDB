@@ -1415,6 +1415,9 @@ impl Evaluator<'_> {
             return crate::ranges::construct(self, range.oid, arguments);
         }
         match name {
+            crate::aggregate::MYSQL_ANY_VALUE if arguments.len() == 1 => {
+                return self.eval(&arguments[0], None);
+            }
             crate::records::ROW_FUNCTION => {
                 if let Some(error) =
                     crate::row_values::misused(crate::constraints::current_dialect(), arguments)

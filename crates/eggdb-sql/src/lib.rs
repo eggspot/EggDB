@@ -306,6 +306,8 @@ mod with_statement;
 #[cfg(test)]
 mod arrays_tests;
 #[cfg(test)]
+mod user_aggregates_tests;
+#[cfg(test)]
 mod batch_logic_tests;
 #[cfg(test)]
 mod bulk_load_tests;
@@ -456,7 +458,9 @@ pub use indexes::IndexCheck;
 pub use interval::{Interval, IntervalFields};
 pub use memory::{MAX_ROW_BYTES, MAX_VALUE_BYTES, held_row_bytes};
 pub use mysql_errors::Warning;
-pub use native_functions::{NativeFunction, NativeFunctions, with_native_functions};
+pub use native_functions::{
+    NativeAggregate, NativeAggregateState, NativeFunction, NativeFunctions, with_native_functions,
+};
 pub use new_files::{FileReader, NewFileWriter};
 pub use mysql_variables::MYSQL_COMPATIBLE_VERSION;
 pub use notifications::Notification;

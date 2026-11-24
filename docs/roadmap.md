@@ -1173,8 +1173,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The SQLAlchemy dialect, the Django backend and asyncio support for Python (D16, D182). The SQLAlchemy dialect
   (`eggdb.sqlalchemy`) and asyncio support (`eggdb.aio`): **code written, unbuilt** (code-only mode, 2026-11-13,
   D957). Functions the program defines (`create_function`, on the C API's `eggdb_sql_create_function`): **code written,
-  unbuilt** (D1266). The Django backend (`eggdb.django`): **code written, unbuilt** (D1267); `executescript`, `lastrowid`, `in_transaction` and `total_changes` (D1285); row factories and `eggdb.Row` (D1286). Left: aggregates
-  (`create_aggregate`) and Django's own test suite.
+  unbuilt** (D1266). The Django backend (`eggdb.django`): **code written, unbuilt** (D1267); `executescript`, `lastrowid`, `in_transaction` and `total_changes` (D1285); row factories and `eggdb.Row` (D1286); aggregates (`create_aggregate`, on the C API's `eggdb_sql_create_aggregate`)
+  and `any_value`: **code written, unbuilt** (D1305). Left: Django's own test suite.
 - Prisma, TypeORM, Drizzle, Sequelize and Knex adapters for Node.js (D16, D182). Drizzle (`eggdb/drizzle`) and Knex
   (`eggdb/knex`): **code written, unbuilt** (code-only mode, 2026-11-13, D959). TypeORM and Sequelize through a
   `sqlite3`-compatible module (`eggdb/sqlite3`): **code written, unbuilt** (code-only mode, 2026-11-13, D960).

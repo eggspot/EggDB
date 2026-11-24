@@ -42,9 +42,10 @@ pub use copy::{
     eggdb_sql_copy_in_begin, eggdb_sql_copy_out_begin,
 };
 pub use functions::{
-    EggdbDestroy, EggdbFunction, EggdbFunctionContext, eggdb_function_result_blob,
-    eggdb_function_result_double, eggdb_function_result_error, eggdb_function_result_int64,
-    eggdb_function_result_null, eggdb_function_result_text, eggdb_sql_create_function,
+    EggdbAggregateFinal, EggdbDestroy, EggdbFunction, EggdbFunctionContext, eggdb_aggregate_context,
+    eggdb_function_result_blob, eggdb_function_result_double, eggdb_function_result_error,
+    eggdb_function_result_int64, eggdb_function_result_null, eggdb_function_result_text,
+    eggdb_sql_create_aggregate, eggdb_sql_create_function,
 };
 pub use inspection::{EggdbCheckReport, EggdbStats, eggdb_check, eggdb_open_v2, eggdb_stats};
 pub use database::{

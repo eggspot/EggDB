@@ -87,10 +87,6 @@ class DbApiTest(unittest.TestCase):
         self.assertEqual(b"".join(connection.copy_to("COPY t TO STDOUT")), b"1\tada\n2\tgrace\n")
         connection.close()
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_functions_defined_in_python_run_in_sql(self):
         connection = eggdb.connect(":memory:")
         connection.create_function("twice", 1, lambda value: None if value is None else value * 2, deterministic=True)
@@ -104,6 +100,37 @@ if __name__ == "__main__":
         connection.create_function("twice", 1, None)
         with self.assertRaises(eggdb.Error):
             cursor.execute("SELECT twice(1)")
+        connection.close()
+
+    def test_aggregates_defined_in_python_run_per_group(self):
+        class Longest:
+            def __init__(self):
+                self.longest = None
+
+            def step(self, word):
+                if not isinstance(word, str):
+                    raise ValueError("longest takes text")
+                if self.longest is None or len(word) > len(self.longest):
+                    self.longest = word
+
+            def finalize(self):
+                return self.longest
+
+        connection = eggdb.connect(":memory:")
+        connection.create_aggregate("longest", 1, Longest)
+        cursor = connection.cursor()
+        cursor.execute("CREATE TABLE words (team TEXT, word TEXT)")
+        cursor.executemany("INSERT INTO words VALUES (?, ?)", [("a", "egg"), ("a", "omelette"), ("b", "yolk")])
+        cursor.execute("SELECT team, longest(word) FROM words GROUP BY team ORDER BY team")
+        self.assertEqual(cursor.fetchall(), [("a", "omelette"), ("b", "yolk")])
+        cursor.execute("SELECT longest(word) FROM words WHERE team = 'none'")
+        self.assertEqual(cursor.fetchone(), (None,))
+        with self.assertRaises(eggdb.Error) as raised:
+            cursor.execute("SELECT longest(1) FROM words")
+        self.assertIn("longest takes text", str(raised.exception))
+        connection.create_aggregate("longest", 1, None)
+        with self.assertRaises(eggdb.Error):
+            cursor.execute("SELECT longest(word) FROM words")
         connection.close()
 
     def test_sqlite_conveniences_scripts_rowids_and_change_counts(self):
@@ -153,3 +180,7 @@ class KeyValueTest(unittest.TestCase):
                 with store.read() as transaction:
                     self.assertEqual(transaction.collections(), ["logins"])
                     self.assertEqual(transaction.get("s:1", collection="logins"), b"ada")
+
+
+if __name__ == "__main__":
+    unittest.main()

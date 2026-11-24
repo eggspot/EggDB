@@ -11,8 +11,9 @@ use eggdb_capi::{
     eggdb_stmt_bind_blob, eggdb_stmt_bind_bool, eggdb_stmt_bind_double, eggdb_stmt_bind_int64,
     eggdb_stmt_bind_null, eggdb_stmt_bind_text, eggdb_stmt_clear_bindings, eggdb_stmt_column_count,
     eggdb_stmt_column_name, eggdb_stmt_column_type, eggdb_stmt_execute, eggdb_stmt_finalize,
-    eggdb_stmt_parameter_count, eggdb_stmt_reset, EggdbFunctionContext, eggdb_function_result_error,
-    eggdb_function_result_int64, eggdb_function_result_text, eggdb_sql_create_function,
+    eggdb_stmt_parameter_count, eggdb_stmt_reset, EggdbFunctionContext, eggdb_aggregate_context,
+    eggdb_function_result_error, eggdb_function_result_int64, eggdb_function_result_null,
+    eggdb_function_result_text, eggdb_sql_create_aggregate, eggdb_sql_create_function,
 };
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::PathBuf;
@@ -652,5 +653,111 @@ fn a_defined_function_answers_from_the_program_and_is_destroyed_with_its_session
     assert_eq!(DESTROYED.load(Ordering::SeqCst), 0);
     close_sql(sql);
     assert_eq!(DESTROYED.load(Ordering::SeqCst), 1);
+    close_db(db);
+}
+
+unsafe extern "C" fn longest_step(context: *mut EggdbFunctionContext, _: *mut std::ffi::c_void, arguments: *const EggdbValue, count: usize) {
+    // SAFETY: the library passes `count` arguments that live for this call.
+    let values = unsafe { std::slice::from_raw_parts(arguments, count) };
+    let Some(value) = values.first() else {
+        return;
+    };
+    if value.kind != EGGDB_TEXT {
+        // SAFETY: the context of this call and a NUL-terminated message.
+        unsafe { eggdb_function_result_error(context, c"longest takes text".as_ptr()) };
+        return;
+    }
+    // SAFETY: the context of this call; the group's memory holds one i64.
+    let longest = unsafe { eggdb_aggregate_context(context, size_of::<i64>()) }.cast::<i64>();
+    let length = i64::try_from(value.len).unwrap_or(i64::MAX);
+    // SAFETY: the group's zeroed, aligned memory of one i64, alive during this call.
+    let current = unsafe { *longest };
+    if length > current {
+        // SAFETY: as above.
+        unsafe { *longest = length };
+    }
+}
+
+unsafe extern "C" fn longest_final(context: *mut EggdbFunctionContext, _: *mut std::ffi::c_void) {
+    // SAFETY: the context of this call; 0 bytes asks for the memory only if a step made it.
+    let longest = unsafe { eggdb_aggregate_context(context, 0) }.cast::<i64>();
+    if longest.is_null() {
+        // SAFETY: the context of this call.
+        unsafe { eggdb_function_result_null(context) };
+        return;
+    }
+    // SAFETY: the group's memory of one i64 made by a step.
+    let value = unsafe { *longest };
+    // SAFETY: the context of this call.
+    unsafe { eggdb_function_result_int64(context, value) };
+}
+
+fn integer_column(results: &[EggdbResult]) -> Vec<Option<i64>> {
+    let result = results.iter().find(|result| result.column_count > 0).expect("a result with rows");
+    (0..result.row_count)
+        .map(|row| {
+            // SAFETY: the session lends the result's values until its next call.
+            let value = unsafe { *result.values.add(row * result.column_count) };
+            (value.kind == EGGDB_INTEGER).then_some(value.integer)
+        })
+        .collect()
+}
+
+static AGGREGATES_DESTROYED: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn count_aggregate_destroyed(_: *mut std::ffi::c_void) {
+    AGGREGATES_DESTROYED.fetch_add(1, Ordering::SeqCst);
+}
+
+#[test]
+fn a_defined_aggregate_steps_each_group_and_finishes_with_its_own_memory() {
+    let file = TempPath::new("aggregates");
+    let db = open_db(&file);
+    let sql = open_sql(db, "sqlite");
+    let name = c_text("longest");
+    // SAFETY: a live session, a name, callbacks that read their arguments, and no user data.
+    ok(unsafe {
+        eggdb_sql_create_aggregate(
+            sql,
+            name.as_ptr(),
+            1,
+            Some(longest_step),
+            Some(longest_final),
+            ptr::null_mut(),
+            Some(count_aggregate_destroyed),
+        )
+    });
+    let (status, _) = execute(
+        sql,
+        "CREATE TABLE words (team TEXT, word TEXT); \
+         INSERT INTO words VALUES ('a', 'egg'), ('a', 'omelette'), ('b', 'yolk'), ('b', 'hen');",
+    );
+    assert_eq!(status, EGGDB_OK, "{}", last_error());
+    let (status, results) = execute(sql, "SELECT longest(word) FROM words GROUP BY team ORDER BY team");
+    assert_eq!(status, EGGDB_OK, "{}", last_error());
+    assert_eq!(integer_column(&results), vec![Some(8), Some(4)]);
+    let (status, results) = execute(sql, "SELECT longest(word) FROM words WHERE team = 'none'");
+    assert_eq!(status, EGGDB_OK, "{}", last_error());
+    assert_eq!(integer_column(&results), vec![None]);
+    let (status, results) = execute(sql, "SELECT longest(DISTINCT word) FILTER (WHERE team = 'b') FROM words");
+    assert_eq!(status, EGGDB_OK, "{}", last_error());
+    assert_eq!(integer_column(&results), vec![Some(4)]);
+    let (status, _) = execute(sql, "SELECT longest(1) FROM words");
+    assert_eq!(status, EGGDB_ERR_SQL);
+    assert!(last_error().contains("longest takes text"), "{}", last_error());
+    let statement = prepared(sql, "SELECT longest(word) FROM words WHERE team = ?");
+    // SAFETY: a live statement, its first parameter and 1 byte of text.
+    ok(unsafe { eggdb_stmt_bind_text(statement, 1, c"a".as_ptr().cast(), 1) });
+    let (status, results) = run(statement);
+    assert_eq!(status, EGGDB_OK, "{}", last_error());
+    assert_eq!(integer_column(&results), vec![Some(8)]);
+    // SAFETY: the statement, given up here.
+    ok(unsafe { eggdb_stmt_finalize(statement) });
+    // SAFETY: as above, with no callbacks: the definition is removed.
+    ok(unsafe { eggdb_sql_create_aggregate(sql, name.as_ptr(), 1, None, None, ptr::null_mut(), None) });
+    assert_eq!(AGGREGATES_DESTROYED.load(Ordering::SeqCst), 1);
+    let (status, _) = execute(sql, "SELECT longest(word) FROM words");
+    assert_eq!(status, EGGDB_ERR_SQL);
+    close_sql(sql);
     close_db(db);
 }

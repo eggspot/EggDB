@@ -82,6 +82,7 @@ class _Value(Structure):
 
 
 _FUNCTION = ctypes.CFUNCTYPE(None, c_void_p, c_void_p, POINTER(_Value), c_size_t)
+_FINAL = ctypes.CFUNCTYPE(None, c_void_p, c_void_p)
 _INT64_RANGE = range(-(2**63), 2**63)
 
 
@@ -130,6 +131,49 @@ def _callback(function):
             api.eggdb_function_result_error(context, message)
 
     return _FUNCTION(called)
+
+
+class _AggregateCallbacks:
+    def __init__(self, aggregate_class):
+        self.aggregate_class = aggregate_class
+        self.groups = {}
+        self.next_group = 1
+        self.step = _FUNCTION(self._stepped)
+        self.final = _FINAL(self._finished)
+
+    def _failed(self, api, context, method, error):
+        message = f"user-defined aggregate's '{method}' method raised error: {error}"
+        api.eggdb_function_result_error(context, message.encode("utf-8", "replace"))
+
+    def _stepped(self, context, _user_data, arguments, count):
+        api = _api()
+        try:
+            memory = api.eggdb_aggregate_context(context, 8)
+            if not memory:
+                raise MemoryError("no memory for the aggregate's group")
+            slot = ctypes.cast(memory, POINTER(c_int64))
+            if slot[0] == 0:
+                group = self.next_group
+                self.next_group += 1
+                self.groups[group] = self.aggregate_class()
+                slot[0] = group
+            instance = self.groups[slot[0]]
+            values = [_argument(arguments[index]) for index in range(count)]
+            instance.step(*values)
+        except BaseException as error:
+            self._failed(api, context, "step", error)
+
+    def _finished(self, context, _user_data):
+        api = _api()
+        try:
+            memory = api.eggdb_aggregate_context(context, 0)
+            if memory:
+                instance = self.groups.pop(ctypes.cast(memory, POINTER(c_int64))[0])
+            else:
+                instance = self.aggregate_class()
+            _answer(api, context, instance.finalize())
+        except BaseException as error:
+            self._failed(api, context, "finalize", error)
 
 
 class _Parameter(Structure):
@@ -246,6 +290,8 @@ def _api():
         "eggdb_function_result_text": (None, [c_void_p, c_char_p, c_size_t]),
         "eggdb_function_result_blob": (None, [c_void_p, c_char_p, c_size_t]),
         "eggdb_function_result_error": (None, [c_void_p, c_char_p]),
+        "eggdb_sql_create_aggregate": (c_int, [c_void_p, c_char_p, c_int, _FUNCTION, _FINAL, c_void_p, c_void_p]),
+        "eggdb_aggregate_context": (c_void_p, [c_void_p, c_size_t]),
     }
     for name, (restype, argtypes) in prototypes.items():
         function = getattr(library, name)
@@ -490,6 +536,32 @@ class Connection:
             self._functions.pop(key, None)
         else:
             self._functions[key] = callback
+
+    def create_aggregate(self, name, n_arg, aggregate_class):
+        """Makes `aggregate_class` the SQL aggregate `name` with `n_arg` arguments (-1 for any
+        number), as `sqlite3.Connection.create_aggregate` does: each group gets a new instance,
+        its `step` method gets each row's arguments and its `finalize` method answers the
+        group's value; `aggregate_class` None removes it. An exception fails the statement."""
+        session = self._live_session()
+        if self._database is None:
+            raise NotSupportedError("aggregates are defined on an embedded connection, not a server one")
+        callbacks = None if aggregate_class is None else _AggregateCallbacks(aggregate_class)
+        status = _api().eggdb_sql_create_aggregate(
+            session,
+            str(name).encode("utf-8"),
+            int(n_arg),
+            callbacks.step if callbacks is not None else ctypes.cast(None, _FUNCTION),
+            callbacks.final if callbacks is not None else ctypes.cast(None, _FINAL),
+            None,
+            None,
+        )
+        if status != 0:
+            _raise_last(status)
+        key = (str(name).lower(), int(n_arg))
+        if callbacks is None:
+            self._functions.pop(key, None)
+        else:
+            self._functions[key] = callbacks
 
     def prepare(self, sql):
         """Checks one statement once and returns a `Statement` that runs it as often as needed,

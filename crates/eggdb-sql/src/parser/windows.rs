@@ -177,6 +177,12 @@ impl Parser<'_> {
         else {
             return Err(self.unexpected());
         };
+        if function == AggregateFunction::Native {
+            return Err(SqlError::not_supported(
+                "OVER is not supported yet for aggregates the program defines",
+            )
+            .at(position));
+        }
         if function.is_ordered_set() || function.is_hypothetical() {
             return Err(SqlError::not_supported(format!(
                 "OVER is not supported for ordered-set aggregate {}",

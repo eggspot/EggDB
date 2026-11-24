@@ -411,7 +411,17 @@ gets the arguments as `eggdb_value`s, live until it returns, and sets its answer
 returns) or `_error`, which fails the statement with SQLSTATE 38000; setting nothing answers NULL.
 `destroy`, when not NULL, frees `user_data` once the definition is replaced or removed or the
 session closes. The function runs on the thread that runs the statement. A session from
-`eggdb_sql_connect` refuses definitions. Aggregate functions are not there yet.
+`eggdb_sql_connect` refuses definitions.
+
+`eggdb_sql_create_aggregate(sql, name, arguments, step, finish, user_data, destroy)` defines an
+aggregate the same way, as `sqlite3_create_function` does with `xStep` and `xFinal`: for each
+group, `step` runs once per input row with that row's arguments, and `finish` runs once at the
+end and sets the group's answer with the `eggdb_function_result_*` calls. Both reach the group's
+own memory with `eggdb_aggregate_context(context, bytes)`: the first call with `bytes` above 0
+makes `bytes` zeroed bytes aligned to 8, later calls return the same memory, and a call with 0
+before any memory was made answers NULL (a group with no rows). An `_error` set in `step` fails
+the statement. The calls take `DISTINCT` with one argument, `FILTER (WHERE ...)` and `GROUP BY`;
+`OVER` is refused for now. `step` or `finish` NULL removes the definition.
 
 ## Backup and compaction
 `eggdb_backup(db, path, &report)` writes a copy of the last commit to a new file while readers

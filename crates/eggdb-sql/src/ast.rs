@@ -2296,10 +2296,12 @@ pub(crate) enum AggregateFunction {
     Corr,
     CorrS,
     CorrK,
+    AnyValue,
+    Native,
 }
 
 impl AggregateFunction {
-    pub(crate) const ALL: [Self; 45] = [
+    pub(crate) const ALL: [Self; 46] = [
         Self::Count,
         Self::Sum,
         Self::Avg,
@@ -2345,6 +2347,7 @@ impl AggregateFunction {
         Self::Corr,
         Self::CorrS,
         Self::CorrK,
+        Self::AnyValue,
     ];
 
     pub(crate) fn bivariate_named(name: &str) -> Option<Self> {
@@ -2508,6 +2511,8 @@ impl AggregateFunction {
             Self::Corr => "corr",
             Self::CorrS => "corr_s",
             Self::CorrK => "corr_k",
+            Self::AnyValue => "any_value",
+            Self::Native => "native_aggregate",
         }
     }
 

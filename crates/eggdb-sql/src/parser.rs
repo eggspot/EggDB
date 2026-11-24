@@ -378,7 +378,7 @@ fn time_ordered_pick(name: Name, arguments: Vec<Expr>) -> Expr {
     }
 }
 
-const INTERNAL_FUNCTIONS: [&str; 35] = [
+const INTERNAL_FUNCTIONS: [&str; 37] = [
     crate::row_values::ROW_ORDERING,
     crate::row_values::ROW_MEMBERSHIP,
     crate::triggers::RAISE_FUNCTION,
@@ -415,6 +415,8 @@ const INTERNAL_FUNCTIONS: [&str; 35] = [
     crate::hypothetical_set::HYPOTHETICAL_ARGUMENTS,
     crate::bivariate_aggregates::PAIRED_ARGUMENTS,
     crate::window::WINDOW_CALL,
+    crate::native_functions::AGGREGATE_ARGUMENTS,
+    crate::aggregate::MYSQL_ANY_VALUE,
 ];
 
 const NOT_IN_MYSQL: [&str; 1] = ["trunc"];
@@ -5811,6 +5813,19 @@ impl<'t> Parser<'t> {
         {
             return self.st_as_mvt(name);
         }
+        if self.peek_kind() == &TokenKind::LeftParen
+            && crate::native_functions::aggregate_defined(&name.text)
+        {
+            return self.native_aggregate(name);
+        }
+        if name.text == "any_value" && self.peek_kind() == &TokenKind::LeftParen {
+            if self.mysql() {
+                return self.mysql_any_value(name);
+            }
+            if !self.sqlite() && !self.sqlserver() {
+                return self.aggregate(name, AggregateFunction::AnyValue);
+            }
+        }
         if let Some(function) = AggregateFunction::named(&name.text) {
             let expr = self.aggregate(name, function)?;
             return Ok(if self.sqlite() {
@@ -6028,6 +6043,59 @@ impl<'t> Parser<'t> {
                 function,
                 argument,
                 distinct,
+            },
+            position: name.position,
+        })
+    }
+
+    fn native_aggregate(&mut self, name: Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut inputs = Vec::new();
+        let mut distinct = false;
+        if self.is_operator("*") {
+            self.at += 1;
+        } else if self.peek_kind() != &TokenKind::RightParen {
+            distinct = self.take_word("distinct");
+            if !distinct {
+                self.take_word("all");
+            }
+            loop {
+                inputs.push(self.expression()?);
+                if !self.take(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        if distinct && inputs.len() != 1 {
+            return Err(SqlError::syntax(
+                "DISTINCT aggregates must have exactly one argument",
+                name.position,
+            )
+            .with_sqlite_code(1));
+        }
+        Ok(Expr {
+            kind: ExprKind::Aggregate {
+                function: AggregateFunction::Native,
+                argument: Some(Box::new(crate::native_functions::aggregate_call(
+                    name.text,
+                    inputs,
+                    name.position,
+                ))),
+                distinct,
+            },
+            position: name.position,
+        })
+    }
+
+    fn mysql_any_value(&mut self, name: Name) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let argument = self.expression()?;
+        self.expect(&TokenKind::RightParen)?;
+        Ok(Expr {
+            kind: ExprKind::Function {
+                name: crate::aggregate::MYSQL_ANY_VALUE.to_owned(),
+                arguments: vec![argument],
             },
             position: name.position,
         })
