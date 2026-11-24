@@ -762,8 +762,14 @@ opens a database takes it.
 
 A file in SQLite's format (`eggdb sql app.sqlite`) is read into a database in memory, with its
 tables, rows, indexes, views and triggers, and any committed pages still in its `-wal` file.
-The SQL then runs on that copy, and a line on stderr says that changes are not written back to
-the SQLite file. A statement EggDB refuses is skipped with a note on stderr.
+The SQL then runs on that copy. When the command ends, the changes go back into the SQLite
+file the way SQLite writes in rollback journal mode: the old pages are kept in `<file>-journal`
+until the new ones are on disk, so a crash leaves either the old file or the new one, and
+SQLite programs see the change. A file that another program changed meanwhile, or whose `-wal`
+file still holds frames, is left as it was, with the reason on stderr; a journal left by a
+crash is rolled back before the file is read. `--read-only` writes nothing back. The file is
+written whole, in rollback journal mode with 4,096-byte pages. A statement EggDB refuses is
+skipped with a note on stderr.
 
 `eggdb sql` runs SQL statements on the file: from `-c "<sql>"`, from a script file, or from
 stdin (a script of `-`, or none at all when stdin is not a terminal). This release runs the

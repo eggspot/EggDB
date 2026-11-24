@@ -1012,3 +1012,34 @@ fn memory_runs_a_whole_database_without_a_file() {
     );
     assert!(!Path::new(":memory:").exists());
 }
+
+#[test]
+fn changes_to_an_sqlite_file_are_written_back_into_it() {
+    let file = TempPath::new("sql-sqlite-write-back");
+    let bytes = eggdb_sqlite_format::write_database(&[eggdb_sqlite_format::SqliteObject::Table {
+        name: "notes".to_owned(),
+        sql: "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)".to_owned(),
+        rows: vec![eggdb_sqlite_format::SqliteRow {
+            rowid: 1,
+            values: vec![eggdb_sqlite_format::SqliteValue::Null, eggdb_sqlite_format::SqliteValue::Text("first".to_owned())],
+        }],
+    }])
+    .unwrap();
+    std::fs::write(file.path(), &bytes).unwrap();
+    let counter = eggdb_sqlite_format::change_counter(file.path()).unwrap();
+    let written = eggdb_sql(
+        file.path(),
+        &["--dialect", "sqlite", "-c", "INSERT INTO notes (body) VALUES ('second')"],
+        b"",
+    );
+    assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
+    assert!(String::from_utf8_lossy(&written.stderr).contains("writes the changes back"));
+    assert_eq!(eggdb_sqlite_format::change_counter(file.path()).unwrap(), counter.wrapping_add(1));
+    let mut journal = file.path().as_os_str().to_owned();
+    journal.push("-journal");
+    assert!(!Path::new(&journal).exists());
+    let read = eggdb_sql(file.path(), &["--dialect", "sqlite", "-c", "SELECT body FROM notes ORDER BY id"], b"");
+    let shown = String::from_utf8_lossy(&read.stdout);
+    assert!(shown.contains("first") && shown.contains("second"), "{shown}");
+    assert_eq!(eggdb_sqlite_format::change_counter(file.path()).unwrap(), counter.wrapping_add(1));
+}

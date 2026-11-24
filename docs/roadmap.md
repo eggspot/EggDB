@@ -653,8 +653,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   Oracle's other database events (`SUSPEND`, `DB_ROLE_CHANGE` and the rest).
 - Users can write SQLite files: the B-tree writer, the rollback journal and the WAL (D180).
   Check: files EggDB writes pass `PRAGMA integrity_check`. The b-tree writer for whole new files
-  and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631). Left: editing a
-  file in place with the rollback journal and the WAL.
+  and `VACUUM INTO`: **code written, unbuilt** (code-only mode, 2026-11-12, D631). Changes written back into the
+  file through SQLite's rollback journal, and a crash's journal rolled back: **code written, unbuilt** (D1309). Left:
+  page-level edits instead of rewriting the whole file, writing through the WAL, and SQLite's file locks.
 - `WITHOUT ROWID` tables and UTF-16 databases in SQLite files (D180). Reading them (and importing them with
   `eggdb restore`): **code written, unbuilt** (code-only mode, 2026-11-12, D788); writing `WITHOUT ROWID` tables (the
   writer and `VACUUM INTO`): **code written, unbuilt** (D789). Left: writing UTF-16 files, which only editing a

@@ -8,7 +8,7 @@ use super::reports::{self, Damage};
 use super::ui;
 use eggdb::{Database, Error, ErrorKind, Options};
 use eggdb_storage::{BTree, PageSize, StorageError};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::ops::Bound;
 
 mod archive;
@@ -89,6 +89,17 @@ enum Access {
 enum Opened<'a> {
     Owned(Box<Database>),
     Shared(&'a Database),
+    SqliteCopy(Box<super::sqlite_import::SqliteCopy>),
+}
+
+impl Opened<'_> {
+    fn finish(self) -> Result<(), Error> {
+        match self {
+            Self::Owned(db) => db.close(),
+            Self::Shared(_) => Ok(()),
+            Self::SqliteCopy(mut copy) => copy.write_back().map(drop),
+        }
+    }
 }
 
 impl std::ops::Deref for Opened<'_> {
@@ -98,6 +109,7 @@ impl std::ops::Deref for Opened<'_> {
         match self {
             Self::Owned(db) => db,
             Self::Shared(db) => db,
+            Self::SqliteCopy(copy) => copy.database(),
         }
     }
 }
@@ -773,8 +785,7 @@ impl<'a> Session<'a> {
         match self.shared {
             Some(db) => Ok(Opened::Shared(db)),
             None => self
-                .open_database(access, cache_for_command)
-                .map(|db| Opened::Owned(Box::new(db)))
+                .open_owned(access, cache_for_command)
                 .map_err(|error| self.open_failure(&error, access)),
         }
     }
@@ -782,9 +793,7 @@ impl<'a> Session<'a> {
     fn open_shared_or(&self, access: Access) -> Result<Opened<'a>, Error> {
         match self.shared {
             Some(db) => Ok(Opened::Shared(db)),
-            None => self
-                .open_database(access, None)
-                .map(|db| Opened::Owned(Box::new(db))),
+            None => self.open_owned(access, None),
         }
     }
 
@@ -811,21 +820,25 @@ impl<'a> Session<'a> {
         if self.request.file.as_os_str() == IN_MEMORY_FILE {
             return Database::in_memory_with(options.read_only(false));
         }
-        if super::sqlite_import::is_sqlite_file(&self.request.file) {
-            let db = Database::in_memory_with(options.read_only(false))?;
-            let warnings = super::sqlite_import::import(&db, &self.request.file)?;
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(
-                stderr,
-                "eggdb: {} is an SQLite file; EggDB read it into memory, and changes are not written back to it",
-                self.request.file.display()
-            );
-            for warning in warnings {
-                let _ = writeln!(stderr, "eggdb: {warning}");
-            }
-            return Ok(db);
-        }
         Database::open_with(&self.request.file, options)
+    }
+
+    fn opens_an_sqlite_file(&self) -> bool {
+        self.request.serve.edge_of.is_none()
+            && self.request.serve.page_store.is_none()
+            && self.request.file.as_os_str() != IN_MEMORY_FILE
+            && super::sqlite_import::is_sqlite_file(&self.request.file)
+    }
+
+    fn open_owned<'o>(&self, access: Access, cache_for_command: Option<usize>) -> Result<Opened<'o>, Error> {
+        if self.opens_an_sqlite_file() {
+            let options = self.database_options(access, cache_for_command);
+            let writable = matches!(access, Access::Write { .. });
+            return super::sqlite_import::open_copy(&self.request.file, options, writable)
+                .map(|copy| Opened::SqliteCopy(Box::new(copy)));
+        }
+        self.open_database(access, cache_for_command)
+            .map(|db| Opened::Owned(Box::new(db)))
     }
 
     fn busy_timeout(&self) -> std::time::Duration {
@@ -874,6 +887,9 @@ impl<'a> Session<'a> {
         match db {
             Opened::Owned(db) => self.close_database(*db),
             Opened::Shared(_) => Ok(()),
+            sqlite @ Opened::SqliteCopy(_) => sqlite
+                .finish()
+                .map_err(|error| operation_failure(&error, &format!("cannot write back {}", self.file))),
         }
     }
 

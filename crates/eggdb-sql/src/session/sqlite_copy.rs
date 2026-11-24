@@ -473,6 +473,29 @@ fn sqlite_objects(
 }
 
 impl Session<'_> {
+    fn sqlite_bytes(&mut self, position: usize) -> SqlResult<Vec<u8>> {
+        let objects = self.read(|reader, cache| sqlite_objects(reader, cache, position))?;
+        eggdb_sqlite_format::write_database(&objects).map_err(|error| {
+            SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, error.to_string()).at(position)
+        })
+    }
+
+    /// The database's tables, indexes, views and triggers as the bytes of a whole SQLite
+    /// file, as `VACUUM INTO` writes them (D631, D1309).
+    ///
+    /// # Errors
+    /// A transaction block is open, or the database holds what an SQLite file cannot (as for
+    /// `VACUUM INTO`).
+    pub fn sqlite_file_bytes(&mut self) -> SqlResult<Vec<u8>> {
+        if self.in_block() {
+            return Err(SqlError::new(
+                SqlState::ACTIVE_SQL_TRANSACTION,
+                "cannot write an SQLite file from within a transaction",
+            ));
+        }
+        self.sqlite_bytes(0)
+    }
+
     pub(super) fn vacuum_into(&mut self, vacuum: &VacuumInto) -> SqlResult<QueryResult> {
         let position = vacuum.position;
         if self.in_block() {
@@ -489,10 +512,7 @@ impl Session<'_> {
             )
             .at(position));
         };
-        let objects = self.read(|reader, cache| sqlite_objects(reader, cache, position))?;
-        let bytes = eggdb_sqlite_format::write_database(&objects).map_err(|error| {
-            SqlError::new(SqlState::PROGRAM_LIMIT_EXCEEDED, error.to_string()).at(position)
-        })?;
+        let bytes = self.sqlite_bytes(position)?;
         files
             .write_new_file(&vacuum.path, &bytes)
             .map_err(|message| SqlError::new(SqlState::IO_ERROR, message).at(position))?;

@@ -173,7 +173,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
     let db = {
         let session = session_for(request.clone(), console, None);
         session
-            .open_database(access, None)
+            .open_owned(access, None)
             .map_err(|error| session.open_failure(&error, access))?
     };
     let (exit, left_open, color_err, file) = {
@@ -207,7 +207,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
             exit = exit_for(&error);
         }
     }
-    db.close().map_err(|error| {
+    db.finish().map_err(|error| {
         Failure::database(
             format!("cannot close {file}: {error}"),
             Exit::for_error(error.kind()),

@@ -706,8 +706,10 @@ fn value_of(serial: u64, rest: &[u8], encoding: TextEncoding) -> Result<(SqliteV
     })
 }
 
+mod journal;
 mod writer;
 
+pub use journal::{change_counter, replace_database, roll_back_hot_journal};
 pub use writer::{KeyOrder, SqliteObject, compare_values, encode_record, write_database};
 
 /// Whether an SQLite `CREATE TABLE` statement ends with the `WITHOUT ROWID` option.

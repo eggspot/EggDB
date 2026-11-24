@@ -1,8 +1,9 @@
 use eggdb::sql::{Dialect, SqlType, Store};
-use eggdb::{Database, Error, ErrorKind};
+use eggdb::{Database, Error, ErrorKind, Options};
 use eggdb_sqlite_format::{SqliteFile, SqliteRow, SqliteValue};
-use std::io::Read;
-use std::path::Path;
+use eggdb_storage::CommitStamp;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 const ROWS_PER_INSERT: usize = 500;
 const BYTES_PER_INSERT: usize = 1 << 20;
@@ -19,6 +20,100 @@ fn failed(path: &Path, what: impl std::fmt::Display) -> Error {
         ErrorKind::Incompatible,
         format!("cannot read the SQLite file {}: {what}", path.display()),
     )
+}
+
+fn write_back_failed(path: &Path, what: impl std::fmt::Display) -> Error {
+    Error::new(
+        ErrorKind::Io,
+        format!("cannot write the changes back to the SQLite file {}: {what}", path.display()),
+    )
+}
+
+/// An SQLite file opened as a copy in memory (D180): when it was opened for writing, the
+/// changes made to the copy go back into the file when the command ends, crash-safely through
+/// SQLite's rollback journal (D1309).
+pub(crate) struct SqliteCopy {
+    db: Database,
+    path: PathBuf,
+    change_counter: u32,
+    imported_at: CommitStamp,
+    writable: bool,
+    finished: bool,
+}
+
+/// Opens the SQLite file at `path` as a copy in memory, after rolling back a journal a crash
+/// left beside it; `writable` says whether changes go back into the file.
+pub(crate) fn open_copy(path: &Path, options: Options, writable: bool) -> Result<SqliteCopy, Error> {
+    let rolled_back = eggdb_sqlite_format::roll_back_hot_journal(path).map_err(|error| failed(path, error))?;
+    let change_counter = eggdb_sqlite_format::change_counter(path).map_err(|error| failed(path, error))?;
+    let db = Database::in_memory_with(options.read_only(false))?;
+    let warnings = import(&db, path)?;
+    let imported_at = db.stats()?.last_commit;
+    let mut stderr = std::io::stderr().lock();
+    if rolled_back {
+        let _ = writeln!(
+            stderr,
+            "eggdb: {} had a journal left by an interrupted write; it was rolled back first",
+            path.display()
+        );
+    }
+    let _ = if writable {
+        writeln!(
+            stderr,
+            "eggdb: {} is an SQLite file; EggDB reads it into memory and writes the changes back to it when the command ends",
+            path.display()
+        )
+    } else {
+        writeln!(
+            stderr,
+            "eggdb: {} is an SQLite file; EggDB read it into memory, read-only",
+            path.display()
+        )
+    };
+    for warning in warnings {
+        let _ = writeln!(stderr, "eggdb: {warning}");
+    }
+    Ok(SqliteCopy {
+        db,
+        path: path.to_owned(),
+        change_counter,
+        imported_at,
+        writable,
+        finished: false,
+    })
+}
+
+impl SqliteCopy {
+    pub(crate) fn database(&self) -> &Database {
+        &self.db
+    }
+
+    /// Writes the copy back into the file once, if it changed since it was read; answers
+    /// whether it wrote.
+    pub(crate) fn write_back(&mut self) -> Result<bool, Error> {
+        if self.finished || !self.writable {
+            return Ok(false);
+        }
+        self.finished = true;
+        if self.db.stats()?.last_commit == self.imported_at {
+            return Ok(false);
+        }
+        let bytes = Store(&self.db)
+            .session(Dialect::Sqlite)
+            .sqlite_file_bytes()
+            .map_err(|error| write_back_failed(&self.path, error))?;
+        eggdb_sqlite_format::replace_database(&self.path, &bytes, self.change_counter)
+            .map_err(|error| write_back_failed(&self.path, error))?;
+        Ok(true)
+    }
+}
+
+impl Drop for SqliteCopy {
+    fn drop(&mut self) {
+        if let Err(error) = self.write_back() {
+            let _ = writeln!(std::io::stderr().lock(), "eggdb: {error}");
+        }
+    }
 }
 
 fn quoted_name(name: &str) -> String {
