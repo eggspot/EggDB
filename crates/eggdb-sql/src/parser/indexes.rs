@@ -14,6 +14,20 @@ pub(super) struct IndexColumns {
 }
 
 impl IndexColumns {
+    fn refusal_for(&self, method: IndexMethod, unique: bool) -> Option<&'static str> {
+        if unique {
+            Some("unique indexes")
+        } else if method == IndexMethod::SpGist && self.names.len() > 1 {
+            Some("multicolumn indexes")
+        } else if self.order_written {
+            Some("ASC/DESC options")
+        } else if self.nulls_order_written {
+            Some("NULLS FIRST/LAST options")
+        } else {
+            None
+        }
+    }
+
     fn hash_refusal(&self, unique: bool) -> Option<&'static str> {
         if unique {
             Some("unique indexes")
@@ -29,7 +43,15 @@ impl IndexColumns {
     }
 }
 
-const BTREE_STORAGE_PARAMETERS: [&str; 2] = ["fillfactor", "deduplicate_items"];
+const BTREE_STORAGE_PARAMETERS: [&str; 7] = [
+    "fillfactor",
+    "deduplicate_items",
+    "fastupdate",
+    "gin_pending_list_limit",
+    "buffering",
+    "pages_per_range",
+    "autosummarize",
+];
 
 impl Parser<'_> {
     pub(super) fn at_index_definition(&self) -> bool {
@@ -91,6 +113,14 @@ impl Parser<'_> {
             return Err(SqlError::new(
                 SqlState::FEATURE_NOT_SUPPORTED,
                 format!("access method \"hash\" does not support {refused}"),
+            ));
+        }
+        if !method.is_searched()
+            && let Some(refused) = columns.refusal_for(method, unique)
+        {
+            return Err(SqlError::new(
+                SqlState::FEATURE_NOT_SUPPORTED,
+                format!("access method \"{}\" does not support {refused}", method.name()),
             ));
         }
         if self.sqlserver() {
@@ -257,6 +287,12 @@ impl Parser<'_> {
                 if !byte_order {
                     return Err(self.not_supported("index columns with a collation"));
                 }
+            }
+            if postgresql
+                && let TokenKind::Word(word) = self.peek_kind()
+                && word.to_ascii_lowercase().ends_with("_ops")
+            {
+                self.at += 1;
             }
             let descending = self.take_word("desc");
             if descending || self.take_word("asc") {

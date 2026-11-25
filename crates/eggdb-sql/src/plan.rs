@@ -608,7 +608,7 @@ pub(crate) fn plan(
         keys.push((KeyChoice::Primary, &table.primary_key, true));
     }
     for (position, index) in table.indexes.iter().enumerate() {
-        if index.building {
+        if index.building || !index.method.is_searched() {
             continue;
         }
         keys.push((KeyChoice::Index(position), &index.columns, index.unique));

@@ -650,7 +650,7 @@ fn index_lefts(
 ) -> Option<(usize, Vec<usize>)> {
     let mut best: Option<(usize, Vec<usize>)> = None;
     for (position, index) in table.indexes.iter().enumerate() {
-        if index.building {
+        if index.building || !index.method.is_searched() {
             continue;
         }
         let lefts: Vec<usize> = index

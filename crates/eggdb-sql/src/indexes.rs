@@ -425,7 +425,9 @@ pub(crate) fn define_index(
             )
             .at(name.position));
         }
-        check_orderable(table.columns[column].sql_type, name.position)?;
+        if spec.method.is_searched() {
+            check_orderable(table.columns[column].sql_type, name.position)?;
+        }
         columns.push(column);
     }
     crate::generated_columns::virtual_index_refused(table, &columns)

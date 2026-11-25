@@ -92,6 +92,8 @@ mod hstore_functions;
 mod hyperloglog;
 mod hypothetical_set;
 mod indexes;
+#[cfg(test)]
+mod index_methods_tests;
 mod information_schema;
 mod interval;
 mod interval_style;

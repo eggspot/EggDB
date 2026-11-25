@@ -442,11 +442,17 @@ pub(crate) enum IndexMethod {
     #[default]
     BTree,
     Hash,
+    Gist,
+    Gin,
+    SpGist,
+    Brin,
 }
 
 impl IndexMethod {
+    const ALL: [Self; 6] = [Self::BTree, Self::Hash, Self::Gist, Self::Gin, Self::SpGist, Self::Brin];
+
     pub(crate) fn named(name: &str) -> Option<Self> {
-        [Self::BTree, Self::Hash]
+        Self::ALL
             .into_iter()
             .find(|method| name.eq_ignore_ascii_case(method.name()))
     }
@@ -455,6 +461,10 @@ impl IndexMethod {
         match self {
             Self::BTree => "btree",
             Self::Hash => "hash",
+            Self::Gist => "gist",
+            Self::Gin => "gin",
+            Self::SpGist => "spgist",
+            Self::Brin => "brin",
         }
     }
 
@@ -462,13 +472,21 @@ impl IndexMethod {
         match self {
             Self::BTree => 0,
             Self::Hash => 1,
+            Self::Gist => 2,
+            Self::Gin => 3,
+            Self::SpGist => 4,
+            Self::Brin => 5,
         }
     }
 
     fn of_code(code: u8) -> Option<Self> {
-        [Self::BTree, Self::Hash]
-            .into_iter()
-            .find(|method| method.code() == code)
+        Self::ALL.into_iter().find(|method| method.code() == code)
+    }
+
+    /// Whether queries search the index (D1343): GiST, GIN, SP-GiST and BRIN indexes are
+    /// kept up to date but not searched until their own structures are built.
+    pub(crate) fn is_searched(self) -> bool {
+        matches!(self, Self::BTree | Self::Hash)
     }
 }
 
@@ -1540,8 +1558,9 @@ fn decode_options(
             descending: u32::from_le_bytes(reader.array()?),
             nulls_first: u32::from_le_bytes(reader.array()?),
         };
-        let hash_misused = method == IndexMethod::Hash
-            && (index.unique || index.columns.len() != 1 || !sort_options.is_default());
+        let hash_misused = (method == IndexMethod::Hash
+            && (index.unique || index.columns.len() != 1 || !sort_options.is_default()))
+            || (!method.is_searched() && (index.unique || !sort_options.is_default()));
         if (without_constraint && !index.unique)
             || !sort_options.fits(index.columns.len())
             || hash_misused

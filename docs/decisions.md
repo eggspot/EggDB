@@ -1367,3 +1367,4 @@ its full title with its status.
 - [D1340](decisions/D1340.md) Code-only batch 995 (M5): rows streamed from plain scans, first step of the streaming executor
 - [D1341](decisions/D1341.md) Code-only batch 996 (M5): vectorized filter and aggregate kernels over column values
 - [D1342](decisions/D1342.md) Code-only batch 997 (M5): WHERE filters compiled once per scan into a flat program
+- [D1343](decisions/D1343.md) Code-only batch 998 (M5): GiST, GIN, SP-GiST and BRIN indexes accepted and kept

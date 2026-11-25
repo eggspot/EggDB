@@ -22,6 +22,10 @@ const PG_CLASS: u32 = 1259;
 const PG_CONSTRAINT: u32 = 2606;
 const PG_NAMESPACE: u32 = 2615;
 const HASH: u32 = 405;
+const GIST: u32 = 783;
+const GIN: u32 = 2742;
+const SPGIST: u32 = 4000;
+const BRIN: u32 = 3580;
 const INDOPTION_DESC: i64 = 1;
 const INDOPTION_NULLS_FIRST: i64 = 2;
 
@@ -276,6 +280,10 @@ fn access_method_oid(method: IndexMethod) -> u32 {
     match method {
         IndexMethod::BTree => oids::BTREE,
         IndexMethod::Hash => HASH,
+        IndexMethod::Gist => GIST,
+        IndexMethod::Gin => GIN,
+        IndexMethod::SpGist => SPGIST,
+        IndexMethod::Brin => BRIN,
     }
 }
 
@@ -1929,6 +1937,10 @@ fn am_rows() -> Vec<Vec<Value>> {
         (oids::HEAP, "heap", "t"),
         (oids::BTREE, "btree", "i"),
         (HASH, "hash", "i"),
+        (GIST, "gist", "i"),
+        (GIN, "gin", "i"),
+        (SPGIST, "spgist", "i"),
+        (BRIN, "brin", "i"),
     ]
     .into_iter()
     .map(|(id, name, kind)| {
