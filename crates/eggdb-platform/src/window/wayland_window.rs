@@ -1,5 +1,6 @@
+use super::atspi_bridge::{self, AtspiBridge};
 use super::wayland::{self, Arguments, Event, Request, event, request};
-use super::{KeyPress, Modifiers, PointerButton, Window, WindowError, WindowEvent, WindowOptions};
+use super::{AccessNode, KeyPress, Modifiers, PointerButton, Window, WindowError, WindowEvent, WindowOptions};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
@@ -13,6 +14,7 @@ const EGGOS_DISPLAY: &str = "/run/user/0/wayland-0";
 const APP_ID: &str = "eggdb";
 const WHEEL_UNITS_PER_LINE: f32 = 10.0;
 const READ_BYTES: usize = 4096;
+const BACKLOG_RETRY: Duration = Duration::from_millis(10);
 
 mod fd_passing {
     use std::ffi::c_void;
@@ -153,6 +155,7 @@ pub(crate) struct WaylandWindow {
     repeat: Repeat,
     pixels: Vec<u8>,
     pool_number: u32,
+    accessibility: Option<AtspiBridge>,
 }
 
 impl std::fmt::Debug for WaylandWindow {
@@ -207,12 +210,18 @@ impl WaylandWindow {
             repeat: Repeat::default(),
             pixels: Vec::new(),
             pool_number: 0,
+            accessibility: None,
         };
         let globals = window.discover_globals()?;
         window.bind_globals(&globals)?;
         window.create_toplevel(options)?;
         while !window.configured {
             window.read_events(None)?;
+        }
+        window.accessibility = AtspiBridge::connect(&options.title);
+        let scale = window.scale as f32;
+        if let Some(bridge) = &mut window.accessibility {
+            bridge.set_geometry(scale, (0, 0));
         }
         Ok(window)
     }
@@ -502,9 +511,13 @@ impl WaylandWindow {
 
     fn handle_keyboard(&mut self, opcode: u16, arguments: &mut Arguments<'_>) -> Result<(), WindowError> {
         match opcode {
-            event::KEYBOARD_ENTER => self.events.push_back(WindowEvent::Focused(true)),
+            event::KEYBOARD_ENTER => {
+                self.update_accessibility(|bridge| bridge.set_window_active(true));
+                self.events.push_back(WindowEvent::Focused(true));
+            }
             event::KEYBOARD_LEAVE => {
                 self.repeat.held = None;
+                self.update_accessibility(|bridge| bridge.set_window_active(false));
                 self.events.push_back(WindowEvent::Focused(false));
             }
             event::KEYBOARD_KEY => {
@@ -541,6 +554,37 @@ impl WaylandWindow {
             _ => {}
         }
         Ok(())
+    }
+
+    fn update_accessibility(&mut self, update: impl FnOnce(&mut AtspiBridge) -> bool) {
+        if let Some(bridge) = &mut self.accessibility
+            && !update(bridge)
+        {
+            self.accessibility = None;
+        }
+    }
+
+    fn wait_serving_accessibility(&mut self, wait: Option<Duration>) -> Result<(), WindowError> {
+        let Some(bridge) = &mut self.accessibility else {
+            return self.read_events(wait);
+        };
+        if !bridge.pump() {
+            self.accessibility = None;
+            return Ok(());
+        }
+        let requests = bridge.take_requests();
+        let (bus, backlog) = (bridge.fd(), bridge.has_backlog());
+        if !requests.is_empty() {
+            self.events.extend(requests.into_iter().map(WindowEvent::AccessRequested));
+            return Ok(());
+        }
+        let wait = if backlog {
+            Some(wait.map_or(BACKLOG_RETRY, |wait| wait.min(BACKLOG_RETRY)))
+        } else {
+            wait
+        };
+        atspi_bridge::wait_for_input(self.stream.as_raw_fd(), bus, wait).map_err(|error| io_error(&error))?;
+        self.read_events(Some(Duration::ZERO))
     }
 
     fn repeat_due(&mut self, now: Instant) -> Option<WindowEvent> {
@@ -689,7 +733,11 @@ impl Window for WaylandWindow {
                 (Some(repeat), Some(deadline)) => Some(repeat.min(deadline)),
                 (one, other) => one.or(other),
             };
-            self.read_events(wait)?;
+            self.wait_serving_accessibility(wait)?;
         }
+    }
+
+    fn set_accessibility_tree(&mut self, nodes: &[AccessNode]) {
+        self.update_accessibility(|bridge| bridge.set_tree(nodes));
     }
 }
