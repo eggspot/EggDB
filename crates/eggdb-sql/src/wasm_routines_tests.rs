@@ -151,3 +151,43 @@ fn a_set_returning_wasm_function_yields_rows_until_its_flag_says_stop() {
     )
     .is_err());
 }
+
+#[test]
+fn a_roles_wasm_ceiling_and_the_sessions_settings_only_lower_the_limits() {
+    let defaults = eggdb_wasm_vm::Limits::default();
+    let mut settings = crate::settings::Settings::default();
+    assert_eq!(super::limits_for(&settings), defaults);
+    settings.wasm_ceiling = super::WasmCeiling::of_settings(&[
+        (super::FUEL_SETTING.to_owned(), "5000".to_owned()),
+        (super::MEMORY_PAGES_SETTING.to_owned(), "not a number".to_owned()),
+        ("search_path".to_owned(), "public".to_owned()),
+    ]);
+    let limited = super::limits_for(&settings);
+    assert_eq!(limited.fuel, 5000);
+    assert_eq!(limited.max_memory_pages, defaults.max_memory_pages);
+    settings.set(super::FUEL_SETTING, Some("900000000")).unwrap();
+    settings.set(super::CALL_DEPTH_SETTING, Some("8")).unwrap();
+    let limited = super::limits_for(&settings);
+    assert_eq!(limited.fuel, 5000);
+    assert_eq!(limited.max_call_depth, 8);
+    settings.set(super::FUEL_SETTING, Some("100")).unwrap();
+    assert_eq!(super::limits_for(&settings).fuel, 100);
+}
+
+#[test]
+fn a_role_with_a_small_wasm_fuel_ceiling_traps_where_others_finish() {
+    let store = MemoryStore::default();
+    let mut admin = Session::new(&store);
+    run(
+        &mut admin,
+        &format!("CREATE FUNCTION wseries(n integer) RETURNS SETOF integer LANGUAGE wasm AS '{SERIES_MODULE}', 'series'"),
+    )
+    .expect("created");
+    run(&mut admin, "CREATE USER tight LOGIN").expect("role");
+    run(&mut admin, "ALTER ROLE tight SET eggdb.wasm_fuel = 2").expect("ceiling");
+    let mut tight = Session::new(&store);
+    tight.identify_role("tight", "eggdb").expect("login");
+    let error = run(&mut tight, "SELECT count(*) FROM wseries(2)").expect_err("trapped");
+    assert_eq!(error.state().code(), "38000", "{error}");
+    assert_eq!(run(&mut admin, "SELECT count(*) AS n FROM wseries(2)").expect("ran"), "n\n2\nSELECT 1");
+}

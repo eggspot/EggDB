@@ -200,7 +200,7 @@ fn invoke_in(
             base_name(&definition.name)
         ),
         RoutineLanguage::Wasm => {
-            return crate::wasm_routines::invoke(&definition, call.arguments);
+            return crate::wasm_routines::invoke(&definition, call.arguments, &crate::wasm_routines::limits_for(settings));
         }
         RoutineLanguage::Tsql => {
             return crate::tsql::invoke_function(

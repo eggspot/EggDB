@@ -635,7 +635,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   unbuilt** (code-only mode, 2026-11-12, D793); text and bytea through the module's memory: **code written, unbuilt**
   (code-only mode, 2026-11-12, D862); the side-effect-free host functions `eggdb.now_micros` and `env.abort`: **code
   written, unbuilt** (code-only mode, 2026-11-12, D908); set-returning functions (`RETURNS SETOF`): **code written, unbuilt**
-  (D1318). Left: `RETURNS TABLE`, host functions with effects behind permissions, and per-role limits.
+  (D1318); per-role limits through `ALTER ROLE ... SET eggdb.wasm_*`: **code written, unbuilt** (D1319). Left:
+  `RETURNS TABLE`, and host functions with effects behind permissions.
 - An extension API for types, index methods, functions and protocols, loaded as sandboxed
   WebAssembly with CPU, memory, time and output limits per role (D27, D45).
 - A native-code compiler for hot WebAssembly functions (D27, D232). Check: benchmarks against

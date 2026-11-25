@@ -1177,6 +1177,7 @@ impl<'s> Session<'s> {
         settings.set_superuser(role.superuser);
         settings.login_role = Some(role.name);
         settings.role_limits = limits;
+        settings.wasm_ceiling = crate::wasm_routines::WasmCeiling::of_settings(&login_settings);
         for (name, value) in login_settings {
             if is_dialect_setting(&name) {
                 continue;

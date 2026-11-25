@@ -157,6 +157,56 @@ fn shown(value_types: &[ValueType]) -> String {
 }
 
 const MOST_SET_ROWS: usize = 10_000_000;
+pub(crate) const FUEL_SETTING: &str = "eggdb.wasm_fuel";
+pub(crate) const MEMORY_PAGES_SETTING: &str = "eggdb.wasm_memory_pages";
+pub(crate) const CALL_DEPTH_SETTING: &str = "eggdb.wasm_call_depth";
+
+/// The most a role's `LANGUAGE wasm` calls may use (D1319): what `ALTER ROLE ... SET` gave the
+/// role for `eggdb.wasm_fuel`, `eggdb.wasm_memory_pages` and `eggdb.wasm_call_depth` when its
+/// session logged in. A session may lower its limits with `SET`, never raise them past these
+/// or the defaults.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WasmCeiling {
+    fuel: Option<u64>,
+    memory_pages: Option<u64>,
+    call_depth: Option<u64>,
+}
+
+impl WasmCeiling {
+    pub(crate) fn of_settings(settings: &[(String, String)]) -> Self {
+        let mut ceiling = Self::default();
+        for (name, value) in settings {
+            let Ok(number) = value.trim().parse::<u64>() else {
+                continue;
+            };
+            match name.as_str() {
+                FUEL_SETTING => ceiling.fuel = Some(number),
+                MEMORY_PAGES_SETTING => ceiling.memory_pages = Some(number),
+                CALL_DEPTH_SETTING => ceiling.call_depth = Some(number),
+                _ => {}
+            }
+        }
+        ceiling
+    }
+}
+
+/// The limits a `LANGUAGE wasm` call of this session runs under: the defaults, lowered by the
+/// role's ceiling and by the session's own settings of the same names.
+pub(crate) fn limits_for(settings: &crate::settings::Settings) -> Limits {
+    let defaults = Limits::default();
+    let session = |name: &str| settings.get(name).ok().and_then(|value| value.trim().parse::<u64>().ok());
+    let lowest = |default: u64, ceiling: Option<u64>, name: &str| {
+        [Some(default), ceiling, session(name)].into_iter().flatten().min().unwrap_or(default)
+    };
+    let ceiling = settings.wasm_ceiling;
+    Limits {
+        fuel: lowest(defaults.fuel, ceiling.fuel, FUEL_SETTING),
+        max_memory_pages: u32::try_from(lowest(u64::from(defaults.max_memory_pages), ceiling.memory_pages, MEMORY_PAGES_SETTING))
+            .unwrap_or(defaults.max_memory_pages),
+        max_call_depth: usize::try_from(lowest(defaults.max_call_depth as u64, ceiling.call_depth, CALL_DEPTH_SETTING))
+            .unwrap_or(defaults.max_call_depth),
+    }
+}
 
 fn result_type(definition: &RoutineDefinition) -> SqlResult<Option<SqlType>> {
     match &definition.returns {
@@ -346,7 +396,7 @@ fn result_value(results: &[eggdb_wasm_vm::Value], sql_type: Option<SqlType>, ins
 
 /// Runs a `LANGUAGE wasm` function on a fresh instance of its module, within the default
 /// fuel, memory and call-depth limits; a trap fails the statement with 38000.
-pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>) -> SqlResult<Returned> {
+pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>, limits: &Limits) -> SqlResult<Returned> {
     let nothing = || {
         if returns_set(definition) {
             Returned::Set(Vec::new())
@@ -369,10 +419,9 @@ pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>) -> S
     }
     let (written, export) = parts(definition);
     let module = parsed(written)?;
-    let limits = Limits::default();
     check_imports(&module)?;
     let now_micros = crate::datetime::statement_now().saturating_add(MICROS_FROM_1970_TO_2000);
-    let mut instance = Instance::with_host((*module).clone(), &limits, host_for(now_micros)).map_err(trapped)?;
+    let mut instance = Instance::with_host((*module).clone(), limits, host_for(now_micros)).map_err(trapped)?;
     let mut values = Vec::with_capacity(arguments.len());
     for (value, parameter) in arguments.iter().zip(&definition.parameters) {
         if value.is_null() {
@@ -380,15 +429,15 @@ pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>) -> S
         }
         if through_memory(parameter.sql_type) {
             let bytes = memory_bytes(value, parameter.sql_type)?;
-            values.extend(passed_in_memory(&mut instance, &bytes, &limits)?);
+            values.extend(passed_in_memory(&mut instance, &bytes, limits)?);
         } else {
             values.push(argument(value, parameter.sql_type)?);
         }
     }
     if returns_set(definition) {
-        return set_rows(&mut instance, export, values, result_type(definition)?, &limits);
+        return set_rows(&mut instance, export, values, result_type(definition)?, limits);
     }
-    let results = instance.call_values(export, &values, &limits).map_err(trapped)?;
+    let results = instance.call_values(export, &values, limits).map_err(trapped)?;
     Ok(Returned::Value(result_value(&results, result_type(definition)?, &instance)?))
 }
 
