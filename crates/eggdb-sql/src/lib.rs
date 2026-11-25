@@ -71,6 +71,7 @@ mod foreign;
 mod foreign_tables;
 mod foreign_pushdown;
 mod column_lineage;
+mod compiled_filter;
 mod fuzzy_functions;
 mod generated_columns;
 #[cfg(test)]

@@ -573,7 +573,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   aggregate kernels with AVX2 chosen at runtime: **code written, unbuilt** (code-only mode, 2026-11-25, D1341);
   the vectorized executor, numeric and string kernels and grouped aggregates are left.
 - A query compiler for hot prepared statements' expressions, compiled to a flat program, after
-  parsed plans are kept in prepared statements (below) (D40). Check: TPC-H Q1 and Q6 times.
+  parsed plans are kept in prepared statements (below) (D40). Check: TPC-H Q1 and Q6 times. Scan filters compiled
+  once per scan: **code written, unbuilt** (code-only mode, 2026-11-25, D1342); programs kept with prepared plans,
+  projections, arithmetic and text comparisons are left.
 - `TABLESAMPLE`, t-digest and the other `APPROX_*` functions (D40). `TABLESAMPLE`: **code written, unbuilt** (code-only
   mode, 2026-11-11, D541); the `APPROX_PERCENTILE` family, exact: **code written, unbuilt** (D542); t-digest
   sketches for `APPROX_PERCENTILE_CONT`: **code written, unbuilt** (code-only mode, 2026-11-12, D620).

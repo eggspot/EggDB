@@ -4450,9 +4450,16 @@ impl SourceRows<'_> {
         }
         let (reader, scope, filter) = (self.reader, self.scope, self.filter);
         let (late, correlation) = (self.late, self.correlation);
+        let program = filter.and_then(|filter| crate::compiled_filter::compile(scope, filter));
+        let passes = |row: &[Value]| -> SqlResult<bool> {
+            match program.as_ref().and_then(|program| program.passes(row)) {
+                Some(decided) => Ok(decided),
+                None => filter_matches(scope, filter, row),
+            }
+        };
         match &mut self.rows {
             RowSource::Joined(joined) => joined.for_each(&mut |row| {
-                if filter_matches(scope, filter, row)?
+                if passes(row)?
                     && late_matches(scope, correlation, late, row)?
                 {
                     visit(row)
@@ -4470,7 +4477,7 @@ impl SourceRows<'_> {
                     &mut |_, bytes| {
                         row.clear();
                         decode_row_into(bytes, &table.columns, None, &mut row)?;
-                        if filter_matches(scope, filter, &row)? {
+                        if passes(&row)? {
                             visit(&row)
                         } else {
                             Ok(true)
