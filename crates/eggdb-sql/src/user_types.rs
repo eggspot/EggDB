@@ -593,6 +593,9 @@ fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
     if let Some(kind) = crate::network_types::kind_of(defined) {
         return crate::network_types::parse(text, kind).map(crate::network_types::value);
     }
+    if defined == DefinedType::MONEY {
+        return crate::money::parse(text).map(crate::money::value);
+    }
     if defined == DefinedType::CITEXT {
         Ok(crate::citext::value(text.to_owned()))
     } else if defined == DefinedType::HSTORE {
@@ -612,6 +615,17 @@ fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) ->
         Value::Bpchar(text) => Some(crate::types::without_trailing_spaces(text)),
         other => crate::citext::text_of(other),
     };
+    if target == DefinedType::MONEY {
+        if let Some(cents) = crate::money::from_number(&value) {
+            return cents.map(crate::money::value);
+        }
+        return match (text, conversion) {
+            (Some(text), Conversion::Explicit | Conversion::Assignment) => {
+                crate::money::parse(text).map(crate::money::value)
+            }
+            _ => Err(cannot_cast(&value, target)),
+        };
+    }
     if let Some(kind) = crate::network_types::kind_of(target) {
         if let Value::Defined(defined) = &value
             && let DefinedValue::Network(network) = defined.as_ref()

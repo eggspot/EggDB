@@ -46,6 +46,9 @@ fn arithmetic_type(
         }
         _ => (static_type(left, scope)?, static_type(right, scope)?),
     };
+    if let Some(sql_type) = crate::money::arithmetic_type(operator, left_type, right_type) {
+        return Some(sql_type);
+    }
     if operator == BinaryOperator::Subtract
         && left_type.is_datetime()
         && right_type.is_datetime()
@@ -342,6 +345,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     }
     if let Some(sql_type) = crate::network_types::result_type(name) {
         return Some(sql_type);
+    }
+    if name == "cash_words" {
+        return Some(SqlType::Text);
     }
     if let Some(sql_type) = crate::mysql_set::result_type(name) {
         return Some(sql_type);

@@ -2939,6 +2939,7 @@ impl<'t> Parser<'t> {
             "bpchar" => SqlType::Bpchar(self.character_length(token.start)?),
             "xml" if self.postgresql() => SqlType::Text,
             "inet" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::INET),
+            "money" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::MONEY),
             "cidr" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::CIDR),
             "macaddr" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::MACADDR),
             "macaddr8" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::MACADDR8),

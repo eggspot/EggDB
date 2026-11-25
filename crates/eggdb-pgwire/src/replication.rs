@@ -960,6 +960,7 @@ pub fn builtin_type_name(type_oid: u32, type_modifier: i32) -> Option<String> {
         },
         650 => "cidr".to_owned(),
         774 => "macaddr8".to_owned(),
+        790 => "money".to_owned(),
         829 => "macaddr".to_owned(),
         869 => "inet".to_owned(),
         2950 => "uuid".to_owned(),

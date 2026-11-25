@@ -849,6 +849,12 @@ impl Evaluator<'_> {
                 Some(_) => Err(no_prefix_operator(symbol, &value)),
             };
         }
+        if let Some(cents) = crate::money::cents_of(&value) {
+            return cents
+                .checked_neg()
+                .map(crate::money::value)
+                .ok_or_else(|| SqlError::new(SqlState::NUMERIC_VALUE_OUT_OF_RANGE, "money out of range"));
+        }
         match value {
             Value::Null => Ok(Value::Null),
             Value::SmallInt(number) => number
@@ -1603,6 +1609,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::network_types::function(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::money::function(name, &values) {
             return result;
         }
         if let Some(result) = crate::hstore_functions::function(name, &values) {
@@ -2626,6 +2635,9 @@ pub(crate) fn arithmetic(
     if matches!(left, Value::Defined(_))
         && let Some(result) = crate::ranges::arithmetic(operator, left, right)
     {
+        return result;
+    }
+    if let Some(result) = crate::money::arithmetic(operator, left, right) {
         return result;
     }
     refuse_infinite_date_without_infinities(left)?;

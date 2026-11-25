@@ -185,8 +185,15 @@ impl DefinedType {
         oid: crate::network_types::MACADDR8_OID,
     };
 
+    /// The type `money`: a currency amount in cents.
+    pub const MONEY: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::money::MONEY_OID,
+    };
+
     pub(crate) fn builtin_base_named(name: &str) -> Option<Self> {
         match name {
+            "money" => Some(Self::MONEY),
             "inet" => Some(Self::INET),
             "cidr" => Some(Self::CIDR),
             "macaddr" => Some(Self::MACADDR),
@@ -213,6 +220,7 @@ impl DefinedType {
             crate::vector_type::VECTOR_OID => Some("vector"),
             crate::geometry_type::GEOMETRY_OID => Some("geometry"),
             crate::network_types::INET_OID => Some("inet"),
+            crate::money::MONEY_OID => Some("money"),
             crate::network_types::CIDR_OID => Some("cidr"),
             crate::network_types::MACADDR_OID => Some("macaddr"),
             crate::network_types::MACADDR8_OID => Some("macaddr8"),
@@ -262,6 +270,8 @@ pub enum DefinedValue {
     RefCursor(String),
     /// An `inet`, `cidr`, `macaddr` or `macaddr8` value.
     Network(crate::network_types::NetworkValue),
+    /// A `money` amount in cents.
+    Money(i64),
 }
 
 impl DefinedValue {
@@ -283,6 +293,7 @@ impl DefinedValue {
             Self::JsonPath(_) => SqlType::Defined(DefinedType::JSONPATH),
             Self::RefCursor(_) => SqlType::Defined(DefinedType::REFCURSOR),
             Self::Network(network) => SqlType::Defined(crate::network_types::defined_type(network.kind)),
+            Self::Money(_) => SqlType::Defined(DefinedType::MONEY),
         }
     }
 
@@ -300,6 +311,7 @@ impl DefinedValue {
                 text.clone()
             }
             Self::Network(network) => network.text.clone(),
+            Self::Money(cents) => crate::money::to_text(*cents),
         }
     }
 }
@@ -1179,6 +1191,11 @@ pub(crate) fn convert(value: Value, target: SqlType, conversion: Conversion) -> 
     if let SqlType::Defined(defined) = target {
         return crate::user_types::convert(value, defined, conversion);
     }
+    if let Some(cents) = crate::money::cents_of(&value)
+        && matches!(target, SqlType::Numeric(_))
+    {
+        return convert(Value::Numeric(crate::money::to_numeric(cents)), target, conversion);
+    }
     if let SqlType::Dynamic(affinity) = target {
         return Ok(affinity.stored(storage_class_value(value)));
     }
@@ -1518,6 +1535,9 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (DefinedValue::Network(a), DefinedValue::Network(b)) => crate::network_types::compare(a, b),
         (DefinedValue::Network(_), _) => Ordering::Greater,
         (_, DefinedValue::Network(_)) => Ordering::Less,
+        (DefinedValue::Money(a), DefinedValue::Money(b)) => a.cmp(b),
+        (DefinedValue::Money(_), _) => Ordering::Greater,
+        (_, DefinedValue::Money(_)) => Ordering::Less,
         (DefinedValue::Enum(a), DefinedValue::Enum(b)) => {
             compare_floats(a.sort_order, b.sort_order)
         }
@@ -1578,6 +1598,10 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
                 out.push(18);
                 out.extend_from_slice(&(folded.len() as u64).to_le_bytes());
                 out.extend_from_slice(folded.as_bytes());
+            }
+            DefinedValue::Money(cents) => {
+                out.push(27);
+                out.extend_from_slice(&cents.to_le_bytes());
             }
             DefinedValue::Network(network) => {
                 let key = crate::network_types::ordered_key(network);

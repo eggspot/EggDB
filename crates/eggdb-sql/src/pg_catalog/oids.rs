@@ -113,7 +113,7 @@ pub(crate) const REFCURSOR_TYPE: u32 = 1790;
 
 const REFCURSOR_ARRAY_TYPE: u32 = 2201;
 
-pub(crate) const BUILTIN_TYPES: [BuiltinType; 89] = [
+pub(crate) const BUILTIN_TYPES: [BuiltinType; 91] = [
     BuiltinType {
         oid: 16,
         typname: "bool",
@@ -411,6 +411,36 @@ pub(crate) const BUILTIN_TYPES: [BuiltinType; 89] = [
         element: 774,
         array: 0,
         align: 'i',
+        storage: 'x',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 790,
+        typname: "money",
+        shown: "money",
+        length: 8,
+        by_value: true,
+        kind: 'b',
+        category: 'N',
+        preferred: false,
+        element: 0,
+        array: 791,
+        align: 'd',
+        storage: 'p',
+        collation: 0,
+    },
+    BuiltinType {
+        oid: 791,
+        typname: "_money",
+        shown: "money[]",
+        length: -1,
+        by_value: false,
+        kind: 'b',
+        category: 'A',
+        preferred: false,
+        element: 790,
+        array: 0,
+        align: 'd',
         storage: 'x',
         collation: 0,
     },

@@ -288,6 +288,26 @@ pub(crate) fn ordered_key(network: &NetworkValue) -> Vec<u8> {
     key
 }
 
+/// The value whose [`ordered_key`] is `key`, for a column of type `kind`.
+pub(crate) fn from_ordered_key(kind: NetworkKind, key: &[u8]) -> Option<NetworkValue> {
+    if matches!(kind, NetworkKind::MacAddr | NetworkKind::MacAddr8) {
+        let text = std::str::from_utf8(key).ok()?;
+        return parse(text, kind).ok();
+    }
+    let (&family, rest) = key.split_first()?;
+    let end = rest.iter().position(|symbol| *symbol == 0)?;
+    let (symbols, address) = (&rest[..end], &rest[end + 1..]);
+    let v6 = match (family, address.len()) {
+        (0, 4) => false,
+        (1, 16) => true,
+        _ => return None,
+    };
+    let mut bytes = [0u8; 16];
+    bytes[..address.len()].copy_from_slice(address);
+    let found = Address { v6, bytes, bits: u8::try_from(symbols.len()).ok()? };
+    (found.bits <= found.width()).then(|| NetworkValue { kind, text: found.text(kind == NetworkKind::Cidr) })
+}
+
 impl NetworkKind {
     fn cmp_rank(self) -> u8 {
         match self {
@@ -637,6 +657,9 @@ mod tests {
         assert_eq!(compare(&inet("10.0.0.9"), &inet("10.0.0.10")), Ordering::Less);
         assert_eq!(compare(&inet("10.0.0.0/8"), &inet("10.0.0.0/16")), Ordering::Less);
         assert_eq!(compare(&inet("255.0.0.1"), &inet("::1")), Ordering::Less);
+        for text in ["10.0.0.9", "10.0.0.0/8", "2001:db8::1/64"] {
+            assert_eq!(from_ordered_key(NetworkKind::Inet, &ordered_key(&inet(text))), Some(inet(text)));
+        }
         let pairs = [("10.0.0.9", "10.0.0.10"), ("10.0.0.0/8", "10.0.0.0/16"), ("10.0.0.0/16", "9.0.0.0"), ("1.2.3.4", "::")];
         for (left, right) in pairs {
             assert_eq!(

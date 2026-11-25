@@ -383,6 +383,7 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
             _ => None,
         },
         AggregateFunction::Sum => match argument? {
+            money if crate::money::is_money(money) => Some(money),
             SqlType::SmallInt | SqlType::Integer => Some(SqlType::BigInt),
             SqlType::BigInt | SqlType::Numeric(_) => Some(SqlType::Numeric(None)),
             SqlType::Real => Some(SqlType::Real),
@@ -540,6 +541,7 @@ fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlRes
                 Ok(())
             }
         }
+        AggregateFunction::Sum if crate::money::is_money(sql_type) => Ok(()),
         AggregateFunction::Sum | AggregateFunction::Avg if !sql_type.is_numeric() => {
             Err(undefined_aggregate(function, &name()))
         }
@@ -1115,6 +1117,7 @@ pub(crate) enum Sum {
     Real(f32),
     Double(f64),
     Numeric(Numeric),
+    Money(i64),
 }
 
 #[derive(Clone)]
@@ -1578,6 +1581,18 @@ fn integer_group_key(value: &Value) -> Option<i64> {
 }
 
 fn add_to_sum(sum: &mut Sum, value: &Value) -> SqlResult<()> {
+    if let Some(cents) = crate::money::cents_of(value) {
+        let total = match &*sum {
+            Sum::Money(total) => *total,
+            _ => 0,
+        };
+        *sum = Sum::Money(
+            total
+                .checked_add(cents)
+                .ok_or_else(|| SqlError::new(SqlState::NUMERIC_VALUE_OUT_OF_RANGE, "money out of range"))?,
+        );
+        return Ok(());
+    }
     if let Value::Numeric(number) = value {
         *sum = match &*sum {
             Sum::Empty => Sum::Numeric(number.clone()),
@@ -1585,6 +1600,7 @@ fn add_to_sum(sum: &mut Sum, value: &Value) -> SqlResult<()> {
             Sum::Integer { total, .. } => Sum::Numeric(Numeric::from_i128(*total).add(number)?),
             Sum::Real(total) => Sum::Double(add_float(f64::from(*total), number.to_f64())?),
             Sum::Double(total) => Sum::Double(add_float(*total, number.to_f64())?),
+            Sum::Money(total) => Sum::Money(*total),
         };
         return Ok(());
     }
@@ -1624,6 +1640,7 @@ fn add_to_sum(sum: &mut Sum, value: &Value) -> SqlResult<()> {
         (Sum::Integer { total, .. }, None) => Sum::Double(add_float(*total as f64, float())?),
         (Sum::Double(total), _) => Sum::Double(add_float(*total, float())?),
         (Sum::Numeric(total), _) => Sum::Numeric(total.clone()),
+        (Sum::Money(total), _) => Sum::Money(*total),
     };
     Ok(())
 }
@@ -1648,6 +1665,7 @@ impl Call {
             Accumulator::Sum(Sum::Real(total)) => Value::Real(total),
             Accumulator::Sum(Sum::Double(total)) => Value::Double(total),
             Accumulator::Sum(Sum::Numeric(total)) => Value::Numeric(total),
+            Accumulator::Sum(Sum::Money(total)) => crate::money::value(total),
             Accumulator::Average { count: 0, .. } => Value::Null,
             Accumulator::Average { sum, count } => {
                 let count_value = Numeric::from_i64(count);
@@ -1659,6 +1677,7 @@ impl Call {
                     Sum::Numeric(total) => Value::Numeric(total.divide(&count_value)?),
                     Sum::Real(total) => Value::Double(f64::from(total) / count as f64),
                     Sum::Double(total) => Value::Double(total / count as f64),
+                    Sum::Money(total) => crate::money::value(total / count),
                 }
             }
             Accumulator::Extreme(best) => best,

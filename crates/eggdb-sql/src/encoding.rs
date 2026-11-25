@@ -1985,6 +1985,9 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
                 DefinedValue::Network(network) => {
                     push_escaped_text(out, &crate::network_types::ordered_key(network));
                 }
+                DefinedValue::Money(cents) => {
+                    out.extend_from_slice(&((*cents as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
+                }
                 other => push_escaped_text(out, other.to_text().as_bytes()),
             }
         }
@@ -2030,6 +2033,7 @@ const INET_TAG: u8 = 35;
 const CIDR_TAG: u8 = 36;
 const MACADDR_TAG: u8 = 37;
 const MACADDR8_TAG: u8 = 38;
+const MONEY_TAG: u8 = 39;
 const HSTORE_NULL_VALUE: u8 = 0;
 const HSTORE_TEXT_VALUE: u8 = 1;
 const RANGE_EMPTY: u8 = 1;
@@ -2123,7 +2127,8 @@ fn put_nested(out: &mut Vec<u8>, value: &Value) {
             | DefinedValue::TsQuery(_)
             | DefinedValue::JsonPath(_)
             | DefinedValue::RefCursor(_)
-            | DefinedValue::Network(_) => encode_row_value(out, value),
+            | DefinedValue::Network(_)
+            | DefinedValue::Money(_) => encode_row_value(out, value),
         },
         other => encode_row_value(out, other),
     }
@@ -2209,6 +2214,10 @@ fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Network(network) => {
                 out.push(network_tag(network.kind));
                 put_bytes(out, network.text.as_bytes());
+            }
+            DefinedValue::Money(cents) => {
+                out.push(MONEY_TAG);
+                out.extend_from_slice(&cents.to_le_bytes());
             }
         },
         Value::Null => out.push(0),
@@ -2384,6 +2393,10 @@ pub(crate) fn decode_row_into(
                 }
             }
             CITEXT_TAG if wanted => crate::citext::value(reader.text()?),
+            MONEY_TAG => {
+                let cents = i64::from_le_bytes(reader.array()?);
+                if wanted { crate::money::value(cents) } else { Value::Null }
+            }
             TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG | INET_TAG | CIDR_TAG | MACADDR_TAG
             | MACADDR8_TAG
                 if wanted =>
@@ -2546,6 +2559,9 @@ fn network_tag(kind: crate::network_types::NetworkKind) -> u8 {
 }
 
 fn value_tag(sql_type: SqlType) -> u8 {
+    if crate::money::is_money(sql_type) {
+        return MONEY_TAG;
+    }
     if let SqlType::Defined(defined) = sql_type
         && let Some(kind) = crate::network_types::kind_of(defined)
     {
@@ -2896,6 +2912,10 @@ impl<'b> Reader<'b> {
             SqlType::Defined(defined) if crate::citext::is_citext(defined) => {
                 self.escaped_key_text_width()?
             }
+            SqlType::Defined(_) if crate::money::is_money(sql_type) => 8,
+            SqlType::Defined(defined) if crate::network_types::kind_of(defined).is_some() => {
+                self.escaped_key_text_width()?
+            }
             SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) => {
                 return Err(self.damaged());
             }
@@ -3016,6 +3036,15 @@ impl<'b> Reader<'b> {
             SqlType::Defined(defined) if crate::citext::is_citext(defined) => {
                 let bytes = self.escaped_key_bytes()?;
                 crate::citext::value(String::from_utf8(bytes).map_err(|_| self.damaged())?)
+            }
+            SqlType::Defined(_) if crate::money::is_money(sql_type) => {
+                crate::money::value((u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64)
+            }
+            SqlType::Defined(defined) if crate::network_types::kind_of(defined).is_some() => {
+                let kind = crate::network_types::kind_of(defined).ok_or_else(|| self.damaged())?;
+                let bytes = self.escaped_key_bytes()?;
+                let network = crate::network_types::from_ordered_key(kind, &bytes).ok_or_else(|| self.damaged())?;
+                crate::network_types::value(network)
             }
             SqlType::Array(_) | SqlType::Catalog(_) | SqlType::Defined(_) | SqlType::Dynamic(_) => {
                 return Err(self.damaged());
@@ -3219,6 +3248,7 @@ impl<'b> Reader<'b> {
                 self.range_body(oid, depth)?
             }
             CITEXT_TAG => crate::citext::value(self.text()?),
+            MONEY_TAG => crate::money::value(i64::from_le_bytes(self.array()?)),
             HSTORE_TAG => self.hstore()?,
             TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG | INET_TAG | CIDR_TAG | MACADDR_TAG
             | MACADDR8_TAG => {

@@ -40,6 +40,7 @@ const INET_OID: u32 = crate::network_types::INET_OID;
 const CIDR_OID: u32 = crate::network_types::CIDR_OID;
 const MACADDR_OID: u32 = crate::network_types::MACADDR_OID;
 const MACADDR8_OID: u32 = crate::network_types::MACADDR8_OID;
+const MONEY_OID: u32 = crate::money::MONEY_OID;
 
 const IDENTIFIER_OIDS: [u32; 7] = [26, 28, 24, 2205, 2206, 4089, 4096];
 
@@ -222,6 +223,10 @@ pub fn encode_pg_binary(value: &Value, oid: u32, zone: TimeZone) -> SqlResult<Op
             Some(values) => {
                 crate::vector_type::binary(values).ok_or_else(|| cannot_send(value, oid))?
             }
+            None => return Err(cannot_send(value, oid)),
+        },
+        MONEY_OID => match crate::money::cents_of(value) {
+            Some(cents) => cents.to_be_bytes().to_vec(),
             None => return Err(cannot_send(value, oid)),
         },
         INET_OID | CIDR_OID | MACADDR_OID | MACADDR8_OID => crate::network_types::network_of(value)
@@ -703,6 +708,7 @@ fn decode_text(bytes: &[u8], oid: u32, depth: usize) -> SqlResult<String> {
             return crate::vector_type::from_binary(bytes)
                 .map(|values| crate::vector_type::to_text(&values));
         }
+        MONEY_OID => return Ok(crate::money::to_text(i64::from_be_bytes(eight(fixed(bytes, 8)?)))),
         INET_OID | CIDR_OID | MACADDR_OID | MACADDR8_OID => {
             let kind = crate::network_types::kind_of_oid(oid).ok_or_else(incorrect_binary)?;
             return crate::network_types::text_from_binary(bytes, kind).ok_or_else(incorrect_binary);

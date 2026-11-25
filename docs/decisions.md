@@ -1353,3 +1353,4 @@ its full title with its status.
 - [D1326](decisions/D1326.md) Code-only batch 981 (M6f): the EF Core provider
 - [D1327](decisions/D1327.md) Code-only batch 982 (M8): SQL Server's CONTAINSTABLE and FREETEXTTABLE
 - [D1328](decisions/D1328.md) Code-only batch 983 (M4): PostgreSQL's inet, cidr and macaddr types
+- [D1329](decisions/D1329.md) Code-only batch 984 (M4): PostgreSQL's money type
