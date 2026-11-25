@@ -112,6 +112,37 @@ fn command_of(tokens: &[Token<'_>]) -> SqlResult<Option<MaskCommand>> {
     Ok(None)
 }
 
+const ALIASING_WORDS: [&str; 6] = ["as", "union", "intersect", "except", "minus", "with"];
+
+/// Whether every result column of the statement in `tokens` is named after the stored column
+/// it shows: one `SELECT` whose list holds only plain or qualified column names, or `*`, and no
+/// `AS`, set operation or `WITH` anywhere, so no result column can carry another column's
+/// values under its name.
+fn names_its_columns_plainly(tokens: &[Token<'_>]) -> bool {
+    let tokens = significant(tokens);
+    let selects = tokens.iter().filter(|token| is_word(Some(token), "select")).count();
+    if selects != 1 || !is_word(tokens.first(), "select") {
+        return false;
+    }
+    if tokens.iter().any(|token| ALIASING_WORDS.iter().any(|word| is_word(Some(token), word))) {
+        return false;
+    }
+    let mut expecting_name = true;
+    for token in &tokens[1..] {
+        if is_word(Some(token), "from") {
+            return !expecting_name;
+        }
+        match &token.kind {
+            TokenKind::Operator("*") if expecting_name => expecting_name = false,
+            TokenKind::Word(_) | TokenKind::QuotedIdentifier(_) if expecting_name => expecting_name = false,
+            TokenKind::Dot if !expecting_name => expecting_name = true,
+            TokenKind::Comma if !expecting_name => expecting_name = true,
+            _ => return false,
+        }
+    }
+    !expecting_name
+}
+
 fn undefined_table(table: &str) -> SqlError {
     SqlError::new(SqlState::UNDEFINED_TABLE, format!("relation \"{table}\" does not exist")).with_sqlserver_code(4902)
 }
@@ -131,6 +162,52 @@ fn column_of(reader: &dyn KeyValueRead, table: &str, column: &str) -> SqlResult<
 
 fn not_allowed(what: &str) -> SqlError {
     SqlError::new(SqlState::INSUFFICIENT_PRIVILEGE, format!("permission denied: only a superuser{what} may do this")).with_sqlserver_code(15247)
+}
+
+const MOST_NESTED_VIEWS: usize = 32;
+
+/// Adds to `named` the identifiers of the views `named` holds, and of the views those read,
+/// so a column a view selects counts as named; whether any view was found.
+fn through_views(reader: &dyn KeyValueRead, named: &mut HashSet<String>) -> SqlResult<bool> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut frontier: Vec<String> = named.iter().cloned().collect();
+    for _ in 0..MOST_NESTED_VIEWS {
+        let mut next = Vec::new();
+        for name in frontier {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(bytes) = reader.get(&crate::encoding::table_key(&name))? else {
+                continue;
+            };
+            if !crate::encoding::is_view_record(&bytes) {
+                continue;
+            }
+            let view = crate::encoding::ViewDefinition::decode(&name, &bytes)?;
+            let words: Vec<String> = match tokenize_in(&view.query, view.dialect) {
+                Ok(tokens) => tokens.iter().filter_map(identifier).map(|word| word.to_ascii_lowercase()).collect(),
+                Err(_) => Vec::new(),
+            };
+            for word in words {
+                if named.insert(word.clone()) {
+                    next.push(word);
+                }
+            }
+            next.extend(view.references.iter().map(|reference| reference.to_ascii_lowercase()));
+            named.extend(view.references.iter().map(|reference| reference.to_ascii_lowercase()));
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    Ok(seen.iter().any(|name| {
+        reader
+            .get(&crate::encoding::table_key(name))
+            .ok()
+            .flatten()
+            .is_some_and(|bytes| crate::encoding::is_view_record(&bytes))
+    }))
 }
 
 impl Session<'_> {
@@ -297,11 +374,15 @@ impl Session<'_> {
         let Ok(tokens) = tokenize_in(text, self.dialect) else {
             return Ok(None);
         };
-        let named: HashSet<String> = tokens.iter().filter_map(identifier).map(|name| name.to_ascii_lowercase()).collect();
+        let mut named: HashSet<String> = tokens.iter().filter_map(identifier).map(|name| name.to_ascii_lowercase()).collect();
+        let mut plain = names_its_columns_plainly(&tokens);
         self.with_block_reader(|reader| {
             let masks = masking::every_mask(reader)?;
             if masks.is_empty() || masking::holds_unmask(reader, &role)? {
                 return Ok(None);
+            }
+            if through_views(reader, &mut named)? {
+                plain = false;
             }
             let held = crate::roles::role_closure(reader, &role)?;
             let mut exempt = HashSet::new();
@@ -312,7 +393,7 @@ impl Session<'_> {
                     exempt.insert(mask.table.clone());
                 }
             }
-            ResultMasks::for_statement(reader, &masks, &exempt, &named)
+            ResultMasks::for_statement(reader, &masks, &exempt, &named, plain)
         })
     }
 }

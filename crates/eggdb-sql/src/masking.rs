@@ -341,12 +341,15 @@ pub(crate) struct ResultMasks {
 impl ResultMasks {
     /// The masks for a statement whose identifiers (lowercased) are `named`, from `masks`
     /// minus those of tables the role may see unmasked; `None` when the statement names no
-    /// masked column, so its results show as they are.
+    /// masked column, so its results show as they are. Only when `plain` (every result column
+    /// is named after the column it shows) do the masked tables' other columns show as they
+    /// are; otherwise every result column without a mask of its own gets `default()`.
     pub(crate) fn for_statement(
         reader: &dyn KeyValueRead,
         masks: &[ColumnMask],
         exempt_tables: &HashSet<String>,
         named: &HashSet<String>,
+        plain: bool,
     ) -> SqlResult<Option<Self>> {
         let mentioned: Vec<&ColumnMask> = masks
             .iter()
@@ -364,6 +367,9 @@ impl ResultMasks {
                 _ => mask.function.clone(),
             };
             result.functions.insert(column, function);
+        }
+        if !plain {
+            return Ok(Some(result));
         }
         let tables: HashSet<&str> = mentioned.iter().map(|mask| mask.table.as_str()).collect();
         for table in tables {

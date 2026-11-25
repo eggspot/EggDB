@@ -26,6 +26,8 @@ fn customers() -> MemoryStore {
     let mut owner = Session::new(&store);
     run(&mut owner, "CREATE ROLE support");
     run(&mut owner, "GRANT SELECT ON customers TO support");
+    run(&mut owner, "CREATE VIEW contacts AS SELECT id, email AS name FROM customers");
+    run(&mut owner, "GRANT SELECT ON contacts TO support");
     owner.close().unwrap();
     store
 }
@@ -53,6 +55,15 @@ fn a_role_without_unmask_sees_masked_values_and_filters_on_real_ones() {
         as_support(&store, "SELECT upper(email) AS shout, sum(salary) AS total FROM customers GROUP BY email ORDER BY 1"),
         "shout|total\nxxxx|0\nxxxx|0\nSELECT 2"
     );
+    for (sql, shown) in [
+        ("SELECT email AS name FROM customers WHERE id = 1", "name\nxxxx\nSELECT 1"),
+        ("SELECT email name FROM customers WHERE id = 1", "name\nxxxx\nSELECT 1"),
+        ("SELECT name FROM customers WHERE id = 3 UNION ALL SELECT email FROM customers WHERE id = 1", "name\nxxxx\nSELECT 1"),
+        ("SELECT name FROM (SELECT email AS name FROM customers) AS t", "name\nxxxx\nxxxx\nSELECT 2"),
+        ("SELECT * FROM contacts WHERE id = 2", "id|name\n0|xxxx\nSELECT 1"),
+    ] {
+        assert_eq!(as_support(&store, sql), shown, "{sql}");
+    }
     let mut owner = Session::new(&store);
     assert_eq!(
         run(&mut owner, "SELECT email FROM customers WHERE id = 1"),
@@ -96,6 +107,7 @@ fn only_a_superuser_or_the_owner_changes_masks() {
         .execute("ALTER TABLE customers ALTER COLUMN email ADD MASKED WITH (FUNCTION = 'mask()')", &mut |_| {})
         .expect_err("an unknown mask function");
     assert_eq!(wrong.state(), crate::SqlState::INVALID_PARAMETER_VALUE);
+    run(&mut owner, "DROP VIEW contacts");
     run(&mut owner, "DROP TABLE customers");
     run(&mut owner, "CREATE TABLE customers (id int PRIMARY KEY, email text)");
     run(&mut owner, "INSERT INTO customers VALUES (1, 'ada@example.com')");
@@ -111,6 +123,7 @@ fn only_a_superuser_or_the_owner_changes_masks() {
 fn a_mask_follows_its_table_and_column_when_they_are_renamed() {
     let store = customers();
     let mut owner = Session::new(&store);
+    run(&mut owner, "DROP VIEW contacts");
     run(&mut owner, "ALTER TABLE customers RENAME COLUMN email TO mail");
     run(&mut owner, "ALTER TABLE customers RENAME TO clients");
     run(&mut owner, "GRANT SELECT ON clients TO support");
