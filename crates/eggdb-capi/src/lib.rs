@@ -26,6 +26,7 @@
 //!   stops the process instead.
 
 mod args;
+mod asynchronous;
 mod copy;
 mod database;
 mod functions;
@@ -38,6 +39,7 @@ mod status;
 mod text_backend;
 mod transaction;
 
+pub use asynchronous::{EggdbCompletion, eggdb_sql_execute_async, eggdb_sql_execute_with_parameters_async};
 pub use copy::{
     EggdbCopy, eggdb_copy_end, eggdb_copy_free, eggdb_copy_put, eggdb_copy_read, eggdb_sql_copy_in,
     eggdb_sql_copy_in_begin, eggdb_sql_copy_out_begin,

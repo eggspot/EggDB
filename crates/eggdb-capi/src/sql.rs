@@ -454,6 +454,7 @@ pub(crate) enum Holder {
 pub struct EggdbSql {
     canceller: Canceller,
     open_statements: AtomicUsize,
+    running: std::sync::atomic::AtomicBool,
     state: UnsafeCell<SessionState>,
 }
 
@@ -489,6 +490,7 @@ impl EggdbSql {
         Self {
             canceller,
             open_statements: AtomicUsize::new(0),
+            running: std::sync::atomic::AtomicBool::new(false),
             state: UnsafeCell::new(SessionState {
                 backend,
                 results: ResultBatch::default(),
@@ -529,10 +531,49 @@ pub(crate) unsafe fn session_state<'a>(
 ) -> Result<&'a mut SessionState, Failure> {
     // SAFETY: eggdb.h asks for a live SQL session handle.
     let sql: &'a EggdbSql = unsafe { args::handle(sql, what) }?;
+    if sql.running.load(Ordering::Acquire) {
+        return Err(Failure::new(
+            EGGDB_ERR_IN_USE,
+            "the session is running an asynchronous call; wait for its callback",
+        ));
+    }
     // SAFETY: eggdb.h lets one call at a time use a session, its statements and its copies,
     // so no other reference to the state is live; eggdb_sql_cancel, the one call allowed
     // alongside, reads only `canceller`, outside the cell.
     Ok(unsafe { &mut *sql.state.get() })
+}
+
+/// The state of a session an asynchronous call owns (D1347): `session_state` refuses everyone
+/// else until the call's callback.
+///
+/// # Safety
+/// `sql` is a live handle whose `running` flag this call set, so no other call reaches the state.
+pub(crate) unsafe fn owned_session_state<'a>(sql: &'a EggdbSql) -> &'a mut SessionState {
+    // SAFETY: the asynchronous call set `running`, which keeps every other call out of the cell until it clears it.
+    unsafe { &mut *sql.state.get() }
+}
+
+impl EggdbSql {
+    pub(crate) fn claim_for_asynchronous_call(&self) -> Result<(), Failure> {
+        self.running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| Failure::new(EGGDB_ERR_IN_USE, "the session is running an asynchronous call; wait for its callback"))
+    }
+
+    pub(crate) fn release_after_asynchronous_call(&self) {
+        self.running.store(false, Ordering::Release);
+    }
+}
+
+impl SessionState {
+    pub(crate) fn run_for_asynchronous_call(
+        &mut self,
+        text: &str,
+        parameters: Option<&[Parameter]>,
+    ) -> Result<(*const EggdbResult, usize), Failure> {
+        self.run(text, parameters)
+    }
 }
 
 fn dialect_named(name: Option<&str>) -> Result<Dialect, Failure> {
@@ -770,7 +811,7 @@ pub(crate) fn run_on(
     Ok(batch.publish())
 }
 
-unsafe fn parameters(
+pub(crate) unsafe fn parameters(
     given: *const EggdbParameter,
     count: usize,
 ) -> Result<Vec<Parameter>, Failure> {
@@ -971,9 +1012,14 @@ pub unsafe extern "C" fn eggdb_sql_close(sql: *mut EggdbSql) -> c_int {
             return Ok(());
         }
         // SAFETY: eggdb.h asks for a live SQL session handle.
-        let open = unsafe { args::handle(sql, "sql") }?
-            .open_statements
-            .load(Ordering::Acquire);
+        let live = unsafe { args::handle(sql, "sql") }?;
+        if live.running.load(Ordering::Acquire) {
+            return Err(Failure::new(
+                EGGDB_ERR_IN_USE,
+                "the session is running an asynchronous call; close it after its callback",
+            ));
+        }
+        let open = live.open_statements.load(Ordering::Acquire);
         if open > 0 {
             return Err(Failure::new(
                 EGGDB_ERR_IN_USE,

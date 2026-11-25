@@ -234,6 +234,12 @@ eggdb_sql_close(sql);
 - `eggdb_sql_execute_with_parameters` does the same with values for the placeholders (`$1` in
   PostgreSQL's and Oracle's dialects, `?` in SQLite's and MySQL's), passed as text in an array
   of `eggdb_parameter` (a NULL `text` is SQL's NULL). Values never need quoting into the SQL.
+- `eggdb_sql_execute_async` and `eggdb_sql_execute_with_parameters_async` start the same work on
+  a thread of their own and return at once; the `eggdb_completion` callback gets the caller's
+  `user_data`, the status and the batch's results when it ends, on that thread, where
+  `eggdb_last_error` and `eggdb_last_sqlstate` describe a failure. Until the callback, every
+  other call on the session fails with `EGGDB_ERR_IN_USE`, except `eggdb_sql_cancel`; the
+  callback may start the next call.
 - A value's `kind` is `EGGDB_NULL`, `EGGDB_INTEGER` (booleans as 1 and 0, in `integer`),
   `EGGDB_REAL` (in `real`), `EGGDB_BLOB` (the bytes in `data`) or `EGGDB_TEXT` (everything else:
   text, numerics, dates, JSON, UUIDs). Every value but NULL also has its text in `data`, as the

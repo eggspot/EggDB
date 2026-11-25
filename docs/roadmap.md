@@ -726,7 +726,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   server sessions and the remaining open options, `check` and `stats` (D142, D268, D293). The remaining open options
   (`eggdb_open_v2` settings), `eggdb_check` and `eggdb_stats`: **code written, unbuilt** (code-only mode, 2026-11-14,
   D1146); left: plans kept in prepared statements, binary result formats and typed `Parse`.
-- Asynchronous C API calls, completed by one callback per batch (D17, D293).
+- Asynchronous C API calls, completed by one callback per batch (D17, D293). **Code written, unbuilt** (code-only mode,
+  2026-11-25, D1347): `eggdb_sql_execute_async` and its parameter form; a thread pool and asynchronous statements
+  are left.
 - Every language driver using the new C API calls (prepared handles, stepping, `COPY`) (D293). Python, Go and C++:
   **code written, unbuilt** (code-only mode, 2026-11-14, D1148). Node.js, Ruby and PHP: **code written, unbuilt** (code-only mode,
   2026-11-14, D1149). Dart and .NET: **code written, unbuilt** (code-only mode, 2026-11-14, D1150). Java, Kotlin,

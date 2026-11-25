@@ -232,6 +232,14 @@ int eggdb_sql_execute_with_parameters(eggdb_sql *sql, const char *text,
 int eggdb_sql_copy_in(eggdb_sql *sql, const char *text, const uint8_t *data, size_t len,
                       const eggdb_result **results, size_t *count);
 int eggdb_sql_cancel(eggdb_sql *sql);
+typedef void (*eggdb_completion)(void *user_data, int status, const eggdb_result *results,
+                                 size_t count);
+int eggdb_sql_execute_async(eggdb_sql *sql, const char *text, eggdb_completion callback,
+                            void *user_data);
+int eggdb_sql_execute_with_parameters_async(eggdb_sql *sql, const char *text,
+                                            const eggdb_parameter *parameters,
+                                            size_t parameter_count, eggdb_completion callback,
+                                            void *user_data);
 int eggdb_pool_open(const char *url, size_t max_connections, eggdb_pool **pool);
 int eggdb_pool_acquire(eggdb_pool *pool, uint64_t timeout_ms, eggdb_sql **sql);
 int eggdb_pool_release(eggdb_pool *pool, eggdb_sql *sql);
