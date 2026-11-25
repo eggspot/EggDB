@@ -550,7 +550,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A cost-based optimizer that orders joins by cost (D40, D178). Check: TPC-H's joins, and the
   Linux join at 1.0 times SQLite's (D100). Inner joins ordered by estimated size: **code written, unbuilt** (code-only mode, 2026-11-14,
   D1136); left: outer joins and a full cost model over join methods.
-- Adaptive re-planning during execution (D40).
+- Adaptive re-planning during execution (D40). **Code written, unbuilt** (code-only mode, 2026-11-25, D1338): lookup
+  joins switch to a hash table after 4,096 lookups; join re-ordering at runtime is left.
 - Point `SELECT`s as fast as SQLite's everywhere (item 19e, D99). Check: the compare job.
 - SQL joins by key at 1.0 times SQLite's on Linux: measured by CI's Linux `compare` job after
   the per-row pass, then `linux sqlite_compare.sql_join` (1.396) lowered in

@@ -805,6 +805,17 @@ struct Step<'a> {
     using: &'a [(usize, usize)],
     scope: Scope<'a>,
     access: Access,
+    adaptive: RefCell<Adaptive>,
+}
+
+const ADAPT_AFTER_LOOKUPS: u32 = 4_096;
+const ADAPTED_HASH_BYTES: usize = 64 << 20;
+
+#[derive(Default)]
+struct Adaptive {
+    lookups: u32,
+    settled: bool,
+    rows: Option<HashMap<Vec<u8>, Vec<Vec<Value>>>>,
 }
 
 pub(crate) struct JoinedRows<'a> {
@@ -1446,6 +1457,7 @@ impl<'a> JoinedRows<'a> {
                 using,
                 scope,
                 access,
+                adaptive: RefCell::new(Adaptive::default()),
             });
         }
         Ok(Self {
@@ -1630,6 +1642,39 @@ impl<'a> JoinedRows<'a> {
             }
             return Ok(true);
         }
+        let looked_up = match &step.access {
+            Access::Lookup(lefts) => Some((step.table.primary_key.as_slice(), lefts.as_slice())),
+            Access::IndexLookup { position, lefts, .. } => {
+                let columns = &step.table.indexes[*position].columns;
+                Some((&columns[..lefts.len().min(columns.len())], lefts.as_slice()))
+            }
+            _ => None,
+        };
+        if let Some((columns, lefts)) = looked_up
+            && self.adapted(step, columns)?
+        {
+            let adaptive = step.adaptive.borrow();
+            let mut key = Vec::new();
+            if let Some(rows) = &adaptive.rows
+                && probe_key(step, columns, lefts, row, &mut key)
+                && let Some(rights) = rows.get(&key)
+            {
+                for right in rights {
+                    row.extend_from_slice(right);
+                    if !attempt(row)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            drop(adaptive);
+            if !matched && step.preserves_left {
+                row.resize(base + step.table.columns.len(), Value::Null);
+                let keep_going = self.extend(level + 1, row, visit)?;
+                row.truncate(base);
+                return Ok(keep_going);
+            }
+            return Ok(true);
+        }
         match &step.access {
             Access::Lookup(lefts) => {
                 if self.lookup(step, lefts, row)? && !attempt(row)? {
@@ -1729,6 +1774,51 @@ impl<'a> JoinedRows<'a> {
         Ok(going)
     }
 
+    fn adapted(&self, step: &Step<'_>, columns: &[usize]) -> SqlResult<bool> {
+        let mut adaptive = step.adaptive.borrow_mut();
+        if adaptive.rows.is_some() {
+            return Ok(true);
+        }
+        if adaptive.settled {
+            return Ok(false);
+        }
+        adaptive.lookups += 1;
+        if adaptive.lookups < ADAPT_AFTER_LOOKUPS {
+            return Ok(false);
+        }
+        adaptive.settled = true;
+        let mut needed = step.needed.clone();
+        for &column in columns {
+            if let Some(slot) = needed.get_mut(column) {
+                *slot = true;
+            }
+        }
+        let mut rows: HashMap<Vec<u8>, Vec<Vec<Value>>> = HashMap::new();
+        let mut bytes = 0usize;
+        let mut too_large = false;
+        scan_table(self.reader, step.table, &needed, &mut |row| {
+            bytes = bytes.saturating_add(crate::memory::held_row_bytes(&row));
+            if bytes > ADAPTED_HASH_BYTES {
+                too_large = true;
+                return Ok(false);
+            }
+            let mut key = Vec::new();
+            for &column in columns {
+                match row.get(column) {
+                    Some(value) if !value.is_null() => equality_key(&mut key, value),
+                    _ => return Ok(true),
+                }
+            }
+            rows.entry(key).or_default().push(row);
+            Ok(true)
+        })?;
+        if too_large {
+            return Ok(false);
+        }
+        adaptive.rows = Some(rows);
+        Ok(true)
+    }
+
     fn lookup(&self, step: &Step<'_>, lefts: &[usize], row: &mut Vec<Value>) -> SqlResult<bool> {
         let table = step.table;
         let mut key = step.key.borrow_mut();
@@ -1748,6 +1838,18 @@ impl<'a> JoinedRows<'a> {
         })?;
         Ok(found)
     }
+}
+
+fn probe_key(step: &Step<'_>, columns: &[usize], lefts: &[usize], row: &[Value], key: &mut Vec<u8>) -> bool {
+    key.clear();
+    for (&column, &left) in columns.iter().zip(lefts) {
+        let sql_type = step.table.columns[column].sql_type;
+        let Some(value) = row.get(left).and_then(|value| key_value(value, sql_type)) else {
+            return false;
+        };
+        equality_key(key, &value);
+    }
+    true
 }
 
 fn key_value(original: &Value, sql_type: SqlType) -> Option<Cow<'_, Value>> {
@@ -1938,6 +2040,47 @@ mod tests {
         assert_eq!(
             keys(Vec::new(), &[(1, 4), (0, 3)]),
             (vec![(1, 4), (0, 3)], vec![(1, 4), (0, 3)])
+        );
+    }
+
+    fn answer(session: &mut crate::Session<'_>, sql: &str) -> String {
+        let mut outputs = Vec::new();
+        session
+            .execute(sql, &mut |result| outputs.push(crate::tests::render(&result)))
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        outputs.pop().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_lookup_join_that_meets_many_outer_rows_answers_the_same_after_adapting() {
+        let store = crate::memory_store::MemoryStore::default();
+        let mut session = crate::Session::new(&store);
+        answer(
+            &mut session,
+            "CREATE TABLE customers (id integer PRIMARY KEY, region integer, name text);
+             CREATE INDEX customers_region ON customers (region);
+             CREATE TABLE orders (id integer PRIMARY KEY, customer integer, amount integer);
+             CREATE INDEX orders_customer ON orders (customer)",
+        );
+        answer(
+            &mut session,
+            "INSERT INTO customers SELECT n, n % 50, 'c' || n FROM generate_series(1, 3000) AS n;
+             INSERT INTO orders SELECT n, (n % 3000) + 1, n % 7 FROM generate_series(1, 9000) AS n",
+        );
+        assert_eq!(
+            answer(
+                &mut session,
+                "SELECT count(*), sum(o.amount) FROM orders o JOIN customers c ON c.id = o.customer WHERE o.id > 100"
+            ),
+            "count|sum\n8900|26696\nSELECT 1"
+                .replace("26696", &((101..=9000).map(|n: i64| n % 7).sum::<i64>()).to_string())
+        );
+        assert_eq!(
+            answer(
+                &mut session,
+                "SELECT count(*) FROM orders o JOIN customers c ON c.region = o.amount WHERE o.id > 10"
+            ),
+            format!("count\n{}\nSELECT 1", (11..=9000).map(|n: i64| if n % 7 < 50 { 60 } else { 0 }).sum::<i64>())
         );
     }
 }
