@@ -1042,6 +1042,18 @@ columns' names first, or one JSON object `{"columns": [...], "rows": [[...]]}` w
 with `--allow-write`, where a query that deletes or removes (`DELETE`, `DETACH DELETE`, `REMOVE`, `DROP`) also
 needs `confirm: true` (D1352).
 
+## Documents: `eggdb document`
+
+```
+eggdb document get <file> <namespace> [<query>]
+```
+
+The file's document collections (the ones `eggdb serve --mongo-listen` serves to MongoDB drivers), read on a
+read-only open. `<namespace>` is `database.collection`; `<query>` is Extended JSON: a filter object (every
+document when left out) or an aggregation pipeline array whose stages only read (`$out` and `$merge` are refused,
+`document_error`). It prints one document per line in relaxed Extended JSON, or one object `{"documents": [...]}`
+with `--json`. The same command is the MCP tool `document_get` of `eggdb mcp`, for every agent (D1353).
+
 ## `eggdb shell`
 
 ```
@@ -1632,7 +1644,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   `--allow-write`; the key tools not under `--tables`), `stats` and `check` (as `eggdb stats` and
   `eggdb check --format json` print them) and `backup` (with `--allow-write`: a new file beside
   the database file; the three not under `--tables` or an agent role, D1351), `graph_get` and
-  `graph_run` (Cypher on the property graph, `graph_run` with `--allow-write`, D1352), and the resource
+  `graph_run` (Cypher on the property graph, `graph_run` with `--allow-write`, D1352), `document_get`
+  (a filter or a reading pipeline on a document collection, D1353), and the resource
   `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.

@@ -67,6 +67,17 @@ pub trait DatabaseOpener {
         None
     }
 
+    /// Reads the documents of `namespace` (`database.collection`) that `query` returns, opening
+    /// the database read-only for this call alone: a filter object or an aggregation pipeline
+    /// array in Extended JSON whose stages only read. Returns the JSON object
+    /// `{"documents": [...]}`, each document in relaxed Extended JSON; a refused query is
+    /// [`OpenRefusal::Failed`] with its message. `None` when this opener keeps no document
+    /// store, the default.
+    fn documents(&self, namespace: &str, query: Option<&str>) -> Option<Result<String, OpenRefusal>> {
+        let _ = (namespace, query);
+        None
+    }
+
     /// Runs one administration task on the database file, opening it for this call alone, and
     /// returns the JSON object `eggdb`'s command of the same name prints with `--format json`.
     /// `None` when this opener cannot administer its file, the default.

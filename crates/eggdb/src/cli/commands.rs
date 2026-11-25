@@ -18,6 +18,7 @@ mod collection;
 mod compact;
 mod copy_io;
 mod csv_import;
+mod document;
 mod expiry;
 mod explain;
 mod follow;
@@ -236,6 +237,7 @@ fn execute_on(
         CommandName::Memory => session.memory_command(),
         CommandName::Rdf => session.rdf_command(),
         CommandName::Graph => session.graph_command(),
+        CommandName::Document => session.document_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();

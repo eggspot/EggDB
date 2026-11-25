@@ -398,7 +398,7 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
 fn the_tools_list_carries_the_registry_s_names_and_annotations() {
     let file = key_value_file("parity-tools");
     let _audit = audit_of(file.path());
-    for (options, offered) in [(&[][..], 13), (&["--allow-write"][..], 25)] {
+    for (options, offered) in [(&[][..], 14), (&["--allow-write"][..], 26)] {
         let mut mcp = Mcp::start(file.path(), options);
         let listed = mcp.request("tools/list", "{}");
         let Json::Array(tools) = &at(&listed, &["result", "tools"]).value else {
@@ -532,6 +532,86 @@ fn graph_get_and_graph_run_return_what_graph_get_and_run_print() {
         "--json",
     ])));
     assert_eq!(canonical(at(&remaining[0], &["rows"])), "[[2]]");
+}
+
+#[test]
+fn document_get_returns_what_document_get_prints() {
+    let file = key_value_file("parity-documents");
+    let _audit = audit_of(file.path());
+    let path = file.path().to_str().unwrap().to_owned();
+    let empty_answer = {
+        let mut mcp = Mcp::start(file.path(), &[]);
+        let answer = mcp.call("document_get", r#"{"namespace":"shop.orders"}"#);
+        mcp.finish();
+        answer
+    };
+    assert_eq!(canonical(at(structured(&empty_answer, false), &["documents"])), "[]");
+    let folder = std::env::temp_dir().join(format!("eggdb-test-parity-documents-{}", std::process::id()));
+    let database = folder.join("shop");
+    let dump = database.join("orders.bson");
+    std::fs::create_dir_all(&database).unwrap();
+    let mut bytes = Vec::new();
+    for (id, status, total) in [(1, "open", 120), (2, "paid", 80), (3, "open", 30)] {
+        bytes.extend(order_bson(id, status, total));
+    }
+    std::fs::write(&dump, bytes).unwrap();
+    succeeded(&eggdb(&["restore", &path, dump.to_str().unwrap()]));
+    std::fs::remove_file(&dump).unwrap();
+    std::fs::remove_dir(&database).unwrap();
+    std::fs::remove_dir(&folder).unwrap();
+    let mut mcp = Mcp::start(file.path(), &[]);
+    let wrong = mcp.call("document_get", r#"{"namespace":"orders"}"#);
+    let (code, _) = code_and_category(structured(&wrong, true));
+    assert_eq!(code, "document_error");
+    let writing = mcp.call(
+        "document_get",
+        r#"{"namespace":"shop.orders","query":"[{\"$out\": \"copy\"}]"}"#,
+    );
+    let (code, _) = code_and_category(structured(&writing, true));
+    assert_eq!(code, "document_error");
+    mcp.finish();
+    for query in [
+        None,
+        Some(r#"{"status": "open"}"#),
+        Some(r#"[{"$group": {"_id": "$status", "n": {"$sum": 1}}}, {"$sort": {"_id": 1}}]"#),
+    ] {
+        let mut args = vec!["document", "get", path.as_str(), "shop.orders"];
+        args.extend(query);
+        args.push("--json");
+        let printed = lines(&succeeded(&eggdb(&args)));
+        assert_eq!(printed.len(), 1);
+        let mut mcp = Mcp::start(file.path(), &[]);
+        let arguments = match query {
+            Some(query) => format!(r#"{{"namespace":"shop.orders","query":{query:?}}}"#),
+            None => r#"{"namespace":"shop.orders"}"#.to_owned(),
+        };
+        let answer = mcp.call("document_get", &arguments);
+        assert_eq!(
+            canonical_without(structured(&answer, false), envelope("document_get")),
+            canonical(&printed[0]),
+            "{query:?}"
+        );
+        mcp.finish();
+    }
+}
+
+fn order_bson(id: i32, status: &str, total: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(0x10);
+    body.extend(b"_id\0");
+    body.extend(id.to_le_bytes());
+    body.push(0x02);
+    body.extend(b"status\0");
+    body.extend((status.len() as i32 + 1).to_le_bytes());
+    body.extend(status.as_bytes());
+    body.push(0);
+    body.push(0x10);
+    body.extend(b"total\0");
+    body.extend(total.to_le_bytes());
+    body.push(0);
+    let mut document = ((body.len() + 4) as i32).to_le_bytes().to_vec();
+    document.extend(body);
+    document
 }
 
 fn catalog_file(name: &str) -> TempPath {

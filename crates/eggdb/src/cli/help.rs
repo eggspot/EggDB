@@ -50,6 +50,8 @@ Commands:
                                 RDF graphs: a SPARQL query or update; see eggdb help rdf
   graph  get|run <file> <cypher>
                                 the property graph: a Cypher query that reads or writes
+  document get <file> <namespace> [query]
+                                documents: a filter or a reading pipeline, in Extended JSON
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help

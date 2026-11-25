@@ -171,6 +171,20 @@ impl DatabaseOpener for FileOpener {
         })
     }
 
+    fn documents(&self, namespace: &str, query: Option<&str>) -> Option<Result<String, OpenRefusal>> {
+        let db = match self.open(true) {
+            Ok(db) => db,
+            Err(error) => return Some(Err(self.refusal(&error))),
+        };
+        let outcome = super::document::query_documents(&db, namespace, query.unwrap_or("{}"));
+        let closed = db.close();
+        Some(match (outcome, closed) {
+            (Ok(documents), Ok(())) => Ok(super::document::documents_json(&documents)),
+            (Err(message), _) => Err(OpenRefusal::Failed(message)),
+            (Ok(_), Err(error)) => Err(failed(&error)),
+        })
+    }
+
     fn administer(&self, task: Administration<'_>) -> Option<Result<String, OpenRefusal>> {
         Some(match task {
             Administration::Stats => self.stats_report(),

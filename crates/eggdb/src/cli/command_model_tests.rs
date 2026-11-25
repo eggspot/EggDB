@@ -500,7 +500,8 @@ fn every_command_is_a_kept_name_or_a_noun_and_its_core_verbs() {
             | CommandName::Row
             | CommandName::Memory
             | CommandName::Rdf
-            | CommandName::Graph => {
+            | CommandName::Graph
+            | CommandName::Document => {
                 help::definitions(command).iter().all(|definition| {
                     definition.words.len() == 2 && is_core_verb(definition.words[1])
                 })

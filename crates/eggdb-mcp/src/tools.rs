@@ -58,13 +58,14 @@ pub(crate) enum Tool {
     RdfRun,
     GraphGet,
     GraphRun,
+    DocumentGet,
     Stats,
     Check,
     Backup,
 }
 
 impl Tool {
-    const ALL: [Self; 25] = [
+    const ALL: [Self; 26] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -87,6 +88,7 @@ impl Tool {
         Self::RdfRun,
         Self::GraphGet,
         Self::GraphRun,
+        Self::DocumentGet,
         Self::Stats,
         Self::Check,
         Self::Backup,
@@ -801,6 +803,7 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::MemoryAdd | Tool::MemoryDelete | Tool::RdfRun | Tool::GraphRun => Err(writes_not_allowed()),
         Tool::RdfGet => rdf_get(arguments, call),
         Tool::GraphGet => graph_get(arguments, call),
+        Tool::DocumentGet => document_get(arguments, call),
         Tool::Stats | Tool::Check | Tool::Backup if call.tables.is_some() || call.agent_role.is_some() => {
             Err(whole_file_refused(call))
         }
@@ -1029,31 +1032,29 @@ fn graph_failure(refusal: OpenRefusal) -> ToolError {
     }
 }
 
-fn graph_success(answer: &str, committed: Option<bool>) -> Result<ToolSuccess, ToolError> {
-    let malformed = || ToolError::new("graph_error", "The graph's answer was not a result. Nothing was changed.");
+fn array_success(answer: &str, field: &str, committed: Option<bool>) -> Result<ToolSuccess, ToolError> {
+    let malformed = || ToolError::new("database_failed", "The answer was not a result. Nothing was changed.");
     let document = eggdb_sql::json::parse_document(answer).map_err(|_| malformed())?;
     let Json::Object(members) = &document.value else {
         return Err(malformed());
     };
-    let find = |name: &str| members.iter().find(|(member, _)| member == name).map(|(_, node)| node);
-    let (Some(columns), Some(rows)) = (find("columns"), find("rows")) else {
-        return Err(malformed());
-    };
-    let Json::Array(rows) = &rows.value else {
+    let Some(Json::Array(items)) = members.iter().find(|(member, _)| member == field).map(|(_, node)| &node.value) else {
         return Err(malformed());
     };
     let mut out = JsonOut::new();
     out.begin_object();
     out.key("notice").string(NOTICE);
-    out.key("columns").node(columns);
-    out.key("rows").begin_array();
+    for (name, node) in members.iter().filter(|(member, _)| member != field) {
+        out.key(name).node(node);
+    }
+    out.key(field).begin_array();
     let mut truncated = false;
-    for row in rows {
+    for item in items {
         if out.len() > results::MAX_RESULT_BYTES {
             truncated = true;
             break;
         }
-        out.node(row);
+        out.node(item);
     }
     out.end_array();
     out.key("truncated").boolean(truncated);
@@ -1062,6 +1063,10 @@ fn graph_success(answer: &str, committed: Option<bool>) -> Result<ToolSuccess, T
     }
     out.end_object();
     Ok(ToolSuccess { structured: out.finish(), rows: None, truncated })
+}
+
+fn graph_success(answer: &str, committed: Option<bool>) -> Result<ToolSuccess, ToolError> {
+    array_success(answer, "rows", committed)
 }
 
 fn graph_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
@@ -1080,6 +1085,24 @@ fn graph_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -
             other => graph_failure(other),
         })?;
     graph_success(&answer, None)
+}
+
+fn document_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
+    arguments.allow_tool(Tool::DocumentGet)?;
+    let namespace = arguments.required_string("namespace")?;
+    let query = arguments.string("query")?;
+    if query.is_some_and(|query| query.len() > MAX_SQL_BYTES) {
+        return Err(ToolError::invalid("query is longer than 1 MiB"));
+    }
+    let answer = call
+        .opener
+        .documents(namespace, query)
+        .ok_or_else(|| ToolError::new("not_supported", "This server keeps no document store."))?
+        .map_err(|refusal| match refusal {
+            OpenRefusal::Failed(message) => ToolError::new("document_error", format!("{message}. Nothing was read.")),
+            other => sparql_failure(other),
+        })?;
+    array_success(&answer, "documents", None)
 }
 
 /// A query `graph_run` may run: its text, after the confirmation a query that deletes needs.
@@ -2577,6 +2600,7 @@ mod tests {
                 | Tool::RdfRun
                 | Tool::GraphGet
                 | Tool::GraphRun
+                | Tool::DocumentGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2622,6 +2646,7 @@ mod tests {
                 | Tool::RdfRun
                 | Tool::GraphGet
                 | Tool::GraphRun
+                | Tool::DocumentGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2675,6 +2700,7 @@ mod tests {
                 | Tool::RdfRun
                 | Tool::GraphGet
                 | Tool::GraphRun
+                | Tool::DocumentGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2817,6 +2843,7 @@ mod tests {
                 | Tool::RdfRun
                 | Tool::GraphGet
                 | Tool::GraphRun
+                | Tool::DocumentGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
