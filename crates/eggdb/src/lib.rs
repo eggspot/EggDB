@@ -75,6 +75,7 @@ mod database;
 mod error;
 mod expiry;
 mod lsm_tables;
+mod memory_collections;
 pub mod inbox;
 pub mod keyspace;
 mod options;
@@ -93,6 +94,7 @@ mod writer_slot;
 
 pub use collection::{Collection, CollectionStats, DropProgress, ReadCollection, SQL_COLLECTION, WriteCollection};
 pub use concurrent::{ConcurrentTransaction, Isolation, PreparedTransaction};
+pub use memory_collections::MemoryCollection;
 pub use database::{BackupReport, CheckReport, CloneReport, CompactReport, Database, DifferentialReport, Stats};
 pub use eggdb_platform::{Clock, SimClock};
 pub use eggdb_storage::CommitStamp;

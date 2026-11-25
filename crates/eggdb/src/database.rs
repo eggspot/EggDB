@@ -90,6 +90,7 @@ pub struct Database {
     power_source: std::sync::Mutex<PowerSource>,
     page_store_generation: std::sync::atomic::AtomicU64,
     page_store_side: AtomicU8,
+    memory_collections: crate::memory_collections::MemoryCollections,
 }
 
 /// How much more log a commit leaves before its automatic checkpoint while the machine runs on
@@ -549,7 +550,12 @@ impl Database {
             power_source: std::sync::Mutex::new(PowerSource::Mains),
             page_store_generation: std::sync::atomic::AtomicU64::new(0),
             page_store_side: AtomicU8::new(0),
+            memory_collections: crate::memory_collections::MemoryCollections::default(),
         })
+    }
+
+    pub(crate) fn memory_collections(&self) -> &crate::memory_collections::MemoryCollections {
+        &self.memory_collections
     }
 
     /// Tells the database what the machine runs on, so background work costs less battery

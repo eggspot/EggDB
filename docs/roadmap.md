@@ -1317,7 +1317,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-11, D485). The reverse and lexicographic sorted-set ranges and removals, `ZREVRANK`, `SPOP`,
   `LINSERT`, `LPUSHX`/`RPUSHX`, `TIME`, `LASTSAVE` and `CONFIG GET`: **code written, unbuilt** (code-only mode,
   2026-11-11, D486).
-- Memory-only collections in the engine, with expiry and eviction (D2, D193).
+- Memory-only collections in the engine, with expiry and eviction (D2, D193). `Database::create_memory_collection` with
+  times to live and least-recently-used eviction under a byte limit: **code written, unbuilt** (code-only mode,
+  2026-11-25, D1367). Left: reaching them from SQL, the CLI and `eggdb serve`'s protocols.
 - Benchmarks with redis-benchmark and memtier against Redis, Valkey and Dragonfly, gated (D7,
   D177).
 - memcached's binary protocol and SASL (D194). **Code written, unbuilt** (code-only mode,

@@ -1026,6 +1026,38 @@ struct FirstDropStep {
 }
 
 impl Database {
+    /// Creates a collection named `name` that is kept in memory only (D1367): its keys never
+    /// reach the file and go when the database closes, each may have a time to live, and with
+    /// `limit_bytes` a put past the limit evicts the least recently used keys. Returns whether
+    /// it created it: `false` when a memory collection has the name. A name a collection in the
+    /// file already has fails with [`ErrorKind::AlreadyExists`], so one name never means two
+    /// key spaces; names follow [`Database::create_collection`]'s rules.
+    pub fn create_memory_collection(&self, name: &str, limit_bytes: Option<u64>) -> Result<bool> {
+        check_collection_name(name)?;
+        if self.collection_names()?.iter().any(|known| known == name) {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!("a collection in the file is already named \"{name}\""),
+            ));
+        }
+        Ok(self.memory_collections().create(name, limit_bytes))
+    }
+
+    /// The memory collection named `name`, when there is one.
+    pub fn memory_collection(&self, name: &str) -> Option<std::sync::Arc<crate::MemoryCollection>> {
+        self.memory_collections().get(name)
+    }
+
+    /// Removes the memory collection named `name` and its keys; whether it was there.
+    pub fn drop_memory_collection(&self, name: &str) -> bool {
+        self.memory_collections().drop_named(name)
+    }
+
+    /// The names of the memory collections, in byte order.
+    pub fn memory_collection_names(&self) -> Vec<String> {
+        self.memory_collections().names()
+    }
+
     /// The collection named `name`, for transactions of one step (see [`Collection`]). Nothing
     /// is read until it is used.
     pub fn collection(&self, name: &str) -> Collection<'_> {
