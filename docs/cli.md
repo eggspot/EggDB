@@ -1612,7 +1612,10 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,
   `sqlite` or `oracle`), `explain_query`, `sample_rows`, `kv_get`, `kv_scan` (not under
   `--tables`), `row_list`, `write_sql`, `put`, `del`, `incr`, `cas`, `expire` and `persist` (with
-  `--allow-write`; the key tools not under `--tables`), and the resource `eggdb://schema`.
+  `--allow-write`; the key tools not under `--tables`), `stats` and `check` (as `eggdb stats` and
+  `eggdb check --format json` print them) and `backup` (with `--allow-write`: a new file beside
+  the database file; the three not under `--tables` or an agent role, D1351), and the resource
+  `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.
 - stdout carries only protocol messages; one line on stderr says what is served (a short

@@ -1,7 +1,7 @@
 use crate::call_store::{CallLimits, CallStore, WritingCallStore};
 use crate::json_out::JsonOut;
 use crate::results::{self, NOTICE};
-use crate::server::{DatabaseOpener, OpenRefusal};
+use crate::server::{Administration, DatabaseOpener, OpenRefusal};
 use crate::watchdog::Watchdog;
 use eggdb_commands::{
     ArgumentType, Category, CursorList, CursorRefusal, Grants, TOOLS, TimeToLiveError,
@@ -56,10 +56,13 @@ pub(crate) enum Tool {
     MemoryDelete,
     RdfGet,
     RdfRun,
+    Stats,
+    Check,
+    Backup,
 }
 
 impl Tool {
-    const ALL: [Self; 20] = [
+    const ALL: [Self; 23] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -80,6 +83,9 @@ impl Tool {
         Self::MemoryDelete,
         Self::RdfGet,
         Self::RdfRun,
+        Self::Stats,
+        Self::Check,
+        Self::Backup,
     ];
 
     pub(crate) fn definition(self) -> &'static ToolDefinition {
@@ -790,7 +796,94 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::MemoryGet => memory_get(arguments, call),
         Tool::MemoryAdd | Tool::MemoryDelete | Tool::RdfRun => Err(writes_not_allowed()),
         Tool::RdfGet => rdf_get(arguments, call),
+        Tool::Stats | Tool::Check | Tool::Backup if call.tables.is_some() || call.agent_role.is_some() => {
+            Err(whole_file_refused(call))
+        }
+        Tool::Stats => {
+            arguments.allow_tool(Tool::Stats)?;
+            administer(Administration::Stats, call)
+        }
+        Tool::Check => {
+            arguments.allow_tool(Tool::Check)?;
+            administer(Administration::Check, call)
+        }
+        Tool::Backup if !call.allow_write => Err(writes_not_allowed()),
+        Tool::Backup => {
+            arguments.allow_tool(Tool::Backup)?;
+            let copy = backup_copy_name(arguments)?;
+            administer(Administration::Backup { copy }, call)
+        }
     }
+}
+
+const LONGEST_FILE_NAME: usize = 255;
+
+fn whole_file_refused<O: DatabaseOpener>(call: &Call<'_, O>) -> ToolError {
+    let (code, limit) = if call.tables.is_some() {
+        ("limited_to_tables", "serves only the tables the user listed (--tables)")
+    } else {
+        ("limited_to_role", "acts as a database role")
+    };
+    ToolError::new(
+        code,
+        format!("This server {limit}, and stats, check and backup work on the whole database file. Nothing was read."),
+    )
+    .with_fix("Ask the user to run eggdb stats, eggdb check or eggdb backup on the file.")
+}
+
+fn backup_copy_name<'a>(arguments: &Arguments<'a>) -> Result<&'a str, ToolError> {
+    let copy = arguments.required_string("copy")?;
+    let plain_name = !copy.is_empty()
+        && copy.len() <= LONGEST_FILE_NAME
+        && copy != "."
+        && copy != ".."
+        && !copy.contains(['/', '\\', ':', '\0']);
+    if plain_name {
+        Ok(copy)
+    } else {
+        Err(ToolError::invalid(
+            "copy is a file name alone, such as app-2026-11-25.bak: the copy is written beside the database file",
+        ))
+    }
+}
+
+fn administration_failure(refusal: OpenRefusal) -> ToolError {
+    match refusal {
+        OpenRefusal::Failed(message) => {
+            ToolError::new("database_failed", format!("{message}. Nothing was changed."))
+        }
+        OpenRefusal::Busy => ToolError::new("database_busy", "Another process has the database open for writing.")
+            .with_fix("Try again in a moment."),
+        OpenRefusal::Missing => ToolError::new("not_found", "The database file is not there."),
+        OpenRefusal::Damaged(message) => ToolError::new("damaged", format!("The database is damaged: {message}."))
+            .with_fix("Tell your user: restore the last backup, or run eggdb check on the file for what to do next."),
+        OpenRefusal::NotWritable(message) => {
+            ToolError::new("not_writable", format!("The copy cannot be written: {message}."))
+        }
+    }
+}
+
+fn administer<O: DatabaseOpener>(task: Administration<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
+    let report = call
+        .opener
+        .administer(task)
+        .ok_or_else(|| ToolError::new("not_supported", "This server cannot administer its database file."))?
+        .map_err(administration_failure)?;
+    let members = report
+        .trim()
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .ok_or_else(|| ToolError::new("database_failed", "The report was not a JSON object. Nothing was changed."))?;
+    let mut out = JsonOut::new();
+    out.begin_object();
+    out.key("notice").string(NOTICE);
+    out.end_object();
+    let head = out.finish();
+    let structured = match head.strip_suffix('}') {
+        Some(open) if !members.trim().is_empty() => format!("{open},{members}}}"),
+        _ => head,
+    };
+    Ok(ToolSuccess { structured, rows: None, truncated: false })
 }
 
 const SPARQL_QUERY_FORMS: [&str; 4] = ["select", "ask", "construct", "describe"];
@@ -2373,7 +2466,10 @@ mod tests {
                 | Tool::MemoryGet
                 | Tool::MemoryDelete
                 | Tool::RdfGet
-                | Tool::RdfRun => not_shipped(),
+                | Tool::RdfRun
+                | Tool::Stats
+                | Tool::Check
+                | Tool::Backup => not_shipped(),
             }
         }
 
@@ -2413,7 +2509,10 @@ mod tests {
                 | Tool::MemoryGet
                 | Tool::MemoryDelete
                 | Tool::RdfGet
-                | Tool::RdfRun => not_shipped(),
+                | Tool::RdfRun
+                | Tool::Stats
+                | Tool::Check
+                | Tool::Backup => not_shipped(),
             }
         }
 
@@ -2461,7 +2560,10 @@ mod tests {
                 | Tool::MemoryGet
                 | Tool::MemoryDelete
                 | Tool::RdfGet
-                | Tool::RdfRun => not_shipped(),
+                | Tool::RdfRun
+                | Tool::Stats
+                | Tool::Check
+                | Tool::Backup => not_shipped(),
             }
         }
 
@@ -2598,7 +2700,10 @@ mod tests {
                 | Tool::MemoryGet
                 | Tool::MemoryDelete
                 | Tool::RdfGet
-                | Tool::RdfRun => not_shipped(),
+                | Tool::RdfRun
+                | Tool::Stats
+                | Tool::Check
+                | Tool::Backup => not_shipped(),
             }
             out.end_object();
             if !required.is_empty() {

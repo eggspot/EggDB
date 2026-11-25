@@ -398,7 +398,7 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
 fn the_tools_list_carries_the_registry_s_names_and_annotations() {
     let file = key_value_file("parity-tools");
     let _audit = audit_of(file.path());
-    for (options, offered) in [(&[][..], 8), (&["--allow-write"][..], 15)] {
+    for (options, offered) in [(&[][..], 12), (&["--allow-write"][..], 23)] {
         let mut mcp = Mcp::start(file.path(), options);
         let listed = mcp.request("tools/list", "{}");
         let Json::Array(tools) = &at(&listed, &["result", "tools"]).value else {
@@ -426,6 +426,58 @@ fn the_tools_list_carries_the_registry_s_names_and_annotations() {
         }
         mcp.finish();
     }
+}
+
+#[test]
+fn stats_check_and_backup_return_what_their_commands_print() {
+    let file = key_value_file("parity-admin");
+    let _audit = audit_of(file.path());
+    let path = file.path().to_str().unwrap().to_owned();
+    let mut mcp = Mcp::start(file.path(), &[]);
+    for (tool, command) in [("stats", "stats"), ("check", "check")] {
+        let answer = mcp.call(tool, "{}");
+        let result = structured(&answer, false);
+        let printed = lines(&succeeded(&eggdb(&[command, &path, "--format", "json"])));
+        assert_eq!(printed.len(), 1, "{command}");
+        assert_eq!(
+            canonical_without(result, envelope(tool)),
+            canonical(&printed[0]),
+            "{tool}"
+        );
+    }
+    let refused = mcp.call("backup", r#"{"copy":"parity-admin.bak"}"#);
+    let (code, _) = code_and_category(structured(&refused, true));
+    assert_eq!(code, "read_only");
+    mcp.finish();
+
+    let copy = TempPath::new("parity-admin-copy");
+    let copy_name = copy
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap()
+        .to_owned();
+    let mut mcp = Mcp::start(file.path(), &["--allow-write"]);
+    for wrong in ["../elsewhere.bak", "copies/app.bak", "", ".."] {
+        let answer = mcp.call("backup", &format!(r#"{{"copy":{wrong:?}}}"#));
+        let (code, _) = code_and_category(structured(&answer, true));
+        assert_eq!(code, "invalid_arguments", "{wrong}");
+    }
+    let answer = mcp.call("backup", &format!(r#"{{"copy":{copy_name:?}}}"#));
+    let result = structured(&answer, false);
+    assert_eq!(scalar(at(result, &["ok"])), "true");
+    assert!(copy.path().is_file());
+    let copied = lines(&succeeded(&eggdb(&[
+        "check",
+        copy.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ])));
+    assert_eq!(scalar(at(&copied[0], &["entries"])), scalar(at(result, &["entries"])));
+    let again = mcp.call("backup", &format!(r#"{{"copy":{copy_name:?}}}"#));
+    let (code, _) = code_and_category(structured(&again, true));
+    assert_eq!(code, "database_failed");
+    mcp.finish();
 }
 
 fn catalog_file(name: &str) -> TempPath {

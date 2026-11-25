@@ -56,6 +56,29 @@ pub trait DatabaseOpener {
         let _ = (text, write);
         None
     }
+
+    /// Runs one administration task on the database file, opening it for this call alone, and
+    /// returns the JSON object `eggdb`'s command of the same name prints with `--format json`.
+    /// `None` when this opener cannot administer its file, the default.
+    fn administer(&self, task: Administration<'_>) -> Option<Result<String, OpenRefusal>> {
+        let _ = task;
+        None
+    }
+}
+
+/// An administration task of the `stats`, `check` and `backup` tools (D1351).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Administration<'a> {
+    /// The file's page size, pages, free pages, size, last commit and log, reading no page.
+    Stats,
+    /// Every page read and checked as of the last commit.
+    Check,
+    /// A consistent copy of the last commit written to a new file of this name beside the
+    /// database file: a file name alone, never a path.
+    Backup {
+        /// The new file's name.
+        copy: &'a str,
+    },
 }
 
 /// Why the database could not be opened for a call.

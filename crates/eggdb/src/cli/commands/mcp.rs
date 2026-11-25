@@ -3,15 +3,19 @@ use crate::cli::Console;
 use crate::cli::args::Request;
 use crate::cli::failure::{Exit, Failure};
 use crate::cli::render;
+use crate::cli::reports::{self, Copied};
 use eggdb::sql::OwnedStore;
 use eggdb::{Database, ErrorKind, Options};
 use eggdb_mcp::audit::{AuditLog, audit_path_for};
-use eggdb_mcp::{DatabaseOpener, OpenRefusal, Server, ServerConfig, StartFailure};
+use eggdb_mcp::{
+    Administration, DatabaseOpener, OpenRefusal, Server, ServerConfig, StartFailure,
+};
+use eggdb_platform::time::Instant;
 use eggdb_sql::{
     KeyValueStore, OutsideLink, OutsideLinkKind, UnknownTableName, UnservableColumnList,
     VisibleTables,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const DEFAULT_TIME_LIMIT_SECONDS: u64 = 5;
@@ -35,6 +39,58 @@ impl FileOpener {
         )
     }
 
+    fn stats_report(&self) -> Result<String, OpenRefusal> {
+        let db = self.open(true).map_err(|error| self.refusal(&error))?;
+        let stats = db.stats().map_err(|error| failed(&error))?;
+        db.close().map_err(|error| failed(&error))?;
+        Ok(reports::stats_json(&self.file_display, &stats, None))
+    }
+
+    fn check_report(&self) -> Result<String, OpenRefusal> {
+        let db = self.open(true).map_err(|error| self.refusal(&error))?;
+        let stats = db.stats().map_err(|error| failed(&error))?;
+        let report = db.check().map_err(|error| self.refusal(&error))?;
+        db.close().map_err(|error| failed(&error))?;
+        Ok(reports::check_json(&self.file_display, &stats, &report))
+    }
+
+    fn backup_report(&self, copy: &str) -> Result<String, OpenRefusal> {
+        let directory = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let copy_path = directory.join(copy);
+        if copy_path == self.path {
+            return Err(OpenRefusal::Failed(
+                "the copy cannot be the database file itself; give it another name".to_owned(),
+            ));
+        }
+        if std::fs::symlink_metadata(&copy_path).is_ok() {
+            return Err(OpenRefusal::Failed(format!(
+                "{copy} already exists beside the database file, and backup never replaces a file; choose another name"
+            )));
+        }
+        let started = Instant::now();
+        let db = self.open(true).map_err(|error| self.refusal(&error))?;
+        let report = db.backup_to(&copy_path).map_err(|error| match error.kind() {
+            ErrorKind::PermissionDenied | ErrorKind::ReadOnly => {
+                OpenRefusal::NotWritable("permission denied".to_owned())
+            }
+            _ => failed(&error),
+        })?;
+        let page_size = db.page_size();
+        db.close().map_err(|error| failed(&error))?;
+        let copy_display = copy_path.display().to_string();
+        let copied = Copied {
+            file: &self.file_display,
+            copy: &copy_display,
+            page_size,
+            elapsed: started.elapsed(),
+        };
+        Ok(reports::backup_json(&copied, &report))
+    }
+
     fn refusal(&self, error: &eggdb::Error) -> OpenRefusal {
         let message = without_open_prefix(&error.to_string(), &self.file_display);
         match error.kind() {
@@ -44,6 +100,10 @@ impl FileOpener {
             _ => OpenRefusal::Failed(message),
         }
     }
+}
+
+fn failed(error: &eggdb::Error) -> OpenRefusal {
+    OpenRefusal::Failed(error.to_string())
 }
 
 impl DatabaseOpener for FileOpener {
@@ -94,6 +154,14 @@ impl DatabaseOpener for FileOpener {
             (Ok(answer), Ok(())) => Ok(answer),
             (Err(error), _) => Err(OpenRefusal::Failed(error.to_string())),
             (Ok(_), Err(error)) => Err(OpenRefusal::Failed(error.to_string())),
+        })
+    }
+
+    fn administer(&self, task: Administration<'_>) -> Option<Result<String, OpenRefusal>> {
+        Some(match task {
+            Administration::Stats => self.stats_report(),
+            Administration::Check => self.check_report(),
+            Administration::Backup { copy } => self.backup_report(copy),
         })
     }
 }

@@ -49,5 +49,5 @@ mod watchdog;
 
 pub use jsonrpc::MAX_MESSAGE_BYTES;
 pub use server::{
-    DatabaseOpener, OpenRefusal, PROTOCOL_VERSIONS, Server, ServerConfig, StartFailure,
+    Administration, DatabaseOpener, OpenRefusal, PROTOCOL_VERSIONS, Server, ServerConfig, StartFailure,
 };

@@ -1025,7 +1025,7 @@ impl Database {
     /// # Ok(()) }
     /// ```
     pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<BackupReport> {
-        self.backup_to_reporting(path, &mut |_| {})
+        self.backup_to_reporting(path, &mut |_, _| {})
     }
 
     /// Builds a copy as [`Database::backup_to`] does, from one snapshot while readers and the

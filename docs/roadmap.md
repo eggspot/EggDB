@@ -1100,7 +1100,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - MCP key writes for agents acting as a role, through key-level grants (D328).
 - A per-session key allow-list, so the MCP key-value tools work under `--tables` and
   `--mcp-tables` (D328).
-- Backup, restore and administration tools (D11).
+- Backup, restore and administration tools (D11). `stats`, `check` and `backup`: **code written,
+  unbuilt** (code-only mode, 2026-11-25, D1351). Left: restore and the per-collection counts.
 - Tools that query documents, search indexes, vectors, graphs and keys in their own query
   languages (D10, D11).
 - Text-to-SQL in every dialect through the MCP server (D31, D205). `eggdb_ai.text_to_sql`: **code written, unbuilt**
