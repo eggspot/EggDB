@@ -1080,7 +1080,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A hand check with VoiceOver, Narrator, Orca and a browser screen reader on every screen (D278).
 - UI Automation's Text and Selection patterns, NSAccessibility rows and live regions, AT-SPI2's
   text attributes, and selection announcements (D278).
-- IME input, and Wayland windows (D256).
+- IME input, and Wayland windows (D256). Wayland windows (also the client's way onto EggOS, D1323): **code written,
+  unbuilt** (D1324). Left: IME input, keyboard layouts from the compositor's keymap, and the clipboard on Wayland.
 - The main window in the browser, with the wheel and files dropped on the browser card opened in
   memory; the browser card's pointer and async clipboard are built (D278, D279, D313).
 - Touch gestures beyond a tap and a drag in the browser; `INCR` for the `PRIMARY` selection;

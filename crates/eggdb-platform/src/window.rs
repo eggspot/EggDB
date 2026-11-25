@@ -20,6 +20,7 @@ use std::time::Duration;
 pub mod atspi;
 pub mod cocoa;
 pub mod uia;
+pub mod wayland;
 pub mod win32;
 pub mod x11;
 pub mod x11_incr;
@@ -29,6 +30,8 @@ pub mod xdnd;
 mod cocoa_window;
 #[cfg(windows)]
 mod win32_window;
+#[cfg(target_os = "linux")]
+mod wayland_window;
 
 #[cfg(any(
     target_os = "linux",
@@ -693,6 +696,20 @@ pub fn check_frame(width: u32, height: u32, rgba: &[u8]) -> Result<(), WindowErr
     }
 }
 
+/// Whether a Linux window goes to a Wayland compositor first (D1324): when a compositor is named
+/// (`WAYLAND_DISPLAY`, or EggOS's `eggway`) and `EGGDB_WINDOW_SYSTEM` does not say `x11`, or
+/// when it says `wayland`. A compositor that cannot be reached leaves the window to the X
+/// server when one is named.
+#[cfg(target_os = "linux")]
+fn prefers_wayland() -> bool {
+    let chosen = std::env::var("EGGDB_WINDOW_SYSTEM").unwrap_or_default().to_ascii_lowercase();
+    match chosen.as_str() {
+        "wayland" => true,
+        "x11" => false,
+        _ => wayland_window::display_path().is_some(),
+    }
+}
+
 /// Opens a native window on this system's display.
 pub fn open_window(options: &WindowOptions) -> Result<Box<dyn Window>, WindowError> {
     #[cfg(any(
@@ -703,6 +720,14 @@ pub fn open_window(options: &WindowOptions) -> Result<Box<dyn Window>, WindowErr
         target_os = "dragonfly"
     ))]
     {
+        #[cfg(target_os = "linux")]
+        if prefers_wayland() {
+            match wayland_window::WaylandWindow::open(options) {
+                Ok(window) => return Ok(Box::new(window)),
+                Err(error) if std::env::var_os("DISPLAY").is_none() => return Err(error),
+                Err(_) => {}
+            }
+        }
         let window = x11_window::X11Window::open(options)?;
         Ok(Box::new(window))
     }
