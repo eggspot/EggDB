@@ -944,7 +944,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-25, D1362). Left: `UNMASK` per schema, table and column, `datetime()`, Oracle's `DBMS_REDACT`,
   the catalogs, and result columns traced to their source instead of matched by name.
 - Redis ACLs, MongoDB roles, Elasticsearch roles and Cassandra roles mapped onto the one role
-  model (D22). Check: the same user has the same rights over every protocol.
+  model (D22). Check: the same user has the same rights over every protocol. Stored roles as RESP users, reading
+  or writing as `pg_read_all_data` and `pg_write_all_data` grant: **code written, unbuilt** (code-only mode,
+  2026-11-25, D1364). Left: MongoDB, Elasticsearch and Cassandra logins.
 - Authenticated page encryption, with a tag per page (D187).
 - Encrypting an existing file and rotating keys online (D23, D187).
 - KMS, HSM and Vault-compatible key sources (D23, D187). `--key-source` with environment variables, programs (HSM tools), Vault's

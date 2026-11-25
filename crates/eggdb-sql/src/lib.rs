@@ -496,7 +496,7 @@ pub use restore::{
     ServerOutputSetting, SkippedObject, SqlPlusCommand, SqlPlusScript, SqlPlusStep, SqlServerBatch,
     TableRows, restore_dump, sqlserver_batches, starts_plsql_unit,
 };
-pub use roles::{StoredRole, login_verifier, stored_role, stored_roles};
+pub use roles::{ProtocolAccess, StoredRole, login_verifier, protocol_access, stored_role, stored_roles};
 pub use schema::{
     ColumnGeneration, ColumnSchema, IndexColumnOrder, IndexSchema, TableSchema, ViewColumnSchema,
     ViewSchema, quoted,

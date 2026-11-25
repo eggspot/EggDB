@@ -1388,3 +1388,4 @@ its full title with its status.
 - [D1361](decisions/D1361.md) Code-only batch 1016 (M6e): Stop interrupts a RESP connect in the client
 - [D1362](decisions/D1362.md) Code-only batch 1017 (M6b): dynamic data masking, first slice: SQL Server's masks and UNMASK
 - [D1363](decisions/D1363.md) Code-only batch 1018 (M6c): EXPLAIN ANALYZE measures the scan inside a subplan
+- [D1364](decisions/D1364.md) Code-only batch 1019 (M6b): stored roles log in to the RESP listener

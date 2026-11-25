@@ -1472,6 +1472,7 @@ impl Session<'_> {
             Some(limited) => limited,
             None => &resp_database,
         };
+        let resp_logins = super::serve_resp::RoleLogins { db: &db };
         let resp_config = eggdb_resp::ServerConfig {
             password_sha256: resp_password,
             max_connections: config.max_connections,
@@ -2178,10 +2179,11 @@ impl Session<'_> {
                 tls_relays.run(scope, &tls.relayed, &stop_signals::requested);
             }
             let resp_server = scope.spawn(|| match &resp_listener {
-                Some(listener) => eggdb_resp::serve(
+                Some(listener) => eggdb_resp::serve_with_logins(
                     resp_keyspace,
                     listener,
                     &resp_config,
+                    Some(&resp_logins),
                     &stop_signals::requested,
                     &|_| {},
                 )

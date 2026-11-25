@@ -142,6 +142,41 @@ pub trait Keyspace {
     }
 }
 
+/// A keyspace that reads through to another and refuses every write with `refusal`: what a
+/// protocol serves to a login that may only read (D1364).
+pub struct ReadOnlyKeyspace<'k> {
+    /// The keyspace read through.
+    pub inner: &'k dyn Keyspace,
+    /// The error every write gets, in the protocol's own words.
+    pub refusal: &'static str,
+}
+
+impl Keyspace for ReadOnlyKeyspace<'_> {
+    fn read(
+        &self,
+        db: u32,
+        body: &mut dyn FnMut(&dyn KeysRead) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.inner.read(db, body)
+    }
+
+    fn write(
+        &self,
+        _db: u32,
+        _body: &mut dyn FnMut(&mut dyn KeysWrite) -> Result<(), String>,
+    ) -> Result<(), String> {
+        Err(self.refusal.to_owned())
+    }
+
+    fn read_record(&self, name: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.inner.read_record(name)
+    }
+
+    fn write_record(&self, _name: &[u8], _value: Option<&[u8]>) -> Result<(), String> {
+        Err(self.refusal.to_owned())
+    }
+}
+
 /// A keyspace in memory, for tests and for servers that keep no file.
 #[derive(Debug, Default)]
 pub struct MemoryKeyspace {

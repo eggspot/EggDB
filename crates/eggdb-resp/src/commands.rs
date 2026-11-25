@@ -28,6 +28,26 @@ pub struct Client {
     pub queue_failed: bool,
     /// The keys `WATCH` saw, with their database and stored bytes then.
     pub watched: Vec<(u32, Vec<u8>, Option<Vec<u8>>)>,
+    /// Whether it logged in as a user that may only read, so every write it tries fails
+    /// (D1364).
+    pub read_only: bool,
+}
+
+/// What a login reaches (D1364).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginAccess {
+    /// Commands that read; every write fails with `NOPERM`.
+    Read,
+    /// Every command.
+    ReadWrite,
+}
+
+/// Checks `AUTH <user> <password>` and `HELLO ... AUTH <user> <password>` against users the
+/// server knows besides the default one, such as the database's stored roles (D1364).
+pub trait Logins {
+    /// What `user` reaches when `password` is theirs; `None` when it is not, or the user is
+    /// unknown, so the default user's password is checked instead.
+    fn check(&self, user: &[u8], password: &[u8]) -> Option<LoginAccess>;
 }
 
 /// What a connection needs from the server to run its commands.

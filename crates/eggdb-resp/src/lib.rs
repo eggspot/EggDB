@@ -36,12 +36,12 @@ mod value;
 pub use aof::{AofReplay, AofReport, replay_aof};
 pub use cluster::key_slot;
 pub use aof_manifest::{AofFileKind, AofManifest, AofManifestFile, parse_aof_manifest};
-pub use commands::{Client, Context, execute};
+pub use commands::{Client, Context, LoginAccess, Logins, execute};
 pub use eviction::{EvictingKeyspace, EvictionPolicy};
 pub use keyspace::{EntryVisitor, KeysRead, KeysWrite, Keyspace, MemoryKeyspace};
 pub use protocol::{ProtocolError, Reply, RequestReader, format_double};
 pub use scripting::Scripts;
-pub use server::{ServerConfig, serve};
+pub use server::{ServerConfig, serve, serve_with_logins};
 pub use transactions::execute_with_transactions;
 pub use value::{Data, Entry, SortedSet};
 

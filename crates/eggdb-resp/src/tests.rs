@@ -460,3 +460,68 @@ fn consumer_groups_deliver_acknowledge_and_claim() {
     assert_eq!(redis.text("XACK s g 1-0"), ":1|");
     assert_eq!(redis.text("XPENDING s g"), "*4|:0|$-1|$-1|*-1|");
 }
+
+struct TwoUsers;
+
+impl crate::Logins for TwoUsers {
+    fn check(&self, user: &[u8], password: &[u8]) -> Option<crate::LoginAccess> {
+        match (user, password) {
+            (b"writer", b"w-secret") => Some(crate::LoginAccess::ReadWrite),
+            (b"reader", b"r-secret") => Some(crate::LoginAccess::Read),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn a_user_the_logins_know_logs_in_and_a_reader_cannot_write() {
+    use std::io::{Read, Write};
+    let keyspace = MemoryKeyspace::default();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stopped = std::sync::atomic::AtomicBool::new(false);
+    let config = ServerConfig {
+        password_sha256: Some(eggdb_crypto::sha256(b"default-secret")),
+        max_connections: 8,
+        memory_budget: std::sync::Arc::default(),
+        cluster: false,
+    };
+    let session = |input: &[u8]| -> String {
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        client.write_all(input).unwrap();
+        let mut answer = String::new();
+        client.read_to_string(&mut answer).unwrap();
+        answer
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            crate::serve_with_logins(
+                &keyspace,
+                &listener,
+                &config,
+                Some(&TwoUsers),
+                &|| stopped.load(std::sync::atomic::Ordering::Acquire),
+                &|_| {},
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            session(b"AUTH writer w-secret\r\nSET k hi\r\nQUIT\r\n"),
+            "+OK\r\n+OK\r\n+OK\r\n"
+        );
+        let read = session(b"AUTH reader r-secret\r\nGET k\r\nSET k bye\r\nQUIT\r\n");
+        assert!(read.starts_with("+OK\r\n$2\r\nhi\r\n-NOPERM"), "{read}");
+        assert_eq!(
+            session(b"AUTH reader wrong\r\nGET k\r\nQUIT\r\n"),
+            "-WRONGPASS invalid username-password pair or user is disabled.\r\n-NOAUTH Authentication required.\r\n+OK\r\n"
+        );
+        let hello = session(b"HELLO 2 AUTH reader r-secret\r\nGET k\r\nQUIT\r\n");
+        assert!(hello.starts_with('*'), "{hello}");
+        assert!(hello.contains("$2\r\nhi\r\n"), "{hello}");
+        assert_eq!(
+            session(b"AUTH default-secret\r\nSET k bye\r\nGET k\r\nQUIT\r\n"),
+            "+OK\r\n+OK\r\n$3\r\nbye\r\n+OK\r\n"
+        );
+        stopped.store(true, std::sync::atomic::Ordering::Release);
+    });
+}

@@ -1455,6 +1455,40 @@ pub(crate) fn role_oid(name: &str) -> u32 {
     STORED_ROLE_OIDS.start + hash % (STORED_ROLE_OIDS.end - STORED_ROLE_OIDS.start)
 }
 
+/// How far a stored role reaches through the protocols that have no SQL privileges of their
+/// own: RESP keys, documents, search indices and wide-column tables (D1364).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolAccess {
+    /// Reads only: a member of `pg_read_all_data`.
+    Read,
+    /// Reads and writes: a superuser, or a member of `pg_write_all_data`.
+    ReadWrite,
+}
+
+const READ_ALL_DATA: &str = "pg_read_all_data";
+const WRITE_ALL_DATA: &str = "pg_write_all_data";
+
+/// What a stored role that may log in reaches through those protocols, as PostgreSQL's
+/// predefined roles `pg_read_all_data` and `pg_write_all_data` grant it, held directly or
+/// through other roles; `None` for a role that may not log in, does not exist, or holds
+/// neither.
+pub fn protocol_access(reader: &dyn KeyValueRead, user: &str) -> SqlResult<Option<ProtocolAccess>> {
+    let Some(role) = stored_role(reader, user)?.filter(|role| role.login) else {
+        return Ok(None);
+    };
+    if role.superuser {
+        return Ok(Some(ProtocolAccess::ReadWrite));
+    }
+    let held = role_closure(reader, user)?;
+    Ok(if held.contains(WRITE_ALL_DATA) {
+        Some(ProtocolAccess::ReadWrite)
+    } else if held.contains(READ_ALL_DATA) {
+        Some(ProtocolAccess::Read)
+    } else {
+        None
+    })
+}
+
 /// Logs in a stored role: its SCRAM verifier when it may log in and has a password.
 pub fn login_verifier(reader: &dyn KeyValueRead, user: &str) -> SqlResult<Option<String>> {
     Ok(stored_role(reader, user)?

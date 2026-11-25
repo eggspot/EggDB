@@ -307,6 +307,66 @@ struct Shared<'s> {
     clients: &'s Clients,
     notifications: &'s Notifications,
     scripts: &'s Scripts,
+    logins: Option<&'s (dyn crate::commands::Logins + Sync)>,
+}
+
+const READ_ONLY_WRITE: &str = "NOPERM this user may only read: it has no permission to run commands that write";
+
+fn logged_in(client: &mut Client, access: crate::commands::LoginAccess) {
+    client.authenticated = true;
+    client.read_only = access == crate::commands::LoginAccess::Read;
+}
+
+/// Answers `AUTH <user> <password>` for a user `logins` knows; `None` to leave the command to
+/// the default user's check.
+fn role_auth(
+    logins: Option<&(dyn crate::commands::Logins + Sync)>,
+    name: &str,
+    arguments: &[Vec<u8>],
+    client: &mut Client,
+) -> Option<Reply> {
+    let logins = logins?;
+    let [_, user, password] = arguments else {
+        return None;
+    };
+    if name != "auth" {
+        return None;
+    }
+    let access = logins.check(user, password)?;
+    logged_in(client, access);
+    Some(Reply::ok())
+}
+
+/// Takes `AUTH <user> <password>` out of a `HELLO` when `logins` knows the user, logging the
+/// client in, so the rest of the `HELLO` runs as usual.
+fn role_hello(
+    logins: Option<&(dyn crate::commands::Logins + Sync)>,
+    name: &str,
+    arguments: Vec<Vec<u8>>,
+    client: &mut Client,
+) -> Vec<Vec<u8>> {
+    let Some(logins) = logins else {
+        return arguments;
+    };
+    if name != "hello" {
+        return arguments;
+    }
+    let Some(at) = arguments
+        .iter()
+        .position(|argument| argument.eq_ignore_ascii_case(b"auth"))
+    else {
+        return arguments;
+    };
+    let (Some(user), Some(password)) = (arguments.get(at + 1), arguments.get(at + 2)) else {
+        return arguments;
+    };
+    let Some(access) = logins.check(user, password) else {
+        return arguments;
+    };
+    logged_in(client, access);
+    let mut kept = arguments;
+    kept.drain(at..at + 3);
+    kept
 }
 
 fn config_command(
@@ -367,6 +427,7 @@ fn serve_connection(
         clients,
         notifications,
         scripts,
+        logins,
     } = *shared;
     if stream.set_read_timeout(Some(READ_POLL)).is_err() || stream.set_nodelay(true).is_err() {
         return;
@@ -381,6 +442,10 @@ fn serve_connection(
         inner: keyspace,
         written: RefCell::default(),
         deleted: RefCell::default(),
+    };
+    let guarded = eggdb_keyspace::ReadOnlyKeyspace {
+        inner: &notifying,
+        refusal: READ_ONLY_WRITE,
     };
     let Ok(writer) = stream.try_clone() else {
         return;
@@ -419,8 +484,12 @@ fn serve_connection(
             .first()
             .map(|first| String::from_utf8_lossy(first).to_ascii_lowercase())
             .unwrap_or_default();
+        let arguments = role_hello(logins, &name, arguments, &mut client);
         let subscribed = hub.held(id) > 0;
-        let replies = if !client.authenticated
+        let keyspace_for_client: &dyn Keyspace = if client.read_only { &guarded } else { &notifying };
+        let replies = if let Some(reply) = role_auth(logins, &name, &arguments, &mut client) {
+            vec![reply]
+        } else if !client.authenticated
             && name != "auth"
             && name != "hello"
             && name != "quit"
@@ -437,7 +506,7 @@ fn serve_connection(
             ))]
         } else {
             let context = Context {
-                keyspace: &notifying,
+                keyspace: keyspace_for_client,
                 password_sha256: config.password_sha256.as_ref(),
                 now_ms: now_ms(),
                 reply_room_bytes: reply_room(&config.memory_budget, held.bytes(), out.len()),
@@ -486,7 +555,7 @@ fn serve_connection(
                                 reply_room(&config.memory_budget, held.bytes(), 0);
                             let mut retry = |command: &mut BlockingCommand| {
                                 let context = Context {
-                                    keyspace: &notifying,
+                                    keyspace: keyspace_for_client,
                                     password_sha256: config.password_sha256.as_ref(),
                                     now_ms: now_ms(),
                                     reply_room_bytes,
@@ -556,6 +625,19 @@ pub fn serve(
     stop: &(dyn Fn() -> bool + Sync),
     log: &(dyn Fn(&str) + Sync),
 ) -> io::Result<usize> {
+    serve_with_logins(keyspace, listener, config, None, stop, log)
+}
+
+/// Serves as [`serve`] does, also letting clients log in as the users `logins` knows with
+/// `AUTH <user> <password>` (D1364); a user that may only read gets `NOPERM` for every write.
+pub fn serve_with_logins(
+    keyspace: &(dyn Keyspace + Sync),
+    listener: &TcpListener,
+    config: &ServerConfig,
+    logins: Option<&(dyn crate::commands::Logins + Sync)>,
+    stop: &(dyn Fn() -> bool + Sync),
+    log: &(dyn Fn(&str) + Sync),
+) -> io::Result<usize> {
     listener.set_nonblocking(true)?;
     let active = AtomicUsize::new(0);
     let hub = Hub::new(Arc::clone(&config.memory_budget));
@@ -572,6 +654,7 @@ pub fn serve(
         clients: &clients,
         notifications: &notifications,
         scripts: &scripts,
+        logins,
     };
     let next_id = AtomicU64::new(1);
     std::thread::scope(|scope| {
