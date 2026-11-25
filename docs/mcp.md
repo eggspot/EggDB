@@ -104,6 +104,16 @@ not a cursor of this table with `invalid_arguments`. Each tool's confirmation ch
 `eggdb help --json` (`confirm`, `confirm_when`), and the server asks for confirmation exactly as
 that check says.
 
+## Protocol versions
+
+`eggdb mcp` speaks both eras of MCP. Clients that start with `initialize` get 2025-11-25 or 2025-06-18 for the
+whole connection. Clients of the stateless 2026-07-28 revision send no `initialize`: each request names its version
+in `params._meta["io.modelcontextprotocol/protocolVersion"]`, and each result carries `resultType: "complete"`
+(lists and `server/discover` also `ttlMs` and `cacheScope: "private"`). `server/discover` answers with every version
+the server speaks, its capabilities and `_meta["io.modelcontextprotocol/serverInfo"]`; a version the server does
+not speak is `-32022` with the supported list. Under 2026-07-28 `ping` and `logging/setLevel` are gone, and the
+server never asks the user mid-call, so a destructive write needs `confirm: true` (D1357).
+
 ## What the agent can't do (yet)
 
 - **Write, unless you allow it.** Without `--allow-write` every call opens the file read-only,

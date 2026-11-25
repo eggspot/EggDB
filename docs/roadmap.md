@@ -1091,7 +1091,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Per-agent time limits and quotas, and the agent's role in each audit record (D190). **Code written,
   unbuilt** (code-only mode, 2026-11-11, D491) for `eggdb serve`'s MCP endpoint.
 - Table resources beyond the schema document (D190). **Code written, unbuilt** (code-only mode, 2026-11-12, D569).
-- The 2026-07-28 protocol revision (D190).
+- The 2026-07-28 protocol revision (D190). Stateless requests with `_meta`, `server/discover`,
+  `resultType`, the cache fields and `UnsupportedProtocolVersion` on stdio: **code written, unbuilt**
+  (code-only mode, 2026-11-25, D1357). Left: the HTTP transport's headers without sessions,
+  `subscriptions/listen`, multi round-trip requests for confirmations, and `-32602` for a missing resource.
 - `eggdb mcp --tables`: deleting rows of a table listed with columns, inserts whose hidden column
   takes a generated value, unique indexes and foreign keys over a hidden column checked without
   an oracle, and checking a listed child's keys against a hidden column of a listed parent

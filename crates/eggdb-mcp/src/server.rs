@@ -26,6 +26,16 @@ use std::time::{Duration, Instant};
 /// `initialize` handshake. A client asking for another version is answered with the first.
 pub const PROTOCOL_VERSIONS: [&str; 2] = ["2025-11-25", "2025-06-18"];
 
+/// The stateless MCP versions this server speaks, newest first: each request carries its
+/// version, capabilities and client in `_meta`, with no `initialize` (D1357).
+pub const MODERN_PROTOCOL_VERSIONS: [&str; 1] = ["2026-07-28"];
+
+const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
+const CLIENT_INFO_META: &str = "io.modelcontextprotocol/clientInfo";
+const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
+const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+const LIST_CACHE_MS: u64 = 60_000;
+
 const WATCHDOG_GRACE: Duration = Duration::from_secs(1);
 const TIME_LIMIT_EXIT_CODE: i32 = 3;
 const LONGEST_CLIENT_TEXT: usize = 200;
@@ -373,6 +383,89 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         params: Option<&Node>,
         link: Option<&mut Connection<'_, '_>>,
     ) -> Option<String> {
+        match modern_version(params) {
+            ModernVersion::Absent if method == "server/discover" => {
+                Some(result_line(id, &modern_result(&self.discover_result(), true)))
+            }
+            ModernVersion::Absent => self.legacy_request(id, method, params, link),
+            ModernVersion::Unsupported(requested) => Some(unsupported_version(id, &requested)),
+            ModernVersion::Supported(version) => {
+                self.client.protocol = Some(version.to_owned());
+                self.client.can_ask_user = false;
+                if let Some(Json::Object(info)) = meta(params, CLIENT_INFO_META) {
+                    self.client.name = text(info, "name");
+                    self.client.version = text(info, "version");
+                }
+                let line = match method {
+                    "server/discover" => result_line(id, &self.discover_result()),
+                    "initialize" | "ping" | "logging/setLevel" => {
+                        return Some(error_line(
+                            Some(id),
+                            METHOD_NOT_FOUND,
+                            "method not found: the 2026-07-28 revision has no initialize, ping or logging/setLevel",
+                            None,
+                        ));
+                    }
+                    _ => {
+                        let initialized = std::mem::replace(&mut self.client.initialized, true);
+                        let answered = self.legacy_request(id, method, params, link);
+                        self.client.initialized = initialized;
+                        answered?
+                    }
+                };
+                let cacheable = matches!(
+                    method,
+                    "server/discover" | "tools/list" | "prompts/list" | "resources/list" | "resources/read" | "resources/templates/list"
+                );
+                Some(with_result_type(&line, cacheable))
+            }
+        }
+    }
+
+    fn discover_result(&self) -> String {
+        let mut out = JsonOut::new();
+        out.begin_object().key("supportedVersions").begin_array();
+        for version in MODERN_PROTOCOL_VERSIONS.into_iter().chain(PROTOCOL_VERSIONS) {
+            out.string(version);
+        }
+        out.end_array()
+            .key("capabilities")
+            .begin_object()
+            .key("tools")
+            .begin_object()
+            .end_object()
+            .key("resources")
+            .begin_object()
+            .end_object()
+            .key("prompts")
+            .begin_object()
+            .end_object()
+            .end_object()
+            .key("_meta")
+            .begin_object()
+            .key(SERVER_INFO_META)
+            .begin_object()
+            .key("name")
+            .string("eggdb")
+            .key("title")
+            .string("EggDB")
+            .key("version")
+            .string(&self.config.server_version)
+            .end_object()
+            .end_object()
+            .key("instructions")
+            .string(&instructions(self.config.allow_write, self.config.tables.is_some()))
+            .end_object();
+        out.finish()
+    }
+
+    fn legacy_request(
+        &mut self,
+        id: &str,
+        method: &str,
+        params: Option<&Node>,
+        link: Option<&mut Connection<'_, '_>>,
+    ) -> Option<String> {
         let needs_initialize = matches!(
             method,
             "tools/list"
@@ -392,7 +485,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             return Some(error_line(
                 Some(id),
                 INVALID_REQUEST,
-                "send initialize first: this server speaks the MCP versions that start with it (2025-11-25 and 2025-06-18)",
+                "send initialize first (2025-11-25 and 2025-06-18), or name 2026-07-28 in each request's params._meta[\"io.modelcontextprotocol/protocolVersion\"]",
                 None,
             ));
         }
@@ -1187,6 +1280,72 @@ fn member<'n>(members: &'n [(String, Node)], name: &str) -> Option<&'n Json> {
         .map(|(_, node)| &node.value)
 }
 
+enum ModernVersion<'p> {
+    Absent,
+    Supported(&'p str),
+    Unsupported(String),
+}
+
+fn meta<'p>(params: Option<&'p Node>, name: &str) -> Option<&'p Json> {
+    let Some(Json::Object(members)) = params.map(|node| &node.value) else {
+        return None;
+    };
+    let Some(Json::Object(meta)) = member(members, "_meta") else {
+        return None;
+    };
+    member(meta, name)
+}
+
+fn modern_version(params: Option<&Node>) -> ModernVersion<'_> {
+    match meta(params, PROTOCOL_VERSION_META) {
+        None => ModernVersion::Absent,
+        Some(Json::String(requested)) => match MODERN_PROTOCOL_VERSIONS.into_iter().find(|known| known == requested) {
+            Some(_) => ModernVersion::Supported(requested),
+            None => ModernVersion::Unsupported(cut(requested, 64)),
+        },
+        Some(_) => ModernVersion::Unsupported("(not a string)".to_owned()),
+    }
+}
+
+fn unsupported_version(id: &str, requested: &str) -> String {
+    let mut data = JsonOut::new();
+    data.begin_object().key("supported").begin_array();
+    for version in MODERN_PROTOCOL_VERSIONS.into_iter().chain(PROTOCOL_VERSIONS) {
+        data.string(version);
+    }
+    data.end_array().key("requested").string(requested).end_object();
+    error_line(
+        Some(id),
+        UNSUPPORTED_PROTOCOL_VERSION,
+        "Unsupported protocol version",
+        Some(&data.finish()),
+    )
+}
+
+fn modern_result(result: &str, cacheable: bool) -> String {
+    let mut fields = String::from("\"resultType\":\"complete\"");
+    if cacheable {
+        fields.push_str(&format!(",\"ttlMs\":{LIST_CACHE_MS},\"cacheScope\":\"private\""));
+    }
+    match result.trim().strip_prefix('{') {
+        Some(rest) if rest.trim_start().starts_with('}') => format!("{{{fields}}}"),
+        Some(rest) => format!("{{{fields},{rest}"),
+        None => result.to_owned(),
+    }
+}
+
+fn with_result_type(line: &str, cacheable: bool) -> String {
+    const RESULT_KEY: &str = "\"result\":";
+    match line.find(RESULT_KEY) {
+        Some(at) => {
+            let start = at + RESULT_KEY.len();
+            let end = line.len() - 1;
+            format!("{}{}}}", &line[..start], modern_result(&line[start..end], cacheable))
+        }
+        None => line.to_owned(),
+    }
+}
+
 fn text(members: &[(String, Node)], name: &str) -> Option<String> {
     match member(members, name) {
         Some(Json::String(text)) => Some(cut(text, LONGEST_CLIENT_TEXT)),
@@ -1293,4 +1452,24 @@ fn cancelled_notification(asked_id: &str) -> String {
         .end_object()
         .end_object();
     out.finish()
+}
+
+#[cfg(test)]
+mod modern_tests {
+    use super::{modern_result, with_result_type};
+
+    #[test]
+    fn modern_results_carry_their_type_and_cache_fields() {
+        assert_eq!(modern_result("{}", false), r#"{"resultType":"complete"}"#);
+        assert_eq!(
+            modern_result(r#"{"tools":[]}"#, true),
+            r#"{"resultType":"complete","ttlMs":60000,"cacheScope":"private","tools":[]}"#
+        );
+        assert_eq!(
+            with_result_type(r#"{"jsonrpc":"2.0","id":"a\"result\":{","result":{"x":1}}"#, false),
+            r#"{"jsonrpc":"2.0","id":"a\"result\":{","result":{"resultType":"complete","x":1}}"#
+        );
+        let error = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
+        assert_eq!(with_result_type(error, true), error);
+    }
 }

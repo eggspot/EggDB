@@ -1531,3 +1531,47 @@ fn an_agent_counts_swaps_and_expires_keys_that_eggdb_reads_back() {
     let gone = eggdb(&["get", path, "lock", "-C", "sessions"]);
     assert_eq!(gone.status.code(), Some(1));
 }
+
+const MODERN_META: &str = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"modern-test","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}"#;
+
+#[test]
+fn a_modern_client_is_served_statelessly_without_initialize() {
+    let (file, _audit) = sample("mcp-modern", 0);
+    let mut mcp = Mcp::start(file.path(), &[]);
+    let discovered = mcp.request("server/discover", "{}");
+    assert_eq!(text_at(&discovered, &["result", "supportedVersions", "0"]), "2026-07-28");
+    assert_eq!(text_at(&discovered, &["result", "resultType"]), "complete");
+    assert_eq!(text_at(&discovered, &["result", "cacheScope"]), "private");
+    assert_eq!(
+        text_at(&discovered, &["result", "_meta", "io.modelcontextprotocol/serverInfo", "name"]),
+        "eggdb"
+    );
+
+    let listed = mcp.request("tools/list", &format!("{{{MODERN_META}}}"));
+    assert_eq!(text_at(&listed, &["result", "resultType"]), "complete");
+    assert_eq!(text_at(&listed, &["result", "ttlMs"]), "60000");
+    assert_eq!(text_at(&listed, &["result", "tools", "0", "name"]), "list_tables");
+
+    let ran = mcp.request(
+        "tools/call",
+        &format!(r#"{{"name":"run_sql","arguments":{{"sql":"SELECT count(*) AS n FROM users"}},{MODERN_META}}}"#),
+    );
+    assert_eq!(text_at(&ran, &["result", "resultType"]), "complete");
+    assert_eq!(text_at(ok(&ran), &["rows", "0", "0"]), "3");
+
+    let pinged = mcp.request("ping", &format!("{{{MODERN_META}}}"));
+    assert_eq!(text_at(&pinged, &["error", "code"]), "-32601");
+
+    let old = mcp.request(
+        "tools/list",
+        r#"{"_meta":{"io.modelcontextprotocol/protocolVersion":"1900-01-01"}}"#,
+    );
+    assert_eq!(text_at(&old, &["error", "code"]), "-32022");
+    assert_eq!(text_at(&old, &["error", "data", "requested"]), "1900-01-01");
+    assert_eq!(text_at(&old, &["error", "data", "supported", "0"]), "2026-07-28");
+
+    let legacy = mcp.request("tools/list", "{}");
+    assert_eq!(text_at(&legacy, &["error", "code"]), "-32600");
+    let (status, _) = mcp.finish();
+    assert!(status.success());
+}
