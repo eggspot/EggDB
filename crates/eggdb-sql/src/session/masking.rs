@@ -165,6 +165,37 @@ fn not_allowed(what: &str) -> SqlError {
 }
 
 const MOST_NESTED_OBJECTS: usize = 32;
+const WRITING_WORDS: [&str; 7] = ["insert", "update", "merge", "create", "replace", "upsert", "copy"];
+const DYNAMIC_WORDS: [&str; 6] = ["do", "execute", "exec", "prepare", "call", "sp_executesql"];
+
+fn first_word(tokens: &[Token<'_>]) -> Option<String> {
+    tokens.first().and_then(|token| match &token.kind {
+        TokenKind::Word(word) => Some(word.to_ascii_lowercase()),
+        _ => None,
+    })
+}
+
+fn writes_rows(tokens: &[Token<'_>]) -> bool {
+    match first_word(tokens).as_deref() {
+        Some(word) if WRITING_WORDS.contains(&word) => true,
+        Some("select" | "with") => tokens.iter().any(|token| is_word(Some(token), "into")),
+        _ => false,
+    }
+}
+
+fn runs_dynamic_text(tokens: &[Token<'_>]) -> bool {
+    first_word(tokens).is_some_and(|word| DYNAMIC_WORDS.contains(&word.as_str()))
+        || tokens.iter().any(|token| is_word(Some(token), "sp_executesql"))
+}
+
+fn copies_masked_values() -> SqlError {
+    SqlError::new(
+        SqlState::INSUFFICIENT_PRIVILEGE,
+        "permission denied: this role holds no UNMASK, so it may not copy masked columns into rows or run dynamic SQL while they are masked",
+    )
+    .with_hint("Read masked columns with SELECT, or ask for GRANT UNMASK.")
+    .with_sqlserver_code(15247)
+}
 
 fn identifiers_of(text: &str, dialect: crate::dialect::Dialect) -> Vec<String> {
     match tokenize_in(text, dialect) {
@@ -381,6 +412,8 @@ impl Session<'_> {
         };
         let mut named: HashSet<String> = tokens.iter().filter_map(identifier).map(|name| name.to_ascii_lowercase()).collect();
         let mut plain = names_its_columns_plainly(&tokens);
+        let writes = writes_rows(&tokens);
+        let dynamic = runs_dynamic_text(&tokens);
         self.with_block_reader(|reader| {
             let masks = masking::every_mask(reader)?;
             if masks.is_empty() || masking::holds_unmask(reader, &role)? {
@@ -398,7 +431,14 @@ impl Session<'_> {
                     exempt.insert(mask.table.clone());
                 }
             }
-            ResultMasks::for_statement(reader, &masks, &exempt, &named, plain)
+            if dynamic && masks.iter().any(|mask| !exempt.contains(&mask.table)) {
+                return Err(copies_masked_values());
+            }
+            let result = ResultMasks::for_statement(reader, &masks, &exempt, &named, plain)?;
+            if result.is_some() && writes {
+                return Err(copies_masked_values());
+            }
+            Ok(result)
         })
     }
 }

@@ -138,3 +138,32 @@ fn a_mask_follows_its_table_and_column_when_they_are_renamed() {
         "mail\naXXX@XXXX.com\nSELECT 1"
     );
 }
+
+#[test]
+fn a_role_without_unmask_cannot_copy_masked_values_or_run_dynamic_sql() {
+    let store = customers();
+    let mut owner = Session::new(&store);
+    run(&mut owner, "CREATE TABLE notes (id int PRIMARY KEY, body text)");
+    run(&mut owner, "GRANT SELECT, INSERT, UPDATE ON notes TO support");
+    run(&mut owner, "GRANT UPDATE ON customers TO support");
+    owner.close().unwrap();
+    let mut session = Session::new(&store);
+    run(&mut session, "SET ROLE support");
+    for sql in [
+        "INSERT INTO notes SELECT id, email FROM customers",
+        "UPDATE customers SET name = email",
+        "SELECT email INTO copied FROM customers",
+        "CREATE TABLE copied AS SELECT email FROM customers",
+        "DO $$ BEGIN INSERT INTO notes SELECT id, email FROM customers; END $$",
+    ] {
+        let error = session.execute(sql, &mut |_| {}).expect_err(sql);
+        assert_eq!(error.state(), crate::SqlState::INSUFFICIENT_PRIVILEGE, "{sql}: {error}");
+    }
+    run(&mut session, "INSERT INTO notes VALUES (1, 'called Ada')");
+    run(&mut session, "UPDATE customers SET name = 'Ada L.' WHERE email = 'ada@example.com'");
+    session.close().unwrap();
+    assert_eq!(
+        as_support(&store, "SELECT name FROM customers WHERE id = 1"),
+        "name\nAda L.\nSELECT 1"
+    );
+}
