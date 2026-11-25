@@ -1100,10 +1100,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   an oracle, and checking a listed child's keys against a hidden column of a listed parent
   (refused with 42501 for now); writes to tables listed with columns, foreign keys to unlisted
   tables and column lists on views (whose query text no catalog shows) are built (D306).
-- MCP key writes for agents acting as a role, through key-level grants (D328).
+- MCP key writes for agents acting as a role, through key-level grants (D328). Per-agent key grants
+  (`keys=` in `--mcp-token-file`): **code written, unbuilt** (code-only mode, 2026-11-25, D1359).
 - A per-session key allow-list, so the MCP key-value tools work under `--tables` and
   `--mcp-tables` (D328). `eggdb mcp --keys`: **code written, unbuilt** (code-only mode, 2026-11-25,
-  D1358). Left: `--mcp-keys` for `eggdb serve`'s MCP endpoint.
+  D1358); `eggdb serve`'s MCP endpoint per agent through `keys=` (D1359).
 - Backup, restore and administration tools (D11). `stats`, `check` and `backup`: **code written,
   unbuilt** (code-only mode, 2026-11-25, D1351). Left: restore and the per-collection counts.
 - Tools that query documents, search indexes, vectors, graphs and keys in their own query

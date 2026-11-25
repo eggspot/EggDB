@@ -84,6 +84,28 @@ pub(super) struct AgentToken {
     time_limit: Duration,
     calls_per_minute: Option<u32>,
     writes: bool,
+    key_prefixes: Option<Vec<Vec<u8>>>,
+}
+
+fn parse_key_prefixes(value: &str) -> Option<Vec<Vec<u8>>> {
+    let mut prefixes: Vec<Vec<u8>> = Vec::new();
+    for part in value.split(',') {
+        let prefix = match part.strip_prefix("0x") {
+            Some(hex) if hex.len() % 2 == 0 => (0..hex.len())
+                .step_by(2)
+                .map(|at| hex.get(at..at + 2).and_then(|pair| u8::from_str_radix(pair, 16).ok()))
+                .collect::<Option<Vec<u8>>>()?,
+            Some(_) => return None,
+            None => part.as_bytes().to_vec(),
+        };
+        if prefix.is_empty() {
+            return None;
+        }
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    Some(prefixes)
 }
 
 pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, String> {
@@ -108,6 +130,7 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
         let mut time_limit = TIME_LIMIT;
         let mut calls_per_minute = None;
         let mut writes = false;
+        let mut key_prefixes = None;
         for option in options {
             let (name, value) = option.split_once('=').unwrap_or((option, ""));
             let bad = || {
@@ -137,6 +160,15 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
                         ));
                     }
                 },
+                "keys" => {
+                    key_prefixes = Some(parse_key_prefixes(value).ok_or_else(|| {
+                        format!(
+                            "--mcp-token-file {} line {}: keys= takes non-empty key prefixes, comma-separated, 0x.. for hex",
+                            path.display(),
+                            index + 1
+                        )
+                    })?);
+                }
                 "calls_per_minute" => {
                     let calls: u32 = value.parse().map_err(|_| bad())?;
                     if calls == 0 {
@@ -146,7 +178,7 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
                 }
                 _ => {
                     return Err(format!(
-                        "--mcp-token-file {} line {}: unknown option {name}=; use time_limit=, calls_per_minute= or writes=",
+                        "--mcp-token-file {} line {}: unknown option {name}=; use time_limit=, calls_per_minute=, writes= or keys=",
                         path.display(),
                         index + 1
                     ));
@@ -169,6 +201,7 @@ pub(super) fn read_tokens(path: &std::path::Path) -> Result<Vec<AgentToken>, Str
             time_limit,
             calls_per_minute,
             writes,
+            key_prefixes,
         });
     }
     if tokens.is_empty() {
@@ -347,6 +380,13 @@ impl<'d> McpEndpoint<'d> {
             .is_some_and(|agent| agent.writes)
     }
 
+    fn key_prefixes_of(&self, role: &Option<String>) -> Option<Vec<Vec<u8>>> {
+        self.tokens
+            .iter()
+            .find(|agent| &agent.role == role)
+            .and_then(|agent| agent.key_prefixes.clone())
+    }
+
     fn time_limit_of(&self, role: &Option<String>) -> Duration {
         self.tokens
             .iter()
@@ -362,7 +402,7 @@ impl<'d> McpEndpoint<'d> {
             audit: AuditLog::new(self.audit.clone()),
             allow_write: self.writes_allowed(&role),
             tables: self.tables.clone(),
-            key_prefixes: None,
+            key_prefixes: self.key_prefixes_of(&role),
             call_gap: Duration::ZERO,
             agent_role: role,
             exit_process: None,
@@ -531,5 +571,10 @@ mod tests {
         assert!(refused.contains("line 2"), "{refused}");
         std::fs::write(&file, format!("reporter {token}\nanalyst {token}x\n")).unwrap();
         assert_eq!(read_tokens(&file).map(|tokens| tokens.len()), Ok(2));
+        std::fs::write(&file, format!("reporter {token} keys=session:,0x00ff writes=confirmed\n")).unwrap();
+        let read = read_tokens(&file).unwrap_or_default();
+        assert_eq!(read.first().and_then(|agent| agent.key_prefixes.clone()), Some(vec![b"session:".to_vec(), vec![0x00, 0xff]]));
+        std::fs::write(&file, format!("reporter {token} keys=0xabc\n")).unwrap();
+        assert!(read_tokens(&file).is_err());
     }
 }
