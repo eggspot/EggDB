@@ -122,3 +122,32 @@ fn modules_import_the_host_functions_eggdb_provides_only() {
     .expect_err("env.local is not provided");
     assert!(refused.to_string().contains("does not provide"), "{refused}");
 }
+
+const SERIES_MODULE: &str = "\\x0061736d0100000001080160027f7f027f7f03020100070a0106736572696573\
+00000a0e010c002001200048200141016a0b";
+
+#[test]
+fn a_set_returning_wasm_function_yields_rows_until_its_flag_says_stop() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        &format!(
+            "CREATE FUNCTION wseries(n integer) RETURNS SETOF integer LANGUAGE wasm AS '{SERIES_MODULE}', 'series'"
+        ),
+    )
+    .expect("created");
+    assert_eq!(
+        run(&mut session, "SELECT * FROM wseries(3) AS s(v)").expect("called"),
+        "v\n1\n2\n3\nSELECT 3"
+    );
+    assert_eq!(
+        run(&mut session, "SELECT count(*) AS n FROM wseries(0)").expect("called"),
+        "n\n0\nSELECT 1"
+    );
+    assert!(run(
+        &mut session,
+        &format!("CREATE FUNCTION wrong(n integer) RETURNS SETOF bigint LANGUAGE wasm AS '{SERIES_MODULE}', 'series'"),
+    )
+    .is_err());
+}

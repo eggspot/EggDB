@@ -156,14 +156,22 @@ fn shown(value_types: &[ValueType]) -> String {
         .join(", ")
 }
 
+const MOST_SET_ROWS: usize = 10_000_000;
+
 fn result_type(definition: &RoutineDefinition) -> SqlResult<Option<SqlType>> {
     match &definition.returns {
-        RoutineReturns::One(ReturnType::Type(sql_type)) => Ok(Some(*sql_type)),
+        RoutineReturns::One(ReturnType::Type(sql_type)) | RoutineReturns::Set(ReturnType::Type(sql_type)) => {
+            Ok(Some(*sql_type))
+        }
         RoutineReturns::One(ReturnType::Void) | RoutineReturns::Nothing => Ok(None),
         _ => Err(SqlError::not_supported(
-            "a LANGUAGE wasm function returning a set, a row or a trigger is not supported yet",
+            "a LANGUAGE wasm function returning a row, a table or a trigger is not supported yet",
         )),
     }
+}
+
+fn returns_set(definition: &RoutineDefinition) -> bool {
+    matches!(definition.returns, RoutineReturns::Set(_))
 }
 
 /// Checks a `LANGUAGE wasm` routine when it is created: its module parses, exports the named
@@ -171,7 +179,8 @@ fn result_type(definition: &RoutineDefinition) -> SqlResult<Option<SqlType>> {
 /// `smallint` and `integer` as `i32`, `bigint` as `i64`, `real` as `f32`, `double precision` as
 /// `f64`; `text`, `varchar` and `bytea` as a pointer and a length, both `i32`, in the module's
 /// memory, which also needs an `eggdb_alloc(i32) -> i32` export when an argument is passed
-/// that way).
+/// that way). A `SETOF` function takes one more `i32`, the row's index from 0, and returns an
+/// `i32` before its value, 0 once there are no more rows (D1318).
 pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
     if definition.kind != RoutineKind::Function {
         return Err(SqlError::not_supported(
@@ -203,7 +212,7 @@ pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
             )
         })?);
     }
-    let returned = match result_type(definition)? {
+    let mut returned = match result_type(definition)? {
         Some(sql_type) => wasm_types_of(sql_type).ok_or_else(|| {
             SqlError::not_supported(
                 "LANGUAGE wasm functions return only boolean, smallint, integer, bigint, real, double precision, text, varchar or bytea",
@@ -211,6 +220,10 @@ pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
         })?,
         None => Vec::new(),
     };
+    if returns_set(definition) {
+        wanted.push(ValueType::I32);
+        returned.insert(0, ValueType::I32);
+    }
     if params != wanted || results != returned {
         return Err(invalid(format!(
             "the WebAssembly function \"{export}\" takes ({}) and returns {}, which does not match the SQL declaration",
@@ -334,8 +347,15 @@ fn result_value(results: &[eggdb_wasm_vm::Value], sql_type: Option<SqlType>, ins
 /// Runs a `LANGUAGE wasm` function on a fresh instance of its module, within the default
 /// fuel, memory and call-depth limits; a trap fails the statement with 38000.
 pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>) -> SqlResult<Returned> {
+    let nothing = || {
+        if returns_set(definition) {
+            Returned::Set(Vec::new())
+        } else {
+            Returned::Value(Value::Null)
+        }
+    };
     if definition.strict && arguments.iter().any(Value::is_null) {
-        return Ok(Returned::Value(Value::Null));
+        return Ok(nothing());
     }
     if arguments.len() != definition.parameters.len() {
         return Err(SqlError::new(
@@ -356,7 +376,7 @@ pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>) -> S
     let mut values = Vec::with_capacity(arguments.len());
     for (value, parameter) in arguments.iter().zip(&definition.parameters) {
         if value.is_null() {
-            return Ok(Returned::Value(Value::Null));
+            return Ok(nothing());
         }
         if through_memory(parameter.sql_type) {
             let bytes = memory_bytes(value, parameter.sql_type)?;
@@ -365,8 +385,46 @@ pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>) -> S
             values.push(argument(value, parameter.sql_type)?);
         }
     }
+    if returns_set(definition) {
+        return set_rows(&mut instance, export, values, result_type(definition)?, &limits);
+    }
     let results = instance.call_values(export, &values, &limits).map_err(trapped)?;
     Ok(Returned::Value(result_value(&results, result_type(definition)?, &instance)?))
+}
+
+fn set_rows(
+    instance: &mut Instance,
+    export: &str,
+    mut values: Vec<eggdb_wasm_vm::Value>,
+    element: Option<SqlType>,
+    limits: &Limits,
+) -> SqlResult<Returned> {
+    let mut rows = Vec::new();
+    let mut held = crate::memory::RowBytes::default();
+    values.push(eggdb_wasm_vm::Value::I32(0));
+    for index in 0..MOST_SET_ROWS {
+        if let Some(last) = values.last_mut() {
+            *last = eggdb_wasm_vm::Value::I32(i32::try_from(index).unwrap_or(i32::MAX));
+        }
+        crate::cancel::check()?;
+        let results = instance.call_values(export, &values, limits).map_err(trapped)?;
+        let Some((eggdb_wasm_vm::Value::I32(more), value_results)) = results.split_first() else {
+            return Err(SqlError::new(
+                SqlState::EXTERNAL_ROUTINE_EXCEPTION,
+                "a set-returning LANGUAGE wasm function must return a row flag first",
+            ));
+        };
+        if *more == 0 {
+            return Ok(Returned::Set(rows));
+        }
+        let value = result_value(value_results, element, instance)?;
+        held.add(&value)?;
+        rows.push(value);
+    }
+    Err(SqlError::new(
+        SqlState::PROGRAM_LIMIT_EXCEEDED,
+        format!("a LANGUAGE wasm function returned more than {MOST_SET_ROWS} rows"),
+    ))
 }
 
 fn trapped(trap: eggdb_wasm_vm::Trap) -> SqlError {
