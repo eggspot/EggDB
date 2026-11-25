@@ -1748,6 +1748,12 @@ digits from a file; `--key-source <source>` reads the same key from somewhere el
 
 `https://` sources check the server's certificate against `SSL_CERT_FILE` or the system's roots.
 
+To encrypt a file that holds plain data, or to rotate its key, compact it under the new key:
+`eggdb compact app.db --new-key-file new.key` (with `--key-file old.key` for a file already
+encrypted). The rewritten file, built beside the old one and renamed over it in one step, holds
+every page under the new key; programs reading the file keep reading the old one until they open
+it again, now with the new key (D1365).
+
 ## Exit codes and errors
 
 | Code | Meaning |

@@ -29,7 +29,11 @@ impl Session<'_> {
             .open_database(Access::ReadOnly, None)
             .map_err(|error| self.open_failure(&error, Access::ReadOnly))?;
         let page_size = db.page_size();
-        let report = db.compact().map_err(|error| engine_failure(&error))?;
+        let report = match &self.request.new_key {
+            Some(key) => db.compact_with_key(key.0),
+            None => db.compact(),
+        }
+        .map_err(|error| engine_failure(&error))?;
         let elapsed = started.elapsed();
         match self.format {
             Format::Json => {

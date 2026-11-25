@@ -5,7 +5,7 @@ use crate::transaction::{ReadTransaction, WriteTransaction};
 use crate::writer_slot::WriterSlot;
 use eggdb_platform::{Clock, DatabaseFile, File as _, FileSystem, OpenMode, OsFileSystem, OsMemory, PowerSource};
 use eggdb_storage::{
-    Access, BTree, CacheSize, CommitStamp, CopyDestination, CopyFailure, CreateOptions, Features,
+    Access, BTree, CacheSize, CommitStamp, CopyDestination, CopyFailure, CopyKey, CreateOptions, Features,
     FileId, NO_PAGE, PageCache, PageFile, PageSize, StorageError, Store,
 };
 use std::ffi::OsString;
@@ -1044,6 +1044,7 @@ impl Database {
             staging,
             replaces: false,
             lsm_roots: lsm_roots.as_ref().map(|(start, end)| (start.as_slice(), end.as_slice())),
+            key: CopyKey::Same,
         };
         let report = snapshot
             .copy_to_reporting(&fs, &OsMemory::new(), Arc::clone(&self.clock.0), destination, &mut |_| {})
@@ -1078,6 +1079,7 @@ impl Database {
             staging: &staging,
             replaces: false,
             lsm_roots: lsm_roots.as_ref().map(|(start, end)| (start.as_slice(), end.as_slice())),
+            key: CopyKey::Same,
         };
         let report = snapshot
             .copy_to_reporting(
@@ -1183,6 +1185,18 @@ impl Database {
     /// # Ok(()) }
     /// ```
     pub fn compact(self) -> Result<CompactReport> {
+        self.compact_under(CopyKey::Same)
+    }
+
+    /// Compacts the file as [`Database::compact`] does, writing every page of the rewritten
+    /// file under `key` (D1365): this encrypts a file that was not, or rotates the key of one
+    /// that was, while programs reading the file keep reading the file they opened. Open it
+    /// again with `key` afterwards.
+    pub fn compact_with_key(self, key: [u8; 32]) -> Result<CompactReport> {
+        self.compact_under(CopyKey::Use(key))
+    }
+
+    fn compact_under(self, key: CopyKey) -> Result<CompactReport> {
         if self.is_in_memory() {
             return Err(Error::new(
                 ErrorKind::InvalidOption,
@@ -1203,6 +1217,7 @@ impl Database {
             staging: &staging,
             replaces: true,
             lsm_roots: lsm_roots.as_ref().map(|(start, end)| (start.as_slice(), end.as_slice())),
+            key,
         };
         let report = snapshot
             .copy_to(

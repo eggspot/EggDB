@@ -37,6 +37,28 @@ pub struct CopyDestination<'p> {
     /// clears [`Features::LSM_TABLES`](crate::Features::LSM_TABLES), so it holds the same
     /// entries in plain B-tree form. `None` copies the catalog tree as it is.
     pub lsm_roots: Option<(&'p [u8], &'p [u8])>,
+    /// Which key the copy's pages are encrypted with (D1365).
+    pub key: CopyKey,
+}
+
+/// The key a copy's pages are encrypted with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CopyKey {
+    /// The source's key, or none when the source is not encrypted: what a backup and a plain
+    /// compaction keep.
+    Same,
+    /// This key, [`PAGE_KEY_BYTES`](crate::PAGE_KEY_BYTES) long: encrypting a file that was
+    /// not, or rotating its key.
+    Use([u8; crate::page_cipher::PAGE_KEY_BYTES]),
+}
+
+impl std::fmt::Debug for CopyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Same => f.write_str("Same"),
+            Self::Use(_) => f.write_str("Use(..)"),
+        }
+    }
 }
 
 /// How far a copy has come, as [`ReadTransaction::copy_to_reporting`] reports it.
@@ -215,7 +237,13 @@ impl<F: File> ReadTransaction<'_, F> {
                 let _ = fs.remove_file(destination.staging);
             }
         })?;
-        if let Some(cipher) = self.page_cipher()? {
+        let cipher = match destination.key {
+            CopyKey::Same => self.page_cipher()?,
+            CopyKey::Use(key) => Some(crate::page_cipher::PageCipher::new(&key).inspect_err(|_| {
+                let _ = fs.remove_file(destination.staging);
+            })?),
+        };
+        if let Some(cipher) = cipher {
             file.adopt_cipher(cipher).inspect_err(|_| {
                 let _ = fs.remove_file(destination.staging);
             })?;

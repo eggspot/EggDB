@@ -160,7 +160,7 @@ pub(super) const COMPACT: CommandDefinition = CommandDefinition {
     synopsis: "<file>",
     summary: "rewrite the file without free or leaked pages, in place",
     description: "Rewrites the file without its free and leaked pages and renames the result over it in one step, so a crash leaves either the old file or the new one. The data stays the same.",
-    usage: "eggdb compact <file>",
+    usage: "eggdb compact <file> [--new-key-file <file>]",
     help: "\
 Rewrites the file without its free and leaked pages and swaps the result in. The new file is
 built entry by entry as <file>.compacting, synced, its entries counted again, and then renamed
@@ -171,11 +171,20 @@ eggdb shell, which holds the file: quit it first. A file with no free or leaked 
 all the same, which packs its pages. eggdb check says how many pages a compact would reclaim. In a
 pipe the report is one JSON line.
 
+      --new-key-file <file>   write the new file encrypted under this key (64 hexadecimal digits):
+                              encrypts a file that was not, or rotates the key of one that was,
+                              opened with --key-file; open it with the new key afterwards
+
 Examples:
   eggdb compact app.db
   eggdb check app.db && eggdb compact app.db --format json
+  eggdb compact app.db --key-file old.key --new-key-file new.key
 ",
-    options: &[],
+    options: &[valued(
+        "new-key-file",
+        "file",
+        "write the new file encrypted under this key: encrypts a plain file or rotates its key",
+    )],
     operands: &[FILE],
     outputs: &object_outputs(COMPACT_FIELDS),
     max_effect: Effect::Change,
@@ -183,6 +192,7 @@ Examples:
     examples: &[
         "eggdb compact app.db",
         "eggdb check app.db && eggdb compact app.db --format json",
+        "eggdb compact app.db --key-file old.key --new-key-file new.key",
     ],
     surfaces: "none yet: the GUI client (D15) brings a file view",
 };

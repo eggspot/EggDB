@@ -3,7 +3,7 @@ use crate::error::StorageError;
 use crate::format::{Access, Features, FileId, NO_PAGE, PageSize};
 use crate::page_cache::{CacheSize, PageCache};
 use crate::page_file::{CreateOptions, PageFile};
-use crate::snapshot_copy::CopyDestination;
+use crate::snapshot_copy::{CopyDestination, CopyKey};
 use crate::store::Store;
 use eggdb_platform::{File, FileSystem, OpenMode, SimClock, SimFile, SimFileSystem, SimMemory};
 use std::path::Path;
@@ -143,6 +143,7 @@ fn a_copy_of_an_encrypted_file_stays_encrypted_with_the_same_key() {
             staging: Path::new("copy.backing-up"),
             replaces: false,
         lsm_roots: None,
+            key: CopyKey::Same,
         },
     )
     .unwrap();
@@ -155,4 +156,55 @@ fn a_copy_of_an_encrypted_file_stays_encrypted_with_the_same_key() {
         reopened(&fs, "copy", Some(&[3; 32])),
         Err(StorageError::WrongKey)
     ));
+}
+
+const NEW_KEY: [u8; 32] = [0xa5; 32];
+
+fn copied_under(store: &Store<SimFile>, fs: &SimFileSystem, path: &'static str, staging: &'static str, key: CopyKey) {
+    let read = store.begin_read().unwrap();
+    read.copy_to(
+        fs,
+        &SimMemory::new(),
+        Arc::new(SimClock::new(1)),
+        CopyDestination {
+            path: Path::new(path),
+            staging: Path::new(staging),
+            replaces: false,
+            lsm_roots: None,
+            key,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_copy_under_a_new_key_rotates_the_key_and_encrypts_a_plain_file() {
+    let fs = SimFileSystem::new();
+    encrypted_database(&fs);
+    let store = reopened(&fs, "db", Some(&KEY)).unwrap();
+    copied_under(&store, &fs, "rotated", "rotated.compacting", CopyKey::Use(NEW_KEY));
+    drop(store);
+    assert!(!holds(&raw_contents(&fs, "rotated"), SECRET));
+    let rotated = reopened(&fs, "rotated", Some(&NEW_KEY)).unwrap();
+    assert!(read_secret(&rotated).unwrap().starts_with(SECRET));
+    drop(rotated);
+    assert!(matches!(reopened(&fs, "rotated", Some(&KEY)), Err(StorageError::WrongKey)));
+
+    let options = CreateOptions {
+        page_size: PageSize::DEFAULT,
+        file_id: FileId(*b"plain-to-sealed!"),
+    };
+    let plain = store_of(PageFile::create(&fs, Path::new("plain"), options).unwrap());
+    let mut write = plain.begin_write().unwrap();
+    let tree = write.create_tree().unwrap();
+    write.set_catalog_root(tree.root());
+    write.put(&tree, &7u32.to_be_bytes(), SECRET).unwrap();
+    write.commit().unwrap();
+    plain.sync().unwrap();
+    assert!(holds(&raw_contents(&fs, "plain"), SECRET));
+    copied_under(&plain, &fs, "sealed", "sealed.compacting", CopyKey::Use(KEY));
+    drop(plain);
+    assert!(!holds(&raw_contents(&fs, "sealed"), SECRET));
+    let sealed = reopened(&fs, "sealed", Some(&KEY)).unwrap();
+    assert!(read_secret(&sealed).unwrap().starts_with(SECRET));
 }

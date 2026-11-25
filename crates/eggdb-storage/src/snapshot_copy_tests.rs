@@ -5,7 +5,7 @@ use crate::error::{FormatError, StorageError};
 use crate::format::{Access, Features, FileId, NO_PAGE, PageSize};
 use crate::page_cache::{CacheSize, PageCache};
 use crate::page_file::{CreateOptions, PageFile};
-use crate::snapshot_copy::{CopyDestination, CopyFailure, CopyReport};
+use crate::snapshot_copy::{CopyDestination, CopyFailure, CopyKey, CopyReport};
 use crate::store::{ReadTransaction, Store};
 use eggdb_platform::{
     CrashMode, File, FileSystem, OpenMode, SimClock, SimFile, SimFileSystem, SimMemory,
@@ -131,6 +131,7 @@ fn backup_destination() -> CopyDestination<'static> {
         staging: Path::new(COPY_STAGING),
         replaces: false,
         lsm_roots: None,
+        key: CopyKey::Same,
     }
 }
 
@@ -140,6 +141,7 @@ fn compaction_destination() -> CopyDestination<'static> {
         staging: Path::new(DB_STAGING),
         replaces: true,
         lsm_roots: None,
+        key: CopyKey::Same,
     }
 }
 

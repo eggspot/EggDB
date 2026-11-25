@@ -122,5 +122,5 @@ pub use page_cipher::{PAGE_KEY_BYTES, PageCipher};
 pub use page_file::{CreateOptions, PageFile};
 pub use spill::SpillOpener;
 #[cfg(feature = "std")]
-pub use snapshot_copy::{CopyDestination, CopyFailure, CopyProgress, CopyReport};
+pub use snapshot_copy::{CopyDestination, CopyFailure, CopyKey, CopyProgress, CopyReport};
 pub use store::{FileReport, ReadTransaction, SnapshotToken, Store, ValueReader, WriteTransaction};

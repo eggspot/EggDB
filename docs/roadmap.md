@@ -948,7 +948,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   or writing as `pg_read_all_data` and `pg_write_all_data` grant: **code written, unbuilt** (code-only mode,
   2026-11-25, D1364). Left: MongoDB, Elasticsearch and Cassandra logins.
 - Authenticated page encryption, with a tag per page (D187).
-- Encrypting an existing file and rotating keys online (D23, D187).
+- Encrypting an existing file and rotating keys online (D23, D187). Through compaction under a new key
+  (`eggdb compact --new-key-file`, `Database::compact_with_key`): **code written, unbuilt** (code-only mode,
+  2026-11-25, D1365). Left: removing encryption, and rotating while a program has the file open for writing.
 - KMS, HSM and Vault-compatible key sources (D23, D187). `--key-source` with environment variables, programs (HSM tools), Vault's
   key-value store and Transit engine, and AWS KMS: **code written, unbuilt** (code-only mode, 2026-11-17, D1196); Azure
   Key Vault, Google Secret Manager and Cloud KMS: **code written, unbuilt** (code-only mode, 2026-11-17, D1197). Left: a

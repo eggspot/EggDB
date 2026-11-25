@@ -279,6 +279,7 @@ impl CommandName {
             OptionName::ForRelease => self == Self::Backup,
             OptionName::Differential | OptionName::Keep | OptionName::Clone => self == Self::Backup,
             OptionName::BackupKeyFile => matches!(self, Self::Backup | Self::Restore),
+            OptionName::NewKeyFile => self == Self::Compact,
             OptionName::ArchiveChanges => matches!(
                 self,
                 Self::Serve
@@ -728,6 +729,7 @@ enum OptionName {
     Differential,
     Keep,
     BackupKeyFile,
+    NewKeyFile,
     Clone,
     Table,
     Header,
@@ -774,6 +776,7 @@ impl OptionName {
             b"clone" => Self::Clone,
             b"keep" => Self::Keep,
             b"backup-key-file" => Self::BackupKeyFile,
+            b"new-key-file" => Self::NewKeyFile,
             b"compress" => Self::Compress,
             b"create" => Self::Create,
             b"prefix" => Self::Prefix,
@@ -1112,6 +1115,7 @@ pub(crate) struct Request {
     pub(crate) clone_copy: bool,
     pub(crate) keep_copies: Option<u32>,
     pub(crate) backup_key: Option<EncryptionKey>,
+    pub(crate) new_key: Option<EncryptionKey>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1650,6 +1654,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         clone_copy: false,
         keep_copies: None,
         backup_key: None,
+        new_key: None,
     };
     for option in &tokens.options {
         if !command.takes(option.name) {
@@ -1706,6 +1711,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
                         .and_then(|count| u32::try_from(count).ok())
                         .ok_or_else(|| usage(format!("{} takes how many full copies to keep, 1 to 100000", option.spelled)))?,
                 );
+            }
+            OptionName::NewKeyFile => {
+                request.new_key = Some(read_key_file(value).map_err(|message| usage(message.replace("--key-file", "--new-key-file")))?);
             }
             OptionName::BackupKeyFile => {
                 request.backup_key = Some(read_key_file(value).map_err(|message| usage(message.replace("--key-file", "--backup-key-file")))?);
