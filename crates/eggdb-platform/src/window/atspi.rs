@@ -76,6 +76,14 @@ const INVALID_ARGS: &str = "org.freedesktop.DBus.Error.InvalidArgs";
 pub const ROLE_ALERT: u32 = 2;
 /// `ATSPI_ROLE_CHECK_BOX`.
 pub const ROLE_CHECK_BOX: u32 = 7;
+/// `ATSPI_ROLE_CHECK_MENU_ITEM`.
+pub const ROLE_CHECK_MENU_ITEM: u32 = 8;
+/// `ATSPI_ROLE_DIALOG`.
+pub const ROLE_DIALOG: u32 = 16;
+/// `ATSPI_ROLE_SCROLL_BAR`.
+pub const ROLE_SCROLL_BAR: u32 = 48;
+/// `ATSPI_ROLE_TOOL_TIP`.
+pub const ROLE_TOOL_TIP: u32 = 64;
 /// `ATSPI_ROLE_COMBO_BOX`.
 pub const ROLE_COMBO_BOX: u32 = 11;
 /// `ATSPI_ROLE_FRAME`.
@@ -226,6 +234,11 @@ pub fn role(role: AccessRole) -> u32 {
         AccessRole::Cell => ROLE_TABLE_CELL,
         AccessRole::Menu => ROLE_MENU,
         AccessRole::MenuItem => ROLE_MENU_ITEM,
+        AccessRole::ScrollBar => ROLE_SCROLL_BAR,
+        AccessRole::Dialog => ROLE_DIALOG,
+        AccessRole::AlertDialog => ROLE_ALERT,
+        AccessRole::Tooltip => ROLE_TOOL_TIP,
+        AccessRole::MenuItemCheckBox => ROLE_CHECK_MENU_ITEM,
     }
 }
 
@@ -253,6 +266,11 @@ pub fn role_name(role: AccessRole) -> &'static str {
         AccessRole::Cell => "table cell",
         AccessRole::Menu => "menu",
         AccessRole::MenuItem => "menu item",
+        AccessRole::ScrollBar => "scroll bar",
+        AccessRole::Dialog => "dialog",
+        AccessRole::AlertDialog => "alert",
+        AccessRole::Tooltip => "tool tip",
+        AccessRole::MenuItemCheckBox => "check menu item",
     }
 }
 
@@ -2919,6 +2937,10 @@ mod tests {
         assert_eq!(role(AccessRole::ComboBox), 11);
         assert_eq!(role(AccessRole::TextArea), 61);
         assert_eq!(role(AccessRole::Alert), 2);
+        assert_eq!(role(AccessRole::ScrollBar), ROLE_SCROLL_BAR);
+        assert_eq!(role(AccessRole::Tooltip), 64);
+        assert_eq!(role(AccessRole::MenuItemCheckBox), 8);
+        assert_eq!(role_name(AccessRole::Dialog), "dialog");
         assert_eq!(role(AccessRole::Tree), 65);
         assert_eq!(role(AccessRole::TreeItem), 91);
         assert_eq!(role(AccessRole::Grid), 55);

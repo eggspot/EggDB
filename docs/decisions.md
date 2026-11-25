@@ -1393,3 +1393,4 @@ its full title with its status.
 - [D1366](decisions/D1366.md) Code-only batch 1021 (M6b): a key per tenant database, and crypto-shredding
 - [D1367](decisions/D1367.md) Code-only batch 1022 (M7): memory-only collections in the engine
 - [D1368](decisions/D1368.md) Code-only batch 1023 (M6e): the pointer's shape follows what is under it
+- [D1369](decisions/D1369.md) Code-only batch 1024 (M6e): scroll bar, dialog, tooltip and checkable menu item roles in every accessibility bridge

@@ -115,6 +115,11 @@ pub fn aria_role(role: AccessRole) -> &'static str {
         AccessRole::Menu => "menu",
         AccessRole::MenuItem => "menuitem",
         AccessRole::SearchBox => "searchbox",
+        AccessRole::ScrollBar => "scrollbar",
+        AccessRole::Dialog => "dialog",
+        AccessRole::AlertDialog => "alertdialog",
+        AccessRole::Tooltip => "tooltip",
+        AccessRole::MenuItemCheckBox => "menuitemcheckbox",
     }
 }
 

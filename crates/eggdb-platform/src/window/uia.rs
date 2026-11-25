@@ -78,6 +78,12 @@ pub const HEADING_LEVEL_1: i32 = 80051;
 
 /// `UIA_ButtonControlTypeId`.
 pub const BUTTON_CONTROL: i32 = 50000;
+/// `UIA_ScrollBarControlTypeId`.
+pub const SCROLL_BAR_CONTROL: i32 = 50014;
+/// `UIA_ToolTipControlTypeId`.
+pub const TOOL_TIP_CONTROL: i32 = 50022;
+/// `UIA_WindowControlTypeId`, which a dialog is with `IsDialog` true.
+pub const WINDOW_CONTROL: i32 = 50032;
 /// `UIA_MenuControlTypeId`.
 pub const MENU_CONTROL: i32 = 50009;
 /// `UIA_MenuItemControlTypeId`.
@@ -242,7 +248,10 @@ pub fn control_type(role: AccessRole) -> Option<i32> {
         AccessRole::ColumnHeader => HEADER_ITEM_CONTROL,
         AccessRole::Cell => DATA_ITEM_CONTROL,
         AccessRole::Menu => MENU_CONTROL,
-        AccessRole::MenuItem => MENU_ITEM_CONTROL,
+        AccessRole::MenuItem | AccessRole::MenuItemCheckBox => MENU_ITEM_CONTROL,
+        AccessRole::ScrollBar => SCROLL_BAR_CONTROL,
+        AccessRole::Dialog | AccessRole::AlertDialog => WINDOW_CONTROL,
+        AccessRole::Tooltip => TOOL_TIP_CONTROL,
     })
 }
 
@@ -749,6 +758,9 @@ mod tests {
         assert_eq!(control_type(AccessRole::ComboBox), Some(COMBO_BOX_CONTROL));
         assert_eq!(control_type(AccessRole::TextArea), Some(EDIT_CONTROL));
         assert_eq!(control_type(AccessRole::Alert), Some(TEXT_CONTROL));
+        assert_eq!(control_type(AccessRole::ScrollBar), Some(50014));
+        assert_eq!(control_type(AccessRole::AlertDialog), Some(WINDOW_CONTROL));
+        assert_eq!(control_type(AccessRole::Tooltip), Some(50022));
         assert_eq!(control_type(AccessRole::Tree), Some(TREE_CONTROL));
         assert_eq!(control_type(AccessRole::TreeItem), Some(TREE_ITEM_CONTROL));
         assert_eq!(control_type(AccessRole::Grid), Some(DATA_GRID_CONTROL));

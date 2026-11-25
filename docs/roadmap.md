@@ -1163,7 +1163,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The value view's text selection and SQL type names; menu, dialog and scroll bar accessibility
   roles; scrollbars that hide and fade; the editor's draggable and horizontal scrollbars; the
   column-resize cursor (D310). The pointer's shapes (the column-resize cursor and six others) on X11, Windows and macOS:
-  **code written, unbuilt** (code-only mode, 2026-11-25, D1368).
+  **code written, unbuilt** (code-only mode, 2026-11-25, D1368). The `scrollbar`, `dialog`, `alertdialog`, `tooltip` and
+  `menuitemcheckbox` roles in every bridge: **code written, unbuilt** (D1369).
 - The splitters' leftovers: the results grid filling a taller results region, the results and
   inspector splitters as `Tab` stops, the resize cursor, splitters in the familiar layouts, and the
   rail's hover, tooltips and accessibility roles with the splitters' and the drawer's (D311).

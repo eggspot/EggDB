@@ -366,6 +366,16 @@ pub enum AccessRole {
     MenuItem,
     /// A single-line field that filters or searches as it is typed in (the keys tab's prefix).
     SearchBox,
+    /// A scroll bar, whose value is how far its region is scrolled, from 0 to 1.
+    ScrollBar,
+    /// A non-modal dialog: the value view, the drawer, a popover that takes the focus.
+    Dialog,
+    /// A modal dialog that asks for a decision: the layout picker, a confirmation, `Drop`.
+    AlertDialog,
+    /// A tooltip describing another node.
+    Tooltip,
+    /// A menu command that turns something on or off, with its checked state.
+    MenuItemCheckBox,
 }
 
 /// Rectangle of an accessibility node in logical pixels, from the window's top-left corner.

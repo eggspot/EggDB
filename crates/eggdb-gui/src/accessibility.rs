@@ -30,7 +30,16 @@ pub fn default_actions(node: &AccessNode) -> AccessActions {
         | AccessRole::Tree
         | AccessRole::Grid
         | AccessRole::ColumnHeader
-        | AccessRole::Menu => AccessActions::default(),
+        | AccessRole::Menu
+        | AccessRole::ScrollBar
+        | AccessRole::Dialog
+        | AccessRole::AlertDialog
+        | AccessRole::Tooltip => AccessActions::default(),
+        AccessRole::MenuItemCheckBox => AccessActions {
+            invoke: true,
+            toggle: true,
+            ..focus_only
+        },
         AccessRole::Button | AccessRole::Link | AccessRole::MenuItem => AccessActions {
             invoke: true,
             ..focus_only
@@ -243,6 +252,11 @@ fn role_word(role: AccessRole) -> &'static str {
         AccessRole::Menu => "menu",
         AccessRole::MenuItem => "menuitem",
         AccessRole::SearchBox => "searchbox",
+        AccessRole::ScrollBar => "scrollbar",
+        AccessRole::Dialog => "dialog",
+        AccessRole::AlertDialog => "alertdialog",
+        AccessRole::Tooltip => "tooltip",
+        AccessRole::MenuItemCheckBox => "menuitemcheckbox",
     }
 }
 

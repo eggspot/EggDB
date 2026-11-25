@@ -250,7 +250,11 @@ pub fn ax_role(role: AccessRole) -> Option<AxRole> {
         AccessRole::Grid => ("AXTable", false),
         AccessRole::ColumnHeader | AccessRole::Cell => ("AXCell", false),
         AccessRole::Menu => ("AXMenu", false),
-        AccessRole::MenuItem => ("AXMenuItem", false),
+        AccessRole::MenuItem | AccessRole::MenuItemCheckBox => ("AXMenuItem", false),
+        AccessRole::ScrollBar => ("AXScrollBar", false),
+        AccessRole::Dialog => ("AXPopover", false),
+        AccessRole::AlertDialog => ("AXSheet", false),
+        AccessRole::Tooltip => ("AXGroup", true),
     };
     Some(AxRole {
         role,
