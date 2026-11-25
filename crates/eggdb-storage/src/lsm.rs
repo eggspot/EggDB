@@ -289,11 +289,18 @@ impl LsmTree {
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let manifest = Manifest::read(pages, &self.manifest)?;
+        let sealed: Vec<u64> = manifest.runs.iter().map(|run| run.component.tree.root()).collect();
         for component in manifest.components_newest_first() {
-            if let Some(stored) = component
-                .tree
-                .get_in(pages, key, |value| value.into_vec())?
-            {
+            let learned = if sealed.contains(&component.tree.root()) {
+                learned_get(pages, &component.tree, key)?
+            } else {
+                None
+            };
+            let found = match learned {
+                Some(found) => found,
+                None => component.tree.get_in(pages, key, |value| value.into_vec())?,
+            };
+            if let Some(stored) = found {
                 return Ok(live_value(&stored)?.map(<[u8]>::to_vec));
             }
         }
@@ -572,6 +579,42 @@ impl LsmTree {
         }
         Ok(report)
     }
+}
+
+fn learned_get(
+    pages: &impl PageSource,
+    tree: &BTree,
+    key: &[u8],
+) -> Result<Option<Option<Vec<u8>>>, StorageError> {
+    let Some(models) = pages.learned_runs() else {
+        return Ok(None);
+    };
+    let root_lsn = crate::page_cache::TreePage::header(&pages.page(tree.root())?).lsn;
+    if root_lsn == 0 {
+        return Ok(None);
+    }
+    let known = models
+        .try_borrow()
+        .is_ok_and(|models| models.get(tree.root()).is_some_and(|model| model.describes(root_lsn)));
+    if !known {
+        let model = crate::learned::model_of(pages, tree, root_lsn)?;
+        let Ok(mut models) = models.try_borrow_mut() else {
+            return Ok(None);
+        };
+        models.insert(tree.root(), model);
+    }
+    let Ok(models) = models.try_borrow() else {
+        return Ok(None);
+    };
+    let Some(model) = models.get(tree.root()).filter(|model| model.describes(root_lsn)) else {
+        return Ok(None);
+    };
+    for leaf in model.candidates(crate::learned::key_number(key)) {
+        if let Some(found) = BTree::get_in_leaf(pages, leaf, key)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
 }
 
 fn pages_of(report: &TreeReport) -> u64 {

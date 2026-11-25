@@ -227,6 +227,34 @@ impl BTree {
         })
     }
 
+    /// The value under `key` read straight from leaf `leaf` of this tree: `Some(Some(value))`
+    /// or `Some(None)` when the leaf's fence keys cover `key`, `None` when they do not (or the
+    /// page is no leaf), so the caller looks elsewhere (D1336).
+    pub(crate) fn get_in_leaf(
+        pages: &impl PageSource,
+        leaf: u64,
+        key: &[u8],
+    ) -> Result<Option<Option<Vec<u8>>>, StorageError> {
+        let page = pages.page(leaf)?;
+        let shape = shape_of_ref(&page)?;
+        if !shape.is_leaf() {
+            return Ok(None);
+        }
+        let Ok(suffix) = shape.key_suffix(&page, key) else {
+            return Ok(None);
+        };
+        let Ok(index) = shape.search(&page, suffix)? else {
+            return Ok(Some(None));
+        };
+        let cell = shape.cell_at(&page, index)?;
+        let value = if cell.overflow {
+            assembled_value(pages, &shape, &cell)?
+        } else {
+            cell.payload.to_vec()
+        };
+        Ok(Some(Some(value)))
+    }
+
     pub(crate) fn stored_value_in(
         &self,
         pages: &impl PageSource,

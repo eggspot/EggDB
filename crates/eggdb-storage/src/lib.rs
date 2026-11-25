@@ -61,6 +61,7 @@ mod flash_file;
 use eggdb_format::{bytes, format};
 mod frames;
 mod hybrid_clock;
+mod learned;
 mod log;
 mod lsm;
 #[cfg(test)]

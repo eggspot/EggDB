@@ -441,7 +441,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   going): **code written, unbuilt** (code-only mode, 2026-11-13, D1122); left: `REINDEX ... CONCURRENTLY`, the other
   dialects' online index syntax, and `ALTER TABLE` rewrites in steps.
 - Learned indexes, first over the LSM tree's sealed runs, after the per-table LSM switch above,
-  with a D35 review if they are stored (D40, D170). Check: point gets with and without them.
+  with a D35 review if they are stored (D40, D170). Check: point gets with and without them. **Code written,
+  unbuilt** (code-only mode, 2026-11-25, D1336): in-memory models per sealed run; stored models and the measurement
+  are left.
 
 ### M3 Transactions
 - Users can run SQL sessions on concurrent transactions, with each dialect's isolation levels and

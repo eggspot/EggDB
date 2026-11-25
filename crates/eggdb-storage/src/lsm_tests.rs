@@ -191,3 +191,29 @@ fn values_at_the_limit_and_beyond_are_handled() {
     );
     write.commit().unwrap();
 }
+
+#[test]
+fn point_gets_through_learned_models_find_every_key_and_no_other() {
+    let fs = SimFileSystem::new();
+    let (store, tree) = created(&fs);
+    let mut model = Model::new();
+    for round in 0..6u64 {
+        let mut write = store.begin_write().unwrap();
+        for index in 0..40u64 {
+            let key = key(round * 1_000 + index * 7);
+            let value = vec![(round * 40 + index) as u8; 300];
+            write.lsm_put(&tree, &key, &value).unwrap();
+            model.insert(key, value);
+        }
+        write.commit().unwrap();
+    }
+    for _ in 0..2 {
+        let read = store.begin_read().unwrap();
+        for (key, value) in &model {
+            assert_eq!(read.lsm_get(&tree, key).unwrap().as_ref(), Some(value));
+        }
+        for absent in [key(1), key(999_999), b"a".to_vec(), b"zzz".to_vec()] {
+            assert_eq!(read.lsm_get(&tree, &absent).unwrap(), None);
+        }
+    }
+}

@@ -190,6 +190,7 @@ pub struct PageCache<F: File> {
     value_compression: Cell<crate::compression::ValueCompression>,
     compressed_written: Cell<u64>,
     spill: RefCell<Spill>,
+    learned: RefCell<crate::learned::LearnedRuns>,
 }
 
 impl<F: File> PageCache<F> {
@@ -309,6 +310,7 @@ impl<F: File> PageCache<F> {
             value_compression: Cell::new(crate::compression::ValueCompression::Off),
             compressed_written: Cell::new(0),
             spill: RefCell::new(Spill::default()),
+            learned: RefCell::new(crate::learned::LearnedRuns::default()),
         })
     }
 
@@ -472,6 +474,9 @@ impl<F: File> PageCache<F> {
             return Err(StorageError::PageBorrowed { page: page_id });
         }
         self.file.borrow_mut().free(page_id)?;
+        if let Ok(mut learned) = self.learned.try_borrow_mut() {
+            learned.forget(page_id);
+        }
         let spilled = self
             .spill
             .try_borrow_mut()
@@ -563,6 +568,7 @@ impl<F: File> PageCache<F> {
     pub fn rollback(&mut self) -> Result<(), StorageError> {
         self.new_chains.get_mut().clear();
         self.spill.get_mut().clear();
+        self.learned.get_mut().clear();
         self.compressed_written.set(0);
         self.drop_changes();
         self.images.get_mut().discard_pending();
@@ -779,6 +785,7 @@ impl<F: File> PageCache<F> {
         self.images.get_mut().discard_all();
         self.new_chains.get_mut().clear();
         self.spill.get_mut().clear();
+        self.learned.get_mut().clear();
     }
 
     fn drop_changes(&mut self) {
@@ -1054,6 +1061,13 @@ pub(crate) trait PageSource {
     fn page_size(&self) -> PageSize;
 
     fn page_count(&self) -> u64;
+
+    /// The learned models of sealed LSM runs the page cache keeps (D1336), shared by the
+    /// writer and every snapshot: a model names the log position of its run's root page, so
+    /// a reader whose root differs builds its own.
+    fn learned_runs(&self) -> Option<&RefCell<crate::learned::LearnedRuns>> {
+        None
+    }
 }
 
 impl<F: File> PageSource for PageCache<F> {
@@ -1073,6 +1087,10 @@ impl<F: File> PageSource for PageCache<F> {
 
     fn page_count(&self) -> u64 {
         self.file.borrow().page_count()
+    }
+
+    fn learned_runs(&self) -> Option<&RefCell<crate::learned::LearnedRuns>> {
+        Some(&self.learned)
     }
 }
 
@@ -1097,6 +1115,10 @@ impl<F: File> PageSource for Snapshot<'_, F> {
 
     fn page_count(&self) -> u64 {
         PageSource::page_count(self.cache)
+    }
+
+    fn learned_runs(&self) -> Option<&RefCell<crate::learned::LearnedRuns>> {
+        Some(&self.cache.learned)
     }
 }
 
