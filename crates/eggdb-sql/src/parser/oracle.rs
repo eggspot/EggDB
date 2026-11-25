@@ -1227,6 +1227,7 @@ impl<'t> Parser<'t> {
             self.expect_word("default")?;
             if self.take_word("on") {
                 self.expect_word("null")?;
+                column.identity_on_null = true;
                 if self.take_word("for") {
                     self.expect_word("insert")?;
                     if !self.take_word("only") {

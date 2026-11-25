@@ -282,7 +282,7 @@ fn access_method_oid(method: IndexMethod) -> u32 {
 fn identity_code(generation: Option<IdentityGeneration>) -> &'static str {
     match generation {
         Some(IdentityGeneration::Always) => "a",
-        Some(IdentityGeneration::ByDefault) => "d",
+        Some(IdentityGeneration::ByDefault | IdentityGeneration::ByDefaultOnNull) => "d",
         None => "",
     }
 }

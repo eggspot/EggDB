@@ -1027,7 +1027,7 @@ fn column_row(
     if let Some(identity) = &column.identity {
         let generation = match identity.generation {
             IdentityGeneration::Always => "ALWAYS",
-            IdentityGeneration::ByDefault => "BY DEFAULT",
+            IdentityGeneration::ByDefault | IdentityGeneration::ByDefaultOnNull => "BY DEFAULT",
         };
         row = row
             .set("identity_generation", character_data(generation))

@@ -2354,6 +2354,7 @@ impl<'t> Parser<'t> {
             serial: serial.is_some(),
             identity_seed: None,
             generated_always: false,
+            identity_on_null: false,
             sequence_identity: None,
             on_update_current_timestamp: false,
             unique: None,

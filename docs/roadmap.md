@@ -1575,7 +1575,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `sp_sproc_columns` rows for PL/SQL functions (D295).
 - Oracle's refusal of values for `GENERATED ALWAYS` identity columns, `ALTER COLUMN ... SET
   GENERATED` and `DROP IDENTITY` (roadmap item 37c). **Code written, unbuilt** (code-only mode, 2026-11-11, D428):
-  the refusals were already there; Oracle's `MODIFY` forms added. Left: `ON NULL`.
+  the refusals were already there; Oracle's `MODIFY` forms added. `BY DEFAULT ON NULL` identities: **code written,
+  unbuilt** (D1315). Left: `DEFAULT ON NULL` on other columns and `ON NULL` on `UPDATE`.
 - Oracle's `IS JSON` (lax syntax, `STRICT`, `TYPE (...)`), `JSON_SERIALIZE`'s `PRETTY`, `ASCII`
   and `TRUNCATE`, and `JSON_SCALAR` in Oracle's dialect (D302). **Code written, unbuilt** (code-only
   mode, 2026-11-11, D450).

@@ -420,16 +420,17 @@ fn generated_always_identities_refuse_given_values_with_oracle_numbers() {
     );
     rendered(&mut session, "INSERT INTO free (id, code) VALUES (7, 'c')");
     rendered(&mut session, "INSERT INTO free (code) VALUES ('d')");
+    rendered(&mut session, "INSERT INTO free (id, code) VALUES (NULL, 'e')");
     assert_eq!(
         rendered(&mut session, "SELECT id FROM free ORDER BY id"),
-        "ID\n7\n8\nSELECT 2"
+        "ID\n7\n8\n9\nSELECT 3"
     );
     assert_eq!(
         rendered(
             &mut session,
             "SELECT table_name, column_name, generation_type FROM user_tab_identity_cols ORDER BY table_name"
         ),
-        "TABLE_NAME|COLUMN_NAME|GENERATION_TYPE\nFREE|ID|BY DEFAULT\nTICKETS|ID|ALWAYS\nSELECT 2"
+        "TABLE_NAME|COLUMN_NAME|GENERATION_TYPE\nFREE|ID|BY DEFAULT ON NULL\nTICKETS|ID|ALWAYS\nSELECT 2"
     );
 }
 

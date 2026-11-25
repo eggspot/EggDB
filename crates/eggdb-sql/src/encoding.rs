@@ -527,6 +527,7 @@ impl SortOptions {
 pub(crate) enum IdentityGeneration {
     Always,
     ByDefault,
+    ByDefaultOnNull,
 }
 
 impl IdentityGeneration {
@@ -534,11 +535,12 @@ impl IdentityGeneration {
         match self {
             Self::Always => 1,
             Self::ByDefault => 2,
+            Self::ByDefaultOnNull => 3,
         }
     }
 
     fn of_code(code: u8) -> Option<Self> {
-        [Self::Always, Self::ByDefault]
+        [Self::Always, Self::ByDefault, Self::ByDefaultOnNull]
             .into_iter()
             .find(|generation| generation.code() == code)
     }
@@ -600,6 +602,7 @@ fn identity_generation(
 ) -> Option<IdentityGeneration> {
     match (column.auto_increment, stored) {
         (true, Some(IdentityGeneration::Always)) => Some(IdentityGeneration::Always),
+        (true, Some(IdentityGeneration::ByDefaultOnNull)) => Some(IdentityGeneration::ByDefaultOnNull),
         (true, _) => Some(IdentityGeneration::ByDefault),
         (false, Some(generation)) if column.default.is_some() => Some(generation),
         (false, _) => None,

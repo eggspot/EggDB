@@ -553,6 +553,8 @@ fn sequence_backed_columns(
     let generation = |definition: &crate::ast::ColumnDefinition| {
         Some(if definition.generated_always {
             IdentityGeneration::Always
+        } else if definition.identity_on_null {
+            IdentityGeneration::ByDefaultOnNull
         } else {
             IdentityGeneration::ByDefault
         })
@@ -1561,7 +1563,14 @@ fn insert_rows(
                 .and_then(|slot| values.get(slot))
                 .filter(|_| !*ignored);
             row.push(match given {
-                Some(value) => assigned_value(&constants, value, &table, index, rule)?,
+                Some(value) => {
+                    let assigned = assigned_value(&constants, value, &table, index, rule)?;
+                    if assigned.is_null() && table.identity_of(index) == Some(IdentityGeneration::ByDefaultOnNull) {
+                        default_value(&table, index)?
+                    } else {
+                        assigned
+                    }
+                }
                 None => default_value(&table, index)?,
             });
         }

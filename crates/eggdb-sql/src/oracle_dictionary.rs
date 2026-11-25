@@ -1620,6 +1620,7 @@ fn identity_column_rows(dictionary: &Dictionary<'_>) -> Vec<Vec<Value>> {
             let generation = match generation {
                 crate::encoding::IdentityGeneration::Always => "ALWAYS",
                 crate::encoding::IdentityGeneration::ByDefault => "BY DEFAULT",
+                crate::encoding::IdentityGeneration::ByDefaultOnNull => "BY DEFAULT ON NULL",
             };
             let seed = table.identity_seed();
             rows.push(
