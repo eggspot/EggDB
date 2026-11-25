@@ -2938,6 +2938,10 @@ impl<'t> Parser<'t> {
             }
             "bpchar" => SqlType::Bpchar(self.character_length(token.start)?),
             "xml" if self.postgresql() => SqlType::Text,
+            "inet" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::INET),
+            "cidr" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::CIDR),
+            "macaddr" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::MACADDR),
+            "macaddr8" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::MACADDR8),
             "money" | "inet" | "cidr" | "xml" | "bit" | "point" => {
                 return Err(
                     SqlError::not_supported(format!("type {word} is not supported yet"))
@@ -4506,6 +4510,7 @@ impl<'t> Parser<'t> {
                     && let TokenKind::Operator(symbol) = self.peek_kind()
                     && let Some((_, function)) = crate::ranges::OPERATORS
                         .iter()
+                        .chain(crate::network_types::OPERATORS.iter())
                         .find(|(written, _)| written == symbol)
                 {
                     self.at += 1;

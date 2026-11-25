@@ -1596,7 +1596,13 @@ impl Evaluator<'_> {
         if let Some(result) = crate::ranges::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::network_types::range_operator(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::ranges::operator(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::network_types::function(name, &values) {
             return result;
         }
         if let Some(result) = crate::hstore_functions::function(name, &values) {

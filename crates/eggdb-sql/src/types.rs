@@ -161,8 +161,36 @@ impl DefinedType {
         oid: crate::text_types::REFCURSOR_OID,
     };
 
+    /// The type `inet`: a host address with an optional netmask.
+    pub const INET: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::network_types::INET_OID,
+    };
+
+    /// The type `cidr`: a network address.
+    pub const CIDR: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::network_types::CIDR_OID,
+    };
+
+    /// The type `macaddr`: a six-byte hardware address.
+    pub const MACADDR: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::network_types::MACADDR_OID,
+    };
+
+    /// The type `macaddr8`: an eight-byte hardware address.
+    pub const MACADDR8: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::network_types::MACADDR8_OID,
+    };
+
     pub(crate) fn builtin_base_named(name: &str) -> Option<Self> {
         match name {
+            "inet" => Some(Self::INET),
+            "cidr" => Some(Self::CIDR),
+            "macaddr" => Some(Self::MACADDR),
+            "macaddr8" => Some(Self::MACADDR8),
             "tsvector" => Some(Self::TSVECTOR),
             "tsquery" => Some(Self::TSQUERY),
             "jsonpath" => Some(Self::JSONPATH),
@@ -184,6 +212,10 @@ impl DefinedType {
             crate::hstore::HSTORE_OID => Some("hstore"),
             crate::vector_type::VECTOR_OID => Some("vector"),
             crate::geometry_type::GEOMETRY_OID => Some("geometry"),
+            crate::network_types::INET_OID => Some("inet"),
+            crate::network_types::CIDR_OID => Some("cidr"),
+            crate::network_types::MACADDR_OID => Some("macaddr"),
+            crate::network_types::MACADDR8_OID => Some("macaddr8"),
             _ => None,
         }
     }
@@ -228,6 +260,8 @@ pub enum DefinedValue {
     JsonPath(String),
     /// A cursor's name read from a `refcursor` column.
     RefCursor(String),
+    /// An `inet`, `cidr`, `macaddr` or `macaddr8` value.
+    Network(crate::network_types::NetworkValue),
 }
 
 impl DefinedValue {
@@ -248,6 +282,7 @@ impl DefinedValue {
             Self::TsQuery(_) => SqlType::Defined(DefinedType::TSQUERY),
             Self::JsonPath(_) => SqlType::Defined(DefinedType::JSONPATH),
             Self::RefCursor(_) => SqlType::Defined(DefinedType::REFCURSOR),
+            Self::Network(network) => SqlType::Defined(crate::network_types::defined_type(network.kind)),
         }
     }
 
@@ -264,6 +299,7 @@ impl DefinedValue {
             Self::TsVector(text) | Self::TsQuery(text) | Self::JsonPath(text) | Self::RefCursor(text) => {
                 text.clone()
             }
+            Self::Network(network) => network.text.clone(),
         }
     }
 }
@@ -1479,6 +1515,9 @@ pub(crate) fn compare_values(left: &Value, right: &Value) -> Ordering {
 
 fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
     match (left, right) {
+        (DefinedValue::Network(a), DefinedValue::Network(b)) => crate::network_types::compare(a, b),
+        (DefinedValue::Network(_), _) => Ordering::Greater,
+        (_, DefinedValue::Network(_)) => Ordering::Less,
         (DefinedValue::Enum(a), DefinedValue::Enum(b)) => {
             compare_floats(a.sort_order, b.sort_order)
         }
@@ -1539,6 +1578,12 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
                 out.push(18);
                 out.extend_from_slice(&(folded.len() as u64).to_le_bytes());
                 out.extend_from_slice(folded.as_bytes());
+            }
+            DefinedValue::Network(network) => {
+                let key = crate::network_types::ordered_key(network);
+                out.push(26);
+                out.extend_from_slice(&(key.len() as u64).to_le_bytes());
+                out.extend_from_slice(&key);
             }
             DefinedValue::Geometry(ewkb) => {
                 out.push(21);

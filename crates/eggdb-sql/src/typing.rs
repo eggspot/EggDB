@@ -340,6 +340,9 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     if let Some(sql_type) = crate::fuzzy_functions::result_type(name) {
         return Some(sql_type);
     }
+    if let Some(sql_type) = crate::network_types::result_type(name) {
+        return Some(sql_type);
+    }
     if let Some(sql_type) = crate::mysql_set::result_type(name) {
         return Some(sql_type);
     }
@@ -424,6 +427,7 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
     match (name, arguments) {
         ("btrim" | "ltrim" | "rtrim" | "quote_ident", [_, ..]) => Some(SqlType::Text),
         ("collate", [argument]) => static_type(argument, scope),
+        ("set_masklen", [argument, _]) => static_type(argument, scope),
         ("length" | "char_length" | "character_length", [_]) => Some(SqlType::Integer),
         ("lower" | "upper", [_]) => Some(SqlType::Text),
         ("abs", [argument]) => static_type(argument, scope)

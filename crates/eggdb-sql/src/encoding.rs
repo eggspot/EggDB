@@ -1982,6 +1982,9 @@ pub(crate) fn encode_key_value(out: &mut Vec<u8>, value: &Value) {
                 DefinedValue::Citext(text) => {
                     push_escaped_text(out, crate::citext::fold(text).as_bytes());
                 }
+                DefinedValue::Network(network) => {
+                    push_escaped_text(out, &crate::network_types::ordered_key(network));
+                }
                 other => push_escaped_text(out, other.to_text().as_bytes()),
             }
         }
@@ -2023,6 +2026,10 @@ const TSVECTOR_TAG: u8 = 31;
 const TSQUERY_TAG: u8 = 32;
 const JSONPATH_TAG: u8 = 33;
 const REFCURSOR_TAG: u8 = 34;
+const INET_TAG: u8 = 35;
+const CIDR_TAG: u8 = 36;
+const MACADDR_TAG: u8 = 37;
+const MACADDR8_TAG: u8 = 38;
 const HSTORE_NULL_VALUE: u8 = 0;
 const HSTORE_TEXT_VALUE: u8 = 1;
 const RANGE_EMPTY: u8 = 1;
@@ -2115,7 +2122,8 @@ fn put_nested(out: &mut Vec<u8>, value: &Value) {
             | DefinedValue::TsVector(_)
             | DefinedValue::TsQuery(_)
             | DefinedValue::JsonPath(_)
-            | DefinedValue::RefCursor(_) => encode_row_value(out, value),
+            | DefinedValue::RefCursor(_)
+            | DefinedValue::Network(_) => encode_row_value(out, value),
         },
         other => encode_row_value(out, other),
     }
@@ -2197,6 +2205,10 @@ fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::RefCursor(text) => {
                 out.push(REFCURSOR_TAG);
                 put_bytes(out, text.as_bytes());
+            }
+            DefinedValue::Network(network) => {
+                out.push(network_tag(network.kind));
+                put_bytes(out, network.text.as_bytes());
             }
         },
         Value::Null => out.push(0),
@@ -2372,10 +2384,14 @@ pub(crate) fn decode_row_into(
                 }
             }
             CITEXT_TAG if wanted => crate::citext::value(reader.text()?),
-            TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG if wanted => {
+            TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG | INET_TAG | CIDR_TAG | MACADDR_TAG
+            | MACADDR8_TAG
+                if wanted =>
+            {
                 stored_text_value(tag, reader.text()?).ok_or_else(|| reader.damaged())?
             }
-            7 | 13 | 14 | 18 | 20 | 21 | CITEXT_TAG | TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG => {
+            7 | 13 | 14 | 18 | 20 | 21 | CITEXT_TAG | TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG
+            | INET_TAG | CIDR_TAG | MACADDR_TAG | MACADDR8_TAG => {
                 reader.skip_text()?;
                 Value::Null
             }
@@ -2507,12 +2523,34 @@ fn stored_text_value(tag: u8, text: String) -> Option<Value> {
         TSQUERY_TAG => DefinedValue::TsQuery(text),
         JSONPATH_TAG => DefinedValue::JsonPath(text),
         REFCURSOR_TAG => DefinedValue::RefCursor(text),
+        INET_TAG => network(crate::network_types::NetworkKind::Inet, text),
+        CIDR_TAG => network(crate::network_types::NetworkKind::Cidr, text),
+        MACADDR_TAG => network(crate::network_types::NetworkKind::MacAddr, text),
+        MACADDR8_TAG => network(crate::network_types::NetworkKind::MacAddr8, text),
         _ => return None,
     };
     Some(Value::Defined(Box::new(value)))
 }
 
+fn network(kind: crate::network_types::NetworkKind, text: String) -> DefinedValue {
+    DefinedValue::Network(crate::network_types::NetworkValue { kind, text })
+}
+
+fn network_tag(kind: crate::network_types::NetworkKind) -> u8 {
+    match kind {
+        crate::network_types::NetworkKind::Inet => INET_TAG,
+        crate::network_types::NetworkKind::Cidr => CIDR_TAG,
+        crate::network_types::NetworkKind::MacAddr => MACADDR_TAG,
+        crate::network_types::NetworkKind::MacAddr8 => MACADDR8_TAG,
+    }
+}
+
 fn value_tag(sql_type: SqlType) -> u8 {
+    if let SqlType::Defined(defined) = sql_type
+        && let Some(kind) = crate::network_types::kind_of(defined)
+    {
+        return network_tag(kind);
+    }
     match sql_type {
         SqlType::Defined(defined) if defined == DefinedType::CITEXT => CITEXT_TAG,
         SqlType::Defined(defined) if defined == DefinedType::HSTORE => HSTORE_TAG,
@@ -3182,7 +3220,8 @@ impl<'b> Reader<'b> {
             }
             CITEXT_TAG => crate::citext::value(self.text()?),
             HSTORE_TAG => self.hstore()?,
-            TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG => {
+            TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG | INET_TAG | CIDR_TAG | MACADDR_TAG
+            | MACADDR8_TAG => {
                 let text = self.text()?;
                 stored_text_value(tag, text).ok_or_else(|| self.damaged())?
             }

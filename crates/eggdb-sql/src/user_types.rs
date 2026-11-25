@@ -590,6 +590,9 @@ fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
     if let Some(value) = crate::text_types::parse(text, defined) {
         return value;
     }
+    if let Some(kind) = crate::network_types::kind_of(defined) {
+        return crate::network_types::parse(text, kind).map(crate::network_types::value);
+    }
     if defined == DefinedType::CITEXT {
         Ok(crate::citext::value(text.to_owned()))
     } else if defined == DefinedType::HSTORE {
@@ -609,6 +612,19 @@ fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) ->
         Value::Bpchar(text) => Some(crate::types::without_trailing_spaces(text)),
         other => crate::citext::text_of(other),
     };
+    if let Some(kind) = crate::network_types::kind_of(target) {
+        if let Value::Defined(defined) = &value
+            && let DefinedValue::Network(network) = defined.as_ref()
+        {
+            return crate::network_types::convert(network, kind).map(crate::network_types::value);
+        }
+        return match (text, conversion) {
+            (Some(text), Conversion::Explicit | Conversion::Assignment) => {
+                crate::network_types::parse(text, kind).map(crate::network_types::value)
+            }
+            _ => Err(cannot_cast(&value, target)),
+        };
+    }
     if crate::text_types::is_text_type(target) {
         return match (text, conversion) {
             (Some(text), Conversion::Explicit | Conversion::Assignment) => parse_base(text, target),
@@ -702,6 +718,10 @@ pub(crate) fn comparable(defined: DefinedType, other: SqlType) -> bool {
     let Some(other) = other.defined() else {
         return false;
     };
+    let address = |oid: u32| oid == crate::network_types::INET_OID || oid == crate::network_types::CIDR_OID;
+    if address(defined.oid) && address(other.oid) {
+        return true;
+    }
     defined.oid == other.oid
         || (defined.kind == DefinedKind::Composite && other.kind == DefinedKind::Composite)
 }

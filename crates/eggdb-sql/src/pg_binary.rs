@@ -36,6 +36,10 @@ const RANGE_UPPER_INFINITE: u8 = 0x10;
 const HSTORE_OID: u32 = crate::hstore::HSTORE_OID;
 const VECTOR_OID: u32 = crate::vector_type::VECTOR_OID;
 const GEOMETRY_OID: u32 = crate::geometry_type::GEOMETRY_OID;
+const INET_OID: u32 = crate::network_types::INET_OID;
+const CIDR_OID: u32 = crate::network_types::CIDR_OID;
+const MACADDR_OID: u32 = crate::network_types::MACADDR_OID;
+const MACADDR8_OID: u32 = crate::network_types::MACADDR8_OID;
 
 const IDENTIFIER_OIDS: [u32; 7] = [26, 28, 24, 2205, 2206, 4089, 4096];
 
@@ -220,6 +224,9 @@ pub fn encode_pg_binary(value: &Value, oid: u32, zone: TimeZone) -> SqlResult<Op
             }
             None => return Err(cannot_send(value, oid)),
         },
+        INET_OID | CIDR_OID | MACADDR_OID | MACADDR8_OID => crate::network_types::network_of(value)
+            .and_then(crate::network_types::binary)
+            .ok_or_else(|| cannot_send(value, oid))?,
         _ => text.into_bytes(),
     };
     Ok(Some(bytes))
@@ -695,6 +702,10 @@ fn decode_text(bytes: &[u8], oid: u32, depth: usize) -> SqlResult<String> {
         VECTOR_OID => {
             return crate::vector_type::from_binary(bytes)
                 .map(|values| crate::vector_type::to_text(&values));
+        }
+        INET_OID | CIDR_OID | MACADDR_OID | MACADDR8_OID => {
+            let kind = crate::network_types::kind_of_oid(oid).ok_or_else(incorrect_binary)?;
+            return crate::network_types::text_from_binary(bytes, kind).ok_or_else(incorrect_binary);
         }
         oid if TEXT_INPUT_OIDS.contains(&oid) => return text_of(bytes),
         oid if crate::ranges::builtin(oid).is_some() => {

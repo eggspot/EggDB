@@ -285,6 +285,7 @@ mod mysql_fulltext;
 mod sqlserver_fulltext;
 mod table_sample;
 mod text_search;
+mod network_types;
 mod text_types;
 mod publications;
 mod text_search_catalog;

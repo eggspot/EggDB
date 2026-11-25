@@ -70,6 +70,7 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
             | crate::types::DefinedValue::TsQuery(text)
             | crate::types::DefinedValue::JsonPath(text)
             | crate::types::DefinedValue::RefCursor(text) => text.len(),
+            crate::types::DefinedValue::Network(network) => network.text.len(),
         },
         _ => 0,
     }
