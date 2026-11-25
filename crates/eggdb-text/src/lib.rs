@@ -2,9 +2,13 @@
 //! Database by `scripts/unicode/generate.py`: the four normalization forms of UAX #15
 //! ([`normalize`]), full case folding ([`case_fold`]), and comparisons that ignore case
 //! ([`compare_case_insensitive`]) or case and accents ([`compare_accent_insensitive`]), with
-//! [`primary_key`] for indexing what the latter treats as equal.
+//! [`primary_key`] for indexing what the latter treats as equal; and the Unicode Collation
+//! Algorithm over the default table ([`compare_collated`], [`sort_key`], D1345).
 
+mod collation;
 mod tables;
+
+pub use collation::{Strength, compare_collated, sort_key};
 
 use std::cmp::Ordering;
 use tables::{

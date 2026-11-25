@@ -637,11 +637,18 @@ pub(crate) fn function(name: &str, values: &[Value]) -> Option<SqlResult<Value>>
 }
 
 pub(crate) fn collated(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResult<Value> {
-    let [argument] = arguments else {
-        return Err(SqlError::new(
-            SqlState::INTERNAL_ERROR,
-            "COLLATE is missing its operand",
-        ));
+    let (argument, collation) = match arguments {
+        [argument] => (argument, None),
+        [argument, name] => match &name.kind {
+            crate::ast::ExprKind::Literal(crate::ast::Literal::String(name)) => (argument, crate::collations::named(name)),
+            _ => (argument, None),
+        },
+        _ => {
+            return Err(SqlError::new(
+                SqlState::INTERNAL_ERROR,
+                "COLLATE is missing its operand",
+            ));
+        }
     };
     let value = evaluator.eval(argument, Some(SqlType::Text))?;
     let sql_type = value
@@ -656,5 +663,8 @@ pub(crate) fn collated(evaluator: &Evaluator<'_>, arguments: &[Expr]) -> SqlResu
         )
         .at(argument.position));
     }
-    Ok(value)
+    match (collation, value.character_text()) {
+        (Some(collation), Some(text)) => Ok(crate::collations::value(text.to_owned(), collation)),
+        _ => Ok(value),
+    }
 }

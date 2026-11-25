@@ -74,6 +74,7 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
             crate::types::DefinedValue::Money(_) => 0,
             crate::types::DefinedValue::Bits(bits) => bits.bits.len(),
             crate::types::DefinedValue::Geometric(geometric) => geometric.numbers.len() * 8,
+            crate::types::DefinedValue::Collated(collated) => collated.text.len(),
             crate::types::DefinedValue::Multirange(multirange) => multirange
                 .ranges
                 .iter()

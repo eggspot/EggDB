@@ -70,6 +70,7 @@ mod explain;
 mod foreign;
 mod foreign_tables;
 mod foreign_pushdown;
+mod collations;
 mod column_lineage;
 mod compiled_filter;
 mod fuzzy_functions;

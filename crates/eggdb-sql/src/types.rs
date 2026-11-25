@@ -306,6 +306,8 @@ pub enum DefinedValue {
     Geometric(crate::geometric_types::GeometricValue),
     /// A multirange.
     Multirange(crate::ranges::multiranges::MultirangeValue),
+    /// Text with a linguistic collation, as `COLLATE` makes it.
+    Collated(crate::collations::CollatedText),
 }
 
 impl DefinedValue {
@@ -333,6 +335,7 @@ impl DefinedValue {
             Self::Multirange(multirange) => {
                 SqlType::Defined(crate::ranges::multiranges::defined_type(multirange.type_oid))
             }
+            Self::Collated(_) => SqlType::Text,
         }
     }
 
@@ -354,6 +357,7 @@ impl DefinedValue {
             Self::Bits(bits) => bits.bits.clone(),
             Self::Geometric(geometric) => crate::geometric_types::to_text(geometric),
             Self::Multirange(multirange) => crate::ranges::multiranges::format(multirange),
+            Self::Collated(collated) => collated.text.clone(),
         }
     }
 }
@@ -739,6 +743,7 @@ impl Value {
             Self::Bpchar(text) => Some(without_trailing_spaces(text)),
             Self::Defined(defined) => match defined.as_ref() {
                 DefinedValue::JsonPath(text) => Some(text),
+                DefinedValue::Collated(collated) => Some(&collated.text),
                 _ => None,
             },
             _ => None,
@@ -1591,6 +1596,11 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         }
         (DefinedValue::Multirange(_), _) => Ordering::Greater,
         (_, DefinedValue::Multirange(_)) => Ordering::Less,
+        (DefinedValue::Collated(a), DefinedValue::Collated(b)) => {
+            crate::collations::compare(&a.text, &b.text, a.collation)
+        }
+        (DefinedValue::Collated(_), _) => Ordering::Greater,
+        (_, DefinedValue::Collated(_)) => Ordering::Less,
         (DefinedValue::Enum(a), DefinedValue::Enum(b)) => {
             compare_floats(a.sort_order, b.sort_order)
         }
@@ -1656,6 +1666,7 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
                 out.push(27);
                 out.extend_from_slice(&cents.to_le_bytes());
             }
+            DefinedValue::Collated(collated) => crate::collations::equality_key(out, collated),
             DefinedValue::Multirange(multirange) => {
                 out.push(30);
                 crate::ranges::multiranges::equality_key_of(out, multirange);

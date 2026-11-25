@@ -637,7 +637,10 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   one's status and test (D32). Check: a CI test that every feature marked done has a case. Started: [sql-conformance.md](sql-conformance.md) and
   its test: **code written, unbuilt** (code-only mode, 2026-11-12, D578).
 - The Unicode Collation Algorithm with CLDR tailorings (`COLLATE "de-DE"`), with MySQL's and SQL
-  Server's collation names mapped onto it (D30, D233). Check: the collation conformance test.
+  Server's collation names mapped onto it (D30, D233). Check: the collation conformance test. The algorithm over
+  DUCET with PostgreSQL's ICU-style names for root-collation languages: **code written, unbuilt** (code-only mode,
+  2026-11-25, D1345); tailorings, column collations, MySQL's and SQL Server's names and the conformance test are
+  left.
 - Collation keys in indexes, and locale-aware `upper` and `lower` (D233).
 - Every legacy encoding the supported databases accept, listed per dialect, on the wire and in
   `COPY` (D30). PostgreSQL's single-byte encodings in `COPY ... ENCODING`: **code written, unbuilt** (code-only mode,

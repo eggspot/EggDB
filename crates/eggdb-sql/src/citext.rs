@@ -54,6 +54,9 @@ fn character_or_citext(value: &Value) -> Option<&str> {
 }
 
 pub(crate) fn compare_with_text(left: &Value, right: &Value) -> Ordering {
+    if let Some(order) = crate::collations::compare_with_text(left, right) {
+        return order;
+    }
     match (character_or_citext(left), character_or_citext(right)) {
         (Some(a), Some(b)) => a.as_bytes().cmp(b.as_bytes()),
         _ => Ordering::Equal,

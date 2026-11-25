@@ -258,10 +258,16 @@ impl Parser<'_> {
             Some(schema) => format!("{schema}.{name}"),
             None => name.clone(),
         };
-        let known = schema
-            .as_deref()
-            .is_none_or(|schema| schema == "pg_catalog")
-            && ACCEPTED_COLLATIONS.contains(&name.as_str());
+        let in_catalog = schema.as_deref().is_none_or(|schema| schema == "pg_catalog");
+        if in_catalog && !ACCEPTED_COLLATIONS.contains(&name.as_str()) && crate::collations::named(&name).is_some() {
+            let at = expr.position;
+            let literal = Expr {
+                kind: ExprKind::Literal(Literal::String(name)),
+                position,
+            };
+            return Ok(function("collate", vec![expr, literal], at));
+        }
+        let known = in_catalog && ACCEPTED_COLLATIONS.contains(&name.as_str());
         if !known {
             return Err(SqlError::new(
                 SqlState::UNDEFINED_OBJECT,

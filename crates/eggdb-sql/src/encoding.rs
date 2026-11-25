@@ -2154,7 +2154,8 @@ fn put_nested(out: &mut Vec<u8>, value: &Value) {
             | DefinedValue::Money(_)
             | DefinedValue::Bits(_)
             | DefinedValue::Geometric(_)
-            | DefinedValue::Multirange(_) => encode_row_value(out, value),
+            | DefinedValue::Multirange(_)
+            | DefinedValue::Collated(_) => encode_row_value(out, value),
         },
         other => encode_row_value(out, other),
     }
@@ -2253,6 +2254,7 @@ fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
                 out.push(GEOMETRIC_TAGS.start() + geometric.kind.index());
                 put_bytes(out, &crate::geometric_types::encoded(geometric));
             }
+            DefinedValue::Collated(collated) => encode_row_value(out, &Value::Text(collated.text.clone())),
             DefinedValue::Multirange(multirange) => {
                 out.push(MULTIRANGE_TAG);
                 out.extend_from_slice(&multirange.type_oid.to_le_bytes());
