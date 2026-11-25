@@ -441,6 +441,7 @@ pub(crate) struct Analyzed {
     pub(crate) buffers: Option<Buffers>,
     pub(crate) selects: Vec<MeasuredSelect>,
     pub(crate) subplans: Vec<MeasuredSubplan>,
+    pub(crate) joins: Vec<Vec<crate::step_times::MeasuredLevel>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -587,7 +588,72 @@ fn measured_steps(query: &ExplainedQuery, analyzed: &Analyzed) -> Vec<Option<Mea
     if let Some(step) = measured.first_mut() {
         *step = Some(top);
     }
+    if !query.appended
+        && let Some(levels) = analyzed.joins.first()
+    {
+        join_measured(query, levels, &mut measured);
+    }
     measured
+}
+
+fn level_times(level: crate::step_times::MeasuredLevel, rows: u64) -> Option<RowTimes> {
+    let last_row = level.last_row?;
+    Some(RowTimes {
+        first_row: level.first_row.unwrap_or(last_row),
+        last_row,
+        rows,
+    })
+}
+
+fn join_measured(query: &ExplainedQuery, levels: &[crate::step_times::MeasuredLevel], measured: &mut [Option<Measured>]) {
+    let count = query.sources.len();
+    let mut joins_seen = 0usize;
+    let mut hashing = false;
+    for (index, (_, step)) in steps(query).iter().enumerate() {
+        let Some(slot) = measured.get_mut(index) else {
+            continue;
+        };
+        let source_of = |source: &ExplainedSource| query.sources.iter().position(|found| std::ptr::eq(found, source));
+        let found = match step {
+            Step::NestedLoop | Step::HashJoin => {
+                let joined = count.saturating_sub(1 + joins_seen);
+                joins_seen += 1;
+                levels.get(joined).map(|level| match level_times(*level, level.rows) {
+                    Some(times) => Measured::Ran(times),
+                    None => Measured::NeverExecuted,
+                })
+            }
+            Step::Hash => {
+                hashing = true;
+                None
+            }
+            Step::FullScan(_) if std::mem::take(&mut hashing) => None,
+            Step::Scan(source) | Step::FullScan(source) | Step::KeyLookup(source, _) => match source_of(*source) {
+                Some(0) => levels.first().map(|level| match level_times(*level, level.rows) {
+                    Some(times) => Measured::Ran(times),
+                    None => Measured::NeverExecuted,
+                }),
+                Some(position) => match (levels.get(position - 1), levels.get(position)) {
+                    (Some(outer), Some(inner)) if outer.rows > 0 => Some(
+                        match level_times(*inner, inner.rows / outer.rows) {
+                            Some(times) => Measured::Looped { times, loops: outer.rows },
+                            None => Measured::Looped {
+                                times: RowTimes { first_row: Duration::ZERO, last_row: Duration::ZERO, rows: 0 },
+                                loops: outer.rows,
+                            },
+                        },
+                    ),
+                    (Some(_), Some(_)) => Some(Measured::NeverExecuted),
+                    _ => None,
+                },
+                None => None,
+            },
+            _ => None,
+        };
+        if slot.is_none() {
+            *slot = found;
+        }
+    }
 }
 
 fn buffers_line(indent: &str, lookups: PageLookups) -> Option<String> {
@@ -1210,6 +1276,7 @@ mod tests {
             buffers: None,
             selects,
             subplans: Vec::new(),
+            joins: Vec::new(),
         }
     }
 

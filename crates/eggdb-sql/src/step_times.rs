@@ -24,15 +24,74 @@ pub(crate) struct MeasuredSubplan {
     pub(crate) total: Duration,
 }
 
+/// What one level of a join saw (D1350): the rows that reached it, after the filters that
+/// apply there, and when the first and the last arrived.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MeasuredLevel {
+    pub(crate) rows: u64,
+    pub(crate) first_row: Option<Duration>,
+    pub(crate) last_row: Option<Duration>,
+}
+
 struct Recording {
     started: Instant,
     selects: Vec<MeasuredSelect>,
     subplans: Vec<MeasuredSubplan>,
+    joins: Vec<Vec<MeasuredLevel>>,
+    join_claimed: bool,
     metering: bool,
 }
 
 thread_local! {
     static RECORDING: RefCell<Option<Recording>> = const { RefCell::new(None) };
+    static FINISHED_JOINS: RefCell<Vec<Vec<MeasuredLevel>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The join levels the last recording measured, outermost join first.
+pub(crate) fn take_joins() -> Vec<Vec<MeasuredLevel>> {
+    FINISHED_JOINS
+        .try_with(|finished| finished.try_borrow_mut().map(|mut finished| std::mem::take(&mut *finished)).unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// Counts the rows reaching each level of the first join a recorded statement runs.
+pub(crate) struct JoinMeter {
+    started: Instant,
+    levels: RefCell<Vec<MeasuredLevel>>,
+}
+
+pub(crate) fn claim_join(levels: usize) -> Option<JoinMeter> {
+    let mut claimed = None;
+    with_recording(|recording| {
+        if !recording.join_claimed {
+            recording.join_claimed = true;
+            claimed = Some(JoinMeter {
+                started: recording.started,
+                levels: RefCell::new(vec![MeasuredLevel::default(); levels]),
+            });
+        }
+    });
+    claimed
+}
+
+impl JoinMeter {
+    pub(crate) fn arrived(&self, level: usize) {
+        if let Ok(mut levels) = self.levels.try_borrow_mut()
+            && let Some(found) = levels.get_mut(level)
+        {
+            let now = self.started.elapsed();
+            found.rows = found.rows.saturating_add(1);
+            found.first_row.get_or_insert(now);
+            found.last_row = Some(now);
+        }
+    }
+}
+
+impl Drop for JoinMeter {
+    fn drop(&mut self) {
+        let levels = std::mem::take(self.levels.get_mut());
+        with_recording(|recording| recording.joins.push(levels));
+    }
 }
 
 fn replace_recording(next: Option<Recording>) -> Option<Recording> {
@@ -70,11 +129,20 @@ pub(crate) fn record_with_subplans<T>(
         started: Instant::now(),
         selects: Vec::new(),
         subplans: Vec::new(),
+        joins: Vec::new(),
+        join_claimed: false,
         metering: false,
     }));
     let result = run();
     match replace_recording(outer) {
-        Some(recorded) => (result, recorded.selects, recorded.subplans),
+        Some(recorded) => {
+            let _ = FINISHED_JOINS.try_with(|finished| {
+                if let Ok(mut finished) = finished.try_borrow_mut() {
+                    *finished = recorded.joins;
+                }
+            });
+            (result, recorded.selects, recorded.subplans)
+        }
         None => (result, Vec::new(), Vec::new()),
     }
 }

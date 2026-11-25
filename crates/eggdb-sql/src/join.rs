@@ -827,6 +827,7 @@ pub(crate) struct JoinedRows<'a> {
     width: usize,
     steps: Vec<Step<'a>>,
     filters: Vec<Vec<Expr>>,
+    meter: Option<crate::step_times::JoinMeter>,
 }
 
 struct KeyPairs {
@@ -1467,6 +1468,7 @@ impl<'a> JoinedRows<'a> {
             first_needed: std::mem::take(&mut needed[0]),
             first_key,
             width: Scope::Many(&joined.sources).width(),
+            meter: crate::step_times::claim_join(steps.len() + 1),
             steps,
             filters,
         })
@@ -1571,6 +1573,9 @@ impl<'a> JoinedRows<'a> {
         self.watch.check()?;
         if !self.passes(level, row)? {
             return Ok(true);
+        }
+        if let Some(meter) = &self.meter {
+            meter.arrived(level);
         }
         let Some(step) = self.steps.get(level) else {
             return visit(row);

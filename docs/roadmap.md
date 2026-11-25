@@ -1039,7 +1039,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-25, D1349).
 - Times on each iterator inside a subplan in `EXPLAIN ANALYZE` (D327).
 - Times on the steps inside a join (a counter per level in `JoinedRows::extend`, inner `loops` =
-  outer rows), on an `UPDATE` or `DELETE`'s scan and on aggregates; per-operator rows in `SET
+  outer rows) (**code written, unbuilt**, code-only mode, 2026-11-25, D1350), on an `UPDATE` or `DELETE`'s scan and on aggregates; per-operator rows in `SET
   STATISTICS PROFILE`; `DISPLAY_CURSOR`, predicates in `PLAN_TABLE`, and `SHOWPLAN_*` alone in
   its batch (D312).
 - `EXPLAIN` with costs, conditions and formats other than text; per-node buffers, `I/O Timings`

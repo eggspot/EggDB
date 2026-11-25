@@ -826,3 +826,21 @@ fn a_key_compared_with_an_initplan_is_shown_read_by_the_key() {
     assert!(lines.iter().any(|line| line.contains("InitPlan 1 (returns $0)")), "{lines:?}");
     assert_eq!(last(&mut session, "SELECT ten FROM tenk1 t WHERE t.unique1 = (SELECT max(o.unique1) FROM onek o)"), "ten\n2\nSELECT 1");
 }
+
+#[test]
+fn explain_analyze_counts_each_join_steps_rows_and_loops() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_tables(&store);
+    let lines = plan(
+        &mut session,
+        "EXPLAIN ANALYZE SELECT t.unique1 FROM tenk1 t JOIN onek o ON o.unique1 = t.four",
+    );
+    let join = lines.iter().position(|line| line.starts_with("Nested Loop") || line.starts_with("Hash Join")).unwrap();
+    assert!(lines[join].contains("(actual time="), "{lines:?}");
+    assert_eq!(actual(&lines[join]).map(|(rows, _)| rows), Some(3), "{lines:?}");
+    let outer = lines.iter().find(|line| line.contains("Seq Scan on tenk1 t")).unwrap();
+    assert_eq!(actual(outer), Some((3, 1)), "{lines:?}");
+    if let Some(inner) = lines.iter().find(|line| line.contains("Index Scan using onek_pkey on onek o")) {
+        assert_eq!(actual(inner), Some((1, 3)), "{lines:?}");
+    }
+}

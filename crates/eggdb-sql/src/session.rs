@@ -3301,6 +3301,7 @@ impl<'s> Session<'s> {
             buffers,
             selects,
             subplans,
+            joins: crate::step_times::take_joins(),
         };
         Ok(match explain.style {
             crate::ast::ExplainStyle::Tree => crate::explain::render_analyzed_tree(&plan, analyzed),
