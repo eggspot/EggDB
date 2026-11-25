@@ -88,6 +88,7 @@ pub mod table_sync;
 mod tenant_space;
 pub mod sql;
 mod transaction;
+mod write_set;
 mod writer_slot;
 
 pub use collection::{Collection, CollectionStats, DropProgress, ReadCollection, SQL_COLLECTION, WriteCollection};

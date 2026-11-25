@@ -1361,3 +1361,4 @@ its full title with its status.
 - [D1334](decisions/D1334.md) Code-only batch 989 (M2): leaf pages stored compressed, with their freed blocks punched out
 - [D1335](decisions/D1335.md) Code-only batch 990 (M2): compressed pages logged without their zero tail
 - [D1336](decisions/D1336.md) Code-only batch 991 (M2): learned indexes over sealed LSM runs, in memory
+- [D1337](decisions/D1337.md) Code-only batch 992 (M2): concurrent transactions spill their changes to sorted scratch runs

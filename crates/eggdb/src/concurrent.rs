@@ -3,6 +3,7 @@ use crate::database::Database;
 use crate::error::{Error, ErrorKind, Result};
 use crate::scan::KeyRange;
 use crate::transaction::ReadTransaction;
+use crate::write_set::WriteSet;
 use eggdb_storage::CommitStamp;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
@@ -63,20 +64,6 @@ fn owned(bound: Bound<&[u8]>) -> Bound<Vec<u8>> {
     bound.map(<[u8]>::to_vec)
 }
 
-fn within(key: &[u8], start: &Bound<Vec<u8>>, end: &Bound<Vec<u8>>) -> bool {
-    let after_start = match start {
-        Bound::Included(start) => key >= start.as_slice(),
-        Bound::Excluded(start) => key > start.as_slice(),
-        Bound::Unbounded => true,
-    };
-    let before_end = match end {
-        Bound::Included(end) => key <= end.as_slice(),
-        Bound::Excluded(end) => key < end.as_slice(),
-        Bound::Unbounded => true,
-    };
-    after_start && before_end
-}
-
 fn conflict(what: &str) -> Error {
     Error::new(
         ErrorKind::Conflict,
@@ -95,7 +82,7 @@ pub struct ConcurrentTransaction<'db> {
     database: &'db Database,
     snapshot: ReadTransaction<'db>,
     isolation: Isolation,
-    writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    writes: WriteSet,
     expiring: HashMap<Vec<u8>, Duration>,
     reads: HashMap<Vec<u8>, Option<Vec<u8>>>,
     ranges: Vec<ScannedRange>,
@@ -144,7 +131,7 @@ impl Database {
             database: self,
             snapshot: self.begin_read()?,
             isolation,
-            writes: BTreeMap::new(),
+            writes: WriteSet::beside(self.path(), self.path() == std::path::Path::new(":memory:")),
             expiring: HashMap::new(),
             reads: HashMap::new(),
             ranges: Vec::new(),
@@ -164,8 +151,8 @@ impl<'db> ConcurrentTransaction<'db> {
     /// included, or `None`.
     pub fn get(&mut self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
         let key = key.as_ref();
-        if let Some(written) = self.writes.get(key) {
-            return Ok(written.clone());
+        if let Some(written) = self.writes.get(key)? {
+            return Ok(written);
         }
         if let Some(seen) = self.reads.get(key) {
             return Ok(seen.clone());
@@ -177,14 +164,15 @@ impl<'db> ConcurrentTransaction<'db> {
         Ok(found)
     }
 
-    /// Stores `value` under `key`, in memory until the commit. Limits are those of
+    /// Stores `value` under `key` until the commit, in memory and, past 32 MiB of changes, in
+    /// scratch files beside the database (D1337). Limits are those of
     /// [`WriteTransaction::put`](crate::WriteTransaction::put), checked here.
     pub fn put(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
         let key = key.as_ref();
         let value = value.as_ref();
         collection::refuse_reserved(key)?;
         self.check_limits(key, value.len())?;
-        self.writes.insert(key.to_vec(), Some(value.to_vec()));
+        self.writes.insert(key.to_vec(), Some(value.to_vec()))?;
         self.expiring.remove(key);
         Ok(())
     }
@@ -274,7 +262,7 @@ impl<'db> ConcurrentTransaction<'db> {
             return Ok(false);
         }
         let existed = self.get(key)?.is_some();
-        self.writes.insert(key.to_vec(), None);
+        self.writes.insert(key.to_vec(), None)?;
         Ok(existed)
     }
 
@@ -310,19 +298,17 @@ impl<'db> ConcurrentTransaction<'db> {
             fingerprint.add(&key, &value);
             merged.insert(key, value);
         }
-        for (key, written) in &self.writes {
-            if !within(key, &start, &end) {
-                continue;
-            }
+        self.writes.for_each_in(&start, &end, |key, written| {
             match written {
                 Some(value) => {
-                    merged.insert(key.clone(), value.clone());
+                    merged.insert(key.to_vec(), value.to_vec());
                 }
                 None => {
                     merged.remove(key);
                 }
             }
-        }
+            Ok(())
+        })?;
         if self.isolation == Isolation::Serializable {
             self.ranges.push(ScannedRange {
                 start,
@@ -367,7 +353,7 @@ impl<'db> ConcurrentTransaction<'db> {
                 format!("transaction identifier \"{gid}\" is already in use"),
             ));
         }
-        let record = self.prepared_record(writer.now().unix_micros());
+        let record = self.prepared_record(writer.now().unix_micros())?;
         writer.put_raw(&key, &record)?;
         writer.commit()
     }
@@ -397,11 +383,12 @@ impl<'db> ConcurrentTransaction<'db> {
                 }
             }
             Isolation::Snapshot => {
-                for key in self.writes.keys() {
+                self.writes.for_each(|key, _| {
                     if writer.get(key)? != self.snapshot.get(key)? {
                         return Err(conflict("a key it writes"));
                     }
-                }
+                    Ok(())
+                })?;
                 for (name, key) in self.collection_writes.keys() {
                     let before = match self.snapshot.collection(name) {
                         Ok(collection) => collection.get(key)?,
@@ -417,18 +404,29 @@ impl<'db> ConcurrentTransaction<'db> {
         Ok(())
     }
 
-    fn changes(&self) -> Vec<Change> {
-        let mut changes = Vec::with_capacity(self.writes.len() + self.collection_writes.len());
-        for (key, written) in &self.writes {
-            changes.push(match written {
-                Some(value) => Change::Put {
-                    key: key.clone(),
-                    value: value.clone(),
-                    ttl: self.expiring.get(key).copied(),
-                },
-                None => Change::Delete { key: key.clone() },
-            });
+    fn change_of(&self, key: &[u8], written: Option<&[u8]>) -> Change {
+        match written {
+            Some(value) => Change::Put {
+                key: key.to_vec(),
+                value: value.to_vec(),
+                ttl: self.expiring.get(key).copied(),
+            },
+            None => Change::Delete { key: key.to_vec() },
         }
+    }
+
+    fn changes(&self) -> Result<Vec<Change>> {
+        let mut changes = Vec::with_capacity(self.writes.len() + self.collection_writes.len());
+        self.writes.for_each(|key, written| {
+            changes.push(self.change_of(key, written));
+            Ok(())
+        })?;
+        changes.extend(self.collection_changes());
+        Ok(changes)
+    }
+
+    fn collection_changes(&self) -> Vec<Change> {
+        let mut changes = Vec::with_capacity(self.collection_writes.len());
         for ((name, key), written) in &self.collection_writes {
             changes.push(match written {
                 Some((value, ttl)) => Change::CollectionPut {
@@ -447,11 +445,14 @@ impl<'db> ConcurrentTransaction<'db> {
     }
 
     fn apply(&self, writer: &mut crate::WriteTransaction<'_>) -> Result<()> {
-        apply_changes(writer, &self.changes())
+        self.writes.for_each(|key, written| {
+            apply_changes(writer, core::slice::from_ref(&self.change_of(key, written)))
+        })?;
+        apply_changes(writer, &self.collection_changes())
     }
 
-    fn prepared_record(&self, prepared_at_micros: i64) -> Vec<u8> {
-        encode_prepared(prepared_at_micros, &self.changes())
+    fn prepared_record(&self, prepared_at_micros: i64) -> Result<Vec<u8>> {
+        Ok(encode_prepared(prepared_at_micros, &self.changes()?))
     }
 
     /// Gives up the transaction's changes. Dropping it does the same.

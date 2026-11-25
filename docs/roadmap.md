@@ -452,7 +452,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Users can choose the isolation level per database, table or request, from strict serializable
   to read committed with per-statement snapshots (D18, D173). Per request and per session (`eggdb.isolation`): **code written,
   unbuilt** (code-only mode, 2026-11-13, D1125); left: per database (`ALTER DATABASE ... SET`) and per table.
-- Row versions in the storage engine (MVCC), so changes larger than memory spill (D172).
+- Row versions in the storage engine (MVCC), so changes larger than memory spill (D172). **Code written, unbuilt**
+  (code-only mode, 2026-11-25, D1337): decided to spill a concurrent transaction's changes to sorted scratch runs
+  instead of versioning rows in the engine; the prepared record of two-phase commit is left.
 - Collections and expiring keys inside concurrent transactions (D172). **Code written, unbuilt** (code-only mode, 2026-11-13, D1124).
 - Waiting on a predicate lock instead of failing at commit (D172). **Code written, unbuilt** (code-only mode, 2026-11-14, D1128).
 - Row locks that hold other writers: `FOR UPDATE`/`FOR SHARE` with `NOWAIT` and `SKIP LOCKED`
