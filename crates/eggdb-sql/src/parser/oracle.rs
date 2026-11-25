@@ -1518,6 +1518,34 @@ impl<'t> Parser<'t> {
         Ok(oracle_function(internal, vec![subject, set], name.position))
     }
 
+    pub(super) fn stored_oracle_dynamic_predicate(&mut self, position: usize) -> SqlResult<Expr> {
+        self.expect(&TokenKind::LeftParen)?;
+        let mut parts = Vec::with_capacity(3);
+        loop {
+            match self.peek_kind() {
+                TokenKind::String(text) => parts.push(text.to_string()),
+                _ => return Err(self.unexpected()),
+            }
+            self.at += 1;
+            if !self.take(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RightParen)?;
+        let [schema, object, policy] = parts.as_slice() else {
+            return Err(self.unexpected());
+        };
+        let constant = |flag: bool| Expr {
+            kind: ExprKind::Literal(crate::ast::Literal::Boolean(flag)),
+            position,
+        };
+        match crate::row_security::dynamic_predicate(schema, object, policy) {
+            crate::row_security::DynamicPredicate::Predicate(predicate) => self.oracle_predicate_expression(&predicate),
+            crate::row_security::DynamicPredicate::Unrestricted => Ok(constant(true)),
+            crate::row_security::DynamicPredicate::Unknown => Ok(constant(false)),
+        }
+    }
+
     pub(super) fn stored_oracle_predicate(&mut self) -> SqlResult<Expr> {
         self.expect(&TokenKind::LeftParen)?;
         let predicate = match self.peek_kind() {
@@ -1526,6 +1554,11 @@ impl<'t> Parser<'t> {
         };
         self.at += 1;
         self.expect(&TokenKind::RightParen)?;
+        self.oracle_predicate_expression(&predicate)
+    }
+
+    fn oracle_predicate_expression(&self, predicate: &str) -> SqlResult<Expr> {
+        let predicate = predicate.to_owned();
         let tokens = crate::lexer::tokenize_in(&predicate, crate::Dialect::Oracle)?;
         let mut parser = Parser::new(&predicate, &tokens).in_dialect(crate::Dialect::Oracle);
         if let Some(settings) = self.settings {

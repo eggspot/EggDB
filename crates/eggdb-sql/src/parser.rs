@@ -5651,6 +5651,9 @@ impl<'t> Parser<'t> {
         if self.stored_conditions && name.text == crate::row_security::ORACLE_PREDICATE {
             return self.stored_oracle_predicate();
         }
+        if self.stored_conditions && name.text == crate::row_security::ORACLE_DYNAMIC_PREDICATE {
+            return self.stored_oracle_dynamic_predicate(name.position);
+        }
         if let Some(expr) = self.grouping_operation(&name)? {
             return Ok(expr);
         }

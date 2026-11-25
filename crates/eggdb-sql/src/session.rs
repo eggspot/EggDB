@@ -28,6 +28,7 @@ mod sqlserver_partitions;
 mod oracle_system_triggers;
 mod backup;
 mod incremental;
+mod dynamic_policies;
 mod invisible;
 mod logical_slots;
 pub(crate) mod freshness;
@@ -2057,6 +2058,7 @@ impl<'s> Session<'s> {
         let text = rewritten.as_deref().unwrap_or(text);
         let invisible = self.invisible_columns_declared(text);
         self.prepare_invisible_columns(text);
+        let _dynamic_predicates = self.prepare_dynamic_policies()?;
         let reader = self.file_reader;
         let outcome = crate::new_files::with_reader(reader, || self.run_text_with_reader(text, parameters, on_result, client));
         if outcome.is_ok()

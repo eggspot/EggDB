@@ -968,7 +968,7 @@ fn static_vpd_policies_filter_and_check_rows_for_every_user() {
     );
     failure(
         &mut oracle,
-        "BEGIN DBMS_RLS.ADD_POLICY(object_name => 'NOTES', policy_name => 'OWN', policy_function => 'OWN_ROWS'); END;",
+        "BEGIN DBMS_RLS.ADD_POLICY(object_name => 'NOTES', policy_name => 'OWN', policy_function => 'OWN_ROWS', policy_type => 'NOT_A_TYPE'); END;",
     );
     values(
         &mut oracle,
@@ -1011,6 +1011,48 @@ fn static_vpd_policies_filter_and_check_rows_for_every_user() {
     failure(&mut oracle, "BEGIN DBMS_RLS.DROP_POLICY(NULL, 'NOTES', 'OWN'); END;");
     let mut ada = as_user("ada");
     assert_eq!(values(&mut ada, "SELECT count(*) FROM notes"), vec![vec![number(4)]]);
+}
+
+#[test]
+fn a_dynamic_vpd_policy_asks_its_function_at_every_statement() {
+    let store = MemoryStore::default();
+    let mut admin = Session::new(&store);
+    for sql in [
+        "CREATE TABLE notes (id integer PRIMARY KEY, body text)",
+        "INSERT INTO notes VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+        "CREATE TABLE vpd_config (min_id integer)",
+        "INSERT INTO vpd_config VALUES (1)",
+        "CREATE USER ada LOGIN",
+        "GRANT SELECT ON notes TO ada",
+        "GRANT SELECT ON vpd_config TO ada",
+    ] {
+        values(&mut admin, sql);
+    }
+    let mut oracle = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut oracle,
+        "CREATE OR REPLACE FUNCTION from_config(schema_name IN VARCHAR2, table_name IN VARCHAR2) RETURN VARCHAR2 IS\n  floor_id NUMBER;\nBEGIN\n  SELECT min_id INTO floor_id FROM vpd_config;\n  RETURN 'id >= ' || floor_id;\nEND;",
+    );
+    values(
+        &mut oracle,
+        "BEGIN DBMS_RLS.ADD_POLICY(object_name => 'NOTES', policy_name => 'FLOOR', policy_function => 'FROM_CONFIG', statement_types => 'SELECT'); END;",
+    );
+    let as_ada = || {
+        let mut session = Session::with_dialect(&store, Dialect::Oracle);
+        session.identify_role("ada", "eggdb").unwrap();
+        session
+    };
+    let mut ada = as_ada();
+    assert_eq!(values(&mut ada, "SELECT count(*) FROM notes"), vec![vec![number(3)]]);
+    values(&mut admin, "UPDATE vpd_config SET min_id = 3");
+    assert_eq!(values(&mut ada, "SELECT count(*) FROM notes"), vec![vec![number(1)]]);
+    values(
+        &mut oracle,
+        "BEGIN DBMS_RLS.ENABLE_POLICY(object_name => 'NOTES', policy_name => 'FLOOR', enable => FALSE); END;",
+    );
+    let mut ada = as_ada();
+    assert_eq!(values(&mut ada, "SELECT count(*) FROM notes"), vec![vec![number(3)]]);
+    values(&mut oracle, "BEGIN DBMS_RLS.DROP_POLICY(NULL, 'NOTES', 'FLOOR'); END;");
 }
 
 #[test]

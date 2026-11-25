@@ -12,6 +12,101 @@ const RECORD_VERSION: u8 = 1;
 /// The marker a stored condition wraps an Oracle VPD predicate in, so it is read in the Oracle
 /// dialect it was written in.
 pub(crate) const ORACLE_PREDICATE: &str = "eggdb_oracle_predicate";
+pub(crate) const ORACLE_DYNAMIC_PREDICATE: &str = "eggdb_oracle_dynamic_predicate";
+pub(crate) const DYNAMIC_POLICIES_TABLE: &str = "eggdb_internal.oracle_rls_dynamic";
+
+type PolicyKey = (String, String, String);
+
+static DYNAMIC_POLICY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    static DYNAMIC_PREDICATES: std::cell::RefCell<Option<std::collections::HashMap<PolicyKey, Option<String>>>> =
+        const { std::cell::RefCell::new(None) };
+    static EVALUATING_DYNAMIC_POLICIES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Counts the dynamic Oracle VPD policies added in this process, so a session that found
+/// none looks again after one is added (D1321).
+pub(crate) fn dynamic_policy_generation() -> u64 {
+    DYNAMIC_POLICY_GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub(crate) fn dynamic_policy_added() {
+    DYNAMIC_POLICY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+pub(crate) fn evaluating_dynamic_policies() -> bool {
+    EVALUATING_DYNAMIC_POLICIES.with(std::cell::Cell::get)
+}
+
+pub(crate) struct EvaluatingDynamicPolicies;
+
+impl Drop for EvaluatingDynamicPolicies {
+    fn drop(&mut self) {
+        EVALUATING_DYNAMIC_POLICIES.with(|flag| flag.set(false));
+    }
+}
+
+pub(crate) fn evaluate_dynamic_policies() -> EvaluatingDynamicPolicies {
+    EVALUATING_DYNAMIC_POLICIES.with(|flag| flag.set(true));
+    EvaluatingDynamicPolicies
+}
+
+/// The predicates the dynamic policies' functions gave for the running statement; dropping it
+/// forgets them.
+pub(crate) struct DynamicPredicates;
+
+impl DynamicPredicates {
+    pub(crate) fn install(predicates: std::collections::HashMap<PolicyKey, Option<String>>) -> Self {
+        DYNAMIC_PREDICATES.with(|slot| *slot.borrow_mut() = Some(predicates));
+        Self
+    }
+}
+
+impl Drop for DynamicPredicates {
+    fn drop(&mut self) {
+        DYNAMIC_PREDICATES.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// What a dynamic policy's condition stands for in the running statement.
+pub(crate) enum DynamicPredicate {
+    /// The predicate its function returned.
+    Predicate(String),
+    /// No restriction: an empty or `NULL` predicate, or a policy function being called.
+    Unrestricted,
+    /// Its function was not called for this statement: no row passes.
+    Unknown,
+}
+
+pub(crate) fn dynamic_predicate(schema: &str, object: &str, policy: &str) -> DynamicPredicate {
+    if evaluating_dynamic_policies() {
+        return DynamicPredicate::Unrestricted;
+    }
+    DYNAMIC_PREDICATES.with(|slot| {
+        let slot = slot.borrow();
+        let Some(predicates) = slot.as_ref() else {
+            return DynamicPredicate::Unknown;
+        };
+        match predicates.get(&(schema.to_owned(), object.to_owned(), policy.to_owned())) {
+            Some(Some(predicate)) => DynamicPredicate::Predicate(predicate.clone()),
+            Some(None) => DynamicPredicate::Unrestricted,
+            None => DynamicPredicate::Unknown,
+        }
+    })
+}
+
+/// A dynamic Oracle VPD policy as a stored row-security condition: its predicate is asked for
+/// at every statement.
+pub(crate) fn oracle_dynamic_condition(schema: &str, object: &str, policy: &str) -> String {
+    let quoted = |text: &str| format!("'{}'", text.replace('\'', "''"));
+    format!(
+        "{ORACLE_DYNAMIC_PREDICATE}({}, {}, {})",
+        quoted(schema),
+        quoted(object),
+        quoted(policy)
+    )
+}
 const ENABLED: u8 = 1;
 const FORCED: u8 = 2;
 

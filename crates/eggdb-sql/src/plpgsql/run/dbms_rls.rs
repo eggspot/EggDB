@@ -13,6 +13,8 @@ const CREATE_SCHEMA: &str = "CREATE SCHEMA IF NOT EXISTS eggdb_internal";
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS eggdb_internal.oracle_rls_policies (object_schema text NOT NULL, object_name text NOT NULL, policy_name text NOT NULL, statement_types text NOT NULL, update_check boolean NOT NULL, enabled boolean NOT NULL, predicate text, PRIMARY KEY (object_schema, object_name, policy_name))";
 const BASE_POLICY: &str = "eggdb_oracle_base";
 const STATIC_POLICY_TYPES: [&str; 2] = ["STATIC", "SHARED_STATIC"];
+const DYNAMIC_POLICY_TYPES: [&str; 3] = ["DYNAMIC", "CONTEXT_SENSITIVE", "SHARED_CONTEXT_SENSITIVE"];
+const CREATE_DYNAMIC_TABLE: &str = "CREATE TABLE IF NOT EXISTS eggdb_internal.oracle_rls_dynamic (object_schema text NOT NULL, object_name text NOT NULL, policy_name text NOT NULL, policy_function text NOT NULL, PRIMARY KEY (object_schema, object_name, policy_name))";
 const ADD_POLICY: [&str; 15] = [
     "object_schema",
     "object_name",
@@ -119,6 +121,7 @@ struct StoredPolicy {
     kinds: Vec<GuardedStatement>,
     update_check: bool,
     predicate: Option<String>,
+    dynamic: bool,
 }
 
 fn rls_error(code: u16, message: String) -> SqlError {
@@ -262,19 +265,35 @@ impl Run<'_> {
             return Ok(None);
         };
         let kinds = GuardedStatement::list(row.first().and_then(text_of).as_deref())?;
+        let update_check = row.get(1).is_some_and(|value| truth(value, false));
+        let predicate = row.get(2).and_then(text_of);
+        self.rls_sql(CREATE_DYNAMIC_TABLE)?;
+        let dynamic = !self
+            .rls_sql(&format!(
+                "SELECT 1 FROM {} WHERE {}",
+                crate::row_security::DYNAMIC_POLICIES_TABLE,
+                Self::rls_key(target)
+            ))?
+            .rows
+            .is_empty();
         Ok(Some(StoredPolicy {
             kinds,
-            update_check: row.get(1).is_some_and(|value| truth(value, false)),
-            predicate: row.get(2).and_then(text_of),
+            update_check,
+            predicate,
+            dynamic,
         }))
     }
 
     fn rls_install(&mut self, target: &PolicyTarget, stored: &StoredPolicy) -> SqlResult<()> {
         let table = self.rls_table(target);
-        let condition = stored
-            .predicate
-            .as_deref()
-            .map_or_else(|| "true".to_owned(), crate::row_security::oracle_condition);
+        let condition = if stored.dynamic {
+            crate::row_security::oracle_dynamic_condition(&target.schema, &target.object, &target.policy)
+        } else {
+            stored
+                .predicate
+                .as_deref()
+                .map_or_else(|| "true".to_owned(), crate::row_security::oracle_condition)
+        };
         let base = identifier(BASE_POLICY);
         for text in [
             format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"),
@@ -322,21 +341,12 @@ impl Run<'_> {
             .map(|(_, raw)| policy_type_name(raw))
             .filter(|name| name != "NULL");
         let static_policy = truth(&self.rls_value(bound, "static_policy")?, false);
-        match policy_type.as_deref() {
-            Some(name) if STATIC_POLICY_TYPES.contains(&name) => {}
-            None if static_policy => {}
-            other => {
-                return Err(SqlError::new(
-                    SqlState::FEATURE_NOT_SUPPORTED,
-                    format!(
-                        "ORA-{INVALID_INPUT:05}: input value for policy_type is not valid: {}",
-                        other.unwrap_or("DYNAMIC")
-                    ),
-                )
-                .with_oracle_code(INVALID_INPUT)
-                .with_hint("EggDB runs static VPD policies so far: pass static_policy => TRUE or policy_type => DBMS_RLS.STATIC."));
-            }
-        }
+        let dynamic = match policy_type.as_deref() {
+            Some(name) if STATIC_POLICY_TYPES.contains(&name) => false,
+            Some(name) if DYNAMIC_POLICY_TYPES.contains(&name) => true,
+            None => !static_policy,
+            Some(other) => return Err(invalid_input("policy_type", other)),
+        };
         if text_of(&self.rls_value(bound, "sec_relevant_cols")?).is_some() {
             return Err(SqlError::new(
                 SqlState::FEATURE_NOT_SUPPORTED,
@@ -352,12 +362,16 @@ impl Run<'_> {
         let kinds = GuardedStatement::list(text_of(&self.rls_value(bound, "statement_types")?).as_deref())?;
         let update_check = truth(&self.rls_value(bound, "update_check")?, false);
         let enabled = truth(&self.rls_value(bound, "enable")?, true);
-        let predicate = text_of(&self.text_value(&format!(
-            "{function}({}, {})",
-            quoted(&target.schema),
-            quoted(&target.object)
-        ))?)
-        .filter(|predicate| !predicate.trim().is_empty());
+        let predicate = if dynamic {
+            None
+        } else {
+            text_of(&self.text_value(&format!(
+                "{function}({}, {})",
+                quoted(&target.schema),
+                quoted(&target.object)
+            ))?)
+            .filter(|predicate| !predicate.trim().is_empty())
+        };
         if let Some(predicate) = &predicate {
             let tokens = crate::lexer::tokenize_in(predicate, Dialect::Oracle)?;
             let mut parser = crate::parser::Parser::new(predicate, &tokens)
@@ -380,11 +394,24 @@ impl Run<'_> {
             quoted(&GuardedStatement::joined(&kinds)),
             predicate.as_deref().map_or_else(|| "NULL".to_owned(), quoted)
         ))?;
+        if dynamic {
+            self.rls_sql(CREATE_DYNAMIC_TABLE)?;
+            self.rls_sql(&format!(
+                "INSERT INTO {} VALUES ({}, {}, {}, {})",
+                crate::row_security::DYNAMIC_POLICIES_TABLE,
+                quoted(&target.schema),
+                quoted(&target.object),
+                quoted(&target.policy),
+                quoted(&function)
+            ))?;
+            crate::row_security::dynamic_policy_added();
+        }
         if enabled {
             let stored = StoredPolicy {
                 kinds,
                 update_check,
                 predicate,
+                dynamic,
             };
             self.rls_install(&target, &stored)?;
         }
@@ -400,6 +427,12 @@ impl Run<'_> {
         }
         self.rls_uninstall(&target)?;
         self.rls_sql(&format!("DELETE FROM {POLICIES_TABLE} WHERE {}", Self::rls_key(&target)))?;
+        self.rls_sql(CREATE_DYNAMIC_TABLE)?;
+        self.rls_sql(&format!(
+            "DELETE FROM {} WHERE {}",
+            crate::row_security::DYNAMIC_POLICIES_TABLE,
+            Self::rls_key(&target)
+        ))?;
         Ok(())
     }
 
@@ -415,6 +448,9 @@ impl Run<'_> {
             "UPDATE {POLICIES_TABLE} SET enabled = {enable} WHERE {}",
             Self::rls_key(&target)
         ))?;
+        if stored.dynamic {
+            crate::row_security::dynamic_policy_added();
+        }
         if enable {
             self.rls_install(&target, &stored)
         } else {
