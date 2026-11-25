@@ -1,7 +1,7 @@
 use crate::bytes::{read_u32, read_u64, write_u32, write_u64};
 use crate::error::{FormatError, StorageError};
 use crate::format::{
-    Access, Features, FileId, HEADER_SLOT_SIZE, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE,
+    Access, Features, FileId, HEADER_SLOT_SIZE, NO_PAGE, PAGE_COMPRESSED, PAGE_ENCRYPTED, PAGE_HEADER_SIZE,
     PAGE_VOLUME_MASK, PageChecksum, PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, Superblock,
 };
 use crate::log::{
@@ -27,6 +27,7 @@ const FREE_LIST_ENTRIES_AT: usize = PAGE_HEADER_SIZE + 16;
 const NORMAL_UNWRITTEN_PAGES: usize = 1024;
 const NORMAL_UNSYNCED_LOG_BYTES: u64 = 1 << 20;
 const WRITE_AHEAD_BYTES: usize = 4 << 20;
+const HOLE_BLOCK: usize = 4096;
 pub(crate) const NO_STAMP: u64 = 0;
 
 /// How [`PageFile::create`] sets up a new file.
@@ -89,6 +90,7 @@ pub struct PageFile<F: File> {
     freed: BTreeSet<u64>,
     free_list_pages: BTreeSet<u64>,
     cipher: Option<crate::page_cipher::PageCipher>,
+    compress_pages: bool,
     staged: BTreeMap<u64, (PageHeader, Vec<u8>)>,
     log: Option<LogWriter>,
     log_pages: BTreeMap<u64, u64>,
@@ -249,6 +251,7 @@ impl<F: File> PageFile<F> {
             log_stats: LogStats::default(),
             scratch: Vec::new(),
             cipher: None,
+            compress_pages: false,
             page_count_before_commit: None,
             damaged_header_slot: None,
             older_slot_log_reaches: None,
@@ -616,6 +619,18 @@ impl<F: File> PageFile<F> {
         self.drain_unwritten()
     }
 
+    /// Stores leaf pages written from now on compressed when that frees at least one block of
+    /// 4 KiB, and gives the freed blocks back to the file system (D1334). An encrypted file
+    /// keeps its pages whole, so their lengths say nothing about their contents.
+    pub fn set_page_compression(&mut self, compress: bool) {
+        self.compress_pages = compress && self.cipher.is_none();
+    }
+
+    /// Whether leaf pages are stored compressed (see [`PageFile::set_page_compression`]).
+    pub fn compresses_pages(&self) -> bool {
+        self.compress_pages
+    }
+
     /// Reads data page `page_id` into `page`, which must be one page long, and checks it.
     ///
     /// A page changed through [`PageFile::write_page`] since the last commit reads as changed,
@@ -631,7 +646,11 @@ impl<F: File> PageFile<F> {
         } else {
             self.file.read_exact_at(page, self.offset(page_id))?;
         }
-        let header = self.checksums.verify(page, page_id)?;
+        let mut header = self.checksums.verify(page, page_id)?;
+        if header.flags & PAGE_COMPRESSED != 0 {
+            expand_page(page, page_id)?;
+            header.flags &= !PAGE_COMPRESSED;
+        }
         if header.flags & PAGE_ENCRYPTED == 0 {
             return Ok(header);
         }
@@ -823,6 +842,9 @@ impl<F: File> PageFile<F> {
     ) -> Result<u64, StorageError> {
         self.check_page_in_use(page_id)?;
         self.check_length(page)?;
+        let compressed = (self.compress_pages && self.cipher.is_none() && header.page_type == PageType::BTreeLeaf)
+            .then(|| compressed_form(page))
+            .flatten();
         let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
         if log.buffered_bytes() >= WRITE_AHEAD_BYTES {
             log.write_ahead(&self.file)?;
@@ -831,6 +853,15 @@ impl<F: File> PageFile<F> {
         let lsn = log.lsn();
         let header = PageHeader { lsn, ..*header };
         self.checksums.write(page, page_id, &header)?;
+        if let Some(mut stored) = compressed {
+            let flagged = PageHeader {
+                flags: PAGE_COMPRESSED,
+                ..header
+            };
+            self.checksums.write(&mut stored, page_id, &flagged)?;
+            log.put_image(page_id, &stored);
+            return Ok(lsn);
+        }
         match &self.cipher {
             None => log.put_image(page_id, page),
             Some(cipher) => {
@@ -969,7 +1000,20 @@ impl<F: File> PageFile<F> {
         let page_bytes = self.page_size().bytes();
         for image in log.images() {
             let bytes = &log.buffer()[image.buffer_start..image.buffer_start + page_bytes];
-            self.file.write_all_at(bytes, self.offset(image.page_id))?;
+            self.write_in_place(image.page_id, bytes)?;
+        }
+        Ok(())
+    }
+
+    fn write_in_place(&self, page_id: u64, page: &[u8]) -> Result<(), StorageError> {
+        let offset = self.offset(page_id);
+        self.file.write_all_at(page, offset)?;
+        if read_u16_le(page, 6) & PAGE_COMPRESSED != 0 {
+            let used = PAGE_HEADER_SIZE + 4 + read_u32(page, PAGE_HEADER_SIZE) as usize;
+            let kept = used.next_multiple_of(HOLE_BLOCK).min(page.len());
+            if kept < page.len() {
+                let _ = self.file.punch_hole(offset + kept as u64, (page.len() - kept) as u64);
+            }
         }
         Ok(())
     }
@@ -982,7 +1026,7 @@ impl<F: File> PageFile<F> {
         page.resize(self.page_size().bytes(), 0);
         for (&page_id, &offset) in &self.unwritten {
             self.file.read_exact_at(&mut page, offset)?;
-            self.file.write_all_at(&page, self.offset(page_id))?;
+            self.write_in_place(page_id, &page)?;
         }
         self.unwritten.clear();
         self.scratch = page;
@@ -1666,6 +1710,40 @@ fn fill_free_list_page(page: &mut [u8], next: u64, entries: impl Iterator<Item =
         count += 1;
     }
     write_u32(page, FREE_LIST_COUNT_AT, count as u32);
+}
+
+fn read_u16_le(bytes: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+}
+
+fn compressed_form(page: &[u8]) -> Option<Vec<u8>> {
+    let packed = crate::compression::lz4::compress(&page[PAGE_HEADER_SIZE..]);
+    let used = PAGE_HEADER_SIZE + 4 + packed.len();
+    if used.next_multiple_of(HOLE_BLOCK) >= page.len() {
+        return None;
+    }
+    let mut stored = Vec::new();
+    stored.try_reserve_exact(page.len()).ok()?;
+    stored.resize(page.len(), 0);
+    write_u32(&mut stored, PAGE_HEADER_SIZE, packed.len() as u32);
+    stored[PAGE_HEADER_SIZE + 4..used].copy_from_slice(&packed);
+    Some(stored)
+}
+
+fn expand_page(page: &mut [u8], page_id: u64) -> Result<(), StorageError> {
+    let damaged = || StorageError::Format(FormatError::ChecksumMismatch { page: page_id });
+    let length = read_u32(page, PAGE_HEADER_SIZE) as usize;
+    let packed = page
+        .get(PAGE_HEADER_SIZE + 4..PAGE_HEADER_SIZE + 4 + length)
+        .ok_or_else(damaged)?;
+    let body = crate::compression::lz4::decompress(packed, page.len() - PAGE_HEADER_SIZE).map_err(|_| damaged())?;
+    if body.len() != page.len() - PAGE_HEADER_SIZE {
+        return Err(damaged());
+    }
+    page[PAGE_HEADER_SIZE..].copy_from_slice(&body);
+    let flags = read_u16_le(page, 6) & !PAGE_COMPRESSED;
+    page[6..8].copy_from_slice(&flags.to_le_bytes());
+    Ok(())
 }
 
 fn grow(page_count: &mut u64) -> Result<u64, StorageError> {

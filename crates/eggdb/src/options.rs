@@ -68,6 +68,7 @@ pub struct Options {
     pub(crate) durability: Durability,
     pub(crate) cache_bytes: usize,
     pub(crate) spill_changes: bool,
+    pub(crate) compress_pages: bool,
     pub(crate) snapshot_memory_bytes: Option<usize>,
     pub(crate) auto_checkpoint_log_bytes: Option<u64>,
     pub(crate) page_store_disk_bytes: Option<u64>,
@@ -135,6 +136,7 @@ impl Options {
             durability: Durability::Full,
             cache_bytes: DEFAULT_CACHE_BYTES,
             spill_changes: true,
+            compress_pages: false,
             snapshot_memory_bytes: None,
             auto_checkpoint_log_bytes: Some(DEFAULT_AUTO_CHECKPOINT_LOG_BYTES),
             page_store_disk_bytes: None,
@@ -193,6 +195,17 @@ impl Options {
     /// spills, so its pages never reach a file in the clear.
     pub fn spill_changes(mut self, spill: bool) -> Self {
         self.spill_changes = spill;
+        self
+    }
+
+    /// Stores leaf pages compressed on disk when that frees at least one 4 KiB block of the
+    /// page, giving the freed blocks back to the file system (D1334). It pays with larger page
+    /// sizes (16 KiB and up) on file systems with holes (Linux, macOS); pages are compressed
+    /// as they are written, so an existing file shrinks as its pages change. Off by default;
+    /// once used, releases that do not know compressed pages refuse the file. An encrypted
+    /// database keeps its pages whole.
+    pub fn compress_pages(mut self, compress: bool) -> Self {
+        self.compress_pages = compress;
         self
     }
 

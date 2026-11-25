@@ -106,6 +106,14 @@ impl File for DatabaseFile {
         }
     }
 
+    fn punch_hole(&self, offset: u64, len: u64) -> Result<()> {
+        match self {
+            Self::Os(file) => file.punch_hole(offset, len),
+            Self::Memory(file) => file.punch_hole(offset, len),
+            Self::Custom(file) => file.0.punch_hole(offset, len),
+        }
+    }
+
     fn sync_data(&self) -> Result<()> {
         match self {
             Self::Os(file) => file.sync_data(),

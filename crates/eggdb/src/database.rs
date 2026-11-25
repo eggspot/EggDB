@@ -499,6 +499,9 @@ impl Database {
             cache.lock_in_memory().map_err(Error::storage)?;
         }
         cache.set_value_compression(options.value_compression);
+        if options.compress_pages && !options.read_only {
+            cache.set_page_compression(true);
+        }
         if options.spill_changes && !options.read_only && path != Path::new(MEMORY_NAME) {
             let spill = spill_path(path);
             cache.set_spill_opener(Box::new(move || {

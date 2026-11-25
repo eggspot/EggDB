@@ -254,6 +254,16 @@ pub trait File: Send + Sync + core::fmt::Debug {
     /// [`File::sync_data`] through a read-only handle.
     fn sync_all(&self) -> Result<()>;
 
+    /// Gives the disk blocks of the `len` bytes at `offset` back to the file system while
+    /// keeping the file's size, so the range reads back as zeros (D1334). Only whole blocks
+    /// inside the range are freed. A file or file system without holes keeps the bytes as
+    /// they are, which is what this default does; callers punch only ranges they wrote as
+    /// zeros, so either way the file reads the same.
+    fn punch_hole(&self, offset: u64, len: u64) -> Result<()> {
+        let _ = (offset, len);
+        Ok(())
+    }
+
     /// Fills `buf` from `offset`, failing with [`ErrorKind::UnexpectedEof`] if the file ends
     /// first.
     fn read_exact_at(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {

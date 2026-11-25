@@ -394,7 +394,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-12, D638); FSE-compressed Huffman weights: **code written, unbuilt** (code-only mode,
   2026-11-12, D639); a long-running fuzzer (`eggdb-fuzz zstd`, with LZ4 frames, SQLite files and Arrow
   streams): **code written, unbuilt** (code-only mode, 2026-11-12, D662).
-- Compressed leaf pages and log records, with compression chosen per column and page (D40, D171).
+- Compressed leaf pages and log records, with compression chosen per column and page (D40, D171). Leaf pages:
+  **code written, unbuilt** (code-only mode, 2026-11-25, D1334), `Options::compress_pages`, LZ4 per page with holes
+  punched; shorter log records and per-column choice are left.
 - Compression options in the CLI and `eggdb serve` (D171). **Code written, unbuilt** (code-only
   mode, 2026-11-10, D357): `--compress lz4|zstd|off`.
 - Partitioning's leftovers from D316: Oracle's `DISABLE ROW MOVEMENT` (ORA-14402), the source's

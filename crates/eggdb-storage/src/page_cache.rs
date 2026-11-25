@@ -202,6 +202,12 @@ impl<F: File> PageCache<F> {
         self.spill.get_mut().set_opener(opener);
     }
 
+    /// Stores leaf pages compressed on disk from the next commit on (D1334); see
+    /// [`PageFile::set_page_compression`].
+    pub fn set_page_compression(&mut self, compress: bool) {
+        self.file.get_mut().set_page_compression(compress);
+    }
+
     /// Whether changed pages can move to a scratch file when the cache is full.
     pub fn can_spill(&self) -> bool {
         self.page_cipher().is_none() && self.spill.borrow().can_spill()
@@ -513,7 +519,12 @@ impl<F: File> PageCache<F> {
         order.sort_unstable_by_key(|&frame| (self.pages[frame].get(), frame));
         order.dedup();
         let spilled = self.spill.get_mut().listed();
-        let compressed = self.compressed_written.get();
+        let compressed = self.compressed_written.get()
+            | if self.file.get_mut().compresses_pages() {
+                crate::format::Features::COMPRESSED_PAGES
+            } else {
+                0
+            };
         let committed = self.write_and_commit(&order, &spilled, stamp, |superblock| {
             update(superblock);
             superblock.features.incompatible |= compressed;
@@ -1269,7 +1280,7 @@ impl DerefMut for PageMut<'_> {
 mod tests {
     use super::{CacheSize, PageCache, PageLookups, thread_page_lookups};
     use crate::error::{FormatError, StorageError};
-    use crate::format::{Access, FileId, PageHeader, PageSize, PageType, Superblock};
+    use crate::format::{Access, Features, FileId, PageHeader, PageSize, PageType, Superblock};
     use crate::page_file::{CreateOptions, PageFile};
     use crate::test_rng::TestRng;
     use eggdb_platform::{
@@ -1396,6 +1407,42 @@ mod tests {
         let cache = open(&fs, Access::ReadOnly, 8);
         for (index, &page) in pages.iter().enumerate() {
             assert_eq!(fill_of(&cache, page), (index % 251) as u8);
+        }
+    }
+
+    #[test]
+    fn compressed_leaf_pages_read_back_whole_after_a_reopen() {
+        let fs = SimFileSystem::new();
+        let options = CreateOptions {
+            page_size: PageSize::from_log2(14).unwrap(),
+            file_id: FileId(*b"page-cache-tests"),
+        };
+        let file = PageFile::create(&fs, Path::new(DB), options).unwrap();
+        let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(8)).unwrap();
+        cache.set_page_compression(true);
+        let mut pages = Vec::new();
+        for fill in 0..4u8 {
+            let mut page = cache.allocate(leaf()).unwrap();
+            for (at, byte) in page.iter_mut().enumerate().skip(16) {
+                *byte = if at % 512 == 0 { fill } else { 0 };
+            }
+            pages.push(page.page_id());
+        }
+        cache.commit(|_| {}).unwrap();
+        assert_ne!(cache.superblock().features.incompatible & Features::COMPRESSED_PAGES, 0);
+        drop(cache);
+        let raw = fs.open(Path::new(DB), OpenMode::Read).unwrap();
+        let mut stored = vec![0; 1 << 14];
+        raw.read_exact_at(&mut stored, pages[0] << 14).unwrap();
+        assert_eq!(u16::from_le_bytes([stored[6], stored[7]]) & crate::format::PAGE_COMPRESSED, crate::format::PAGE_COMPRESSED);
+        let file = PageFile::open(&fs, Path::new(DB), Access::ReadOnly).unwrap();
+        let cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(8)).unwrap();
+        for (fill, &page_id) in pages.iter().enumerate() {
+            let page = cache.read(page_id).unwrap();
+            assert_eq!(page.header().flags, 0);
+            for (at, &byte) in page.iter().enumerate().skip(16) {
+                assert_eq!(byte, if at % 512 == 0 { fill as u8 } else { 0 });
+            }
         }
     }
 

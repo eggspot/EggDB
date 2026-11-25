@@ -312,7 +312,17 @@ impl File for OsFile {
         self.require_writable()?;
         Ok(self.file.sync_all()?)
     }
+
+    fn punch_hole(&self, offset: u64, len: u64) -> Result<()> {
+        self.require_writable()?;
+        if len == 0 {
+            return Ok(());
+        }
+        Ok(holes::punch(&self.file, offset, len)?)
+    }
 }
+
+mod holes;
 
 #[cfg(unix)]
 impl OsFile {

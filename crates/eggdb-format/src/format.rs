@@ -32,6 +32,11 @@ pub const RECYCLED_SEGMENTS: usize = 7;
 pub const NO_PAGE: u64 = 0;
 /// The page flag of a page whose body (after its 16-byte header) is encrypted (D187).
 pub const PAGE_ENCRYPTED: u16 = 1;
+/// The page flag of a page stored compressed (D1334): after the header, the length of the
+/// compressed body as four little-endian bytes, the body compressed as one LZ4 block, and
+/// zeros to the end of the page.
+pub const PAGE_COMPRESSED: u16 = 2;
+const KNOWN_PAGE_FLAGS: u16 = PAGE_ENCRYPTED | PAGE_COMPRESSED;
 const PAGE_KEY_CHECK_AT: usize = 232;
 
 /// The longest a log segment may be, in bytes: 64 MiB.
@@ -202,10 +207,17 @@ impl Features {
     /// (D1119): a release that does not know it would not see those tables' rows, and would
     /// count the trees' pages as leaked.
     pub const LSM_TABLES: u64 = 1 << 3;
+    /// The incompatible bit of a file that may hold pages stored compressed (D1334): a
+    /// release that does not know it would refuse their flag.
+    pub const COMPRESSED_PAGES: u64 = 1 << 4;
     /// The incompatible features this release knows: [`Features::COMPRESSED_VALUES`],
-    /// [`Features::ENCRYPTED_PAGES`], [`Features::ZSTD_VALUES`] and [`Features::LSM_TABLES`].
-    pub const KNOWN_INCOMPATIBLE: u64 =
-        Self::COMPRESSED_VALUES | Self::ENCRYPTED_PAGES | Self::ZSTD_VALUES | Self::LSM_TABLES;
+    /// [`Features::ENCRYPTED_PAGES`], [`Features::ZSTD_VALUES`], [`Features::LSM_TABLES`] and
+    /// [`Features::COMPRESSED_PAGES`].
+    pub const KNOWN_INCOMPATIBLE: u64 = Self::COMPRESSED_VALUES
+        | Self::ENCRYPTED_PAGES
+        | Self::ZSTD_VALUES
+        | Self::LSM_TABLES
+        | Self::COMPRESSED_PAGES;
 
     /// The incompatible features release `major.minor` knows (D1121): what a copy made for
     /// that release may carry. Releases before 0.2 knew none; 0.2 to 0.5 knew
@@ -642,7 +654,7 @@ impl PageChecksum {
     ) -> Result<(), FormatError> {
         self.check_length(page)?;
         self.check_page_id(page_id)?;
-        if header.flags & !PAGE_ENCRYPTED != 0 {
+        if header.flags & !KNOWN_PAGE_FLAGS != 0 {
             return Err(FormatError::InvalidField { field: "flags" });
         }
         page[4] = header.page_type.to_byte();
@@ -667,7 +679,7 @@ impl PageChecksum {
             found: page[4],
         })?;
         let flags = read_u16(page, 6);
-        if flags & !PAGE_ENCRYPTED != 0 {
+        if flags & !KNOWN_PAGE_FLAGS != 0 {
             return Err(FormatError::InvalidField { field: "flags" });
         }
         Ok(PageHeader {

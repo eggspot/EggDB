@@ -36,6 +36,6 @@ pub use flash::{Flash, FlashPageError, FlashPages};
 pub use wear::{WearError, WearLevelled, WearStats};
 pub use format::{
     Access, FORMAT_VERSION, Features, FileId, HEADER_SLOT_SIZE, HeaderChoice, MAGIC,
-    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_ENCRYPTED, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK,
+    MAX_LOG_SEGMENT_BYTES, NO_PAGE, PAGE_COMPRESSED, PAGE_ENCRYPTED, PAGE_HEADER_SIZE, PAGE_VOLUME_MASK,
     PageChecksum, PageHeader, PageSize, PageType, RECYCLED_SEGMENTS, SUPERBLOCK_SIZE, Superblock,
 };
