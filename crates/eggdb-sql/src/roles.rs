@@ -169,6 +169,7 @@ impl RoleStatement {
     pub(crate) fn tag(&self) -> &'static str {
         match self {
             Self::Create { .. } => "CREATE ROLE",
+            Self::Settings(statement) if statement.written_as_alter_database => "ALTER DATABASE",
             Self::Alter { .. } | Self::Settings(_) => "ALTER ROLE",
             Self::Drop { .. } => "DROP ROLE",
             Self::Privileges { granting: true, .. }

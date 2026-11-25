@@ -521,3 +521,35 @@ fn alter_role_set_gives_a_role_its_settings_when_it_logs_in() {
         .unwrap();
     assert!(left.iter().all(|(role, _, _)| role != "temp_user"));
 }
+
+#[test]
+fn alter_database_set_reaches_every_role_and_pg_db_role_setting_lists_the_settings() {
+    let store = MemoryStore::default();
+    setup(&store);
+    let mut admin = Session::new(&store);
+    assert_eq!(
+        run(&mut admin, "ALTER DATABASE eggdb SET application_name TO 'from database'").unwrap(),
+        "ALTER DATABASE"
+    );
+    run(&mut admin, "ALTER ROLE clerk SET search_path = public").unwrap();
+    let mut clerk = Session::new(&store);
+    clerk.identify_role("clerk", "eggdb").unwrap();
+    assert_eq!(
+        run(&mut clerk, "SELECT current_setting('application_name') AS a").unwrap(),
+        "a\nfrom database\nSELECT 1"
+    );
+    assert_eq!(
+        run(
+            &mut admin,
+            "SELECT setdatabase <> 0 AS on_database, setrole <> 0 AS for_role, setconfig \
+             FROM pg_catalog.pg_db_role_setting ORDER BY setrole, setdatabase"
+        )
+        .unwrap(),
+        "on_database|for_role|setconfig\nt|f|{\"application_name=from database\"}\nf|t|{search_path=public}\nSELECT 2"
+    );
+    run(&mut admin, "ALTER DATABASE eggdb RESET ALL").unwrap();
+    assert_eq!(
+        run(&mut admin, "SELECT count(*) AS n FROM pg_catalog.pg_db_role_setting").unwrap(),
+        "n\n1\nSELECT 1"
+    );
+}

@@ -210,6 +210,7 @@ pub(crate) fn build(
         CatalogRelation::Proc => proc_rows(snapshot),
         CatalogRelation::Language => language_rows(),
         CatalogRelation::Settings => setting_rows(snapshot),
+        CatalogRelation::DbRoleSetting => db_role_setting_rows(snapshot),
         CatalogRelation::TimezoneNames => time_zone_name_rows(),
         CatalogRelation::TimezoneAbbrevs => time_zone_abbreviation_rows(),
         CatalogRelation::Information(relation) => {
@@ -2020,6 +2021,32 @@ fn depend_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
                     .set("deptype", text(dependency))
                     .done(),
             )
+        })
+        .collect()
+}
+
+fn db_role_setting_rows(snapshot: &CatalogSnapshot) -> Vec<Vec<Value>> {
+    let Ok(pairs) = crate::roles::every_role_setting(&snapshot.access) else {
+        return Vec::new();
+    };
+    pairs
+        .into_iter()
+        .map(|(role, database, settings)| {
+            let database_oid = match database.as_str() {
+                "" => 0,
+                name if name == snapshot.database => oids::DATABASE,
+                name => other_database_oid(name),
+            };
+            let role_oid = if role.is_empty() { 0 } else { crate::roles::role_oid(&role) };
+            let config = settings
+                .into_iter()
+                .map(|(name, value)| Value::Text(format!("{name}={value}")))
+                .collect();
+            Row::new(CatalogRelation::DbRoleSetting)
+                .set("setdatabase", oid(database_oid))
+                .set("setrole", oid(role_oid))
+                .set("setconfig", Value::Array(Box::new(ArrayValue::new(ArrayElement::Text, config))))
+                .done()
         })
         .collect()
 }

@@ -1338,3 +1338,4 @@ its full title with its status.
 - [D1311](decisions/D1311.md) Code-only batch 967 (M8): schema USAGE checked in statements
 - [D1312](decisions/D1312.md) Code-only batch 968 (M8): routine EXECUTE checked in statements
 - [D1313](decisions/D1313.md) Code-only batch 969 (M12): ALTER ROLE ... SET, and concurrency limits per role
+- [D1314](decisions/D1314.md) Code-only batch 970 (M12): ALTER DATABASE ... SET and pg_db_role_setting

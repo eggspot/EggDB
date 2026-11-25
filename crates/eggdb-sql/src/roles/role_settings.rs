@@ -17,13 +17,14 @@ pub(crate) enum SettingChange {
     ResetAll,
 }
 
-/// The role (`None` for `ALTER ROLE ALL`), the database (`None` for every database) and the
-/// change of one `ALTER ROLE ... SET`.
+/// The role (`None` for `ALTER ROLE ALL` and `ALTER DATABASE`), the database (`None` for every
+/// database) and the change of one `ALTER ROLE ... SET` or `ALTER DATABASE ... SET`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RoleSettingStatement {
     pub(crate) role: Option<String>,
     pub(crate) database: Option<String>,
     pub(crate) change: SettingChange,
+    pub(crate) written_as_alter_database: bool,
 }
 
 fn pair_prefix(role: Option<&str>, database: Option<&str>) -> Vec<u8> {
@@ -125,10 +126,11 @@ pub(crate) fn change(writer: &mut dyn KeyValueWrite, statement: &RoleSettingStat
 }
 
 /// The settings a session of `role` on `database` starts with, in the order PostgreSQL applies
-/// them so the most specific wins: every role on the database, then the role everywhere, then
-/// the role on the database.
+/// them so the most specific wins: every role everywhere, every role on the database
+/// (`ALTER DATABASE ... SET`), then the role everywhere, then the role on the database.
 pub(crate) fn login_settings(reader: &dyn KeyValueRead, role: &str, database: &str) -> SqlResult<Vec<(String, String)>> {
-    let mut applied = settings_of(reader, None, Some(database))?;
+    let mut applied = settings_of(reader, None, None)?;
+    applied.extend(settings_of(reader, None, Some(database))?);
     applied.extend(settings_of(reader, Some(role), None)?);
     applied.extend(settings_of(reader, Some(role), Some(database))?);
     Ok(applied)

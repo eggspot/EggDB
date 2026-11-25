@@ -1144,6 +1144,13 @@ impl<'t> Parser<'t> {
             {
                 self.alter_role()
             }
+            "alter"
+                if self.postgresql()
+                    && self.is_word_at(1, "database")
+                    && (self.is_word_at(3, "set") || self.is_word_at(3, "reset")) =>
+            {
+                self.alter_database_setting()
+            }
             "comment" if self.postgresql() || self.oracle() => self.comment(),
             "copy" if self.postgresql() || self.oracle() => self.copy(),
             "discard" if self.postgresql() => self.discard(),

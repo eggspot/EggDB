@@ -1021,7 +1021,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-17, D1204); connection limits (`CONNECTION LIMIT`,
   `MAX_USER_CONNECTIONS`, `MAX_CONNECTIONS_PER_HOUR`): **code written, unbuilt** (code-only mode, 2026-11-17, D1232).
   Concurrency limits per role, through `ALTER ROLE ... SET eggdb.workload_queue` and the queues' `CONCURRENCY`:
-  **code written, unbuilt** (D1313).
+  **code written, unbuilt** (D1313); `ALTER DATABASE ... SET` and `pg_db_role_setting` (D1314).
 - An index and plan advisor, and automatic tuning of indexes and configuration (D25, D31). The index advisor
   (`eggdb_advisor`): **code written, unbuilt** (code-only mode, 2026-11-12, D780); plan advice, unused indexes and
   configuration advice: **code written, unbuilt** (code-only mode, 2026-11-17, D1203). Left: applying configuration

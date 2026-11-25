@@ -227,6 +227,7 @@ pub(crate) enum CatalogRelation {
     Trigger,
     Rewrite,
     AuthMembers,
+    DbRoleSetting,
     Settings,
     TimezoneNames,
     TimezoneAbbrevs,
@@ -295,7 +296,7 @@ const INT2_VECTOR: SqlType = SqlType::Array(ArrayElement::Int2Vector);
 const OID_VECTOR: SqlType = SqlType::Array(ArrayElement::OidVector);
 
 impl CatalogRelation {
-    pub(crate) const IN_PG_CATALOG: [Self; 32] = [
+    pub(crate) const IN_PG_CATALOG: [Self; 33] = [
         Self::Class,
         Self::Attribute,
         Self::Type,
@@ -320,6 +321,7 @@ impl CatalogRelation {
         Self::Trigger,
         Self::Rewrite,
         Self::AuthMembers,
+        Self::DbRoleSetting,
         Self::Settings,
         Self::TimezoneNames,
         Self::TimezoneAbbrevs,
@@ -356,6 +358,7 @@ impl CatalogRelation {
             Self::Trigger => "pg_trigger",
             Self::Rewrite => "pg_rewrite",
             Self::AuthMembers => "pg_auth_members",
+            Self::DbRoleSetting => "pg_db_role_setting",
             Self::Settings => "pg_settings",
             Self::TimezoneNames => "pg_timezone_names",
             Self::TimezoneAbbrevs => "pg_timezone_abbrevs",
@@ -419,6 +422,7 @@ impl CatalogRelation {
             Self::Trigger => 2620,
             Self::Rewrite => 2618,
             Self::AuthMembers => 1261,
+            Self::DbRoleSetting => 2964,
             Self::Settings => 12001,
             Self::TimezoneNames => 12002,
             Self::TimezoneAbbrevs => 12003,
@@ -475,6 +479,7 @@ impl CatalogRelation {
             Self::Attribute => &ATTRIBUTE_COLUMNS,
             Self::Class => &CLASS_COLUMNS,
             Self::AuthMembers => &AUTH_MEMBERS_COLUMNS,
+            Self::DbRoleSetting => &DB_ROLE_SETTING_COLUMNS,
             Self::Database => &DATABASE_COLUMNS,
             Self::Sequence => &SEQUENCE_COLUMNS,
             Self::Am => &AM_COLUMNS,
@@ -756,6 +761,12 @@ const NAMESPACE_COLUMNS: [CatalogColumn; 4] = [
     column("nspname", NAME),
     column("nspowner", OID),
     column("nspacl", ACL_ITEMS),
+];
+
+const DB_ROLE_SETTING_COLUMNS: [CatalogColumn; 3] = [
+    column("setdatabase", OID),
+    column("setrole", OID),
+    column("setconfig", TEXTS),
 ];
 
 const REWRITE_COLUMNS: [CatalogColumn; 8] = [

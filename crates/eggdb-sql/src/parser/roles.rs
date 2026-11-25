@@ -48,6 +48,18 @@ impl Parser<'_> {
             || (self.is_word_at(ahead, "in") && self.is_word_at(ahead + 1, "database"))
     }
 
+    pub(super) fn alter_database_setting(&mut self) -> SqlResult<Statement> {
+        self.at += 2;
+        let database = self.name()?.text;
+        let change = self.setting_change()?;
+        Ok(Statement::Role(RoleStatement::Settings(crate::roles::RoleSettingStatement {
+            role: None,
+            database: Some(database),
+            change,
+            written_as_alter_database: true,
+        })))
+    }
+
     fn role_setting(&mut self, role: Option<String>) -> SqlResult<Statement> {
         let database = if self.take_word("in") {
             self.expect_word("database")?;
@@ -55,7 +67,17 @@ impl Parser<'_> {
         } else {
             None
         };
-        let change = if self.take_word("reset") {
+        let change = self.setting_change()?;
+        Ok(Statement::Role(RoleStatement::Settings(crate::roles::RoleSettingStatement {
+            role,
+            database,
+            change,
+            written_as_alter_database: false,
+        })))
+    }
+
+    fn setting_change(&mut self) -> SqlResult<crate::roles::SettingChange> {
+        Ok(if self.take_word("reset") {
             if self.take_word("all") {
                 crate::roles::SettingChange::ResetAll
             } else {
@@ -74,12 +96,7 @@ impl Parser<'_> {
                 Some(value) => crate::roles::SettingChange::Set { name, value },
                 None => crate::roles::SettingChange::Reset { name },
             }
-        };
-        Ok(Statement::Role(RoleStatement::Settings(crate::roles::RoleSettingStatement {
-            role,
-            database,
-            change,
-        })))
+        })
     }
 
     pub(super) fn drop_role(&mut self) -> SqlResult<Statement> {
