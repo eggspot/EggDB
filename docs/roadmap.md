@@ -1167,7 +1167,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `eggdb_sql_connect`): **code written, unbuilt** (code-only mode, 2026-11-13, D967). Left: TDS, whose client reads
   only `nvarchar` columns, and prepared statements and `COPY` on MySQL sessions.
 - Connection pooling, prepared statement reuse, binary result formats, cancel and `COPY` in the
-  network drivers (D192).
+  network drivers (D192). Prepared statements, cancel and `COPY` on server sessions: **code written, unbuilt**
+  (D293); a connection pool (`eggdb_pool_*`): **code written, unbuilt** (D1325). Left: binary result formats.
 - Each driver's tests run against `eggdb serve` over the network, Python, .NET, Java, Node.js and
   Go first (D182, D192). Check: the drivers' CI jobs with a `postgresql://` URL.
 - Each driver benchmarked over the network against the best driver in its language, as D17 lists

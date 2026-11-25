@@ -400,6 +400,17 @@ session's next call; bound values go as text, typed by their place in the statem
 request. A connection that breaks fails that call with `EGGDB_ERR_IO`, and every later call on
 the session fails the same way until it is closed.
 
+A program that serves many requests keeps its connections in a pool (D1325):
+`eggdb_pool_open(url, max_connections, &pool)` opens one session at once (so a wrong URL or
+password fails there) and up to `max_connections` as they are needed;
+`eggdb_pool_acquire(pool, timeout_ms, &sql)` lends an idle session, opens a new one while the
+pool is not full, or waits up to `timeout_ms` for one to come back (`EGGDB_ERR_IN_USE` when none
+does); `eggdb_pool_release(pool, sql)` rolls back a transaction the borrower left open and keeps
+the session for the next borrower, or closes it when its connection broke; `eggdb_pool_stats`
+counts the sessions, open and idle; `eggdb_pool_close` closes the idle sessions and the pool once
+every session is back. A pool is shared by threads; each lent session stays one thread's at a
+time, as any session does.
+
 ### Functions the program defines
 
 `eggdb_sql_create_function(sql, name, arguments, function, user_data, destroy)` makes a C

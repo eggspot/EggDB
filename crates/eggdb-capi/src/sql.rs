@@ -916,23 +916,45 @@ pub unsafe extern "C" fn eggdb_sql_connect(url: *const c_char, sql: *mut *mut Eg
         unsafe { args::write(sql, std::ptr::null_mut(), "sql") }?;
         // SAFETY: eggdb.h asks for a NUL-terminated URL.
         let url = unsafe { args::text(url, "url") }?;
-        if crate::text_backend::is_mysql_url(url) {
-            let remote = crate::text_backend::MySqlRemote::connect(url)?;
-            let handle = args::give(EggdbSql::new(Backend::MySql(Box::new(remote))));
-            // SAFETY: as for the first write to `sql`.
-            return unsafe { args::write(sql, handle, "sql") };
-        }
-        let options = eggdb_pgwire::client::parse_postgres_url_with_password(url)
-            .map_err(Failure::invalid_argument)?;
-        let client = PgClient::connect(&options).map_err(remote_failure)?;
-        let handle = args::give(EggdbSql::new(Backend::Remote(Box::new(RemoteSession {
-            client,
-            broken: false,
-            statements_to_close: Vec::new(),
-        }))));
+        let handle = connected(url)?;
         // SAFETY: as for the first write to `sql`.
         unsafe { args::write(sql, handle, "sql") }
     })
+}
+
+/// A new session handle connected to the server at `url`, as `eggdb_sql_connect` makes one.
+pub(crate) fn connected(url: &str) -> Result<*mut EggdbSql, Failure> {
+    if crate::text_backend::is_mysql_url(url) {
+        let remote = crate::text_backend::MySqlRemote::connect(url)?;
+        return Ok(args::give(EggdbSql::new(Backend::MySql(Box::new(remote)))));
+    }
+    let options = eggdb_pgwire::client::parse_postgres_url_with_password(url)
+        .map_err(Failure::invalid_argument)?;
+    let client = PgClient::connect(&options).map_err(remote_failure)?;
+    Ok(args::give(EggdbSql::new(Backend::Remote(Box::new(RemoteSession {
+        client,
+        broken: false,
+        statements_to_close: Vec::new(),
+    })))))
+}
+
+impl EggdbSql {
+    /// How many prepared statements and `COPY` handles still use the session.
+    pub(crate) fn open_statements(&self) -> usize {
+        self.open_statements.load(Ordering::Acquire)
+    }
+}
+
+impl SessionState {
+    /// Runs `text` on the session and drops its results, for the library's own housekeeping.
+    pub(crate) fn run_quietly(&mut self, text: &str) -> Result<(), Failure> {
+        self.run(text, None).map(drop)
+    }
+
+    /// Whether a server session lost its connection, so it is closed rather than reused.
+    pub(crate) fn connection_broken(&self) -> bool {
+        matches!(&self.backend, Backend::Remote(remote) if remote.broken)
+    }
 }
 
 /// Ends the SQL session and frees its handle: an open `BEGIN` block is rolled back. NULL does

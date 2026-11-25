@@ -30,6 +30,7 @@ mod copy;
 mod database;
 mod functions;
 mod inspection;
+mod pool;
 mod scan;
 mod sql;
 mod statement;
@@ -58,6 +59,9 @@ pub use database::{
 pub use scan::{
     EGGDB_SCAN_END_INCLUSIVE, EGGDB_SCAN_PREFIX, EGGDB_SCAN_REVERSE, EggdbEntry, EggdbScan,
     eggdb_scan_free, eggdb_scan_next, eggdb_scan_open,
+};
+pub use pool::{
+    EggdbPool, eggdb_pool_acquire, eggdb_pool_close, eggdb_pool_open, eggdb_pool_release, eggdb_pool_stats,
 };
 pub use sql::{
     EGGDB_BLOB, EGGDB_INTEGER, EGGDB_NULL, EGGDB_REAL, EGGDB_TEXT, EggdbParameter, EggdbResult,

@@ -1349,3 +1349,4 @@ its full title with its status.
 - [D1322](decisions/D1322.md) Code-only batch 978 (M6e): the documentation site, built by our own tool
 - [D1323](decisions/D1323.md) Research (M6e): EggOS's GUI and eggdb-gui stay two toolkits, joined at Wayland (refines D15)
 - [D1324](decisions/D1324.md) Code-only batch 979 (M6e): Wayland windows, and the client on EggOS
+- [D1325](decisions/D1325.md) Code-only batch 980 (M6f): a connection pool in the C API
