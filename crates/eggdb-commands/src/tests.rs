@@ -311,7 +311,7 @@ fn a_server_limited_to_tables_withdraws_exactly_the_key_value_tools() {
     assert_eq!(
         withdrawn,
         vec![
-            "kv_get", "kv_scan", "put", "del", "incr", "cas", "expire", "persist"
+            "kv_get", "kv_scan", "put", "del", "incr", "cas", "expire", "persist", "resp_get"
         ]
     );
     assert_eq!(Grant::KeyValueStore.name(), Some("key_value_store"));

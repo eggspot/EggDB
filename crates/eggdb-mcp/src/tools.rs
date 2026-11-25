@@ -60,13 +60,14 @@ pub(crate) enum Tool {
     GraphRun,
     DocumentGet,
     SearchGet,
+    RespGet,
     Stats,
     Check,
     Backup,
 }
 
 impl Tool {
-    const ALL: [Self; 27] = [
+    const ALL: [Self; 28] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -91,6 +92,7 @@ impl Tool {
         Self::GraphRun,
         Self::DocumentGet,
         Self::SearchGet,
+        Self::RespGet,
         Self::Stats,
         Self::Check,
         Self::Backup,
@@ -807,6 +809,9 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::GraphGet => graph_get(arguments, call),
         Tool::DocumentGet => document_get(arguments, call),
         Tool::SearchGet => search_get(arguments, call),
+        Tool::RespGet if call.tables.is_some() => Err(limited_to_tables()),
+        Tool::RespGet if call.agent_role.is_some() => Err(limited_to_role()),
+        Tool::RespGet => resp_get(arguments, call),
         Tool::Stats | Tool::Check | Tool::Backup if call.tables.is_some() || call.agent_role.is_some() => {
             Err(whole_file_refused(call))
         }
@@ -1124,6 +1129,44 @@ fn search_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) 
             other => sparql_failure(other),
         })?;
     search_success(&answer)
+}
+
+fn resp_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
+    arguments.allow_tool(Tool::RespGet)?;
+    let command = arguments.required_string("command")?;
+    if command.len() > MAX_SQL_BYTES {
+        return Err(ToolError::invalid("command is longer than 1 MiB"));
+    }
+    let answer = call
+        .opener
+        .resp(command)
+        .ok_or_else(|| ToolError::new("not_supported", "This server keeps no RESP keys."))?
+        .map_err(|refusal| match refusal {
+            OpenRefusal::Failed(message) => ToolError::new("resp_error", format!("{message}. Nothing was changed.")),
+            other => sparql_failure(other),
+        })?;
+    let members = answer
+        .trim()
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .ok_or_else(|| ToolError::new("resp_error", "The reply was not a JSON object. Nothing was changed."))?;
+    if answer.len() > results::MAX_RESULT_BYTES {
+        return Err(ToolError::new(
+            "too_large",
+            "The reply is larger than the 1 MiB one call returns. Nothing was changed.",
+        )
+        .with_fix("Read fewer elements: a range, a COUNT, or SCAN with a smaller COUNT."));
+    }
+    let mut out = JsonOut::new();
+    out.begin_object();
+    out.key("notice").string(NOTICE);
+    out.end_object();
+    let head = out.finish();
+    let structured = match head.strip_suffix('}') {
+        Some(open) => format!("{open},{members}}}"),
+        None => head,
+    };
+    Ok(ToolSuccess { structured, rows: None, truncated: false })
 }
 
 fn search_success(answer: &str) -> Result<ToolSuccess, ToolError> {
@@ -2670,6 +2713,7 @@ mod tests {
                 | Tool::GraphRun
                 | Tool::DocumentGet
                 | Tool::SearchGet
+                | Tool::RespGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2717,6 +2761,7 @@ mod tests {
                 | Tool::GraphRun
                 | Tool::DocumentGet
                 | Tool::SearchGet
+                | Tool::RespGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2772,6 +2817,7 @@ mod tests {
                 | Tool::GraphRun
                 | Tool::DocumentGet
                 | Tool::SearchGet
+                | Tool::RespGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2916,6 +2962,7 @@ mod tests {
                 | Tool::GraphRun
                 | Tool::DocumentGet
                 | Tool::SearchGet
+                | Tool::RespGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),

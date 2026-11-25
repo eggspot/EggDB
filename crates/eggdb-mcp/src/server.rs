@@ -87,6 +87,16 @@ pub trait DatabaseOpener {
         None
     }
 
+    /// Runs one Redis-compatible command that reads, written as `redis-cli` takes it, on the
+    /// database's RESP keys of database 0, opening the database read-only for this call alone,
+    /// and returns the JSON object `{"reply": ...}`; an error reply or a refused command is
+    /// [`OpenRefusal::Failed`] with its message. `None` when this opener keeps no RESP keys,
+    /// the default.
+    fn resp(&self, command: &str) -> Option<Result<String, OpenRefusal>> {
+        let _ = command;
+        None
+    }
+
     /// Runs one administration task on the database file, opening it for this call alone, and
     /// returns the JSON object `eggdb`'s command of the same name prints with `--format json`.
     /// `None` when this opener cannot administer its file, the default.

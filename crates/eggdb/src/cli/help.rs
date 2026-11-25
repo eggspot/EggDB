@@ -54,6 +54,7 @@ Commands:
                                 documents: a filter or a reading pipeline, in Extended JSON
   search get <file> <index> [body]
                                 one search request on a full-text index, as POST _search
+  resp   get <file> <command>   one Redis-compatible command that reads, such as \"HGETALL user:1\"
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help

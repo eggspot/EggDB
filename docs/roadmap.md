@@ -1107,7 +1107,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (code-only mode, 2026-11-25, D1352). Documents in MongoDB's query
   language (`document_get`, `eggdb document get`): **code written, unbuilt** (D1353). Search
   indexes in the query DSL (`search_get`, `eggdb search get`): **code written, unbuilt** (D1354).
-  Left: vectors and keys.
+  Keys in Redis commands (`resp_get`, `eggdb resp get`) and vectors through `search_get`'s `knn`
+  and `run_sql`'s vector operators: **code written, unbuilt** (D1355).
 - Text-to-SQL in every dialect through the MCP server (D31, D205). `eggdb_ai.text_to_sql`: **code written, unbuilt**
   (code-only mode, 2026-11-12, D779). Left: an MCP tool of its own.
 

@@ -398,7 +398,7 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
 fn the_tools_list_carries_the_registry_s_names_and_annotations() {
     let file = key_value_file("parity-tools");
     let _audit = audit_of(file.path());
-    for (options, offered) in [(&[][..], 15), (&["--allow-write"][..], 27)] {
+    for (options, offered) in [(&[][..], 16), (&["--allow-write"][..], 28)] {
         let mut mcp = Mcp::start(file.path(), options);
         let listed = mcp.request("tools/list", "{}");
         let Json::Array(tools) = &at(&listed, &["result", "tools"]).value else {
@@ -635,6 +635,56 @@ fn search_get_fails_as_search_get_does() {
     let (code, _) = code_and_category(structured(&unknown, true));
     assert_eq!(code, "invalid_arguments");
     mcp.finish();
+}
+
+fn resp_command(words: &[&str]) -> String {
+    let mut text = format!("*{}\r\n", words.len());
+    for word in words {
+        text.push_str(&format!("${}\r\n{word}\r\n", word.len()));
+    }
+    text
+}
+
+#[test]
+fn resp_get_returns_what_resp_get_prints() {
+    let file = key_value_file("parity-resp");
+    let _audit = audit_of(file.path());
+    let path = file.path().to_str().unwrap().to_owned();
+    let aof = std::env::temp_dir().join(format!("eggdb-test-parity-resp-{}.aof", std::process::id()));
+    let commands = [
+        resp_command(&["SET", "session:42", "ada"]),
+        resp_command(&["HSET", "user:1", "name", "Ada Lovelace", "born", "1815"]),
+        resp_command(&["ZADD", "leaders", "3", "ada", "5", "grace"]),
+    ]
+    .concat();
+    std::fs::write(&aof, commands).unwrap();
+    succeeded(&eggdb(&["restore", &path, aof.to_str().unwrap()]));
+    std::fs::remove_file(&aof).unwrap();
+    let mut mcp = Mcp::start(file.path(), &[]);
+    for command in [
+        "GET session:42",
+        "HGETALL user:1",
+        "ZRANGE leaders 0 -1 WITHSCORES",
+        "EXISTS session:42 nowhere",
+        "GET nowhere",
+    ] {
+        let printed = lines(&succeeded(&eggdb(&["resp", "get", &path, command, "--json"])));
+        assert_eq!(printed.len(), 1);
+        let answer = mcp.call("resp_get", &format!(r#"{{"command":{command:?}}}"#));
+        assert_eq!(
+            canonical_without(structured(&answer, false), envelope("resp_get")),
+            canonical(&printed[0]),
+            "{command}"
+        );
+    }
+    for refused in ["SET session:42 grace", "BLPOP queue 0", "SUBSCRIBE news", "NOSUCHCOMMAND"] {
+        let answer = mcp.call("resp_get", &format!(r#"{{"command":{refused:?}}}"#));
+        let (code, _) = code_and_category(structured(&answer, true));
+        assert_eq!(code, "resp_error", "{refused}");
+    }
+    mcp.finish();
+    let get = lines(&succeeded(&eggdb(&["resp", "get", &path, "GET session:42", "--json"])));
+    assert_eq!(canonical(&get[0]), r#"{"reply":"ada"}"#);
 }
 
 fn catalog_file(name: &str) -> TempPath {

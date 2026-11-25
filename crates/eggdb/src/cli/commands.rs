@@ -45,6 +45,7 @@ mod restore;
 mod restore_aof;
 mod restore_mongodump;
 mod restore_sqlite;
+mod resp;
 mod row;
 mod serve;
 mod serve_database_moves;
@@ -240,6 +241,7 @@ fn execute_on(
         CommandName::Graph => session.graph_command(),
         CommandName::Document => session.document_command(),
         CommandName::Search => session.search_command(),
+        CommandName::Resp => session.resp_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();

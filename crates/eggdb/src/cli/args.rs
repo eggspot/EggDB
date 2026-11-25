@@ -53,6 +53,7 @@ pub(crate) enum CommandName {
     Graph,
     Document,
     Search,
+    Resp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +106,7 @@ impl TableAction {
 
 impl CommandName {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 34] = [
+    pub(crate) const ALL: [Self; 35] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -134,6 +135,7 @@ impl CommandName {
         Self::Graph,
         Self::Document,
         Self::Search,
+        Self::Resp,
         Self::Serve,
         Self::Shell,
         Self::Restore,
@@ -184,6 +186,7 @@ impl CommandName {
             b"graph" => Self::Graph,
             b"document" => Self::Document,
             b"search" => Self::Search,
+            b"resp" => Self::Resp,
             _ => return None,
         })
     }
@@ -225,6 +228,7 @@ impl CommandName {
             Self::Graph => "graph",
             Self::Document => "document",
             Self::Search => "search",
+            Self::Resp => "resp",
         }
     }
 
@@ -239,6 +243,7 @@ impl CommandName {
                 | Self::Graph
                 | Self::Document
                 | Self::Search
+                | Self::Resp
         )
     }
 
@@ -1082,6 +1087,7 @@ pub(crate) struct Request {
     pub(crate) graph: Option<(GraphVerb, String)>,
     pub(crate) document: Option<(String, Option<String>)>,
     pub(crate) search: Option<(String, Option<String>)>,
+    pub(crate) resp: Option<String>,
     pub(crate) table: Option<OsString>,
     pub(crate) schema: Option<String>,
     pub(crate) after: Option<String>,
@@ -1564,6 +1570,7 @@ fn noun_needs_a_verb(noun: CommandName) -> Failure {
         CommandName::Graph => GRAPH_NEEDS_A_VERB,
         CommandName::Document => DOCUMENT_NEEDS_A_VERB,
         CommandName::Search => SEARCH_NEEDS_A_VERB,
+        CommandName::Resp => RESP_NEEDS_A_VERB,
         _ => COLLECTION_NEEDS_A_VERB,
     };
     Failure::usage(message, Some(noun))
@@ -1624,6 +1631,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         graph: None,
         document: None,
         search: None,
+        resp: None,
         archive_changes: None,
         differential: false,
         clone_copy: false,
@@ -2638,6 +2646,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if command == CommandName::Search {
         return search_request(request, arguments);
     }
+    if command == CommandName::Resp {
+        return resp_request(request, arguments);
+    }
     if request.swap.if_absent && request.swap.delete {
         return Err(usage(
             "--if-absent with --delete would change nothing: an absent key cannot be deleted"
@@ -2666,7 +2677,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Rdf
         | CommandName::Graph
         | CommandName::Document
-        | CommandName::Search => (1, 1),
+        | CommandName::Search
+        | CommandName::Resp => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -3026,6 +3038,28 @@ const RDF_NEEDS_A_VERB: &str = "rdf needs get or run";
 const GRAPH_NEEDS_A_VERB: &str = "graph needs get or run";
 const DOCUMENT_NEEDS_A_VERB: &str = "document needs get";
 const SEARCH_NEEDS_A_VERB: &str = "search needs get";
+const RESP_NEEDS_A_VERB: &str = "resp needs get";
+
+fn resp_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
+    let command = CommandName::Resp;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    if arguments.first().map(|verb| verb.as_encoded_bytes()) != Some(b"get") {
+        return Err(usage(RESP_NEEDS_A_VERB.to_owned()));
+    }
+    if arguments.len() < 3 {
+        return Err(usage("eggdb resp get needs a file and a command, such as \"GET key\"".to_owned()));
+    }
+    if arguments.len() > 3 {
+        return Err(too_many_arguments(&arguments[3..], Some(command)));
+    }
+    let text = arguments[2]
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| usage("the command is UTF-8".to_owned()))?;
+    request.file = PathBuf::from(arguments[1]);
+    request.resp = Some(text);
+    Ok(request)
+}
 
 fn search_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
     let command = CommandName::Search;

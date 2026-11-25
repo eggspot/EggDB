@@ -199,6 +199,20 @@ impl DatabaseOpener for FileOpener {
         })
     }
 
+    fn resp(&self, command: &str) -> Option<Result<String, OpenRefusal>> {
+        let db = match self.open(true) {
+            Ok(db) => db,
+            Err(error) => return Some(Err(self.refusal(&error))),
+        };
+        let outcome = super::resp::run_read_only(&db, command);
+        let closed = db.close();
+        Some(match (outcome, closed) {
+            (Ok(reply), Ok(())) => Ok(reply),
+            (Err(message), _) => Err(OpenRefusal::Failed(message)),
+            (Ok(_), Err(error)) => Err(failed(&error)),
+        })
+    }
+
     fn administer(&self, task: Administration<'_>) -> Option<Result<String, OpenRefusal>> {
         Some(match task {
             Administration::Stats => self.stats_report(),

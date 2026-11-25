@@ -1067,6 +1067,20 @@ and prints the JSON response: `took`, `hits` with `_id`, `_score` and `_source`,
 out it is `{}`. A request the API refuses (a missing index, a malformed body) is `search_error` with its HTTP
 status and reason. The same command is the MCP tool `search_get` of `eggdb mcp`, for every agent (D1354).
 
+## RESP keys: `eggdb resp`
+
+```
+eggdb resp get <file> <command>
+```
+
+Runs one Redis-compatible command that reads on the keys `eggdb serve --resp-listen` serves (database 0), on a
+read-only open, and prints `{"reply": ...}`: text as a string, bytes that are not UTF-8 as `{"hex": ...}`,
+numbers as numbers, nil as `null`, arrays and sets as arrays, maps and pairs as arrays of `[key, value]`. The
+command is written as `redis-cli` takes it: split on spaces, with `"double"` and `'single'` quotes keeping spaces.
+A command that writes fails on the read-only open; one that blocks (`BLPOP` and the like), subscribes or changes
+the connection (`SELECT`, `MULTI`, `CLIENT`) is refused; both are `resp_error`. The same command is the MCP tool
+`resp_get` of `eggdb mcp`, offered where the key-value tools are (not under `--tables` or an agent role) (D1355).
+
 ## `eggdb shell`
 
 ```
@@ -1659,7 +1673,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   the database file; the three not under `--tables` or an agent role, D1351), `graph_get` and
   `graph_run` (Cypher on the property graph, `graph_run` with `--allow-write`, D1352), `document_get`
   (a filter or a reading pipeline on a document collection, D1353), `search_get` (one search
-  request body on a full-text index, D1354), and the resource
+  request body on a full-text index, D1354), `resp_get` (one Redis-compatible command that reads,
+  not under `--tables`, D1355), and the resource
   `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.
