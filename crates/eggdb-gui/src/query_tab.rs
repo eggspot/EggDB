@@ -113,6 +113,8 @@ impl InlineError {
     }
 }
 
+const LOADING: &str = "Loading…";
+
 /// What a run runs: the statements' texts, where each starts in the editor's text, and the
 /// dialect.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +136,9 @@ pub struct RunRequest {
     /// For a keys tab, the key space to scan instead of running the statements
     /// (`docs/ux/workspace.md` 10.4).
     pub scan: Option<KeySpaceScan>,
+    /// For a RESP keys tab, the aggregate whose elements the full-value view reads instead
+    /// (`docs/ux/data-models.md` 8).
+    pub aggregate: Option<crate::resp_keys::AggregateFetch>,
 }
 
 /// The statement an `Explain` run explains and how its answer is read.
@@ -353,6 +358,7 @@ impl QueryTab {
             source_text: text,
             session: self.session,
             scan: None,
+            aggregate: None,
         })
     }
 
@@ -380,6 +386,7 @@ impl QueryTab {
             source_text: base.source_text.clone(),
             session: self.session,
             scan: None,
+            aggregate: None,
             explain: Some(ExplainRun {
                 analyze,
                 statement: start..start + statement.len(),
@@ -640,14 +647,73 @@ impl QueryTab {
         TabAction::None
     }
 
-    /// Opens the full-value view on the grid's current cell (`docs/ux/workspace.md` 9.3).
-    pub fn open_value(&mut self) {
+    /// Opens the full-value view on the grid's current cell (`docs/ux/workspace.md` 9.3). On a
+    /// RESP keys tab, the value cell of a hash, list, set, sorted set or stream opens the view
+    /// reading `Loading…` and asks for its elements (`docs/ux/data-models.md` 8).
+    pub fn open_value(&mut self) -> TabAction {
         self.grid_menu = None;
+        if let Some(fetch) = self.aggregate_at_current_cell() {
+            let detail = format!("{} · {}", fetch.kind, fetch.summary);
+            self.value_view = Some(ValueView::of_text("value".to_owned(), detail, LOADING.to_owned(), true));
+            let text = String::from_utf8_lossy(&fetch.key).into_owned();
+            return TabAction::Run(Box::new(RunRequest {
+                statements: vec![text.clone()],
+                starts: vec![0],
+                dialect: self.dialect,
+                all: false,
+                explain: None,
+                source_text: text,
+                session: self.session,
+                scan: None,
+                aggregate: Some(fetch),
+            }));
+        }
         self.value_view = self
             .grid
             .as_ref()
             .filter(|grid| grid.current.row < grid.rows.len())
             .map(|grid| ValueView::open(grid, grid.current));
+        TabAction::None
+    }
+
+    fn aggregate_at_current_cell(&self) -> Option<crate::resp_keys::AggregateFetch> {
+        let keys = self.keys.as_ref().filter(|keys| keys.over_resp)?;
+        let grid = self.grid.as_ref()?;
+        let row = grid.rows.get(grid.current.row)?;
+        let column = |name: &str| grid.columns.iter().position(|known| known == name);
+        if grid.current.column != column("value")? {
+            return None;
+        }
+        let kind = row.get(column("type")?)?.clone()?;
+        if !crate::resp_keys::is_aggregate(&kind) {
+            return None;
+        }
+        let summary = row.get(column("value")?)?.clone()?;
+        if summary == crate::resp_keys::GONE {
+            return None;
+        }
+        let key = crate::key_scan::unspelled(row.get(column("key")?)?.as_deref()?).ok()?;
+        Some(crate::resp_keys::AggregateFetch {
+            collection: keys.collection.clone(),
+            key,
+            kind,
+            summary,
+        })
+    }
+
+    /// The elements an aggregate's full-value view asked for arrived, or failed.
+    pub fn aggregate_read(&mut self, fetch: &crate::resp_keys::AggregateFetch, outcome: Result<String, String>) {
+        self.running = false;
+        self.stopping = false;
+        let detail = format!("{} · {}", fetch.kind, fetch.summary);
+        self.summary = detail.clone();
+        self.value_view = Some(match outcome {
+            Ok(json) => {
+                let (shown, _) = crate::value_view::shown_value(Some(&json), crate::grid::ValueKind::Json);
+                ValueView::of_text("value".to_owned(), detail, shown, false)
+            }
+            Err(message) => ValueView::of_text("value".to_owned(), detail, message, true),
+        });
     }
 
     /// Opens the grid's right-click menu `menu`, closing the value view.
@@ -697,10 +763,7 @@ impl QueryTab {
                 }
                 TabAction::None
             }
-            GridAnswer::OpenValue => {
-                self.open_value();
-                TabAction::None
-            }
+            GridAnswer::OpenValue => self.open_value(),
             GridAnswer::OpenMenu => {
                 self.open_grid_menu(GridMenu::at_current_cell());
                 TabAction::None
@@ -988,6 +1051,7 @@ impl QueryTab {
             source_text: text,
             session: self.session,
             scan: Some(scan),
+            aggregate: None,
         }
     }
 
@@ -1473,6 +1537,8 @@ impl QueryTab {
                     source_text: source_text.to_owned(),
                     session: self.session,
                     scan: None,
+                    aggregate: None,
+            aggregate: None,
                 };
                 self.show_error(&shifted, &original, 0);
             }

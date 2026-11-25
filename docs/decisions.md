@@ -1394,3 +1394,4 @@ its full title with its status.
 - [D1367](decisions/D1367.md) Code-only batch 1022 (M7): memory-only collections in the engine
 - [D1368](decisions/D1368.md) Code-only batch 1023 (M6e): the pointer's shape follows what is under it
 - [D1369](decisions/D1369.md) Code-only batch 1024 (M6e): scroll bar, dialog, tooltip and checkable menu item roles in every accessibility bridge
+- [D1370](decisions/D1370.md) Code-only batch 1025 (M6e): the full-value view reads a RESP aggregate's elements

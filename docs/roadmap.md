@@ -1143,7 +1143,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   XDND source); Wayland's data device; X11's `INCR`, XDND drops and Windows' OLE drop target are
   built (D274, D279, D313).
 - The full-value view of a RESP aggregate (`HGETALL`, `LRANGE`, `SMEMBERS`, `ZRANGE …
-  WITHSCORES`, `XRANGE` shown as JSON) (D329).
+  WITHSCORES`, `XRANGE` shown as JSON) (D329). The JSON form: **code written, unbuilt** (code-only mode, 2026-11-25,
+  D1370). Left: the `Table` segment and the 10,000-element line.
 - The dimmed looks of the RESP keys tab's count, `–` and `(gone)` cells (D329). **Code written,
   unbuilt** (code-only mode, 2026-11-11, D549).
 - RESP over TLS in the client (`rediss://`, shown as `RESP · TLS`) (D329).

@@ -800,6 +800,38 @@ impl Connection {
         }
     }
 
+    /// The elements of a RESP aggregate as JSON, for its full-value view
+    /// (`docs/ux/data-models.md` 8); only a RESP server keeps aggregates.
+    pub fn fetch_aggregate(
+        &mut self,
+        fetch: &crate::resp_keys::AggregateFetch,
+        cancel: &CancelHandle,
+    ) -> Result<String, StatementFailure> {
+        match &mut self.link {
+            Link::Resp(resp) => {
+                let place = resp.options.place();
+                let read = resp.client(Some(cancel)).and_then(|client| {
+                    if let Ok(stopper) = client.stopper() {
+                        cancel.arm(Stopper::Resp(stopper));
+                    }
+                    crate::resp_keys::fetch_aggregate(client, fetch, &place, cancel)
+                });
+                cancel.disarm();
+                if read.is_err() {
+                    resp.drop_client();
+                }
+                read
+            }
+            Link::File(_) | Link::Server(_) => Err(StatementFailure {
+                code: String::new(),
+                message: "only a RESP server keeps hashes, lists, sets and streams".to_owned(),
+                hint: None,
+                position: None,
+                report: Vec::new(),
+            }),
+        }
+    }
+
     /// Runs `sql` (one or more statements in PostgreSQL's dialect) and returns each
     /// statement's result as text.
     pub fn run(&mut self, sql: &str) -> Result<Vec<ResultTable>, StatementFailure> {

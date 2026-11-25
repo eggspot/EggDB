@@ -171,6 +171,25 @@ impl ValueView {
         }
     }
 
+    /// A view of `text` already laid out for showing, under `column` and `detail`; with
+    /// `placeholder`, drawn dimmed and not copyable (`Loading…`, an error).
+    pub fn of_text(column: String, detail: String, text: String, placeholder: bool) -> Self {
+        let (lines, left_out) = wrapped_lines(&text, GLYPHS_PER_LINE, BODY_LIMIT);
+        Self {
+            cell: Cell::default(),
+            column,
+            detail,
+            cut: (left_out > 0)
+                .then(|| format!("… and {} more", status_line::bytes_text(left_out as u64))),
+            text,
+            lines,
+            placeholder,
+            blob_bytes: None,
+            first_line: 0,
+            copy_focused: false,
+        }
+    }
+
     /// Whether `Copy` works: not for NULL or the empty string.
     pub fn copyable(&self) -> bool {
         !self.placeholder

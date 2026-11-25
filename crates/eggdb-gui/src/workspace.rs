@@ -589,7 +589,9 @@ impl Workspace {
                     && !extend
                     && let Some(window) = self.main_window_mut()
                 {
-                    window.tab.open_value();
+                    if let crate::query_tab::TabAction::Run(request) = window.tab.open_value() {
+                        self.start_run(*request, now);
+                    }
                 } else {
                     self.drag = Some(Drag::Grid);
                 }
@@ -1226,6 +1228,7 @@ impl Workspace {
         let dialect = request.dialect;
         let session = request.session;
         let scan = request.scan.clone();
+        let aggregate = request.aggregate.clone();
         let bracketed = request.explain.as_ref().map(|explain| BracketedRun {
             before: explain.before.clone(),
             statements: statements.clone(),
@@ -1241,6 +1244,18 @@ impl Workspace {
             }
             let mut page_end = None;
             let outcomes = match (&scan, &bracketed) {
+                _ if aggregate.is_some() => {
+                    let fetch = aggregate.as_ref().map(|fetch| connection.fetch_aggregate(fetch, &worker_cancel));
+                    vec![fetch.unwrap_or_else(|| Ok(String::new())).map(|json| {
+                        vec![crate::connection::ResultTable {
+                            columns: vec!["value".to_owned()],
+                            kinds: vec![crate::grid::ValueKind::Json],
+                            rows: vec![vec![Some(json)]],
+                            row_count: 1,
+                            tag: "VALUE".to_owned(),
+                        }]
+                    })]
+                }
                 (Some(scan), _) => vec![connection.scan_keys(scan, &worker_cancel).map(|page| {
                     page_end = Some(page.end);
                     vec![page.table]
@@ -1273,6 +1288,26 @@ impl Workspace {
             .iter()
             .zip(&running.request.statements)
             .any(|(outcome, statement)| outcome.is_ok() && changes_schema(statement));
+        if let Some(fetch) = &running.request.aggregate {
+            let outcome = match outcomes.into_iter().next() {
+                Some(Ok(tables)) => Ok(tables
+                    .into_iter()
+                    .next()
+                    .and_then(|table| table.rows.into_iter().next())
+                    .and_then(|row| row.into_iter().next().flatten())
+                    .unwrap_or_default()),
+                Some(Err(failure)) => Err(failure.message),
+                None => Err("the read did not run".to_owned()),
+            };
+            if let Some(tab) = self
+                .main_window_mut()
+                .and_then(|window| window.tab_with_session_mut(running.request.session))
+            {
+                tab.aggregate_read(fetch, outcome);
+            }
+            self.connection_back(connection);
+            return;
+        }
         if let Some(tab) = self
             .main_window_mut()
             .and_then(|window| window.tab_with_session_mut(running.request.session))

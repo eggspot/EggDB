@@ -120,6 +120,165 @@ fn command(parts: &[&[u8]]) -> Vec<Vec<u8>> {
     parts.iter().map(|part| part.to_vec()).collect()
 }
 
+/// The most elements the full-value view of an aggregate reads (`docs/ux/data-models.md` 8).
+pub const AGGREGATE_SHOWN: usize = 10_000;
+
+/// What the full-value view of a RESP aggregate reads: the key, its type, the key space it is
+/// in and the grid's count, such as `12 fields`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateFetch {
+    /// The RESP database's collection, `resp0` to `resp15`.
+    pub collection: Option<String>,
+    /// The key's bytes.
+    pub key: Vec<u8>,
+    /// `hash`, `list`, `set`, `zset` or `stream`.
+    pub kind: String,
+    /// The value cell's text, `12 fields`.
+    pub summary: String,
+}
+
+/// Whether a value of `kind` opens its elements in the full-value view.
+pub fn is_aggregate(kind: &str) -> bool {
+    matches!(kind, "hash" | "list" | "set" | "zset" | "stream")
+}
+
+/// The command that reads an aggregate's elements, at most [`AGGREGATE_SHOWN`] of them.
+pub fn aggregate_command(kind: &str, key: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let last = (AGGREGATE_SHOWN - 1).to_string();
+    let count = AGGREGATE_SHOWN.to_string();
+    Some(match kind {
+        "hash" => command(&[b"HGETALL", key]),
+        "list" => command(&[b"LRANGE", key, b"0", last.as_bytes()]),
+        "set" => command(&[b"SMEMBERS", key]),
+        "zset" => command(&[b"ZRANGE", key, b"0", last.as_bytes(), b"WITHSCORES"]),
+        "stream" => command(&[b"XRANGE", key, b"-", b"+", b"COUNT", count.as_bytes()]),
+        _ => return None,
+    })
+}
+
+fn json_string(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", control as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn reply_text(reply: &RespReply) -> String {
+    match reply {
+        RespReply::Integer(value) => json_string(value.to_string().as_bytes()),
+        RespReply::Null => "null".to_owned(),
+        other => json_string(other.bytes().unwrap_or_default()),
+    }
+}
+
+fn pairs_of(reply: &RespReply) -> Vec<(&RespReply, &RespReply)> {
+    match reply {
+        RespReply::Map(pairs) => pairs.iter().map(|(key, value)| (key, value)).collect(),
+        RespReply::Array(items) => match items.first() {
+            Some(RespReply::Array(_)) => items
+                .iter()
+                .filter_map(|item| match item {
+                    RespReply::Array(pair) if pair.len() == 2 => Some((&pair[0], &pair[1])),
+                    _ => None,
+                })
+                .collect(),
+            _ => items.chunks_exact(2).map(|pair| (&pair[0], &pair[1])).collect(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+fn object_of(reply: &RespReply) -> String {
+    let fields: Vec<String> = pairs_of(reply)
+        .into_iter()
+        .map(|(field, value)| format!("{}:{}", reply_text(field), reply_text(value)))
+        .collect();
+    format!("{{{}}}", fields.join(","))
+}
+
+/// An aggregate's elements as JSON (`docs/ux/data-models.md` 8): an object for a hash,
+/// arrays for a list and a set, `[member, score]` pairs for a sorted set, and `{"id", "fields"}`
+/// entries for a stream.
+pub fn aggregate_json(kind: &str, reply: &RespReply) -> String {
+    match kind {
+        "hash" => object_of(reply),
+        "zset" => {
+            let pairs: Vec<String> = pairs_of(reply)
+                .into_iter()
+                .map(|(member, score)| {
+                    let score = score
+                        .bytes()
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .filter(|text| text.parse::<f64>().is_ok_and(f64::is_finite))
+                        .map_or_else(|| reply_text(score), str::to_owned);
+                    format!("[{},{score}]", reply_text(member))
+                })
+                .collect();
+            format!("[{}]", pairs.join(","))
+        }
+        "stream" => {
+            let RespReply::Array(entries) = reply else {
+                return "[]".to_owned();
+            };
+            let shown: Vec<String> = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    RespReply::Array(parts) if parts.len() == 2 => {
+                        Some(format!("{{\"id\":{},\"fields\":{}}}", reply_text(&parts[0]), object_of(&parts[1])))
+                    }
+                    _ => None,
+                })
+                .collect();
+            format!("[{}]", shown.join(","))
+        }
+        _ => match reply {
+            RespReply::Array(items) => {
+                let shown: Vec<String> = items.iter().map(reply_text).collect();
+                format!("[{}]", shown.join(","))
+            }
+            other => reply_text(other),
+        },
+    }
+}
+
+/// Reads `fetch`'s elements as JSON: the database selected, then one command.
+pub fn fetch_aggregate(
+    client: &mut RespClient,
+    fetch: &AggregateFetch,
+    place: &str,
+    cancel: &CancelHandle,
+) -> Result<String, StatementFailure> {
+    let lost = |error: RespError| exchange_failure(&error, place, cancel);
+    let index = fetch
+        .collection
+        .as_deref()
+        .and_then(database_index)
+        .ok_or_else(|| failure("this key space is not a RESP database".to_owned(), None))?;
+    let read = aggregate_command(&fetch.kind, &fetch.key)
+        .ok_or_else(|| failure(format!("a {} has no elements to show", fetch.kind), None))?;
+    let mut replies = client
+        .pipeline(&[command(&[b"SELECT", index.to_string().as_bytes()]), read])
+        .map_err(lost)?
+        .into_iter();
+    if let Some(selected) = replies.next() {
+        answered(selected)?;
+    }
+    let reply = answered(replies.next().unwrap_or(RespReply::Null))?;
+    Ok(aggregate_json(&fetch.kind, &reply))
+}
+
 /// A RESP server's catalog: one `Keys` group of `resp0` (always) and each of `resp1` …
 /// `resp15` whose `DBSIZE` is above 0, read in one pipeline of `SELECT n` and `DBSIZE`.
 pub fn read_catalog(client: &mut RespClient, place: &str) -> Result<Catalog, StatementFailure> {
@@ -1216,5 +1375,29 @@ mod tests {
             Some("1,204 entries")
         );
         assert_eq!(aggregate_text("string", 4), None);
+    }
+
+    #[test]
+    fn aggregates_read_as_the_json_the_value_view_shows() {
+        let bulk = |text: &str| RespReply::Bulk(text.as_bytes().to_vec());
+        let hash = RespReply::Array(vec![bulk("name"), bulk("Ada \"L\""), bulk("age"), bulk("36")]);
+        assert_eq!(aggregate_json("hash", &hash), r#"{"name":"Ada \"L\"","age":"36"}"#);
+        let map = RespReply::Map(vec![(bulk("a"), bulk("1"))]);
+        assert_eq!(aggregate_json("hash", &map), r#"{"a":"1"}"#);
+        let zset = RespReply::Array(vec![bulk("ada"), bulk("3"), bulk("grace"), bulk("5.5")]);
+        assert_eq!(aggregate_json("zset", &zset), r#"[["ada",3],["grace",5.5]]"#);
+        let list = RespReply::Array(vec![bulk("x"), bulk("y")]);
+        assert_eq!(aggregate_json("list", &list), r#"["x","y"]"#);
+        let stream = RespReply::Array(vec![RespReply::Array(vec![
+            bulk("1-0"),
+            RespReply::Array(vec![bulk("temp"), bulk("21")]),
+        ])]);
+        assert_eq!(aggregate_json("stream", &stream), r#"[{"id":"1-0","fields":{"temp":"21"}}]"#);
+        assert_eq!(
+            aggregate_command("zset", b"board"),
+            Some(command(&[b"ZRANGE", b"board", b"0", b"9999", b"WITHSCORES"]))
+        );
+        assert!(aggregate_command("string", b"k").is_none());
+        assert!(is_aggregate("stream") && !is_aggregate("string"));
     }
 }
