@@ -74,7 +74,11 @@ const OPCODE_GET_SELECTION_OWNER: u8 = 23;
 const OPCODE_CONVERT_SELECTION: u8 = 24;
 const OPCODE_SEND_EVENT: u8 = 25;
 const OPCODE_TRANSLATE_COORDINATES: u8 = 40;
+const OPCODE_OPEN_FONT: u8 = 45;
 const OPCODE_CREATE_GC: u8 = 55;
+const OPCODE_CREATE_GLYPH_CURSOR: u8 = 94;
+const CW_CURSOR: u32 = 0x4000;
+const FULL_INTENSITY: u16 = 0xffff;
 const OPCODE_PUT_IMAGE: u8 = 72;
 const OPCODE_GET_KEYBOARD_MAPPING: u8 = 101;
 
@@ -578,6 +582,59 @@ pub fn select_events(window: u32, event_mask: u32) -> Result<Vec<u8>, WindowErro
     body.extend_from_slice(&CW_EVENT_MASK.to_le_bytes());
     body.extend_from_slice(&event_mask.to_le_bytes());
     request(OPCODE_CHANGE_WINDOW_ATTRIBUTES, 0, &body)
+}
+
+/// `OpenFont`: font `font` named `name`, such as the standard `cursor` font.
+pub fn open_font(font: u32, name: &str) -> Result<Vec<u8>, WindowError> {
+    let length = u16::try_from(name.len())
+        .map_err(|_| WindowError::InvalidInput("a font name is longer than 65535 bytes".into()))?;
+    let mut body = Vec::with_capacity(8 + name.len());
+    body.extend_from_slice(&font.to_le_bytes());
+    body.extend_from_slice(&length.to_le_bytes());
+    body.extend_from_slice(&[0, 0]);
+    body.extend_from_slice(name.as_bytes());
+    request(OPCODE_OPEN_FONT, 0, &body)
+}
+
+/// `CreateGlyphCursor`: cursor `cursor` from glyph `glyph` of `font` and its mask, the next
+/// glyph, drawn black on white, as the cursor font's shapes are laid out.
+pub fn create_glyph_cursor(cursor: u32, font: u32, glyph: u16) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(28);
+    body.extend_from_slice(&cursor.to_le_bytes());
+    body.extend_from_slice(&font.to_le_bytes());
+    body.extend_from_slice(&font.to_le_bytes());
+    body.extend_from_slice(&glyph.to_le_bytes());
+    body.extend_from_slice(&(glyph + 1).to_le_bytes());
+    for _ in 0..3 {
+        body.extend_from_slice(&0u16.to_le_bytes());
+    }
+    for _ in 0..3 {
+        body.extend_from_slice(&FULL_INTENSITY.to_le_bytes());
+    }
+    request(OPCODE_CREATE_GLYPH_CURSOR, 0, &body)
+}
+
+/// `ChangeWindowAttributes` with only the cursor: `window` shows `cursor`.
+pub fn set_window_cursor(window: u32, cursor: u32) -> Result<Vec<u8>, WindowError> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&window.to_le_bytes());
+    body.extend_from_slice(&CW_CURSOR.to_le_bytes());
+    body.extend_from_slice(&cursor.to_le_bytes());
+    request(OPCODE_CHANGE_WINDOW_ATTRIBUTES, 0, &body)
+}
+
+/// The cursor font's glyph for `cursor` (`cursorfont.h`'s shapes: `left_ptr`, `xterm`,
+/// `sb_h_double_arrow`, `sb_v_double_arrow`, `hand2`, `circle`, `fleur`).
+pub fn cursor_glyph(cursor: super::PointerCursor) -> u16 {
+    match cursor {
+        super::PointerCursor::Arrow => 68,
+        super::PointerCursor::Text => 152,
+        super::PointerCursor::ColumnResize => 108,
+        super::PointerCursor::RowResize => 116,
+        super::PointerCursor::Pointer => 60,
+        super::PointerCursor::NotAllowed => 24,
+        super::PointerCursor::Grabbing => 52,
+    }
 }
 
 /// `ChangeProperty` in mode `Replace`: sets `property` of `window` to `data` of type `kind`.
@@ -2018,5 +2075,28 @@ mod tests {
             }
         );
         assert_eq!(button_code(9), ButtonCode::Other);
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::{create_glyph_cursor, cursor_glyph, open_font, set_window_cursor};
+    use crate::window::PointerCursor;
+
+    #[test]
+    fn cursor_requests_are_laid_out_as_the_protocol_says() {
+        let glyph = create_glyph_cursor(0x0040_0004, 0x0040_0003, cursor_glyph(PointerCursor::Arrow)).unwrap();
+        assert_eq!(glyph.len(), 32);
+        assert_eq!(glyph[0], 94);
+        assert_eq!(u16::from_le_bytes([glyph[2], glyph[3]]), 8);
+        assert_eq!(u16::from_le_bytes([glyph[16], glyph[17]]), 68);
+        assert_eq!(u16::from_le_bytes([glyph[18], glyph[19]]), 69);
+        let font = open_font(3, "cursor").unwrap();
+        assert_eq!(font.len(), 20);
+        assert_eq!(&font[12..18], b"cursor");
+        let set = set_window_cursor(1, 2).unwrap();
+        assert_eq!(&set[8..12], &0x4000u32.to_le_bytes());
+        assert_eq!(&set[12..16], &2u32.to_le_bytes());
+        assert_eq!(PointerCursor::ColumnResize.css_name(), "col-resize");
     }
 }

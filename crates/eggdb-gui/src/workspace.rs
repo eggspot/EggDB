@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use eggdb::sql::TransactionStatus;
 use eggdb_platform::window::{
     AccessAction, AccessNode, AccessRequest, AccessRole, KeyPress, Modifiers, OpenFileDialog,
-    PointerButton,
+    PointerButton, PointerCursor,
 };
 
 use crate::catalog::Catalog;
@@ -444,6 +444,35 @@ impl Workspace {
             changed = true;
         }
         changed
+    }
+
+    /// The pointer's shape at (`x`, `y`) (`docs/ux/polish.md` section 4): a closed hand while a
+    /// splitter, a separator or a grid handle is dragged, the resize arrows over a splitter's
+    /// band or a column separator, the I-beam over text that takes a caret, the hand over a
+    /// link, and the arrow everywhere else.
+    pub fn pointer_cursor(&self, x: f32, y: f32, faces: Faces<'_>, size: (u32, u32)) -> PointerCursor {
+        if let Screen::Main(window) = &self.screen {
+            if window.resizing || matches!(self.drag, Some(Drag::Handle(_))) {
+                return PointerCursor::Grabbing;
+            }
+            if let Some(splitter) = window.splitter_at(x, y) {
+                return match splitter {
+                    crate::splitters::Splitter::Results => PointerCursor::RowResize,
+                    crate::splitters::Splitter::Sidebar | crate::splitters::Splitter::Inspector => {
+                        PointerCursor::ColumnResize
+                    }
+                };
+            }
+            if window.column_edge.is_some() {
+                return PointerCursor::ColumnResize;
+            }
+        }
+        let tree = self.pointer_tree(faces, size);
+        match pointer::hit_test(&tree, x, y).map(|node| node.role) {
+            Some(AccessRole::TextField | AccessRole::TextArea | AccessRole::SearchBox) => PointerCursor::Text,
+            Some(AccessRole::Link) => PointerCursor::Pointer,
+            _ => PointerCursor::Arrow,
+        }
     }
 
     /// The pointer left the window: nothing is hovered. Returns whether the frame changed.

@@ -619,6 +619,42 @@ pub fn same_access_structure(old: &[AccessNode], new: &[AccessNode]) -> bool {
 }
 
 /// An open native window.
+/// The pointer's shape over the window (docs/ux/polish.md section 4): what lies under the pointer
+/// chooses it, and the system draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerCursor {
+    /// The arrow, everywhere else.
+    #[default]
+    Arrow,
+    /// The I-beam, over text that takes a caret.
+    Text,
+    /// A left-right resize arrow, over a vertical splitter or a column separator.
+    ColumnResize,
+    /// An up-down resize arrow, over a horizontal splitter.
+    RowResize,
+    /// A pointing hand, over a link.
+    Pointer,
+    /// A refusal, over the window while something that cannot be dropped is dragged.
+    NotAllowed,
+    /// A closed hand, while a splitter, a thumb or a separator is dragged.
+    Grabbing,
+}
+
+impl PointerCursor {
+    /// The CSS `cursor` value the browser build sets on its canvas.
+    pub fn css_name(self) -> &'static str {
+        match self {
+            Self::Arrow => "default",
+            Self::Text => "text",
+            Self::ColumnResize => "col-resize",
+            Self::RowResize => "row-resize",
+            Self::Pointer => "pointer",
+            Self::NotAllowed => "not-allowed",
+            Self::Grabbing => "grabbing",
+        }
+    }
+}
+
 pub trait Window: fmt::Debug {
     /// The drawable area in device pixels.
     fn size(&self) -> (u32, u32);
@@ -677,6 +713,13 @@ pub trait Window: fmt::Debug {
     /// `Gtk/EnableAnimations` set to 0. Backends that cannot tell answer `false`.
     fn reduced_motion(&mut self) -> bool {
         false
+    }
+
+    /// Shows `cursor` while the pointer is over the window. Backends that cannot change the
+    /// pointer keep the system's arrow.
+    fn set_pointer_cursor(&mut self, cursor: PointerCursor) -> Result<(), WindowError> {
+        let _ = cursor;
+        Ok(())
     }
 }
 

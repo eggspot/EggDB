@@ -1392,3 +1392,4 @@ its full title with its status.
 - [D1365](decisions/D1365.md) Code-only batch 1020 (M6b): encrypting a file and rotating its key by compacting it under the new key
 - [D1366](decisions/D1366.md) Code-only batch 1021 (M6b): a key per tenant database, and crypto-shredding
 - [D1367](decisions/D1367.md) Code-only batch 1022 (M7): memory-only collections in the engine
+- [D1368](decisions/D1368.md) Code-only batch 1023 (M6e): the pointer's shape follows what is under it

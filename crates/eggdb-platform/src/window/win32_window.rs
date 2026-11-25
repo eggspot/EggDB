@@ -30,6 +30,14 @@ const CS_HREDRAW: u32 = 0x0002;
 const SW_SHOW: i32 = 5;
 const GWLP_USERDATA: i32 = -21;
 const IDC_ARROW: usize = 32512;
+const IDC_IBEAM: usize = 32513;
+const IDC_SIZEWE: usize = 32644;
+const IDC_SIZENS: usize = 32645;
+const IDC_SIZEALL: usize = 32646;
+const IDC_NO: usize = 32648;
+const IDC_HAND: usize = 32649;
+const WM_SETCURSOR: u32 = 0x0020;
+const HTCLIENT: u16 = 1;
 const BLACK_BRUSH: i32 = 4;
 const DIB_RGB_COLORS: u32 = 0;
 const SRCCOPY: u32 = 0x00CC_0020;
@@ -332,6 +340,7 @@ unsafe extern "system" {
     fn EndPaint(window: Handle, paint: *const PaintStruct) -> i32;
     fn FillRect(hdc: Handle, rect: *const Rect, brush: Handle) -> i32;
     fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
+    fn SetCursor(cursor: Handle) -> Handle;
     fn GetDpiForWindow(window: Handle) -> u32;
     fn SetProcessDpiAwarenessContext(context: Handle) -> i32;
     fn AdjustWindowRectExForDpi(
@@ -387,6 +396,7 @@ struct WindowState {
     min_size: (u32, u32),
     automation: Automation,
     tracking_leave: Cell<bool>,
+    cursor: Cell<usize>,
 }
 
 impl WindowState {
@@ -750,6 +760,10 @@ fn handle_message(
     match message {
         WM_PAINT => paint(window, state),
         WM_ERASEBKGND => return Some(1),
+        WM_SETCURSOR if win32::low_word(lparam as usize) == HTCLIENT => {
+            show_system_cursor(state.cursor.get());
+            return Some(1);
+        }
         WM_GETOBJECT => return state.automation.answer_get_object(window, wparam, lparam),
         WM_CLOSE => state.push(WindowEvent::CloseRequested),
         WM_DROPFILES => {
@@ -871,6 +885,28 @@ unsafe extern "system" fn window_procedure(
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
 
+fn system_cursor_id(cursor: super::PointerCursor) -> usize {
+    match cursor {
+        super::PointerCursor::Arrow => IDC_ARROW,
+        super::PointerCursor::Text => IDC_IBEAM,
+        super::PointerCursor::ColumnResize => IDC_SIZEWE,
+        super::PointerCursor::RowResize => IDC_SIZENS,
+        super::PointerCursor::Pointer => IDC_HAND,
+        super::PointerCursor::NotAllowed => IDC_NO,
+        super::PointerCursor::Grabbing => IDC_SIZEALL,
+    }
+}
+
+fn show_system_cursor(id: usize) {
+    // SAFETY: `id` is one of the predefined `IDC_*` cursor ids, passed as an integer resource
+    // name with no instance, as `LoadCursorW` documents.
+    let cursor = unsafe { LoadCursorW(std::ptr::null_mut(), std::ptr::without_provenance(id)) };
+    if !cursor.is_null() {
+        // SAFETY: `cursor` is a shared system cursor `LoadCursorW` returned.
+        unsafe { SetCursor(cursor) };
+    }
+}
+
 fn register_class(instance: Handle, class_name: &[u16]) -> Result<(), WindowError> {
     // SAFETY: `IDC_ARROW` is a predefined cursor id, passed as an integer resource name with
     // no instance, as `LoadCursorW` documents.
@@ -935,6 +971,7 @@ impl Win32Window {
             min_size: (options.min_width, options.min_height),
             automation: Automation::default(),
             tracking_leave: Cell::new(false),
+            cursor: Cell::new(IDC_ARROW),
         });
         // SAFETY: the class is registered, both strings are NUL-terminated and alive for the
         // call, and the creation parameter points to `state`, which this `Win32Window` keeps
@@ -1040,6 +1077,14 @@ impl Drop for Win32Window {
 }
 
 impl Window for Win32Window {
+    fn set_pointer_cursor(&mut self, cursor: super::PointerCursor) -> Result<(), WindowError> {
+        let id = system_cursor_id(cursor);
+        if self.state.cursor.replace(id) != id {
+            show_system_cursor(id);
+        }
+        Ok(())
+    }
+
     fn size(&self) -> (u32, u32) {
         self.state.size.get()
     }

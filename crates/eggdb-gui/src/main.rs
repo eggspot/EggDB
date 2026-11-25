@@ -403,6 +403,8 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
             Some(WindowEvent::PointerMoved { x, y }) => {
                 let (x, y) = at(x, y);
                 dirty |= workspace.pointer_moved(x, y, faces, logical);
+                let cursor = workspace.pointer_cursor(x, y, faces, logical);
+                let _ = window.borrow_mut().set_pointer_cursor(cursor);
                 continue;
             }
             Some(WindowEvent::Wheel {

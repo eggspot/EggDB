@@ -1091,6 +1091,30 @@ impl WindowState {
         reduce != NO
     }
 
+    fn show_cursor(&self, cursor: super::PointerCursor) {
+        let runtime = &self.runtime;
+        let Ok(class) = runtime.class(c"NSCursor") else {
+            return;
+        };
+        let name = match cursor {
+            super::PointerCursor::Arrow => c"arrowCursor",
+            super::PointerCursor::Text => c"IBeamCursor",
+            super::PointerCursor::ColumnResize => c"resizeLeftRightCursor",
+            super::PointerCursor::RowResize => c"resizeUpDownCursor",
+            super::PointerCursor::Pointer => c"pointingHandCursor",
+            super::PointerCursor::NotAllowed => c"operationNotAllowedCursor",
+            super::PointerCursor::Grabbing => c"closedHandCursor",
+        };
+        // SAFETY: each of these is an `NSCursor` class method that takes no arguments and
+        // returns a shared cursor.
+        let shape = unsafe { (runtime.send_id)(class, runtime.selector(name)) };
+        if shape.is_null() {
+            return;
+        }
+        // SAFETY: `shape` is a shared `NSCursor`, and `set` takes no arguments.
+        unsafe { (runtime.send_void)(shape, runtime.selector(c"set")) };
+    }
+
     fn pasteboard(&self) -> Result<Id, WindowError> {
         let runtime = &self.runtime;
         let class = runtime.class(c"NSPasteboard")?;
@@ -1470,6 +1494,12 @@ impl Drop for CocoaWindow {
 }
 
 impl Window for CocoaWindow {
+    fn set_pointer_cursor(&mut self, cursor: super::PointerCursor) -> Result<(), WindowError> {
+        let state = &self.state;
+        state.runtime.with_pool(|| state.show_cursor(cursor));
+        Ok(())
+    }
+
     fn size(&self) -> (u32, u32) {
         self.state.size.get()
     }

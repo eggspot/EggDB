@@ -103,6 +103,9 @@ pub(crate) struct X11Window {
     drag: XdndTarget,
     drag_inputs: VecDeque<XdndInput>,
     screen_number: u32,
+    cursors: Option<CursorIds>,
+    cursors_made: bool,
+    shown_cursor: super::PointerCursor,
 }
 
 impl X11Window {
@@ -174,6 +177,9 @@ impl X11Window {
             drag: XdndTarget::default(),
             drag_inputs: VecDeque::new(),
             screen_number: name.screen,
+            cursors: CursorIds::of(&setup),
+            cursors_made: false,
+            shown_cursor: super::PointerCursor::Arrow,
         };
         this.scale = this.read_scale(screen.root)?;
         this.wm_protocols = this.intern("WM_PROTOCOLS")?;
@@ -971,7 +977,65 @@ fn latin1(text: &str) -> Vec<u8> {
         .collect()
 }
 
+const CURSOR_SHAPES: [super::PointerCursor; 7] = [
+    super::PointerCursor::Arrow,
+    super::PointerCursor::Text,
+    super::PointerCursor::ColumnResize,
+    super::PointerCursor::RowResize,
+    super::PointerCursor::Pointer,
+    super::PointerCursor::NotAllowed,
+    super::PointerCursor::Grabbing,
+];
+
+/// The resource ids of the cursor font and of one cursor per shape, after the window's and the
+/// graphics context's.
+#[derive(Debug, Clone, Copy)]
+struct CursorIds {
+    font: u32,
+    shapes: [u32; 7],
+}
+
+impl CursorIds {
+    fn of(setup: &x11::Setup) -> Option<Self> {
+        let font = setup.resource_id(3)?;
+        let mut shapes = [0u32; 7];
+        for (index, shape) in shapes.iter_mut().enumerate() {
+            *shape = setup.resource_id(4 + index as u32)?;
+        }
+        Some(Self { font, shapes })
+    }
+
+    fn of_shape(&self, cursor: super::PointerCursor) -> u32 {
+        let index = CURSOR_SHAPES.iter().position(|shape| *shape == cursor).unwrap_or(0);
+        self.shapes[index]
+    }
+}
+
+impl X11Window {
+    fn show_cursor(&mut self, cursor: super::PointerCursor) -> Result<(), WindowError> {
+        let Some(ids) = self.cursors else {
+            return Ok(());
+        };
+        if !self.cursors_made {
+            self.send(&x11::open_font(ids.font, "cursor")?)?;
+            for (shape, id) in CURSOR_SHAPES.iter().zip(ids.shapes) {
+                self.send(&x11::create_glyph_cursor(id, ids.font, x11::cursor_glyph(*shape))?)?;
+            }
+            self.cursors_made = true;
+        }
+        if cursor != self.shown_cursor {
+            self.send(&x11::set_window_cursor(self.window, ids.of_shape(cursor))?)?;
+            self.shown_cursor = cursor;
+        }
+        Ok(())
+    }
+}
+
 impl Window for X11Window {
+    fn set_pointer_cursor(&mut self, cursor: super::PointerCursor) -> Result<(), WindowError> {
+        self.show_cursor(cursor)
+    }
+
     fn size(&self) -> (u32, u32) {
         self.size
     }
