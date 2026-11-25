@@ -28,6 +28,10 @@ fn customers() -> MemoryStore {
     run(&mut owner, "GRANT SELECT ON customers TO support");
     run(&mut owner, "CREATE VIEW contacts AS SELECT id, email AS name FROM customers");
     run(&mut owner, "GRANT SELECT ON contacts TO support");
+    run(
+        &mut owner,
+        "CREATE FUNCTION email_of(person int) RETURNS text LANGUAGE sql STABLE AS $$ SELECT email FROM customers WHERE id = person $$",
+    );
     owner.close().unwrap();
     store
 }
@@ -61,6 +65,7 @@ fn a_role_without_unmask_sees_masked_values_and_filters_on_real_ones() {
         ("SELECT name FROM customers WHERE id = 3 UNION ALL SELECT email FROM customers WHERE id = 1", "name\nxxxx\nSELECT 1"),
         ("SELECT name FROM (SELECT email AS name FROM customers) AS t", "name\nxxxx\nxxxx\nSELECT 2"),
         ("SELECT * FROM contacts WHERE id = 2", "id|name\n0|xxxx\nSELECT 1"),
+        ("SELECT email_of(1) AS contact", "contact\nxxxx\nSELECT 1"),
     ] {
         assert_eq!(as_support(&store, sql), shown, "{sql}");
     }

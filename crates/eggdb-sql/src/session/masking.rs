@@ -164,50 +164,55 @@ fn not_allowed(what: &str) -> SqlError {
     SqlError::new(SqlState::INSUFFICIENT_PRIVILEGE, format!("permission denied: only a superuser{what} may do this")).with_sqlserver_code(15247)
 }
 
-const MOST_NESTED_VIEWS: usize = 32;
+const MOST_NESTED_OBJECTS: usize = 32;
 
-/// Adds to `named` the identifiers of the views `named` holds, and of the views those read,
-/// so a column a view selects counts as named; whether any view was found.
-fn through_views(reader: &dyn KeyValueRead, named: &mut HashSet<String>) -> SqlResult<bool> {
+fn identifiers_of(text: &str, dialect: crate::dialect::Dialect) -> Vec<String> {
+    match tokenize_in(text, dialect) {
+        Ok(tokens) => tokens.iter().filter_map(identifier).map(|word| word.to_ascii_lowercase()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Adds to `named` the identifiers in the query text of the views and the bodies of the
+/// routines `named` holds, and of the views and routines those reach, so a column a view
+/// selects or a function returns counts as named; whether any view or routine was found.
+fn through_views_and_routines(reader: &dyn KeyValueRead, named: &mut HashSet<String>) -> SqlResult<bool> {
     let mut seen: HashSet<String> = HashSet::new();
+    let mut found = false;
     let mut frontier: Vec<String> = named.iter().cloned().collect();
-    for _ in 0..MOST_NESTED_VIEWS {
+    for _ in 0..MOST_NESTED_OBJECTS {
         let mut next = Vec::new();
         for name in frontier {
             if !seen.insert(name.clone()) {
                 continue;
             }
-            let Some(bytes) = reader.get(&crate::encoding::table_key(&name))? else {
-                continue;
-            };
-            if !crate::encoding::is_view_record(&bytes) {
-                continue;
+            let mut words = Vec::new();
+            if let Some(bytes) = reader.get(&crate::encoding::table_key(&name))?
+                && crate::encoding::is_view_record(&bytes)
+            {
+                let view = crate::encoding::ViewDefinition::decode(&name, &bytes)?;
+                words.extend(identifiers_of(&view.query, view.dialect));
+                words.extend(view.references.iter().map(|reference| reference.to_ascii_lowercase()));
+                found = true;
             }
-            let view = crate::encoding::ViewDefinition::decode(&name, &bytes)?;
-            let words: Vec<String> = match tokenize_in(&view.query, view.dialect) {
-                Ok(tokens) => tokens.iter().filter_map(identifier).map(|word| word.to_ascii_lowercase()).collect(),
-                Err(_) => Vec::new(),
-            };
+            if let Some(bytes) = reader.get(&crate::encoding::routine_key(&name))? {
+                for routine in crate::encoding::decode_routines(&name, &bytes)? {
+                    words.extend(identifiers_of(&routine.text, routine.dialect));
+                }
+                found = true;
+            }
             for word in words {
                 if named.insert(word.clone()) {
                     next.push(word);
                 }
             }
-            next.extend(view.references.iter().map(|reference| reference.to_ascii_lowercase()));
-            named.extend(view.references.iter().map(|reference| reference.to_ascii_lowercase()));
         }
         if next.is_empty() {
             break;
         }
         frontier = next;
     }
-    Ok(seen.iter().any(|name| {
-        reader
-            .get(&crate::encoding::table_key(name))
-            .ok()
-            .flatten()
-            .is_some_and(|bytes| crate::encoding::is_view_record(&bytes))
-    }))
+    Ok(found)
 }
 
 impl Session<'_> {
@@ -381,7 +386,7 @@ impl Session<'_> {
             if masks.is_empty() || masking::holds_unmask(reader, &role)? {
                 return Ok(None);
             }
-            if through_views(reader, &mut named)? {
+            if through_views_and_routines(reader, &mut named)? {
                 plain = false;
             }
             let held = crate::roles::role_closure(reader, &role)?;
