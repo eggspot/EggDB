@@ -60,6 +60,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write
 | `cas` | only with `--allow-write`: replaces a key's value with `new` only while it is `expected` (or, with `if_absent`, only while the key is not there), in one transaction; `delete: true` removes the key instead and needs your confirmation (below, D346) |
 | `expire` | only with `--allow-write`: gives a key a time to live of `ttl` seconds and commits; `ttl` 0 deletes the key at once and needs your confirmation (below, D346) |
 | `persist` | only with `--allow-write`: removes a key's time to live, so it stays until deleted (below, D346) |
+| `graph_get` | runs one Cypher query that only reads on the property graph and returns its `columns` and `rows`: nodes as `{id, labels, properties}`, relationships as `{id, type, start, end, properties}`, paths as `{nodes, relationships}`; at most 1 MiB (D1352) |
+| `graph_run` | only with `--allow-write`: runs one Cypher query that may write, in one transaction; a query that deletes or removes (`DELETE`, `DETACH DELETE`, `REMOVE`, `DROP`) needs your confirmation through `confirm: true` (D1352) |
 | `stats` | the database file's page size, pages, free pages, size, last commit and the log since the last checkpoint, reading no page; not under `--tables` or an agent role (D1351) |
 | `check` | reads every page as of the last commit and reports the file's health; a damaged file answers `damaged`; not under `--tables` or an agent role (D1351) |
 | `backup` | only with `--allow-write`: writes a consistent copy of the last commit to a new file beside the database file, named by `copy` (a file name alone, never a path), and never replaces a file; not under `--tables` or an agent role (D1351) |

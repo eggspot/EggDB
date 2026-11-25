@@ -57,6 +57,16 @@ pub trait DatabaseOpener {
         None
     }
 
+    /// Runs one Cypher query on the database's property graph, opening the database for this
+    /// call alone: with `write` false a query that writes is refused before it runs, with
+    /// `write` true it runs in one write transaction. Returns the JSON object `{"columns": [...],
+    /// "rows": [[...]]}`; a failed query is [`OpenRefusal::Failed`] with its message. `None`
+    /// when this opener keeps no property graph, the default.
+    fn cypher(&self, text: &str, write: bool) -> Option<Result<String, OpenRefusal>> {
+        let _ = (text, write);
+        None
+    }
+
     /// Runs one administration task on the database file, opening it for this call alone, and
     /// returns the JSON object `eggdb`'s command of the same name prints with `--format json`.
     /// `None` when this opener cannot administer its file, the default.
@@ -667,6 +677,9 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         if tool == Tool::RdfRun && tool.definition().offered(self.grants()) {
             return self.rdf_write_call(id, &arguments, &arguments_text);
         }
+        if tool == Tool::GraphRun && tool.definition().offered(self.grants()) {
+            return self.graph_write_call(id, &arguments, &arguments_text);
+        }
         let call_id = self.next_call_id();
         let started = now_rfc3339();
         let (outcome, duration) =
@@ -756,6 +769,21 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             return Some(answer);
         }
         let (outcome, _) = self.timed(Tool::RdfRun.name(), |call| tools::rdf_run(update, call));
+        Some(self.finish_write(&pending, outcome, None))
+    }
+
+    fn graph_write_call(&mut self, id: &str, arguments: &Arguments<'_>, arguments_text: &str) -> Option<String> {
+        let pending = self.pending_write(id, Tool::GraphRun, arguments_text);
+        let query = match tools::graph_write(arguments) {
+            Ok(query) => query,
+            Err(error) => {
+                return Some(self.finish_write(&pending, unwritten(Err(error)), None));
+            }
+        };
+        if let Err(answer) = self.record_write_start(&pending) {
+            return Some(answer);
+        }
+        let (outcome, _) = self.timed(Tool::GraphRun.name(), |call| tools::graph_run(query, call));
         Some(self.finish_write(&pending, outcome, None))
     }
 

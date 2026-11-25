@@ -50,6 +50,7 @@ pub(crate) enum CommandName {
     Row,
     Memory,
     Rdf,
+    Graph,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +67,14 @@ pub(crate) enum MemoryVerb {
     Add,
     Get,
     Delete,
+}
+
+/// What `eggdb graph` does: run a Cypher query that only reads (`get`) or one that may write
+/// (`run`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraphVerb {
+    Get,
+    Run,
 }
 
 /// What `eggdb rdf` does: run a SPARQL query (`get`) or a SPARQL update (`run`).
@@ -94,7 +103,7 @@ impl TableAction {
 
 impl CommandName {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 31] = [
+    pub(crate) const ALL: [Self; 32] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -120,6 +129,7 @@ impl CommandName {
         Self::Row,
         Self::Memory,
         Self::Rdf,
+        Self::Graph,
         Self::Serve,
         Self::Shell,
         Self::Restore,
@@ -167,6 +177,7 @@ impl CommandName {
             b"row" => Self::Row,
             b"memory" => Self::Memory,
             b"rdf" => Self::Rdf,
+            b"graph" => Self::Graph,
             _ => return None,
         })
     }
@@ -205,11 +216,15 @@ impl CommandName {
             Self::Row => "row",
             Self::Memory => "memory",
             Self::Rdf => "rdf",
+            Self::Graph => "graph",
         }
     }
 
     pub(crate) fn is_noun(self) -> bool {
-        matches!(self, Self::Collection | Self::Table | Self::Row | Self::Memory | Self::Rdf)
+        matches!(
+            self,
+            Self::Collection | Self::Table | Self::Row | Self::Memory | Self::Rdf | Self::Graph
+        )
     }
 
     pub(crate) fn takes_format_option(self) -> bool {
@@ -1049,6 +1064,7 @@ pub(crate) struct Request {
     pub(crate) table_action: Option<TableAction>,
     pub(crate) memory: Option<(MemoryVerb, String, String)>,
     pub(crate) rdf: Option<(RdfVerb, String)>,
+    pub(crate) graph: Option<(GraphVerb, String)>,
     pub(crate) table: Option<OsString>,
     pub(crate) schema: Option<String>,
     pub(crate) after: Option<String>,
@@ -1528,6 +1544,7 @@ fn noun_needs_a_verb(noun: CommandName) -> Failure {
         CommandName::Row => ROW_NEEDS_A_VERB,
         CommandName::Memory => MEMORY_NEEDS_A_VERB,
         CommandName::Rdf => RDF_NEEDS_A_VERB,
+        CommandName::Graph => GRAPH_NEEDS_A_VERB,
         _ => COLLECTION_NEEDS_A_VERB,
     };
     Failure::usage(message, Some(noun))
@@ -1585,6 +1602,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         for_release: None,
         memory: None,
         rdf: None,
+        graph: None,
         archive_changes: None,
         differential: false,
         clone_copy: false,
@@ -2590,6 +2608,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if command == CommandName::Rdf {
         return rdf_request(request, arguments);
     }
+    if command == CommandName::Graph {
+        return graph_request(request, arguments);
+    }
     if request.swap.if_absent && request.swap.delete {
         return Err(usage(
             "--if-absent with --delete would change nothing: an absent key cannot be deleted"
@@ -2615,7 +2636,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Table
         | CommandName::Row
         | CommandName::Memory
-        | CommandName::Rdf => (1, 1),
+        | CommandName::Rdf
+        | CommandName::Graph => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -2972,6 +2994,30 @@ const TABLE_NEEDS_A_VERB: &str = "table needs list, show or sample";
 const ROW_NEEDS_A_VERB: &str = "row needs list";
 const MEMORY_NEEDS_A_VERB: &str = "memory needs add, get or delete";
 const RDF_NEEDS_A_VERB: &str = "rdf needs get or run";
+const GRAPH_NEEDS_A_VERB: &str = "graph needs get or run";
+
+fn graph_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
+    let command = CommandName::Graph;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    let verb = match arguments.first().map(|verb| verb.as_encoded_bytes()) {
+        Some(b"get") => GraphVerb::Get,
+        Some(b"run") => GraphVerb::Run,
+        _ => return Err(usage(GRAPH_NEEDS_A_VERB.to_owned())),
+    };
+    if arguments.len() < 3 {
+        return Err(usage("eggdb graph needs a file and a Cypher query".to_owned()));
+    }
+    if arguments.len() > 3 {
+        return Err(too_many_arguments(&arguments[3..], Some(command)));
+    }
+    let cypher = arguments[2]
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| usage("the Cypher text is UTF-8".to_owned()))?;
+    request.file = PathBuf::from(arguments[1]);
+    request.graph = Some((verb, cypher));
+    Ok(request)
+}
 
 fn rdf_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
     let command = CommandName::Rdf;

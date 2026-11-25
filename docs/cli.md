@@ -1025,6 +1025,23 @@ against `http://eggdb.local/`. The same two are MCP tools of `eggdb mcp`: `rdf_g
 with `--allow-write`, where an update that deletes (`DELETE`, `CLEAR`, `DROP`, `MOVE`) also needs `confirm: true`
 (D1014).
 
+## The property graph and Cypher: `eggdb graph`
+
+```
+eggdb graph get <file> <cypher>
+eggdb graph run <file> <cypher>
+```
+
+The file's property graph (the collection `graph0`, the same graph `eggdb serve --bolt-listen` and
+`--gremlin-listen` serve): `get` runs one Cypher query that only reads on a read-only open (a query that writes
+is refused before it runs, `graph_error` with Neo4j's `AccessMode` status code); `run` runs one query that may
+write in one write transaction, which changes nothing when it fails. Both print the rows tab-separated with the
+columns' names first, or one JSON object `{"columns": [...], "rows": [[...]]}` with `--json`, nodes as
+`{id, labels, properties}`, relationships as `{id, type, start, end, properties}` and paths as
+`{nodes, relationships}`. The same two are MCP tools of `eggdb mcp`: `graph_get` for every agent, and `graph_run`
+with `--allow-write`, where a query that deletes or removes (`DELETE`, `DETACH DELETE`, `REMOVE`, `DROP`) also
+needs `confirm: true` (D1352).
+
 ## `eggdb shell`
 
 ```
@@ -1614,7 +1631,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   `--tables`), `row_list`, `write_sql`, `put`, `del`, `incr`, `cas`, `expire` and `persist` (with
   `--allow-write`; the key tools not under `--tables`), `stats` and `check` (as `eggdb stats` and
   `eggdb check --format json` print them) and `backup` (with `--allow-write`: a new file beside
-  the database file; the three not under `--tables` or an agent role, D1351), and the resource
+  the database file; the three not under `--tables` or an agent role, D1351), `graph_get` and
+  `graph_run` (Cypher on the property graph, `graph_run` with `--allow-write`, D1352), and the resource
   `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.

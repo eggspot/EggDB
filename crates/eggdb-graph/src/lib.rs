@@ -17,6 +17,7 @@ mod centrality;
 mod cypher;
 mod embeddings;
 mod execute;
+mod json;
 mod procedures;
 mod schema;
 mod store;
@@ -29,6 +30,7 @@ pub use algorithms::{
     triangle_count,
 };
 pub use execute::display;
+pub use json::{result_json, value_json};
 pub use procedures::{PROCEDURES, call_on as call_procedure};
 pub use topology::{EdgeList, Topology};
 pub use temporal::{CARTESIAN, CARTESIAN_3D, Point, Temporal, WGS_84, WGS_84_3D};

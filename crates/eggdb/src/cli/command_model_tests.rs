@@ -495,7 +495,12 @@ fn every_command_is_a_kept_name_or_a_noun_and_its_core_verbs() {
     for command in CommandName::ALL {
         let name = command.name();
         let fits = match command {
-            CommandName::Collection | CommandName::Table | CommandName::Row | CommandName::Memory | CommandName::Rdf => {
+            CommandName::Collection
+            | CommandName::Table
+            | CommandName::Row
+            | CommandName::Memory
+            | CommandName::Rdf
+            | CommandName::Graph => {
                 help::definitions(command).iter().all(|definition| {
                     definition.words.len() == 2 && is_core_verb(definition.words[1])
                 })

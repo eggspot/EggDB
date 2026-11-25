@@ -57,6 +57,7 @@ eggdb-clickhouse = { path = "../eggdb-clickhouse" }
 eggdb-trino = { path = "../eggdb-trino" }
 eggdb-flight = { path = "../eggdb-flight" }
 eggdb-rdf = { path = "../eggdb-rdf" }
+eggdb-graph = { path = "../eggdb-graph" }
 eggdb-mail = { path = "../eggdb-mail" }
 eggdb-dav = { path = "../eggdb-dav" }
 eggdb-keyspace = { path = "../eggdb-keyspace" }

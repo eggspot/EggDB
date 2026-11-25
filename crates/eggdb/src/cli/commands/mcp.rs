@@ -157,6 +157,20 @@ impl DatabaseOpener for FileOpener {
         })
     }
 
+    fn cypher(&self, text: &str, write: bool) -> Option<Result<String, OpenRefusal>> {
+        let db = match self.open(!write) {
+            Ok(db) => db,
+            Err(error) => return Some(Err(self.refusal(&error))),
+        };
+        let outcome = super::graph::run_cypher(&db, text, !write);
+        let closed = db.close();
+        Some(match (outcome, closed) {
+            (Ok(result), Ok(())) => Ok(eggdb_graph::result_json(&result)),
+            (Err(error), _) => Err(OpenRefusal::Failed(error.to_string())),
+            (Ok(_), Err(error)) => Err(failed(&error)),
+        })
+    }
+
     fn administer(&self, task: Administration<'_>) -> Option<Result<String, OpenRefusal>> {
         Some(match task {
             Administration::Stats => self.stats_report(),

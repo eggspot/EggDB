@@ -28,6 +28,7 @@ mod follow_mysql;
 mod follow_sql_server;
 mod follow_state;
 mod foreign;
+mod graph;
 mod model_endpoints;
 mod mcp;
 mod ndjson_io;
@@ -234,6 +235,7 @@ fn execute_on(
         CommandName::Row => session.row_list(),
         CommandName::Memory => session.memory_command(),
         CommandName::Rdf => session.rdf_command(),
+        CommandName::Graph => session.graph_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();

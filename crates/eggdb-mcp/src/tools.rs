@@ -56,13 +56,15 @@ pub(crate) enum Tool {
     MemoryDelete,
     RdfGet,
     RdfRun,
+    GraphGet,
+    GraphRun,
     Stats,
     Check,
     Backup,
 }
 
 impl Tool {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 25] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -83,6 +85,8 @@ impl Tool {
         Self::MemoryDelete,
         Self::RdfGet,
         Self::RdfRun,
+        Self::GraphGet,
+        Self::GraphRun,
         Self::Stats,
         Self::Check,
         Self::Backup,
@@ -794,8 +798,9 @@ pub(crate) fn run<O: DatabaseOpener>(
             Err(key_writes_refused(call))
         }
         Tool::MemoryGet => memory_get(arguments, call),
-        Tool::MemoryAdd | Tool::MemoryDelete | Tool::RdfRun => Err(writes_not_allowed()),
+        Tool::MemoryAdd | Tool::MemoryDelete | Tool::RdfRun | Tool::GraphRun => Err(writes_not_allowed()),
         Tool::RdfGet => rdf_get(arguments, call),
+        Tool::GraphGet => graph_get(arguments, call),
         Tool::Stats | Tool::Check | Tool::Backup if call.tables.is_some() || call.agent_role.is_some() => {
             Err(whole_file_refused(call))
         }
@@ -997,6 +1002,109 @@ pub(crate) fn rdf_run<O: DatabaseOpener>(update: RdfUpdate<'_>, call: &Call<'_, 
             out.end_object();
             Ok(ToolSuccess { structured: out.finish(), rows: None, truncated: false })
         }
+    };
+    let committed = result.is_ok();
+    WriteOutcome { result, committed, warning: None }
+}
+
+const CYPHER_DELETING: [&str; 3] = ["delete", "remove", "drop"];
+
+fn cypher_text<'a>(arguments: &Arguments<'a>) -> Result<&'a str, ToolError> {
+    let text = arguments.required_string("cypher")?;
+    if text.len() > MAX_SQL_BYTES {
+        return Err(ToolError::invalid("cypher is longer than 1 MiB"));
+    }
+    Ok(text)
+}
+
+fn cypher_deletes(text: &str) -> bool {
+    text.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .any(|word| CYPHER_DELETING.iter().any(|deleting| word.eq_ignore_ascii_case(deleting)))
+}
+
+fn graph_failure(refusal: OpenRefusal) -> ToolError {
+    match refusal {
+        OpenRefusal::Failed(message) => ToolError::new("graph_error", format!("Cypher: {message}. Nothing was changed.")),
+        other => sparql_failure(other),
+    }
+}
+
+fn graph_success(answer: &str, committed: Option<bool>) -> Result<ToolSuccess, ToolError> {
+    let malformed = || ToolError::new("graph_error", "The graph's answer was not a result. Nothing was changed.");
+    let document = eggdb_sql::json::parse_document(answer).map_err(|_| malformed())?;
+    let Json::Object(members) = &document.value else {
+        return Err(malformed());
+    };
+    let find = |name: &str| members.iter().find(|(member, _)| member == name).map(|(_, node)| node);
+    let (Some(columns), Some(rows)) = (find("columns"), find("rows")) else {
+        return Err(malformed());
+    };
+    let Json::Array(rows) = &rows.value else {
+        return Err(malformed());
+    };
+    let mut out = JsonOut::new();
+    out.begin_object();
+    out.key("notice").string(NOTICE);
+    out.key("columns").node(columns);
+    out.key("rows").begin_array();
+    let mut truncated = false;
+    for row in rows {
+        if out.len() > results::MAX_RESULT_BYTES {
+            truncated = true;
+            break;
+        }
+        out.node(row);
+    }
+    out.end_array();
+    out.key("truncated").boolean(truncated);
+    if let Some(committed) = committed {
+        out.key("committed").boolean(committed);
+    }
+    out.end_object();
+    Ok(ToolSuccess { structured: out.finish(), rows: None, truncated })
+}
+
+fn graph_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
+    arguments.allow_tool(Tool::GraphGet)?;
+    let text = cypher_text(arguments)?;
+    let answer = call
+        .opener
+        .cypher(text, false)
+        .ok_or_else(|| ToolError::new("not_supported", "This server keeps no property graph."))?
+        .map_err(|refusal| match refusal {
+            OpenRefusal::Failed(message) if message.contains("AccessMode") => ToolError::new(
+                "read_only",
+                "graph_get runs Cypher queries that only read. Nothing was run.",
+            )
+            .with_fix("Send queries that write with graph_run."),
+            other => graph_failure(other),
+        })?;
+    graph_success(&answer, None)
+}
+
+/// A query `graph_run` may run: its text, after the confirmation a query that deletes needs.
+pub(crate) struct GraphQuery<'a> {
+    text: &'a str,
+}
+
+pub(crate) fn graph_write<'a>(arguments: &Arguments<'a>) -> Result<GraphQuery<'a>, ToolError> {
+    arguments.allow_tool(Tool::GraphRun)?;
+    let text = cypher_text(arguments)?;
+    if cypher_deletes(text) && !arguments.boolean("confirm")? {
+        return Err(ToolError::new(
+            "needs_confirmation",
+            "The query deletes or removes (DELETE, DETACH DELETE, REMOVE or DROP). Nothing was run.",
+        )
+        .with_fix("Ask your user; with their agreement, send the same query with confirm: true."));
+    }
+    Ok(GraphQuery { text })
+}
+
+pub(crate) fn graph_run<O: DatabaseOpener>(query: GraphQuery<'_>, call: &Call<'_, O>) -> WriteOutcome {
+    let result = match call.opener.cypher(query.text, true) {
+        None => Err(ToolError::new("not_supported", "This server keeps no property graph.")),
+        Some(Err(refusal)) => Err(graph_failure(refusal)),
+        Some(Ok(answer)) => graph_success(&answer, Some(true)),
     };
     let committed = result.is_ok();
     WriteOutcome { result, committed, warning: None }
@@ -2467,6 +2575,8 @@ mod tests {
                 | Tool::MemoryDelete
                 | Tool::RdfGet
                 | Tool::RdfRun
+                | Tool::GraphGet
+                | Tool::GraphRun
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2510,6 +2620,8 @@ mod tests {
                 | Tool::MemoryDelete
                 | Tool::RdfGet
                 | Tool::RdfRun
+                | Tool::GraphGet
+                | Tool::GraphRun
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2561,6 +2673,8 @@ mod tests {
                 | Tool::MemoryDelete
                 | Tool::RdfGet
                 | Tool::RdfRun
+                | Tool::GraphGet
+                | Tool::GraphRun
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2701,6 +2815,8 @@ mod tests {
                 | Tool::MemoryDelete
                 | Tool::RdfGet
                 | Tool::RdfRun
+                | Tool::GraphGet
+                | Tool::GraphRun
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),

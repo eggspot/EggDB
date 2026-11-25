@@ -44,6 +44,12 @@ Commands:
   follow <file> <source-url>    copy a running PostgreSQL or SQL Server database into the file and keep it in step
   collection list|add|delete|move <file> [name] [new-name]
                                 a named key space inside the file; see eggdb help collection
+  memory add|get|delete <file> <agent>
+                                an agent's memories: remember, recall, forget
+  rdf    get|run <file> <sparql>
+                                RDF graphs: a SPARQL query or update; see eggdb help rdf
+  graph  get|run <file> <cypher>
+                                the property graph: a Cypher query that reads or writes
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help

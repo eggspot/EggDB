@@ -398,7 +398,7 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
 fn the_tools_list_carries_the_registry_s_names_and_annotations() {
     let file = key_value_file("parity-tools");
     let _audit = audit_of(file.path());
-    for (options, offered) in [(&[][..], 12), (&["--allow-write"][..], 23)] {
+    for (options, offered) in [(&[][..], 13), (&["--allow-write"][..], 25)] {
         let mut mcp = Mcp::start(file.path(), options);
         let listed = mcp.request("tools/list", "{}");
         let Json::Array(tools) = &at(&listed, &["result", "tools"]).value else {
@@ -478,6 +478,60 @@ fn stats_check_and_backup_return_what_their_commands_print() {
     let (code, _) = code_and_category(structured(&again, true));
     assert_eq!(code, "database_failed");
     mcp.finish();
+}
+
+#[test]
+fn graph_get_and_graph_run_return_what_graph_get_and_run_print() {
+    let file = key_value_file("parity-graph");
+    let _audit = audit_of(file.path());
+    let path = file.path().to_str().unwrap().to_owned();
+    succeeded(&eggdb(&[
+        "graph",
+        "run",
+        &path,
+        "CREATE (:Person {name: 'Ada'})-[:KNOWS {since: 1843}]->(:Person {name: 'Charles'})",
+    ]));
+    let query = "MATCH (a:Person)-[r:KNOWS]->(b) RETURN a.name, r, b ORDER BY a.name";
+    let mut mcp = Mcp::start(file.path(), &[]);
+    let answer = mcp.call("graph_get", &format!(r#"{{"cypher":{query:?}}}"#));
+    let result = structured(&answer, false);
+    let printed = lines(&succeeded(&eggdb(&["graph", "get", &path, query, "--json"])));
+    assert_eq!(printed.len(), 1);
+    assert_eq!(canonical_without(result, envelope("graph_get")), canonical(&printed[0]));
+    let writing = mcp.call("graph_get", r#"{"cypher":"CREATE (:Person {name: 'Grace'})"}"#);
+    let (code, _) = code_and_category(structured(&writing, true));
+    assert_eq!(code, "read_only");
+    let refused = mcp.call("graph_run", r#"{"cypher":"CREATE (:Person {name: 'Grace'})"}"#);
+    let (code, _) = code_and_category(structured(&refused, true));
+    assert_eq!(code, "read_only");
+    mcp.finish();
+
+    let mut mcp = Mcp::start(file.path(), &["--allow-write"]);
+    let created = mcp.call("graph_run", r#"{"cypher":"CREATE (p:Person {name: 'Grace'}) RETURN p.name"}"#);
+    let result = structured(&created, false);
+    assert_eq!(scalar(at(result, &["committed"])), "true");
+    assert_eq!(canonical(at(result, &["rows"])), r#"[["Grace"]]"#);
+    let deleting = r#"{"cypher":"MATCH (p:Person {name: 'Grace'}) DETACH DELETE p"}"#;
+    let unconfirmed = mcp.call("graph_run", deleting);
+    let (code, _) = code_and_category(structured(&unconfirmed, true));
+    assert_eq!(code, "needs_confirmation");
+    let confirmed = mcp.call(
+        "graph_run",
+        r#"{"cypher":"MATCH (p:Person {name: 'Grace'}) DETACH DELETE p","confirm":true}"#,
+    );
+    structured(&confirmed, false);
+    let broken = mcp.call("graph_run", r#"{"cypher":"MATCH (p RETURN p"}"#);
+    let (code, _) = code_and_category(structured(&broken, true));
+    assert_eq!(code, "graph_error");
+    mcp.finish();
+    let remaining = lines(&succeeded(&eggdb(&[
+        "graph",
+        "get",
+        &path,
+        "MATCH (p:Person) RETURN count(p) AS people",
+        "--json",
+    ])));
+    assert_eq!(canonical(at(&remaining[0], &["rows"])), "[[2]]");
 }
 
 fn catalog_file(name: &str) -> TempPath {

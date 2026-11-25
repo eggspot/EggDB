@@ -594,6 +594,9 @@ pub enum ConfirmCheck {
     /// The SPARQL update deletes quads or graphs: `DELETE DATA`, `DELETE WHERE`, a modify with
     /// `DELETE`, `CLEAR`, `DROP` or `MOVE` (D1014).
     QuadDelete,
+    /// The Cypher query deletes or removes: `DELETE`, `DETACH DELETE`, `REMOVE` or a schema
+    /// `DROP` (D1352).
+    GraphDelete,
 }
 
 impl ConfirmCheck {
@@ -603,6 +606,7 @@ impl ConfirmCheck {
             Self::DestructiveStatement => "destructive_statement",
             Self::KeyDelete => "key_delete",
             Self::QuadDelete => "quad_delete",
+            Self::GraphDelete => "graph_delete",
         }
     }
 
@@ -618,6 +622,9 @@ impl ConfirmCheck {
             }
             Self::QuadDelete => {
                 "the SPARQL update deletes quads or graphs: DELETE, CLEAR, DROP or MOVE"
+            }
+            Self::GraphDelete => {
+                "the Cypher query deletes or removes: DELETE, DETACH DELETE, REMOVE or a schema DROP"
             }
         }
     }

@@ -1376,3 +1376,4 @@ its full title with its status.
 - [D1349](decisions/D1349.md) Code-only batch 1004 (M6c): EXPLAIN shows the key a comparison with an InitPlan uses
 - [D1350](decisions/D1350.md) Code-only batch 1005 (M6c): EXPLAIN ANALYZE measures each step of a join
 - [D1351](decisions/D1351.md) Code-only batch 1006 (M6d): MCP tools for the file's statistics, check and backup
+- [D1352](decisions/D1352.md) Code-only batch 1007 (M6d): Cypher on the property graph from the CLI and MCP

@@ -29,6 +29,7 @@ dependencies = [
  "eggdb-fleet",
  "eggdb-flight",
  "eggdb-format",
+ "eggdb-graph",
  "eggdb-gremlin",
  "eggdb-http",
  "eggdb-iot",
