@@ -585,7 +585,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   DISTINCT` (D32).
   `CONCURRENTLY` and storage parameters: **code written, unbuilt** (code-only mode, 2026-11-11, D543).
 - GIN, GiST, SP-GiST, BRIN and bitmap index methods, and Oracle's bitmap, function-based and
-  reverse-key indexes (D32, sql.md).
+  reverse-key indexes (D32, sql.md). The four PostgreSQL methods accepted, recorded and kept, not yet searched:
+  **code written, unbuilt** (code-only mode, 2026-11-25, D1343); their search structures and Oracle's kinds are left.
 - Oracle's `STATS_*`, `CORR_S` and `CORR_K` functions and its 38-digit `NUMBER` results for the
   statistical aggregates (`CORR_S` and `CORR_K` coefficients and `STATS_MODE`: **code written,
   unbuilt**, code-only mode, 2026-11-10, D374, D375); `stddev`, `variance`, the hypothetical-set aggregates, `regr_*`,
