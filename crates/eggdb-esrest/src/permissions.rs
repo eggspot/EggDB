@@ -65,6 +65,23 @@ pub fn parse_search_users(text: &str) -> Result<Vec<SearchUser>, String> {
 pub(crate) enum Principal {
     Administrator,
     Reader { name: String, names: Vec<String> },
+    ReadOnly { name: String },
+}
+
+/// What a login that [`RoleLogins`] knows reaches (D1374).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleAccess {
+    /// Every document, read only.
+    Read,
+    /// Everything, as the server's own user.
+    ReadWrite,
+}
+
+/// Users the API knows besides the server's user and `--es-users`, such as the database's
+/// stored roles, checked on HTTP basic authentication (D1374).
+pub trait RoleLogins {
+    /// What `user` reaches when `password` is theirs; `None` otherwise.
+    fn check(&self, user: &str, password: &str) -> Option<RoleAccess>;
 }
 
 impl Principal {
@@ -106,7 +123,7 @@ impl Drop for Entered {
 /// Restricts what the rest of the request reads to what `principal` may see.
 pub(crate) fn enter(principal: &Principal, field: &str) -> Entered {
     let restriction = match principal {
-        Principal::Administrator => None,
+        Principal::Administrator | Principal::ReadOnly { .. } => None,
         Principal::Reader { names, .. } => Some(Restriction {
             names: names.clone(),
             field: field.to_owned(),

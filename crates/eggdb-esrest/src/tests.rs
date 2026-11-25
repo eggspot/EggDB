@@ -98,6 +98,35 @@ fn readers_see_only_the_documents_that_name_them() {
     assert!(body(&everything).contains("\"count\":3"), "{}", body(&everything));
 }
 
+struct TwoRoles;
+
+impl crate::RoleLogins for TwoRoles {
+    fn check(&self, user: &str, password: &str) -> Option<crate::RoleAccess> {
+        match (user, password) {
+            ("writer", "w") => Some(crate::RoleAccess::ReadWrite),
+            ("analyst", "r") => Some(crate::RoleAccess::Read),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn role_logins_read_everything_or_write_as_the_server_s_user() {
+    let keyspace = MemoryKeyspace::default();
+    let api = api(&keyspace).with_role_logins(&TwoRoles);
+    let as_user = |credentials: &[u8], method: &str, target: &str, body: &str| {
+        let mut sent = request(method, target, body);
+        let encoded = eggdb_crypto::base64_encode(credentials);
+        sent.headers = vec![("authorization".to_owned(), format!("Basic {encoded}"))];
+        api.answer(&sent)
+    };
+    assert_eq!(as_user(b"writer:w", "PUT", "/notes/_doc/1?refresh=true", "{\"text\":\"hello\"}").status, 201);
+    let counted = as_user(b"analyst:r", "POST", "/notes/_count", "");
+    assert!(body(&counted).contains("\"count\":1"), "{}", body(&counted));
+    assert_eq!(as_user(b"analyst:r", "PUT", "/notes/_doc/2", "{\"text\":\"no\"}").status, 403);
+    assert_eq!(as_user(b"analyst:wrong", "POST", "/notes/_count", "").status, 401);
+}
+
 #[test]
 fn the_root_describes_the_cluster() {
     let keyspace = MemoryKeyspace::default();

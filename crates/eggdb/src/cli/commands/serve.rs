@@ -1277,9 +1277,11 @@ impl Session<'_> {
             }
             None => Vec::new(),
         };
+        let es_logins = super::serve_resp::RoleLogins { db: &db };
         let es_api = eggdb_esrest::Api::new(&es_database, &config.user, es_password)
             .with_memory_budget(Arc::clone(&memory_budget))
-            .with_search_users(es_readers, options.es_permission_field.as_deref().unwrap_or("readers"));
+            .with_search_users(es_readers, options.es_permission_field.as_deref().unwrap_or("readers"))
+            .with_role_logins(&es_logins);
         let replication_mode = match options.synchronous_replicas {
             Some(acknowledgements) => eggdb::ReplicationMode::Synchronous { acknowledgements },
             None => eggdb::ReplicationMode::Asynchronous,

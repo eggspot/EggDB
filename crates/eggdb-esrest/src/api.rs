@@ -42,6 +42,7 @@ pub struct Api<'k> {
     tasks: tasks::Tasks,
     readers: Vec<SearchUser>,
     permission_field: String,
+    role_logins: Option<&'k (dyn crate::permissions::RoleLogins + Sync)>,
 }
 
 impl std::fmt::Debug for Api<'_> {
@@ -431,7 +432,15 @@ impl<'k> Api<'k> {
             tasks: tasks::Tasks::default(),
             readers: Vec::new(),
             permission_field: DEFAULT_PERMISSION_FIELD.to_owned(),
+            role_logins: None,
         }
+    }
+
+    /// The same API also letting in the users `logins` knows (D1374): one that may write as
+    /// the server's user, one that may only read every document but change none.
+    pub fn with_role_logins(mut self, logins: &'k (dyn crate::permissions::RoleLogins + Sync)) -> Self {
+        self.role_logins = Some(logins);
+        self
     }
 
     /// The same API holding what `_mget`, `_msearch`, `_update_by_query` and
@@ -461,10 +470,17 @@ impl<'k> Api<'k> {
         if user == self.user && eggdb_crypto::constant_time_eq(&digest, &self.password_sha256) {
             return Some(Principal::Administrator);
         }
-        self.readers
+        if let Some(reader) = self
+            .readers
             .iter()
             .find(|reader| reader.name == user && eggdb_crypto::constant_time_eq(&digest, &reader.password_sha256))
-            .map(Principal::reader)
+        {
+            return Some(Principal::reader(reader));
+        }
+        match self.role_logins?.check(user, password)? {
+            crate::permissions::RoleAccess::ReadWrite => Some(Principal::Administrator),
+            crate::permissions::RoleAccess::Read => Some(Principal::ReadOnly { name: user.to_owned() }),
+        }
     }
 
     fn new_id(&self) -> String {
@@ -544,7 +560,7 @@ impl<'k> Api<'k> {
         };
         let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
         let method = request.method.as_str();
-        if let Principal::Reader { name, .. } = &principal
+        if let Principal::Reader { name, .. } | Principal::ReadOnly { name } = &principal
             && !crate::permissions::only_reads(method, &parts)
         {
             return error(

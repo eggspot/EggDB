@@ -1398,3 +1398,4 @@ its full title with its status.
 - [D1371](decisions/D1371.md) Code-only batch 1026 (M6e): the client follows the system's light, dark and high-contrast theme
 - [D1372](decisions/D1372.md) Code-only batch 1027 (M6e): the plan view prints a looped step's loops and total
 - [D1373](decisions/D1373.md) Code-only batch 1028 (M10): Oracle's ROWID, UROWID, XMLTYPE, VECTOR, SDO_GEOMETRY and LONG RAW columns
+- [D1374](decisions/D1374.md) Code-only batch 1029 (M6b): stored roles log in to the Elasticsearch-compatible listener

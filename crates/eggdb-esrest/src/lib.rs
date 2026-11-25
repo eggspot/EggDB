@@ -23,7 +23,7 @@ mod source_filter;
 mod suggest;
 
 pub use api::{Api, over_memory_budget};
-pub use permissions::{SearchUser, parse_search_users};
+pub use permissions::{RoleAccess, RoleLogins, SearchUser, parse_search_users};
 
 #[cfg(test)]
 mod tests;

@@ -946,7 +946,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Redis ACLs, MongoDB roles, Elasticsearch roles and Cassandra roles mapped onto the one role
   model (D22). Check: the same user has the same rights over every protocol. Stored roles as RESP users, reading
   or writing as `pg_read_all_data` and `pg_write_all_data` grant: **code written, unbuilt** (code-only mode,
-  2026-11-25, D1364). Left: MongoDB, Elasticsearch and Cassandra logins.
+  2026-11-25, D1364); Elasticsearch-compatible logins the same way (D1374). Left: MongoDB and Cassandra logins.
 - Authenticated page encryption, with a tag per page (D187).
 - Encrypting an existing file and rotating keys online (D23, D187). Through compaction under a new key
   (`eggdb compact --new-key-file`, `Database::compact_with_key`): **code written, unbuilt** (code-only mode,
