@@ -208,6 +208,10 @@ impl DefinedType {
             "money" => Some(Self::MONEY),
             "bit" => Some(Self::BIT),
             "varbit" | "bit varying" => Some(Self::VARBIT),
+            "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" => crate::geometric_types::GeometricKind::ALL
+                .into_iter()
+                .find(|kind| kind.name() == name)
+                .map(crate::geometric_types::GeometricKind::defined_type),
             "inet" => Some(Self::INET),
             "cidr" => Some(Self::CIDR),
             "macaddr" => Some(Self::MACADDR),
@@ -237,6 +241,9 @@ impl DefinedType {
             crate::money::MONEY_OID => Some("money"),
             crate::bit_strings::BIT_OID => Some("bit"),
             crate::bit_strings::VARBIT_OID => Some("bit varying"),
+            oid if crate::geometric_types::GeometricKind::of_oid(oid).is_some() => {
+                crate::geometric_types::GeometricKind::of_oid(oid).map(crate::geometric_types::GeometricKind::name)
+            }
             crate::network_types::CIDR_OID => Some("cidr"),
             crate::network_types::MACADDR_OID => Some("macaddr"),
             crate::network_types::MACADDR8_OID => Some("macaddr8"),
@@ -290,6 +297,8 @@ pub enum DefinedValue {
     Money(i64),
     /// A `bit` or `bit varying` value.
     Bits(crate::bit_strings::BitString),
+    /// A value of one of the geometric types.
+    Geometric(crate::geometric_types::GeometricValue),
 }
 
 impl DefinedValue {
@@ -313,6 +322,7 @@ impl DefinedValue {
             Self::Network(network) => SqlType::Defined(crate::network_types::defined_type(network.kind)),
             Self::Money(_) => SqlType::Defined(DefinedType::MONEY),
             Self::Bits(bits) => SqlType::Defined(if bits.varying { DefinedType::VARBIT } else { DefinedType::BIT }),
+            Self::Geometric(geometric) => SqlType::Defined(geometric.kind.defined_type()),
         }
     }
 
@@ -332,6 +342,7 @@ impl DefinedValue {
             Self::Network(network) => network.text.clone(),
             Self::Money(cents) => crate::money::to_text(*cents),
             Self::Bits(bits) => bits.bits.clone(),
+            Self::Geometric(geometric) => crate::geometric_types::to_text(geometric),
         }
     }
 }
@@ -1561,6 +1572,9 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (DefinedValue::Bits(a), DefinedValue::Bits(b)) => a.bits.as_bytes().cmp(b.bits.as_bytes()),
         (DefinedValue::Bits(_), _) => Ordering::Greater,
         (_, DefinedValue::Bits(_)) => Ordering::Less,
+        (DefinedValue::Geometric(a), DefinedValue::Geometric(b)) => crate::geometric_types::compare(a, b),
+        (DefinedValue::Geometric(_), _) => Ordering::Greater,
+        (_, DefinedValue::Geometric(_)) => Ordering::Less,
         (DefinedValue::Enum(a), DefinedValue::Enum(b)) => {
             compare_floats(a.sort_order, b.sort_order)
         }
@@ -1625,6 +1639,12 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Money(cents) => {
                 out.push(27);
                 out.extend_from_slice(&cents.to_le_bytes());
+            }
+            DefinedValue::Geometric(geometric) => {
+                let key = crate::geometric_types::equality_key(geometric);
+                out.push(29);
+                out.extend_from_slice(&(key.len() as u64).to_le_bytes());
+                out.extend_from_slice(&key);
             }
             DefinedValue::Bits(bits) => {
                 out.push(28);

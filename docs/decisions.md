@@ -1355,3 +1355,4 @@ its full title with its status.
 - [D1328](decisions/D1328.md) Code-only batch 983 (M4): PostgreSQL's inet, cidr and macaddr types
 - [D1329](decisions/D1329.md) Code-only batch 984 (M4): PostgreSQL's money type
 - [D1330](decisions/D1330.md) Code-only batch 985 (M4): PostgreSQL's bit strings
+- [D1331](decisions/D1331.md) Code-only batch 986 (M4): PostgreSQL's geometric types

@@ -599,6 +599,9 @@ fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
     if defined == DefinedType::BIT || defined == DefinedType::VARBIT {
         return crate::bit_strings::parse(text, defined == DefinedType::VARBIT).map(crate::bit_strings::value);
     }
+    if let Some(kind) = crate::geometric_types::kind_of(SqlType::Defined(defined)) {
+        return crate::geometric_types::parse(text, kind).map(crate::geometric_types::value);
+    }
     if defined == DefinedType::CITEXT {
         Ok(crate::citext::value(text.to_owned()))
     } else if defined == DefinedType::HSTORE {
@@ -618,6 +621,20 @@ fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) ->
         Value::Bpchar(text) => Some(crate::types::without_trailing_spaces(text)),
         other => crate::citext::text_of(other),
     };
+    if let Some(kind) = crate::geometric_types::kind_of(SqlType::Defined(target)) {
+        if let Some(found) = crate::geometric_types::geometric_of(&value) {
+            return match crate::geometric_types::convert(found, kind) {
+                Some(converted) if conversion == Conversion::Explicit || found.kind == kind => converted,
+                _ => Err(cannot_cast(&value, target)),
+            };
+        }
+        return match (text, conversion) {
+            (Some(text), Conversion::Explicit | Conversion::Assignment) => {
+                crate::geometric_types::parse(text, kind).map(crate::geometric_types::value)
+            }
+            _ => Err(cannot_cast(&value, target)),
+        };
+    }
     if target == DefinedType::BIT || target == DefinedType::VARBIT {
         let varying = target == DefinedType::VARBIT;
         let allowed = crate::bit_strings::bits_of(&value).is_some()

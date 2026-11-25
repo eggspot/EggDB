@@ -286,6 +286,7 @@ mod sqlserver_fulltext;
 mod table_sample;
 mod text_search;
 mod bit_strings;
+mod geometric_types;
 mod money;
 mod network_types;
 mod text_types;

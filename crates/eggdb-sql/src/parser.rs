@@ -2960,6 +2960,9 @@ impl<'t> Parser<'t> {
                     crate::types::DefinedType::BIT
                 })
             }
+            "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" if self.postgresql() => {
+                SqlType::Defined(crate::types::DefinedType::builtin_base_named(word).ok_or_else(|| self.unexpected())?)
+            }
             "varbit" if self.postgresql() => {
                 self.bit_length = self.varchar_length(token.start)?;
                 SqlType::Defined(crate::types::DefinedType::VARBIT)
@@ -4536,6 +4539,7 @@ impl<'t> Parser<'t> {
                     && let Some((_, function)) = crate::ranges::OPERATORS
                         .iter()
                         .chain(crate::network_types::OPERATORS.iter())
+                        .chain(crate::geometric_types::OPERATORS.iter())
                         .find(|(written, _)| written == symbol)
                 {
                     self.at += 1;
@@ -5171,6 +5175,28 @@ impl<'t> Parser<'t> {
                         SqlError::not_supported(format!("type {word} is not supported yet"))
                             .at(position),
                     )
+                }
+                "inet" | "cidr" | "macaddr" | "macaddr8" | "money" | "varbit" | "point" | "line" | "lseg" | "box"
+                | "path" | "polygon" | "circle"
+                    if self.postgresql() && matches!(self.peek_kind_at(1), TokenKind::String(_)) =>
+                {
+                    let sql_type = self.sql_type()?;
+                    self.bit_length = None;
+                    let TokenKind::String(text) = self.peek_kind() else {
+                        return Err(self.unexpected());
+                    };
+                    let operand = Expr {
+                        kind: ExprKind::Literal(Literal::String(text.as_ref().to_owned())),
+                        position: self.position(),
+                    };
+                    self.at += 1;
+                    Ok(Expr {
+                        kind: ExprKind::Cast {
+                            expr: Box::new(operand),
+                            sql_type,
+                        },
+                        position,
+                    })
                 }
                 "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8" | "real"
                 | "float4" | "float8" | "boolean" | "bool" | "text" | "varchar" | "double"

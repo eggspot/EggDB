@@ -950,6 +950,11 @@ impl Evaluator<'_> {
             | BinaryOperator::VectorNegativeInnerProduct
             | BinaryOperator::VectorL1Distance => {
                 let (left, right) = self.pair(left, right)?;
+                if operator == BinaryOperator::VectorL2Distance
+                    && let Some(result) = crate::geometric_types::distance_between(&left, &right)
+                {
+                    return result;
+                }
                 crate::vector_functions::operator(operator, &left, &right)
             }
             BinaryOperator::JsonDeletePath => {
@@ -997,6 +1002,13 @@ impl Evaluator<'_> {
                     return result;
                 }
                 if let Some(result) = crate::hstore_functions::containment(
+                    operator == BinaryOperator::JsonContains,
+                    &left,
+                    &right,
+                ) {
+                    return result;
+                }
+                if let Some(result) = crate::geometric_types::containment(
                     operator == BinaryOperator::JsonContains,
                     &left,
                     &right,
@@ -1569,6 +1581,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::bit_strings::function(name, &values) {
             return result;
         }
+        if let Some(result) = crate::geometric_types::function(name, &values) {
+            return result;
+        }
         let unknown = || {
             if crate::set_returning::named(name).is_some() {
                 return SqlError::not_supported("set-returning functions are not allowed here")
@@ -1626,6 +1641,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::bit_strings::operator(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::geometric_types::operator(name, &values) {
             return result;
         }
         if let Some(result) = crate::ranges::operator(name, &values) {
@@ -2661,6 +2679,9 @@ pub(crate) fn arithmetic(
         return result;
     }
     if let Some(result) = crate::money::arithmetic(operator, left, right) {
+        return result;
+    }
+    if let Some(result) = crate::geometric_types::arithmetic(operator, left, right) {
         return result;
     }
     refuse_infinite_date_without_infinities(left)?;

@@ -73,6 +73,7 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
             crate::types::DefinedValue::Network(network) => network.text.len(),
             crate::types::DefinedValue::Money(_) => 0,
             crate::types::DefinedValue::Bits(bits) => bits.bits.len(),
+            crate::types::DefinedValue::Geometric(geometric) => geometric.numbers.len() * 8,
         },
         _ => 0,
     }

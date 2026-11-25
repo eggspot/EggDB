@@ -49,6 +49,9 @@ fn arithmetic_type(
     if let Some(sql_type) = crate::money::arithmetic_type(operator, left_type, right_type) {
         return Some(sql_type);
     }
+    if let Some(sql_type) = crate::geometric_types::arithmetic_type(operator, left_type, right_type) {
+        return Some(sql_type);
+    }
     if operator == BinaryOperator::Subtract
         && left_type.is_datetime()
         && right_type.is_datetime()
@@ -323,6 +326,14 @@ fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<Sql
         crate::bit_strings::result_type(name, arguments.first().and_then(|argument| static_type(argument, scope)))
     {
         return Some(sql_type);
+    }
+    if let Some(sql_type) =
+        crate::geometric_types::result_type(name, arguments.first().and_then(|argument| static_type(argument, scope)))
+    {
+        return Some(sql_type);
+    }
+    if crate::geometric_types::OPERATORS.iter().any(|(_, function)| *function == name) {
+        return Some(SqlType::Boolean);
     }
     if name == crate::oracle_collections::IS_A_SET || name == crate::oracle_collections::IS_EMPTY {
         return Some(SqlType::Boolean);
