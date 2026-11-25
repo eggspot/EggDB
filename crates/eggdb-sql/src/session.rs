@@ -29,6 +29,7 @@ mod oracle_system_triggers;
 mod backup;
 mod incremental;
 mod dynamic_policies;
+mod full_text_tables;
 mod invisible;
 mod logical_slots;
 pub(crate) mod freshness;
@@ -2041,6 +2042,8 @@ impl<'s> Session<'s> {
         self.prepare_database_links(text)?;
         let federated = self.prepare_federated_names(text)?;
         let text = federated.as_deref().unwrap_or(text);
+        let full_text = self.prepare_full_text_tables(text)?;
+        let text = full_text.as_deref().unwrap_or(text);
         if self.prepare_backup(text, on_result)?
             || self.prepare_switchover(text, on_result)?
             || self.prepare_shard_move(text, on_result)?

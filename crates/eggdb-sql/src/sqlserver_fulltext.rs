@@ -3,6 +3,8 @@ use crate::types::Value;
 
 pub(crate) const CONTAINS_FUNCTION: &str = "sqlserver_contains";
 pub(crate) const FREETEXT_FUNCTION: &str = "sqlserver_freetext";
+pub(crate) const CONTAINS_RANK_FUNCTION: &str = "eggdb_contains_rank";
+pub(crate) const FREETEXT_RANK_FUNCTION: &str = "eggdb_freetext_rank";
 
 const NOISE_WORDS: [&str; 20] = [
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on",
@@ -296,6 +298,79 @@ pub(crate) fn freetext(values: &[Value]) -> SqlResult<Value> {
             .filter(|word| !NOISE_WORDS.contains(&word.as_str()))
             .any(|word| document.contains(word)),
     ))
+}
+
+fn positive_terms(condition: &Condition, out: &mut Vec<(Vec<String>, bool)>) {
+    match condition {
+        Condition::Term { words, prefix } => out.push((words.clone(), *prefix)),
+        Condition::And(left, right) | Condition::Or(left, right) => {
+            positive_terms(left, out);
+            positive_terms(right, out);
+        }
+        Condition::AndNot(left, _) => positive_terms(left, out),
+        Condition::All(parts) | Condition::Any(parts) => {
+            for part in parts {
+                positive_terms(part, out);
+            }
+        }
+    }
+}
+
+fn hits(document: &[String], terms: &[(Vec<String>, bool)]) -> usize {
+    let mut count = 0;
+    for start in 0..document.len() {
+        for (words, prefix) in terms {
+            let Some(window) = document.get(start..start + words.len()) else {
+                continue;
+            };
+            let matched = window.iter().zip(words).enumerate().all(|(at, (seen, wanted))| {
+                if *prefix && at + 1 == words.len() {
+                    seen.starts_with(wanted.as_str())
+                } else {
+                    seen == wanted
+                }
+            });
+            if matched && !words.is_empty() {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn scaled(count: usize) -> Value {
+    Value::Integer(i32::try_from(count.saturating_mul(1000) / (count + 3)).unwrap_or(1000))
+}
+
+/// The `RANK` of a row of `CONTAINSTABLE`: 0 to 999, growing with how often the condition's
+/// terms (not those after `AND NOT`) occur in the columns.
+pub(crate) fn contains_rank(values: &[Value]) -> SqlResult<Value> {
+    let [query, columns @ ..] = values else {
+        return Err(SqlError::new(SqlState::SYNTAX_ERROR, "CONTAINSTABLE needs columns and a search condition"));
+    };
+    let Some(query) = query.to_text() else {
+        return Ok(Value::Integer(0));
+    };
+    let mut terms = Vec::new();
+    positive_terms(&condition_of(&query)?, &mut terms);
+    Ok(scaled(hits(&document_of(columns), &terms)))
+}
+
+/// The `RANK` of a row of `FREETEXTTABLE`: as for `CONTAINSTABLE`, over the text's words other
+/// than noise words.
+pub(crate) fn freetext_rank(values: &[Value]) -> SqlResult<Value> {
+    let [query, columns @ ..] = values else {
+        return Err(SqlError::new(SqlState::SYNTAX_ERROR, "FREETEXTTABLE needs columns and a search text"));
+    };
+    let Some(query) = query.to_text() else {
+        return Ok(Value::Integer(0));
+    };
+    let terms: Vec<(Vec<String>, bool)> = words(&query)
+        .into_iter()
+        .filter(|word| !NOISE_WORDS.contains(&word.as_str()))
+        .map(|word| (vec![word], false))
+        .collect();
+    Ok(scaled(hits(&document_of(columns), &terms)))
 }
 
 #[cfg(test)]

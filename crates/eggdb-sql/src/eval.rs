@@ -1457,6 +1457,12 @@ impl Evaluator<'_> {
             crate::sqlserver_fulltext::CONTAINS_FUNCTION => {
                 return crate::sqlserver_fulltext::contains(&self.arguments(arguments)?);
             }
+            crate::sqlserver_fulltext::CONTAINS_RANK_FUNCTION => {
+                return crate::sqlserver_fulltext::contains_rank(&self.arguments(arguments)?);
+            }
+            crate::sqlserver_fulltext::FREETEXT_RANK_FUNCTION => {
+                return crate::sqlserver_fulltext::freetext_rank(&self.arguments(arguments)?);
+            }
             crate::sqlserver_fulltext::FREETEXT_FUNCTION => {
                 return crate::sqlserver_fulltext::freetext(&self.arguments(arguments)?);
             }

@@ -184,6 +184,9 @@ fn added_function_type(
         crate::sqlserver_fulltext::CONTAINS_FUNCTION | crate::sqlserver_fulltext::FREETEXT_FUNCTION => {
             Some(SqlType::Boolean)
         }
+        crate::sqlserver_fulltext::CONTAINS_RANK_FUNCTION | crate::sqlserver_fulltext::FREETEXT_RANK_FUNCTION => {
+            Some(SqlType::Integer)
+        }
         "l2_distance" | "cosine_distance" | "inner_product" | "l1_distance" | "vector_norm"
         | "hamming_distance" | "jaccard_distance" => Some(SqlType::Double),
         "subvector" | "binary_quantize" => Some(SqlType::Text),

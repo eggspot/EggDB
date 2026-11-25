@@ -2119,3 +2119,32 @@ fn global_temporary_tables_are_shared_and_go_with_their_session() {
     owner.close().unwrap();
     assert!(batch(&mut other, "SELECT count(*) FROM ##shared").map_or(true, |steps| steps.iter().any(|step| step.outcome.is_err())));
 }
+
+#[test]
+fn containstable_and_freetexttable_rank_rows_by_their_key() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    values(&mut session, "CREATE TABLE docs (id int PRIMARY KEY, title nvarchar(100), body nvarchar(400))");
+    values(
+        &mut session,
+        "INSERT INTO docs VALUES (1, N'Eggs', N'eggs and more eggs for breakfast'), (2, N'Toast', N'toast with one egg'), (3, N'Tea', N'green tea')",
+    );
+    assert_eq!(
+        values(
+            &mut session,
+            "SELECT d.id, ct.[RANK] FROM docs AS d INNER JOIN CONTAINSTABLE(docs, body, 'eggs OR egg') AS ct ON d.id = ct.[KEY] ORDER BY ct.[RANK] DESC",
+        ),
+        vec![
+            vec![Value::Integer(1), Value::Integer(400)],
+            vec![Value::Integer(2), Value::Integer(250)],
+        ]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT [KEY] FROM CONTAINSTABLE(dbo.docs, *, '\"gree*\"', 1)"),
+        vec![vec![Value::Integer(3)]]
+    );
+    assert_eq!(
+        values(&mut session, "SELECT [KEY] FROM FREETEXTTABLE(docs, (title, body), N'the toast', LANGUAGE 1033) ORDER BY [KEY]"),
+        vec![vec![Value::Integer(2)]]
+    );
+}
