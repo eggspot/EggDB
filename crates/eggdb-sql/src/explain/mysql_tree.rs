@@ -590,7 +590,7 @@ impl Tree<'_> {
 
     fn subplan_measured(&self, subplan: &Subplan) -> Option<Measured> {
         let measured = self.measured_subplans?;
-        Some(super::subplan_measured(measured, subplan.position))
+        Some(super::subplan_measured(measured, subplan.position, false))
     }
 
     fn add_subplans(&mut self, query: &ExplainedQuery, place: SubplanPlace, level: usize) {

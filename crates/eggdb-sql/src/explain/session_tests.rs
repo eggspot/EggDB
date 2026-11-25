@@ -216,6 +216,26 @@ fn explain_analyze_counts_a_correlated_subplans_loops_and_an_initplans_single_ru
 }
 
 #[test]
+fn explain_analyze_measures_the_scan_inside_a_correlated_subplan() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_tables(&store);
+    let lines = plan(
+        &mut session,
+        "EXPLAIN ANALYZE SELECT unique1 FROM tenk1 t WHERE t.ten < (SELECT o.ten FROM onek o WHERE o.four = t.four ORDER BY o.ten LIMIT 1)",
+    );
+    let subplan = lines
+        .iter()
+        .position(|line| line == "  SubPlan 1")
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(lines[subplan + 1].starts_with("    ->  Limit (actual time="), "{lines:?}");
+    let scan = lines
+        .iter()
+        .find(|line| line.trim_start().starts_with("->  Seq Scan on onek o"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!(actual(scan).map(|(_, loops)| loops), Some(3), "{lines:?}");
+}
+
+#[test]
 fn explain_analyze_of_a_subplan_that_never_ran_says_never_executed() {
     let store = MemoryStore::default();
     let mut session = postgresql_tables(&store);

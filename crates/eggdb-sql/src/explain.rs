@@ -451,10 +451,10 @@ enum Measured {
     NeverExecuted,
 }
 
-fn subplan_measured(measured: &[MeasuredSubplan], position: usize) -> Measured {
+fn subplan_measured(measured: &[MeasuredSubplan], position: usize, scan: bool) -> Measured {
     match measured
         .iter()
-        .find(|subplan| subplan.position == position && subplan.loops > 0)
+        .find(|subplan| subplan.position == position && subplan.scan == scan && subplan.loops > 0)
     {
         None => Measured::NeverExecuted,
         Some(subplan) => {
@@ -951,7 +951,15 @@ fn subplan_lines(
     if let Some(measured) = measured
         && let Some(first) = lines.first_mut()
     {
-        first.push_str(&actual_group(subplan_measured(measured, subplan.position)));
+        first.push_str(&actual_group(subplan_measured(measured, subplan.position, false)));
+    }
+    if let Some(measured) = measured
+        && lines.len() > 1
+        && subplan.plan.sources.len() == 1
+        && !subplan.plan.appended
+        && let Some(leaf) = lines.last_mut()
+    {
+        leaf.push_str(&actual_group(subplan_measured(measured, subplan.position, true)));
     }
     add_subplans(&subplan.plan, base, &mut lines, measured);
     lines

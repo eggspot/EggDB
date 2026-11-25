@@ -1039,7 +1039,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   2026-11-17, D1228); SQL Server's showplan: **code written, unbuilt** (code-only mode, 2026-11-17, D1229).
 - An index used for a comparison with an `InitPlan`'s `$k` (D327). **Code written, unbuilt** (code-only mode,
   2026-11-25, D1349).
-- Times on each iterator inside a subplan in `EXPLAIN ANALYZE` (D327).
+- Times on each iterator inside a subplan in `EXPLAIN ANALYZE` (D327). The scan inside a single-table
+  subplan: **code written, unbuilt** (code-only mode, 2026-11-25, D1363). Left: the `Sort` between them and joins
+  inside a subplan.
 - Times on the steps inside a join (a counter per level in `JoinedRows::extend`, inner `loops` =
   outer rows) (**code written, unbuilt**, code-only mode, 2026-11-25, D1350), on an `UPDATE` or `DELETE`'s scan and on aggregates; per-operator rows in `SET
   STATISTICS PROFILE`; `DISPLAY_CURSOR`, predicates in `PLAN_TABLE`, and `SHOWPLAN_*` alone in

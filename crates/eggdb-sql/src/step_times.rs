@@ -22,6 +22,8 @@ pub(crate) struct MeasuredSubplan {
     pub(crate) loops: u64,
     pub(crate) rows: u64,
     pub(crate) total: Duration,
+    /// Whether this is the scan inside the subplan (D1363) rather than the subplan itself.
+    pub(crate) scan: bool,
 }
 
 /// What one level of a join saw (D1350): the rows that reached it, after the filters that
@@ -40,6 +42,8 @@ struct Recording {
     joins: Vec<Vec<MeasuredLevel>>,
     join_claimed: bool,
     metering: bool,
+    running_subplan: Option<usize>,
+    subplan_scan_claimed: bool,
 }
 
 thread_local! {
@@ -132,6 +136,8 @@ pub(crate) fn record_with_subplans<T>(
         joins: Vec::new(),
         join_claimed: false,
         metering: false,
+        running_subplan: None,
+        subplan_scan_claimed: false,
     }));
     let result = run();
     match replace_recording(outer) {
@@ -152,12 +158,14 @@ pub(crate) fn measure_subplan<T, E>(
     run: impl FnOnce() -> Result<T, E>,
     rows_of: impl FnOnce(&T) -> usize,
 ) -> Result<T, E> {
-    let mut outer_metering = None;
+    let mut outer = None;
     with_recording(|recording| {
-        outer_metering = Some(recording.metering);
+        outer = Some((recording.metering, recording.running_subplan, recording.subplan_scan_claimed));
         recording.metering = true;
+        recording.running_subplan = Some(position);
+        recording.subplan_scan_claimed = false;
     });
-    let Some(outer_metering) = outer_metering else {
+    let Some((outer_metering, outer_subplan, outer_claimed)) = outer else {
         return run();
     };
     let started = Instant::now();
@@ -166,10 +174,12 @@ pub(crate) fn measure_subplan<T, E>(
     let rows = row_count(result.as_ref().map_or(0, rows_of));
     with_recording(|recording| {
         recording.metering = outer_metering;
+        recording.running_subplan = outer_subplan;
+        recording.subplan_scan_claimed = outer_claimed;
         match recording
             .subplans
             .iter_mut()
-            .find(|subplan| subplan.position == position)
+            .find(|subplan| subplan.position == position && !subplan.scan)
         {
             Some(found) => {
                 found.loops = found.loops.saturating_add(1);
@@ -181,6 +191,7 @@ pub(crate) fn measure_subplan<T, E>(
                 loops: 1,
                 rows,
                 total: elapsed,
+                scan: false,
             }),
         }
     });
@@ -205,6 +216,7 @@ pub(crate) struct SelectMeter {
     first_row: Cell<Option<Duration>>,
     last_row: Cell<Option<Duration>>,
     rows: Cell<u64>,
+    subplan: Option<usize>,
 }
 
 pub(crate) fn claim() -> Option<SelectMeter> {
@@ -217,6 +229,18 @@ pub(crate) fn claim() -> Option<SelectMeter> {
                 first_row: Cell::new(None),
                 last_row: Cell::new(None),
                 rows: Cell::new(0),
+                subplan: None,
+            });
+        } else if let Some(position) = recording.running_subplan
+            && !recording.subplan_scan_claimed
+        {
+            recording.subplan_scan_claimed = true;
+            claimed = Some(SelectMeter {
+                started: Instant::now(),
+                first_row: Cell::new(None),
+                last_row: Cell::new(None),
+                rows: Cell::new(0),
+                subplan: Some(position),
             });
         }
     });
@@ -249,6 +273,31 @@ impl SelectMeter {
 
     pub(crate) fn finish(&self, output_rows: usize, skipped: usize) {
         let finished = self.since_start();
+        if let Some(position) = self.subplan {
+            let rows = self.rows.get();
+            let total = self.last_row.get().unwrap_or(finished);
+            with_recording(|recording| {
+                match recording
+                    .subplans
+                    .iter_mut()
+                    .find(|subplan| subplan.position == position && subplan.scan)
+                {
+                    Some(found) => {
+                        found.loops = found.loops.saturating_add(1);
+                        found.rows = found.rows.saturating_add(rows);
+                        found.total = found.total.saturating_add(total);
+                    }
+                    None => recording.subplans.push(MeasuredSubplan {
+                        position,
+                        loops: 1,
+                        rows,
+                        total,
+                        scan: true,
+                    }),
+                }
+            });
+            return;
+        }
         let source = self.last_row.get().map(|last_row| RowTimes {
             first_row: self.first_row.get().unwrap_or(last_row).min(last_row),
             last_row,
@@ -269,6 +318,9 @@ impl SelectMeter {
 
 impl Drop for SelectMeter {
     fn drop(&mut self) {
+        if self.subplan.is_some() {
+            return;
+        }
         with_recording(|recording| recording.metering = false);
     }
 }
@@ -307,13 +359,19 @@ mod tests {
     }
 
     #[test]
-    fn a_subplan_adds_up_its_loops_and_rows_and_never_takes_the_select_meter() {
+    fn a_subplan_adds_up_its_loops_and_rows_and_meters_its_own_scan_apart() {
         let ((), selects, subplans) = record_with_subplans(|| {
             for rows in [2usize, 3] {
                 let measured: Result<usize, ()> = measure_subplan(
                     7,
                     || {
-                        assert!(claim().is_none(), "a subplan's select is not metered");
+                        let scan = claim().expect("the subplan's scan is metered");
+                        assert!(claim().is_none(), "one scan per loop");
+                        for _ in 0..rows * 2 {
+                            scan.source_row();
+                        }
+                        scan.source_read();
+                        scan.finish(rows, 0);
                         Ok(rows)
                     },
                     |rows| *rows,
@@ -324,10 +382,10 @@ mod tests {
             outer.finish(1, 0);
         });
         assert_eq!(selects.len(), 1);
-        assert_eq!(subplans.len(), 1);
-        assert_eq!(subplans[0].position, 7);
-        assert_eq!(subplans[0].loops, 2);
-        assert_eq!(subplans[0].rows, 5);
+        let subplan = subplans.iter().find(|subplan| !subplan.scan).expect("the subplan");
+        assert_eq!((subplan.position, subplan.loops, subplan.rows), (7, 2, 5));
+        let scan = subplans.iter().find(|subplan| subplan.scan).expect("its scan");
+        assert_eq!((scan.position, scan.loops, scan.rows), (7, 2, 10));
     }
 
     #[test]
