@@ -813,3 +813,16 @@ fn mysql_tabular_explain_lists_subqueries_as_their_own_selects() {
         "a query without subqueries stays SIMPLE"
     );
 }
+
+#[test]
+fn a_key_compared_with_an_initplan_is_shown_read_by_the_key() {
+    let store = MemoryStore::default();
+    let mut session = postgresql_tables(&store);
+    let lines = plan(
+        &mut session,
+        "EXPLAIN SELECT ten FROM tenk1 t WHERE t.unique1 = (SELECT max(o.unique1) FROM onek o)",
+    );
+    assert_eq!(lines[0], "Index Scan using tenk1_pkey on tenk1 t");
+    assert!(lines.iter().any(|line| line.contains("InitPlan 1 (returns $0)")), "{lines:?}");
+    assert_eq!(last(&mut session, "SELECT ten FROM tenk1 t WHERE t.unique1 = (SELECT max(o.unique1) FROM onek o)"), "ten\n2\nSELECT 1");
+}

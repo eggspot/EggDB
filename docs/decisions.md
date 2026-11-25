@@ -1373,3 +1373,4 @@ its full title with its status.
 - [D1346](decisions/D1346.md) Code-only batch 1001 (M4): SQLite's INTEGER affinity for INT columns other than the row id
 - [D1347](decisions/D1347.md) Code-only batch 1002 (M6): asynchronous C API calls, one callback per batch
 - [D1348](decisions/D1348.md) Code-only batch 1003 (M6a): dynamic data masking, the design
+- [D1349](decisions/D1349.md) Code-only batch 1004 (M6c): EXPLAIN shows the key a comparison with an InitPlan uses

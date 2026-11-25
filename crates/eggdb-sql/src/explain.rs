@@ -314,6 +314,7 @@ pub(crate) fn plan(
     style: ExplainStyle,
     dialect: Dialect,
 ) -> SqlResult<Planned> {
+    let _explaining = crate::plan::enter_explaining();
     let with_subplans = shows_subplans(style, dialect);
     let mysql = dialect == Dialect::MySql;
     let postgresql_text = dialect == Dialect::PostgreSql

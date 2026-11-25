@@ -139,9 +139,47 @@ pub(crate) fn key_lookup_matches_comparison(sql_type: SqlType) -> bool {
     !sql_type.is_dynamic() || crate::constraints::current_dialect() == crate::Dialect::Sqlite
 }
 
+thread_local! {
+    static EXPLAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the plans made until it drops as plans `EXPLAIN` shows (D1349): an uncorrelated
+/// scalar subquery, which a run evaluates before it plans, counts as a value of the column it
+/// is compared with, so the plan shown uses the key the run uses.
+pub(crate) struct Explaining {
+    previous: bool,
+}
+
+impl Drop for Explaining {
+    fn drop(&mut self) {
+        EXPLAINING.with(|explaining| explaining.set(self.previous));
+    }
+}
+
+pub(crate) fn enter_explaining() -> Explaining {
+    Explaining {
+        previous: EXPLAINING.with(|explaining| explaining.replace(true)),
+    }
+}
+
+fn placeholder_of(sql_type: SqlType) -> Option<Value> {
+    [Value::Integer(0), Value::Text(String::new())]
+        .into_iter()
+        .find_map(|value| convert(value, sql_type, Conversion::Assignment).ok().filter(|found| !found.is_null()))
+}
+
 fn constant(expr: &Expr, column: &Column) -> Option<Value> {
     if check_columns(expr, Scope::empty()).is_err() {
         return None;
+    }
+    if let ExprKind::Subquery(subquery) = &expr.kind
+        && subquery.test == crate::ast::SubqueryTest::Scalar
+        && !crate::subquery::mentions_correlated(expr)
+        && EXPLAINING.with(std::cell::Cell::get)
+    {
+        return key_lookup_matches_comparison(column.sql_type)
+            .then(|| placeholder_of(column.sql_type))
+            .flatten();
     }
     let evaluator = Evaluator {
         scope: Scope::empty(),
