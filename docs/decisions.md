@@ -1346,3 +1346,4 @@ its full title with its status.
 - [D1319](decisions/D1319.md) Code-only batch 975 (M5): per-role limits for WebAssembly functions
 - [D1320](decisions/D1320.md) Code-only batch 976 (M5): WebAssembly functions returning a table
 - [D1321](decisions/D1321.md) Code-only batch 977 (M8): Oracle VPD dynamic and context-sensitive policies
+- [D1322](decisions/D1322.md) Code-only batch 978 (M6e): the documentation site, built by our own tool

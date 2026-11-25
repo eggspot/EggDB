@@ -234,6 +234,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "eggdb-docsite"
+version = "0.5.0"
+
+[[package]]
 name = "eggdb-documents"
 version = "0.5.0"
 dependencies = [

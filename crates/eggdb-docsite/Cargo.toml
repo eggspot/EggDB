@@ -1,0 +1,11 @@
+[package]
+name = "eggdb-docsite"
+description = "Builds EggDB's documentation site: every Markdown page under docs/ as a static HTML page, written by our own Markdown renderer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
