@@ -12,6 +12,7 @@ mod delta;
 mod dictionary;
 mod float_chunk;
 mod hybrid;
+mod kernels;
 mod snappy;
 mod string_chunk;
 
@@ -21,6 +22,7 @@ pub use delta::{decode_deltas, encode_deltas, read_varint, write_varint};
 pub use dictionary::Dictionary;
 pub use float_chunk::{FloatChunk, FloatEncoding, FloatStats};
 pub use hybrid::{decode_hybrid, encode_hybrid};
+pub use kernels::{Comparison, Selection, filter_floats, filter_integers, min_max_integers, sum_floats, sum_integers};
 pub use snappy::{snappy_compress, snappy_decompress};
 pub use string_chunk::{StringChunk, StringEncoding, StringStats};
 

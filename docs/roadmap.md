@@ -569,7 +569,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   other tables, or filtered as their rows arrive (D287). A parameter or a fixed expression: **code written, unbuilt** (code-only mode,
   2026-11-14, D1139); left: joined and filtered functions, which need the streaming executor.
 - Vectorized scans, filters and projections over rows and columnar chunks, float and numeric
-  kernels and grouped aggregates, with SIMD chosen at runtime (D40, D179, D201).
+  kernels and grouped aggregates, with SIMD chosen at runtime (D40, D179, D201). Integer and float filter and
+  aggregate kernels with AVX2 chosen at runtime: **code written, unbuilt** (code-only mode, 2026-11-25, D1341);
+  the vectorized executor, numeric and string kernels and grouped aggregates are left.
 - A query compiler for hot prepared statements' expressions, compiled to a flat program, after
   parsed plans are kept in prepared statements (below) (D40). Check: TPC-H Q1 and Q6 times.
 - `TABLESAMPLE`, t-digest and the other `APPROX_*` functions (D40). `TABLESAMPLE`: **code written, unbuilt** (code-only
