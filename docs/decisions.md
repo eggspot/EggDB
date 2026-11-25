@@ -1368,3 +1368,4 @@ its full title with its status.
 - [D1341](decisions/D1341.md) Code-only batch 996 (M5): vectorized filter and aggregate kernels over column values
 - [D1342](decisions/D1342.md) Code-only batch 997 (M5): WHERE filters compiled once per scan into a flat program
 - [D1343](decisions/D1343.md) Code-only batch 998 (M5): GiST, GIN, SP-GiST and BRIN indexes accepted and kept
+- [D1344](decisions/D1344.md) Code-only batch 999 (M5): SELECT ... INTO keeps NOT NULL through inner joins and of non-null expressions

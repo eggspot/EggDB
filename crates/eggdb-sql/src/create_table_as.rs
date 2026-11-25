@@ -160,6 +160,54 @@ pub(crate) fn unnamed_oracle_expression(
         })
 }
 
+struct SourceTable<'t> {
+    names: Vec<String>,
+    columns: Vec<&'t crate::encoding::Column>,
+}
+
+impl SourceTable<'_> {
+    fn answers_to(&self, qualifier: &str) -> bool {
+        self.names.iter().any(|name| name.eq_ignore_ascii_case(qualifier))
+    }
+}
+
+fn source_names(reference: &crate::ast::TableReference) -> Vec<String> {
+    let mut names = vec![crate::schemas::base_name(&reference.name.text).to_owned()];
+    if let Some(alias) = &reference.alias {
+        names.push(alias.clone());
+    }
+    names
+}
+
+fn column_not_null(sources: &[SourceTable<'_>], qualifier: Option<&str>, name: &str) -> bool {
+    let mut found = sources
+        .iter()
+        .filter(|source| qualifier.is_none_or(|qualifier| source.answers_to(qualifier)))
+        .flat_map(|source| source.columns.iter())
+        .filter(|column| column.name.eq_ignore_ascii_case(name));
+    match (found.next(), found.next()) {
+        (Some(column), None) => column.not_null,
+        _ => false,
+    }
+}
+
+fn expression_not_null(sources: &[SourceTable<'_>], expr: &crate::ast::Expr) -> bool {
+    use crate::ast::Literal;
+    match &expr.kind {
+        ExprKind::Literal(literal) => !matches!(literal, Literal::Null),
+        ExprKind::Column { qualifier, name } => column_not_null(sources, qualifier.as_deref(), name),
+        ExprKind::Cast { expr, .. } => expression_not_null(sources, expr),
+        ExprKind::SqlServerFunction {
+            function: crate::sqlserver_functions::Function::IsNull,
+            arguments,
+        } => arguments.get(1).is_some_and(|fallback| expression_not_null(sources, fallback)),
+        ExprKind::Function { name, arguments } if name == "coalesce" => {
+            arguments.iter().any(|argument| expression_not_null(sources, argument))
+        }
+        _ => false,
+    }
+}
+
 fn kept_not_null(
     reader: &dyn KeyValueRead,
     tables: &mut TableCache,
@@ -173,40 +221,55 @@ fn kept_not_null(
     let Some(from) = &select.from else {
         return kept;
     };
-    if !from.joins.is_empty()
-        || from.first.derived.is_some()
-        || from.first.generated.is_some()
+    let inner = from.joins.iter().all(|join| {
+        matches!(join.kind, crate::ast::JoinKind::Inner | crate::ast::JoinKind::Cross | crate::ast::JoinKind::Comma)
+    });
+    let references: Vec<&crate::ast::TableReference> =
+        std::iter::once(&from.first).chain(from.joins.iter().map(|join| &join.table)).collect();
+    if !inner
+        || references.iter().any(|reference| reference.derived.is_some() || reference.generated.is_some())
         || select.grouping_sets.is_some()
     {
         return kept;
     }
-    let Ok(definition) = tables.require(reader, &from.first.name) else {
-        return kept;
-    };
-    let visible: Vec<&crate::encoding::Column> = definition
-        .columns
+    let mut definitions = Vec::with_capacity(references.len());
+    for reference in &references {
+        let Ok(definition) = tables.require(reader, &reference.name) else {
+            return kept;
+        };
+        definitions.push(definition.clone());
+    }
+    let sources: Vec<SourceTable<'_>> = references
         .iter()
-        .filter(|column| !crate::temp_tables::is_hidden_column(&column.name))
+        .zip(&definitions)
+        .map(|(reference, definition)| SourceTable {
+            names: source_names(reference),
+            columns: definition
+                .columns
+                .iter()
+                .filter(|column| !crate::temp_tables::is_hidden_column(&column.name))
+                .collect(),
+        })
         .collect();
     let mut index = 0;
     for item in &select.items {
         match item {
-            SelectItem::Wildcard { .. } => {
-                for column in &visible {
-                    if let Some(slot) = kept.get_mut(index) {
-                        *slot = column.not_null;
+            SelectItem::Wildcard { qualifier, .. } => {
+                for source in sources
+                    .iter()
+                    .filter(|source| qualifier.as_deref().is_none_or(|qualifier| source.answers_to(qualifier)))
+                {
+                    for column in &source.columns {
+                        if let Some(slot) = kept.get_mut(index) {
+                            *slot = column.not_null;
+                        }
+                        index += 1;
                     }
-                    index += 1;
                 }
             }
             SelectItem::Expr { expr, .. } => {
-                if let ExprKind::Column { name, .. } = &expr.kind
-                    && let Some(column) = visible
-                        .iter()
-                        .find(|column| column.name.eq_ignore_ascii_case(name))
-                    && let Some(slot) = kept.get_mut(index)
-                {
-                    *slot = column.not_null;
+                if let Some(slot) = kept.get_mut(index) {
+                    *slot = expression_not_null(&sources, expr);
                 }
                 index += 1;
             }

@@ -957,6 +957,40 @@ fn sqlserver_select_into_keeps_not_null_of_copied_columns() {
 }
 
 #[test]
+fn sqlserver_select_into_keeps_not_null_through_inner_joins_and_non_null_expressions() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::SqlServer);
+    last(
+        &mut session,
+        "CREATE TABLE customers (id int PRIMARY KEY, name nvarchar(20) NOT NULL, city nvarchar(20)); \
+         CREATE TABLE orders (id int PRIMARY KEY, customer int NOT NULL, total int); \
+         INSERT INTO customers VALUES (1, N'ann', NULL); INSERT INTO orders VALUES (10, 1, NULL)",
+    );
+    last(
+        &mut session,
+        "SELECT o.id, c.name, c.city, ISNULL(o.total, 0) AS total, COALESCE(c.city, N'none') AS place, 7 AS seven \
+         INTO joined FROM orders o INNER JOIN customers c ON c.id = o.customer",
+    );
+    for (row, refused) in [
+        ("(NULL, N'x', NULL, 1, N'p', 7)", true),
+        ("(11, NULL, NULL, 1, N'p', 7)", true),
+        ("(11, N'x', NULL, NULL, N'p', 7)", true),
+        ("(11, N'x', NULL, 1, NULL, 7)", true),
+        ("(11, N'x', NULL, 1, N'p', NULL)", true),
+        ("(11, N'x', NULL, 1, N'p', 7)", false),
+    ] {
+        let sql = format!("INSERT INTO joined VALUES {row}");
+        if refused {
+            assert_eq!(fails(&mut session, &sql).vendor_code(), Some(515), "{row}");
+        } else {
+            last(&mut session, &sql);
+        }
+    }
+    last(&mut session, "SELECT c.* INTO kept FROM orders o LEFT JOIN customers c ON c.id = o.customer");
+    last(&mut session, "INSERT INTO kept VALUES (2, NULL, NULL)");
+}
+
+#[test]
 fn postgresql_execute_runs_with_the_prepared_statements_own_needs() {
     let store = MemoryStore::default();
     let mut session = Session::new(&store);
