@@ -1350,3 +1350,4 @@ its full title with its status.
 - [D1323](decisions/D1323.md) Research (M6e): EggOS's GUI and eggdb-gui stay two toolkits, joined at Wayland (refines D15)
 - [D1324](decisions/D1324.md) Code-only batch 979 (M6e): Wayland windows, and the client on EggOS
 - [D1325](decisions/D1325.md) Code-only batch 980 (M6f): a connection pool in the C API
+- [D1326](decisions/D1326.md) Code-only batch 981 (M6f): the EF Core provider

@@ -62,6 +62,10 @@ if command -v dotnet >/dev/null 2>&1; then
     || { cat "$work/dotnet-build.log" >&2; exit 1; }
   cp "$library" "$work/dotnet/"
   dotnet "$work/dotnet/EggDB.Data.Check.dll"
+  env -u VERSION dotnet build "$root/drivers/dotnet/EggDB.EntityFrameworkCore.Check" -o "$work/dotnet-ef" > "$work/dotnet-ef-build.log" 2>&1 \
+    || { cat "$work/dotnet-ef-build.log" >&2; exit 1; }
+  cp "$library" "$work/dotnet-ef/"
+  dotnet "$work/dotnet-ef/EggDB.EntityFrameworkCore.Check.dll"
 fi
 node_include="$(dirname "$(command -v node 2>/dev/null || echo /none/node)")/../include/node"
 if [ "${NO_C_COMPILER:-}" != 1 ] && [ -f "$node_include/node_api.h" ]; then

@@ -1180,7 +1180,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The EF Core provider, with Dapper and NHibernate checked (D16, D182). Check: EF Core's
   provider specification tests. Named parameters for
   Dapper and NHibernate's driver and dialect (`EggDB.NHibernate`): **code written, unbuilt** (code-only mode,
-  2026-11-13, D965). Left: the EF Core provider.
+  2026-11-13, D965); the EF Core provider (`EggDB.EntityFrameworkCore`): **code written, unbuilt** (D1326). Left: EF Core's
+  provider specification tests, and idempotent migration scripts.
 - The Hibernate dialect, R2DBC, and jOOQ, Spring Data and Exposed checked (D16, D182). The Hibernate dialect
   (`EggDbDialect` with its resolver) and Exposed's registration (`EggDbExposed`): **code written, unbuilt** (code-only
   mode, 2026-11-13, D964). Left: R2DBC, and the jOOQ and Spring Data checks.
