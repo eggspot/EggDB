@@ -185,6 +185,20 @@ impl DatabaseOpener for FileOpener {
         })
     }
 
+    fn search(&self, index: &str, body: Option<&str>) -> Option<Result<String, OpenRefusal>> {
+        let db = match self.open(true) {
+            Ok(db) => db,
+            Err(error) => return Some(Err(self.refusal(&error))),
+        };
+        let outcome = super::search::search_index(&db, index, body.unwrap_or("{}"));
+        let closed = db.close();
+        Some(match (outcome, closed) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Err(message), _) => Err(OpenRefusal::Failed(message)),
+            (Ok(_), Err(error)) => Err(failed(&error)),
+        })
+    }
+
     fn administer(&self, task: Administration<'_>) -> Option<Result<String, OpenRefusal>> {
         Some(match task {
             Administration::Stats => self.stats_report(),

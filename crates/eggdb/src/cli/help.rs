@@ -52,6 +52,8 @@ Commands:
                                 the property graph: a Cypher query that reads or writes
   document get <file> <namespace> [query]
                                 documents: a filter or a reading pipeline, in Extended JSON
+  search get <file> <index> [body]
+                                one search request on a full-text index, as POST _search
   mcp    <file>                 serve the file to an AI agent over MCP; read-only unless --allow-write
   audit  <file>                 list the calls AI agents made through eggdb mcp
   help   [command]              this text, or one command's help

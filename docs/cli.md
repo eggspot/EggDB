@@ -1054,6 +1054,19 @@ document when left out) or an aggregation pipeline array whose stages only read 
 `document_error`). It prints one document per line in relaxed Extended JSON, or one object `{"documents": [...]}`
 with `--json`. The same command is the MCP tool `document_get` of `eggdb mcp`, for every agent (D1353).
 
+## Search indices: `eggdb search`
+
+```
+eggdb search get <file> <index> [<body>]
+```
+
+Runs one search request body on one of the file's full-text indices (the ones `eggdb serve --es-listen` serves
+to Elasticsearch and OpenSearch clients), on a read-only open, exactly as `POST /<index>/_search` answers it,
+and prints the JSON response: `took`, `hits` with `_id`, `_score` and `_source`, the total and `aggregations`.
+`<body>` is the query DSL as JSON (`query`, `size`, `from`, `sort`, `_source`, `aggs`, `highlight`, `knn`); left
+out it is `{}`. A request the API refuses (a missing index, a malformed body) is `search_error` with its HTTP
+status and reason. The same command is the MCP tool `search_get` of `eggdb mcp`, for every agent (D1354).
+
 ## `eggdb shell`
 
 ```
@@ -1645,7 +1658,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   `eggdb check --format json` print them) and `backup` (with `--allow-write`: a new file beside
   the database file; the three not under `--tables` or an agent role, D1351), `graph_get` and
   `graph_run` (Cypher on the property graph, `graph_run` with `--allow-write`, D1352), `document_get`
-  (a filter or a reading pipeline on a document collection, D1353), and the resource
+  (a filter or a reading pipeline on a document collection, D1353), `search_get` (one search
+  request body on a full-text index, D1354), and the resource
   `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.

@@ -52,6 +52,7 @@ pub(crate) enum CommandName {
     Rdf,
     Graph,
     Document,
+    Search,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +105,7 @@ impl TableAction {
 
 impl CommandName {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 33] = [
+    pub(crate) const ALL: [Self; 34] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -132,6 +133,7 @@ impl CommandName {
         Self::Rdf,
         Self::Graph,
         Self::Document,
+        Self::Search,
         Self::Serve,
         Self::Shell,
         Self::Restore,
@@ -181,6 +183,7 @@ impl CommandName {
             b"rdf" => Self::Rdf,
             b"graph" => Self::Graph,
             b"document" => Self::Document,
+            b"search" => Self::Search,
             _ => return None,
         })
     }
@@ -221,6 +224,7 @@ impl CommandName {
             Self::Rdf => "rdf",
             Self::Graph => "graph",
             Self::Document => "document",
+            Self::Search => "search",
         }
     }
 
@@ -234,6 +238,7 @@ impl CommandName {
                 | Self::Rdf
                 | Self::Graph
                 | Self::Document
+                | Self::Search
         )
     }
 
@@ -1076,6 +1081,7 @@ pub(crate) struct Request {
     pub(crate) rdf: Option<(RdfVerb, String)>,
     pub(crate) graph: Option<(GraphVerb, String)>,
     pub(crate) document: Option<(String, Option<String>)>,
+    pub(crate) search: Option<(String, Option<String>)>,
     pub(crate) table: Option<OsString>,
     pub(crate) schema: Option<String>,
     pub(crate) after: Option<String>,
@@ -1557,6 +1563,7 @@ fn noun_needs_a_verb(noun: CommandName) -> Failure {
         CommandName::Rdf => RDF_NEEDS_A_VERB,
         CommandName::Graph => GRAPH_NEEDS_A_VERB,
         CommandName::Document => DOCUMENT_NEEDS_A_VERB,
+        CommandName::Search => SEARCH_NEEDS_A_VERB,
         _ => COLLECTION_NEEDS_A_VERB,
     };
     Failure::usage(message, Some(noun))
@@ -1616,6 +1623,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         rdf: None,
         graph: None,
         document: None,
+        search: None,
         archive_changes: None,
         differential: false,
         clone_copy: false,
@@ -2627,6 +2635,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if command == CommandName::Document {
         return document_request(request, arguments);
     }
+    if command == CommandName::Search {
+        return search_request(request, arguments);
+    }
     if request.swap.if_absent && request.swap.delete {
         return Err(usage(
             "--if-absent with --delete would change nothing: an absent key cannot be deleted"
@@ -2654,7 +2665,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Memory
         | CommandName::Rdf
         | CommandName::Graph
-        | CommandName::Document => (1, 1),
+        | CommandName::Document
+        | CommandName::Search => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -3013,6 +3025,32 @@ const MEMORY_NEEDS_A_VERB: &str = "memory needs add, get or delete";
 const RDF_NEEDS_A_VERB: &str = "rdf needs get or run";
 const GRAPH_NEEDS_A_VERB: &str = "graph needs get or run";
 const DOCUMENT_NEEDS_A_VERB: &str = "document needs get";
+const SEARCH_NEEDS_A_VERB: &str = "search needs get";
+
+fn search_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
+    let command = CommandName::Search;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    if arguments.first().map(|verb| verb.as_encoded_bytes()) != Some(b"get") {
+        return Err(usage(SEARCH_NEEDS_A_VERB.to_owned()));
+    }
+    if arguments.len() < 3 {
+        return Err(usage("eggdb search get needs a file and an index".to_owned()));
+    }
+    if arguments.len() > 4 {
+        return Err(too_many_arguments(&arguments[4..], Some(command)));
+    }
+    let text = |argument: &OsStr| {
+        argument
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| usage("the index and the body are UTF-8".to_owned()))
+    };
+    let index = text(arguments[2])?;
+    let body = arguments.get(3).copied().map(&text).transpose()?;
+    request.file = PathBuf::from(arguments[1]);
+    request.search = Some((index, body));
+    Ok(request)
+}
 
 fn document_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
     let command = CommandName::Document;

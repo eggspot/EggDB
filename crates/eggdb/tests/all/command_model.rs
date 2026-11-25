@@ -398,7 +398,7 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
 fn the_tools_list_carries_the_registry_s_names_and_annotations() {
     let file = key_value_file("parity-tools");
     let _audit = audit_of(file.path());
-    for (options, offered) in [(&[][..], 14), (&["--allow-write"][..], 26)] {
+    for (options, offered) in [(&[][..], 15), (&["--allow-write"][..], 27)] {
         let mut mcp = Mcp::start(file.path(), options);
         let listed = mcp.request("tools/list", "{}");
         let Json::Array(tools) = &at(&listed, &["result", "tools"]).value else {
@@ -612,6 +612,29 @@ fn order_bson(id: i32, status: &str, total: i32) -> Vec<u8> {
     let mut document = ((body.len() + 4) as i32).to_le_bytes().to_vec();
     document.extend(body);
     document
+}
+
+#[test]
+fn search_get_fails_as_search_get_does() {
+    let file = key_value_file("parity-search");
+    let _audit = audit_of(file.path());
+    let path = file.path().to_str().unwrap().to_owned();
+    let twin = eggdb(&["search", "get", &path, "articles", "--json"]);
+    assert_eq!(twin.status.code(), Some(3));
+    let printed = code_and_category(&one_error(&twin));
+    assert_eq!(printed.0, "search_error");
+    let mut mcp = Mcp::start(file.path(), &[]);
+    let missing = mcp.call("search_get", r#"{"index":"articles"}"#);
+    assert_eq!(code_and_category(structured(&missing, true)), printed);
+    for wrong in ["a/b", "a b", "%41", ""] {
+        let answer = mcp.call("search_get", &format!(r#"{{"index":{wrong:?}}}"#));
+        let (code, _) = code_and_category(structured(&answer, true));
+        assert_eq!(code, "search_error", "{wrong}");
+    }
+    let unknown = mcp.call("search_get", r#"{"index":"articles","size":5}"#);
+    let (code, _) = code_and_category(structured(&unknown, true));
+    assert_eq!(code, "invalid_arguments");
+    mcp.finish();
 }
 
 fn catalog_file(name: &str) -> TempPath {

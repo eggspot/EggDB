@@ -1378,3 +1378,4 @@ its full title with its status.
 - [D1351](decisions/D1351.md) Code-only batch 1006 (M6d): MCP tools for the file's statistics, check and backup
 - [D1352](decisions/D1352.md) Code-only batch 1007 (M6d): Cypher on the property graph from the CLI and MCP
 - [D1353](decisions/D1353.md) Code-only batch 1008 (M6d): documents queried in MongoDB's query language from the CLI and MCP
+- [D1354](decisions/D1354.md) Code-only batch 1009 (M6d): search indices queried with the query DSL from the CLI and MCP

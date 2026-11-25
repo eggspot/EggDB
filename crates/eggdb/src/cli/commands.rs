@@ -35,6 +35,7 @@ mod mcp;
 mod ndjson_io;
 mod rdf;
 mod sealed;
+mod search;
 mod xlsx_io;
 mod dbf_io;
 mod mainframe_io;
@@ -238,6 +239,7 @@ fn execute_on(
         CommandName::Rdf => session.rdf_command(),
         CommandName::Graph => session.graph_command(),
         CommandName::Document => session.document_command(),
+        CommandName::Search => session.search_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();

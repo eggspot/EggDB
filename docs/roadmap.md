@@ -1105,8 +1105,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Tools that query documents, search indexes, vectors, graphs and keys in their own query
   languages (D10, D11). Graphs in Cypher (`graph_get`, `graph_run`, with `eggdb graph get|run`):
   **code written, unbuilt** (code-only mode, 2026-11-25, D1352). Documents in MongoDB's query
-  language (`document_get`, `eggdb document get`): **code written, unbuilt** (D1353). Left: search
-  indexes, vectors and keys.
+  language (`document_get`, `eggdb document get`): **code written, unbuilt** (D1353). Search
+  indexes in the query DSL (`search_get`, `eggdb search get`): **code written, unbuilt** (D1354).
+  Left: vectors and keys.
 - Text-to-SQL in every dialect through the MCP server (D31, D205). `eggdb_ai.text_to_sql`: **code written, unbuilt**
   (code-only mode, 2026-11-12, D779). Left: an MCP tool of its own.
 

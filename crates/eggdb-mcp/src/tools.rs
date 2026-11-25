@@ -59,13 +59,14 @@ pub(crate) enum Tool {
     GraphGet,
     GraphRun,
     DocumentGet,
+    SearchGet,
     Stats,
     Check,
     Backup,
 }
 
 impl Tool {
-    const ALL: [Self; 26] = [
+    const ALL: [Self; 27] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -89,6 +90,7 @@ impl Tool {
         Self::GraphGet,
         Self::GraphRun,
         Self::DocumentGet,
+        Self::SearchGet,
         Self::Stats,
         Self::Check,
         Self::Backup,
@@ -804,6 +806,7 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::RdfGet => rdf_get(arguments, call),
         Tool::GraphGet => graph_get(arguments, call),
         Tool::DocumentGet => document_get(arguments, call),
+        Tool::SearchGet => search_get(arguments, call),
         Tool::Stats | Tool::Check | Tool::Backup if call.tables.is_some() || call.agent_role.is_some() => {
             Err(whole_file_refused(call))
         }
@@ -1103,6 +1106,71 @@ fn document_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>
             other => sparql_failure(other),
         })?;
     array_success(&answer, "documents", None)
+}
+
+fn search_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
+    arguments.allow_tool(Tool::SearchGet)?;
+    let index = arguments.required_string("index")?;
+    let body = arguments.string("body")?;
+    if body.is_some_and(|body| body.len() > MAX_SQL_BYTES) {
+        return Err(ToolError::invalid("body is longer than 1 MiB"));
+    }
+    let answer = call
+        .opener
+        .search(index, body)
+        .ok_or_else(|| ToolError::new("not_supported", "This server keeps no search indices."))?
+        .map_err(|refusal| match refusal {
+            OpenRefusal::Failed(message) => ToolError::new("search_error", format!("{message}. Nothing was read.")),
+            other => sparql_failure(other),
+        })?;
+    search_success(&answer)
+}
+
+fn search_success(answer: &str) -> Result<ToolSuccess, ToolError> {
+    let malformed = || ToolError::new("search_error", "The search answer was not a JSON object. Nothing was read.");
+    let document = eggdb_sql::json::parse_document(answer).map_err(|_| malformed())?;
+    let Json::Object(members) = &document.value else {
+        return Err(malformed());
+    };
+    let mut out = JsonOut::new();
+    out.begin_object();
+    out.key("notice").string(NOTICE);
+    let mut truncated = false;
+    for (name, node) in members {
+        out.key(name);
+        let Json::Object(hit_members) = &node.value else {
+            out.node(node);
+            continue;
+        };
+        if name != "hits" {
+            out.node(node);
+            continue;
+        }
+        out.begin_object();
+        for (hit_name, hit_node) in hit_members {
+            out.key(hit_name);
+            match &hit_node.value {
+                Json::Array(hits) if hit_name == "hits" => {
+                    out.begin_array();
+                    for hit in hits {
+                        if out.len() > results::MAX_RESULT_BYTES {
+                            truncated = true;
+                            break;
+                        }
+                        out.node(hit);
+                    }
+                    out.end_array();
+                }
+                _ => {
+                    out.node(hit_node);
+                }
+            }
+        }
+        out.end_object();
+    }
+    out.key("truncated").boolean(truncated);
+    out.end_object();
+    Ok(ToolSuccess { structured: out.finish(), rows: None, truncated })
 }
 
 /// A query `graph_run` may run: its text, after the confirmation a query that deletes needs.
@@ -2601,6 +2669,7 @@ mod tests {
                 | Tool::GraphGet
                 | Tool::GraphRun
                 | Tool::DocumentGet
+                | Tool::SearchGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2647,6 +2716,7 @@ mod tests {
                 | Tool::GraphGet
                 | Tool::GraphRun
                 | Tool::DocumentGet
+                | Tool::SearchGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2701,6 +2771,7 @@ mod tests {
                 | Tool::GraphGet
                 | Tool::GraphRun
                 | Tool::DocumentGet
+                | Tool::SearchGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2844,6 +2915,7 @@ mod tests {
                 | Tool::GraphGet
                 | Tool::GraphRun
                 | Tool::DocumentGet
+                | Tool::SearchGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),

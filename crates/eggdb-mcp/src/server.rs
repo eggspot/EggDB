@@ -78,6 +78,15 @@ pub trait DatabaseOpener {
         None
     }
 
+    /// Runs one search request body on `index` of the database's search indices, opening the
+    /// database read-only for this call alone, and returns the JSON response a `POST
+    /// /<index>/_search` gets; a refused request is [`OpenRefusal::Failed`] with its reason.
+    /// `None` when this opener keeps no search indices, the default.
+    fn search(&self, index: &str, body: Option<&str>) -> Option<Result<String, OpenRefusal>> {
+        let _ = (index, body);
+        None
+    }
+
     /// Runs one administration task on the database file, opening it for this call alone, and
     /// returns the JSON object `eggdb`'s command of the same name prints with `--format json`.
     /// `None` when this opener cannot administer its file, the default.
