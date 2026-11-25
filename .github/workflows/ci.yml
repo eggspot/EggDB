@@ -2256,6 +2256,9 @@ jobs:
           python3 -I scripts/unicode/generate.py "$RUNNER_TEMP/ucd" "$RUNNER_TEMP/tables.rs"
           rustfmt --edition 2024 "$RUNNER_TEMP/tables.rs"
           diff -u crates/eggdb-text/src/tables.rs "$RUNNER_TEMP/tables.rs"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/ucd/allkeys.txt" "https://www.unicode.org/Public/UCA/16.0.0/allkeys.txt"
+          python3 -I scripts/unicode/generate_collation.py "$RUNNER_TEMP/ucd/allkeys.txt" "$RUNNER_TEMP/ducet.bin"
+          cmp crates/eggdb-text/src/ducet.bin "$RUNNER_TEMP/ducet.bin"
           EGGDB_UNICODE_NORMALIZATION_TEST="$RUNNER_TEMP/ucd/NormalizationTest.txt" cargo test -p eggdb-text
 
   compatibility:
