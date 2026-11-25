@@ -67,6 +67,7 @@ pub struct Options {
     pub(crate) read_only: bool,
     pub(crate) durability: Durability,
     pub(crate) cache_bytes: usize,
+    pub(crate) spill_changes: bool,
     pub(crate) snapshot_memory_bytes: Option<usize>,
     pub(crate) auto_checkpoint_log_bytes: Option<u64>,
     pub(crate) page_store_disk_bytes: Option<u64>,
@@ -133,6 +134,7 @@ impl Options {
             read_only: false,
             durability: Durability::Full,
             cache_bytes: DEFAULT_CACHE_BYTES,
+            spill_changes: true,
             snapshot_memory_bytes: None,
             auto_checkpoint_log_bytes: Some(DEFAULT_AUTO_CHECKPOINT_LOG_BYTES),
             page_store_disk_bytes: None,
@@ -173,14 +175,24 @@ impl Options {
     /// The page cache's memory, in bytes, rounded down to whole pages; 16 MiB by default.
     ///
     /// It is reserved when the database opens and never grows, and the operating system
-    /// gives it real memory only as pages are used. Every page a write transaction changes
-    /// stays in the cache until the commit, so this also bounds the size of one write
-    /// transaction: a larger one fails with [`ErrorKind::CacheFull`]. A large value takes
-    /// about its size in pages, so it also bounds a value: with the default, a value of more
-    /// than about 15.8 MiB fails with [`ErrorKind::TooLarge`]. Less than one page fails the
-    /// open with [`ErrorKind::InvalidOption`].
+    /// gives it real memory only as pages are used. A write transaction that changes more
+    /// pages than it holds moves changed pages to a scratch file beside the database until the
+    /// commit (see [`Options::spill_changes`]); without that, or for an in-memory or encrypted
+    /// database, such a transaction fails with [`ErrorKind::CacheFull`] and a value larger
+    /// than the cache with [`ErrorKind::TooLarge`]. Less than one page fails the open with
+    /// [`ErrorKind::InvalidOption`].
     pub fn cache_bytes(mut self, bytes: usize) -> Self {
         self.cache_bytes = bytes;
+        self
+    }
+
+    /// Lets a write transaction change more pages than the cache holds (D1333): changed pages
+    /// move to `<database>-spill`, a scratch file opened the first time it is needed, emptied
+    /// at each commit or rollback and removed when the database closes. On by default; off,
+    /// such a transaction fails with [`ErrorKind::CacheFull`]. An encrypted database never
+    /// spills, so its pages never reach a file in the clear.
+    pub fn spill_changes(mut self, spill: bool) -> Self {
+        self.spill_changes = spill;
         self
     }
 

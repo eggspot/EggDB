@@ -180,7 +180,7 @@ fn the_page_size_is_chosen_at_creation_and_sets_the_size_limits() {
 #[test]
 fn keys_and_values_over_the_limits_are_refused_and_change_nothing() {
     let file = TempPath::new("limits");
-    let db = Database::open_with(file.path(), Options::new().cache_bytes(64 * 4096)).unwrap();
+    let db = Database::open_with(file.path(), Options::new().cache_bytes(64 * 4096).spill_changes(false)).unwrap();
     assert_eq!((db.max_key_bytes(), db.max_value_bytes()), (512, 1 << 30));
     let over_the_limit = vec![0; db.max_value_bytes() + 1];
     let error = db.put("first", &over_the_limit).unwrap_err();

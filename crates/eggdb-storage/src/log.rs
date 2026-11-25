@@ -345,6 +345,7 @@ pub(crate) struct LogWriter {
     buffer: Vec<u8>,
     runs: Vec<Run>,
     images: Vec<StagedImage>,
+    written_ahead: Vec<LoggedImage>,
     new_segments: Vec<Segment>,
     mark: Option<Mark>,
     records_left: u64,
@@ -363,6 +364,7 @@ impl LogWriter {
             buffer: Vec::new(),
             runs: Vec::new(),
             images: Vec::new(),
+            written_ahead: Vec::new(),
             new_segments: Vec::new(),
             mark: None,
             records_left: 0,
@@ -415,6 +417,81 @@ impl LogWriter {
         &self.images
     }
 
+    /// The page images of this commit already written to the log file by
+    /// [`LogWriter::write_ahead`], read back from there for their in-place writes.
+    pub(crate) fn written_ahead(&self) -> &[LoggedImage] {
+        &self.written_ahead
+    }
+
+    /// How many page images this commit logged, written ahead or still buffered.
+    pub(crate) fn image_count(&self) -> usize {
+        self.images.len() + self.written_ahead.len()
+    }
+
+    pub(crate) fn buffered_bytes(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Writes the whole log blocks buffered so far to `file` and drops them from memory, so a
+    /// commit of many pages holds only a few blocks of log at a time (D1333). Nothing written
+    /// ahead counts until the commit record seals the batch: a crash before it leaves records
+    /// that recovery ignores, as it ignores a commit torn while being written.
+    pub(crate) fn write_ahead<F: File>(&mut self, file: &F) -> Result<(), StorageError> {
+        let Some(last) = self.runs.last().copied() else {
+            return Ok(());
+        };
+        let last_end = last.file_offset + (self.buffer.len() - last.buffer_start) as u64;
+        let aligned_end = last_end - last_end % LOG_BLOCK as u64;
+        if aligned_end <= last.file_offset {
+            return Ok(());
+        }
+        let keep_from = last.buffer_start + (aligned_end - last.file_offset) as usize;
+        for (index, run) in self.runs.iter().enumerate() {
+            let end = self
+                .runs
+                .get(index + 1)
+                .map_or(self.buffer.len(), |next| next.buffer_start)
+                .min(keep_from);
+            if run.buffer_start < end {
+                file.write_all_at(&self.buffer[run.buffer_start..end], run.file_offset)?;
+            }
+        }
+        let written_ahead = &mut self.written_ahead;
+        self.images.retain_mut(|image| {
+            if image.buffer_start < keep_from {
+                written_ahead.push(LoggedImage {
+                    page_id: image.page_id,
+                    file_offset: image.file_offset,
+                });
+                false
+            } else {
+                image.buffer_start -= keep_from;
+                true
+            }
+        });
+        let count = self.runs.len();
+        let mut runs = Vec::with_capacity(count);
+        for (index, run) in self.runs.iter().enumerate() {
+            if index + 1 < count && self.runs[index + 1].buffer_start <= keep_from {
+                continue;
+            }
+            runs.push(if run.buffer_start < keep_from {
+                Run {
+                    file_offset: run.file_offset + (keep_from - run.buffer_start) as u64,
+                    buffer_start: 0,
+                }
+            } else {
+                Run {
+                    file_offset: run.file_offset,
+                    buffer_start: run.buffer_start - keep_from,
+                }
+            });
+        }
+        self.runs = runs;
+        self.buffer.drain(..keep_from);
+        Ok(())
+    }
+
     pub(crate) fn buffer(&self) -> &[u8] {
         &self.buffer
     }
@@ -431,6 +508,7 @@ impl LogWriter {
         self.buffer.clear();
         self.runs.clear();
         self.images.clear();
+        self.written_ahead.clear();
         self.new_segments.clear();
         self.mark = Some(Mark {
             segment: self.segment,
@@ -460,6 +538,7 @@ impl LogWriter {
         self.buffer.clear();
         self.runs.clear();
         self.images.clear();
+        self.written_ahead.clear();
         self.records_left = 0;
     }
 

@@ -308,7 +308,7 @@ fn a_thread_that_holds_the_writer_is_refused_a_second_one_at_once() {
 #[test]
 fn a_transaction_larger_than_the_cache_fails_and_is_rolled_back() {
     let file = TempPath::new("cache-full");
-    let db = Database::open_with(file.path(), Options::new().cache_bytes(16 * 4096)).unwrap();
+    let db = Database::open_with(file.path(), Options::new().cache_bytes(16 * 4096).spill_changes(false)).unwrap();
     db.put("before", "1").unwrap();
     let mut tx = db.begin_write().unwrap();
     let error = (0..10_000u32)
@@ -331,6 +331,31 @@ fn a_transaction_larger_than_the_cache_fails_and_is_rolled_back() {
     db.put("next", "1").unwrap();
     assert_eq!(db.check().unwrap().entries, 2);
     assert_eq!(db.get(key(0)).unwrap(), None);
+}
+
+#[test]
+fn a_transaction_larger_than_the_cache_spills_and_commits() {
+    let file = TempPath::new("cache-spill");
+    let spill = {
+        let mut name = file.path().as_os_str().to_owned();
+        name.push("-spill");
+        std::path::PathBuf::from(name)
+    };
+    let db = Database::open_with(file.path(), Options::new().cache_bytes(16 * 4096)).unwrap();
+    db.write(|tx| {
+        for index in 0..10_000u32 {
+            tx.put(key(index), [index as u8; 200])?;
+        }
+        tx.put("large", vec![7u8; 40 * 4096])
+    })
+    .unwrap();
+    assert_eq!(db.check().unwrap().entries, 10_001);
+    assert_eq!(db.get(key(9_999)).unwrap(), Some(vec![9_999u32 as u8; 200]));
+    assert_eq!(db.get("large").unwrap().unwrap().len(), 40 * 4096);
+    drop(db);
+    assert!(!spill.exists());
+    let db = Database::open_with(file.path(), Options::new().read_only(true)).unwrap();
+    assert_eq!(db.check().unwrap().entries, 10_001);
 }
 
 #[test]

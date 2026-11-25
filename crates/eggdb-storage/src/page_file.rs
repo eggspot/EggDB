@@ -26,6 +26,7 @@ const FREE_LIST_COUNT_AT: usize = PAGE_HEADER_SIZE + 8;
 const FREE_LIST_ENTRIES_AT: usize = PAGE_HEADER_SIZE + 16;
 const NORMAL_UNWRITTEN_PAGES: usize = 1024;
 const NORMAL_UNSYNCED_LOG_BYTES: u64 = 1 << 20;
+const WRITE_AHEAD_BYTES: usize = 4 << 20;
 pub(crate) const NO_STAMP: u64 = 0;
 
 /// How [`PageFile::create`] sets up a new file.
@@ -823,6 +824,9 @@ impl<F: File> PageFile<F> {
         self.check_page_in_use(page_id)?;
         self.check_length(page)?;
         let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
+        if log.buffered_bytes() >= WRITE_AHEAD_BYTES {
+            log.write_ahead(&self.file)?;
+        }
         log.reserve(8 + page.len(), &mut self.page_count)?;
         let lsn = log.lsn();
         let header = PageHeader { lsn, ..*header };
@@ -919,11 +923,14 @@ impl<F: File> PageFile<F> {
             let unlogged_pages = grown_pages.saturating_sub(segment_pages);
             self.file.set_size(wanted)?;
             self.file_bytes = wanted;
-            if unlogged_pages > log.images().len() as u64 {
+            if unlogged_pages > log.image_count() as u64 {
                 self.file.sync_data()?;
             }
         }
         log.write(&self.file)?;
+        for image in log.written_ahead() {
+            self.unwritten.insert(image.page_id, image.file_offset);
+        }
         match self.durability {
             Durability::Full => {
                 let lsn = log.lsn();
@@ -931,7 +938,10 @@ impl<F: File> PageFile<F> {
                 self.drain_unwritten()?;
                 self.write_logged_pages_in_place()
             }
-            Durability::Off => self.write_logged_pages_in_place(),
+            Durability::Off => {
+                self.drain_unwritten()?;
+                self.write_logged_pages_in_place()
+            }
             Durability::Normal => {
                 let waiting = self.unwritten.len() + log.images().len();
                 if waiting > NORMAL_UNWRITTEN_PAGES

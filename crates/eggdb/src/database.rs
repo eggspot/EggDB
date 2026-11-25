@@ -499,6 +499,15 @@ impl Database {
             cache.lock_in_memory().map_err(Error::storage)?;
         }
         cache.set_value_compression(options.value_compression);
+        if options.spill_changes && !options.read_only && path != Path::new(MEMORY_NAME) {
+            let spill = spill_path(path);
+            cache.set_spill_opener(Box::new(move || {
+                OsFileSystem::new()
+                    .open(&spill, OpenMode::Create)
+                    .map(|file| Box::new(file) as Box<dyn eggdb_platform::File>)
+                    .map_err(Into::into)
+            }));
+        }
         let clock = options.clock.clock();
         let store = Store::new(cache, Arc::clone(&clock));
         let features = store.superblock().map_err(Error::storage)?.features;
@@ -1496,6 +1505,12 @@ fn writer_cache(path: &Path) -> PathBuf {
     PathBuf::from(named)
 }
 
+fn spill_path(path: &Path) -> PathBuf {
+    let mut name = OsString::from(path.as_os_str());
+    name.push("-spill");
+    PathBuf::from(name)
+}
+
 fn follower_cache(path: &Path, side: u8) -> PathBuf {
     let mut named = path.as_os_str().to_owned();
     named.push(if side == 0 { ".page-cache-a" } else { ".page-cache-b" });
@@ -1523,4 +1538,12 @@ fn is_kind<T>(
     kind: eggdb_platform::ErrorKind,
 ) -> bool {
     matches!(result, Err(StorageError::Io(error)) if error.kind() == kind)
+}
+
+impl Drop for Database {
+    fn drop(&mut self) {
+        if !self.read_only && self.path != Path::new(MEMORY_NAME) {
+            let _ = std::fs::remove_file(spill_path(&self.path));
+        }
+    }
 }

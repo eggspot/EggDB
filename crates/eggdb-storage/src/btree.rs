@@ -180,7 +180,7 @@ impl BTree {
         }
         let pages = overflow::pages_for(value_bytes as u64, page_size) + 1;
         let frames = cache.frame_count();
-        if pages > frames as u64 {
+        if pages > frames as u64 && !cache.can_spill() {
             return Err(StorageError::ValueExceedsCache {
                 bytes: value_bytes,
                 pages,

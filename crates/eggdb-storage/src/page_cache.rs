@@ -7,6 +7,7 @@ use crate::log::{Durability, LogStats};
 use crate::page_file::{NO_STAMP, PageFile, PageUses};
 use crate::page_set::PageSet;
 use crate::page_table::PageTable;
+use crate::spill::{Spill, SpillOpener, SpilledPage};
 use eggdb_platform_core::{ErrorKind, File};
 #[cfg(feature = "std")]
 use eggdb_platform::Memory;
@@ -188,9 +189,29 @@ pub struct PageCache<F: File> {
     new_chains: RefCell<BTreeMap<u64, Box<[u8]>>>,
     value_compression: Cell<crate::compression::ValueCompression>,
     compressed_written: Cell<u64>,
+    spill: RefCell<Spill>,
 }
 
 impl<F: File> PageCache<F> {
+    /// Lets a transaction change more pages than the cache holds (D1333): when every frame
+    /// holds a changed page, one is written to a scratch file that `opener` opens the first
+    /// time, and read back when it is needed again or the transaction commits. Without an
+    /// opener such a transaction fails with [`StorageError::CacheFull`], as it does for an
+    /// encrypted file, whose pages never leave memory in the clear.
+    pub fn set_spill_opener(&mut self, opener: SpillOpener) {
+        self.spill.get_mut().set_opener(opener);
+    }
+
+    /// Whether changed pages can move to a scratch file when the cache is full.
+    pub fn can_spill(&self) -> bool {
+        self.page_cipher().is_none() && self.spill.borrow().can_spill()
+    }
+
+    /// How many changed pages of the open transaction wait in the scratch file.
+    pub fn spilled_pages(&self) -> usize {
+        self.spill.borrow().pages.len()
+    }
+
     /// Sets whether large values written from now on are compressed (see
     /// [`ValueCompression`](crate::ValueCompression)). Values already written keep their form.
     pub fn set_value_compression(&self, compression: crate::compression::ValueCompression) {
@@ -281,6 +302,7 @@ impl<F: File> PageCache<F> {
             new_chains: RefCell::new(BTreeMap::new()),
             value_compression: Cell::new(crate::compression::ValueCompression::Off),
             compressed_written: Cell::new(0),
+            spill: RefCell::new(Spill::default()),
         })
     }
 
@@ -391,16 +413,17 @@ impl<F: File> PageCache<F> {
 
     pub(crate) fn write_keeping_check(&self, page_id: u64) -> Result<PageMut<'_>, StorageError> {
         self.file.borrow().check_writable()?;
-        let (frame, first_change) = match self.table.get(page_id) {
+        let frame = match self.table.get(page_id) {
             Some(frame) if self.is_dirty(frame as usize) => {
                 self.hit(frame as usize);
-                (frame as usize, false)
+                frame as usize
             }
             _ => {
                 self.file.borrow().check_page_writable(page_id)?;
-                (self.locate(page_id)?, true)
+                self.locate(page_id)?
             }
         };
+        let first_change = !self.is_dirty(frame);
         let bytes = self
             .frames
             .write(frame)
@@ -443,8 +466,14 @@ impl<F: File> PageCache<F> {
             return Err(StorageError::PageBorrowed { page: page_id });
         }
         self.file.borrow_mut().free(page_id)?;
-        let kept = match cached {
-            Some(frame) if self.states[frame].get() & ALLOCATED != 0 => Ok(()),
+        let spilled = self
+            .spill
+            .try_borrow_mut()
+            .map_err(|_| StorageError::PageBorrowed { page: page_id })?
+            .forget(page_id);
+        let kept = match (cached, spilled) {
+            (Some(frame), _) if self.states[frame].get() & ALLOCATED != 0 => Ok(()),
+            (None, Some(spilled)) if spilled.state & ALLOCATED != 0 => Ok(()),
             _ => self.keep_freed_page(page_id, cached),
         };
         if let Some(frame) = cached {
@@ -483,8 +512,9 @@ impl<F: File> PageCache<F> {
         );
         order.sort_unstable_by_key(|&frame| (self.pages[frame].get(), frame));
         order.dedup();
+        let spilled = self.spill.get_mut().listed();
         let compressed = self.compressed_written.get();
-        let committed = self.write_and_commit(&order, stamp, |superblock| {
+        let committed = self.write_and_commit(&order, &spilled, stamp, |superblock| {
             update(superblock);
             superblock.features.incompatible |= compressed;
         });
@@ -494,6 +524,9 @@ impl<F: File> PageCache<F> {
         if committed.is_ok() {
             self.images.get_mut().commit();
             self.new_chains.get_mut().clear();
+            self.spill.get_mut().clear();
+            self.pages_written
+                .set(self.pages_written.get() + spilled.len() as u64);
         }
         if committed.is_ok() && self.file.get_mut().has_failed() {
             self.drop_every_page();
@@ -518,6 +551,7 @@ impl<F: File> PageCache<F> {
     /// commit.
     pub fn rollback(&mut self) -> Result<(), StorageError> {
         self.new_chains.get_mut().clear();
+        self.spill.get_mut().clear();
         self.compressed_written.set(0);
         self.drop_changes();
         self.images.get_mut().discard_pending();
@@ -562,9 +596,15 @@ impl<F: File> PageCache<F> {
     }
 
     pub(crate) fn allocated_in_this_transaction(&self, page_id: u64) -> bool {
-        self.table
-            .get(page_id)
-            .is_some_and(|frame| self.states[frame as usize].get() & ALLOCATED != 0)
+        match self.table.get(page_id) {
+            Some(frame) => self.states[frame as usize].get() & ALLOCATED != 0,
+            None => self
+                .spill
+                .borrow()
+                .pages
+                .get(&page_id)
+                .is_some_and(|spilled| spilled.state & ALLOCATED != 0),
+        }
     }
 
     pub(crate) fn record_new_chain(&self, first_page: u64, key: &[u8]) {
@@ -683,6 +723,17 @@ impl<F: File> PageCache<F> {
                 self.keep_committed_image(images, self.pages[frame].get())?;
             }
         }
+        let spilled: Vec<u64> = self
+            .spill
+            .borrow()
+            .pages
+            .iter()
+            .filter(|(_, spilled)| spilled.state & ALLOCATED == 0)
+            .map(|(&page_id, _)| page_id)
+            .collect();
+        for page_id in spilled {
+            self.keep_committed_image(images, page_id)?;
+        }
         let file = self.file.borrow();
         for page_id in file.freed_committed_pages() {
             self.keep_committed_image(images, page_id)?;
@@ -716,6 +767,7 @@ impl<F: File> PageCache<F> {
         self.dirty_frames.get_mut().clear();
         self.images.get_mut().discard_all();
         self.new_chains.get_mut().clear();
+        self.spill.get_mut().clear();
     }
 
     fn drop_changes(&mut self) {
@@ -732,22 +784,24 @@ impl<F: File> PageCache<F> {
     fn write_and_commit(
         &mut self,
         order: &[usize],
+        spilled: &[(u64, SpilledPage)],
         stamp: u64,
         update: impl FnOnce(&mut Superblock),
     ) -> Result<(), StorageError> {
-        self.check_frames_writable(order)?;
+        self.check_frames_writable(order, spilled)?;
         let prepared = self
             .file
             .get_mut()
-            .prepare_commit(stamp, order.len(), update)?;
-        if let Err(error) = self.log_frames(order) {
+            .prepare_commit(stamp, order.len() + spilled.len(), update)?;
+        let logged = self.log_frames(order).and_then(|()| self.log_spilled(spilled));
+        if let Err(error) = logged {
             self.file.get_mut().abort_commit();
             return Err(error);
         }
         self.file.get_mut().finish_commit(prepared)
     }
 
-    fn check_frames_writable(&self, order: &[usize]) -> Result<(), StorageError> {
+    fn check_frames_writable(&self, order: &[usize], spilled: &[(u64, SpilledPage)]) -> Result<(), StorageError> {
         let file = self.file.borrow();
         for &frame in order {
             let page_id = self.pages[frame].get();
@@ -755,6 +809,26 @@ impl<F: File> PageCache<F> {
                 return Err(StorageError::PageBorrowed { page: page_id });
             }
             file.check_page_writable(page_id)?;
+        }
+        for &(page_id, _) in spilled {
+            file.check_page_writable(page_id)?;
+        }
+        Ok(())
+    }
+
+    fn log_spilled(&mut self, spilled: &[(u64, SpilledPage)]) -> Result<(), StorageError> {
+        if spilled.is_empty() {
+            return Ok(());
+        }
+        let mut page = Vec::new();
+        page.try_reserve_exact(self.page_size().bytes())
+            .map_err(|_| StorageError::Io(eggdb_platform_core::Error::new(ErrorKind::OutOfMemory)))?;
+        page.resize(self.page_size().bytes(), 0);
+        let spill = self.spill.get_mut();
+        let file = self.file.get_mut();
+        for &(page_id, kept) in spilled {
+            spill.read(kept, &mut page)?;
+            file.log_page(page_id, &mut page, &kept.header)?;
         }
         Ok(())
     }
@@ -799,6 +873,10 @@ impl<F: File> PageCache<F> {
         }
         file.check_page_in_use(page_id)?;
         drop(file);
+        let spilled = self.spill.borrow().pages.get(&page_id).copied();
+        if let Some(spilled) = spilled {
+            return self.load_spilled(page_id, spilled);
+        }
         let (frame, mut bytes) = self.claim_frame()?;
         self.misses.set(self.misses.get() + 1);
         count_read();
@@ -806,6 +884,53 @@ impl<F: File> PageCache<F> {
         drop(bytes);
         self.install(frame, page_id, header, REFERENCED);
         Ok(frame)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn load_spilled(&self, page_id: u64, spilled: SpilledPage) -> Result<usize, StorageError> {
+        let (frame, mut bytes) = self.claim_frame()?;
+        let mut spill = self
+            .spill
+            .try_borrow_mut()
+            .map_err(|_| StorageError::PageBorrowed { page: page_id })?;
+        spill.read(spilled, &mut bytes)?;
+        spill.forget(page_id);
+        drop(spill);
+        drop(bytes);
+        self.install(frame, page_id, spilled.header, REFERENCED | spilled.state);
+        self.mark_dirty(frame);
+        Ok(frame)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn spill_one(&self) -> Result<Option<usize>, StorageError> {
+        if !self.can_spill() {
+            return Ok(None);
+        }
+        let count = self.frames.count();
+        for _ in 0..count {
+            let frame = self.hand.get();
+            self.hand.set(if frame + 1 == count { 0 } else { frame + 1 });
+            if !self.is_dirty(frame) || self.frames.is_latched(frame) {
+                continue;
+            }
+            let page_id = self.pages[frame].get();
+            let bytes = self
+                .frames
+                .read(frame)
+                .ok_or(StorageError::PageBorrowed { page: page_id })?;
+            let state = self.states[frame].get() & (ALLOCATED | CONTENTS_CHECKED);
+            self.spill
+                .try_borrow_mut()
+                .map_err(|_| StorageError::PageBorrowed { page: page_id })?
+                .keep(page_id, &bytes, self.headers[frame].get(), state)?;
+            drop(bytes);
+            self.discard(frame);
+            return Ok(Some(frame));
+        }
+        Ok(None)
     }
 
     fn claim_frame(&self) -> Result<(usize, FrameMut<'_>), StorageError> {
@@ -829,6 +954,11 @@ impl<F: File> PageCache<F> {
                 self.empty(frame);
                 return Ok((frame, bytes));
             }
+        }
+        if let Some(frame) = self.spill_one()?
+            && let Some(bytes) = self.frames.write(frame)
+        {
+            return Ok((frame, bytes));
         }
         Err(self.cache_full())
     }
@@ -1195,6 +1325,87 @@ mod tests {
         let page = cache.read(page_id).unwrap();
         assert!(page.iter().all(|&byte| byte == page[0]));
         page[0]
+    }
+
+    fn spilling(fs: &SimFileSystem, frames: usize) -> PageCache<SimFile> {
+        let mut cache = create(fs, frames);
+        let scratch = fs.clone();
+        cache.set_spill_opener(Box::new(move || {
+            scratch
+                .open(Path::new("db-spill"), OpenMode::Create)
+                .map(|file| Box::new(file) as Box<dyn File>)
+                .map_err(Into::into)
+        }));
+        cache
+    }
+
+    #[test]
+    fn a_transaction_larger_than_the_cache_spills_and_commits() {
+        let fs = SimFileSystem::new();
+        let mut cache = spilling(&fs, 4);
+        let pages: Vec<u64> = (0..12).map(|fill| allocate_filled(&cache, fill as u8)).collect();
+        assert!(cache.spilled_pages() > 0);
+        for (fill, &page) in pages.iter().enumerate() {
+            assert_eq!(fill_of(&cache, page), fill as u8);
+        }
+        cache.write(pages[0]).unwrap().fill(99);
+        cache.commit(|_| {}).unwrap();
+        assert_eq!(cache.spilled_pages(), 0);
+        drop(cache);
+        let cache = open(&fs, Access::ReadOnly, 4);
+        assert_eq!(fill_of(&cache, pages[0]), 99);
+        for (fill, &page) in pages.iter().enumerate().skip(1) {
+            assert_eq!(fill_of(&cache, page), fill as u8);
+        }
+    }
+
+    #[test]
+    fn a_rollback_drops_spilled_pages() {
+        let fs = SimFileSystem::new();
+        let committed = committed_pages(&fs, 4, 4);
+        let file = PageFile::open(&fs, Path::new(DB), Access::ReadWrite).unwrap();
+        let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(4)).unwrap();
+        let scratch = fs.clone();
+        cache.set_spill_opener(Box::new(move || {
+            scratch
+                .open(Path::new("db-spill"), OpenMode::Create)
+                .map(|file| Box::new(file) as Box<dyn File>)
+                .map_err(Into::into)
+        }));
+        for &page in &committed {
+            cache.write(page).unwrap().fill(200);
+        }
+        for _ in 0..8 {
+            allocate_filled(&cache, 7);
+        }
+        assert!(cache.spilled_pages() > 0);
+        cache.rollback().unwrap();
+        assert_eq!(cache.spilled_pages(), 0);
+        for (fill, &page) in committed.iter().enumerate() {
+            assert_eq!(fill_of(&cache, page), fill as u8);
+        }
+    }
+
+    #[test]
+    fn a_commit_larger_than_the_log_buffer_writes_ahead_and_survives_a_reopen() {
+        let fs = SimFileSystem::new();
+        let mut cache = spilling(&fs, 8);
+        let pages: Vec<u64> = (0..1_500).map(|index| allocate_filled(&cache, (index % 251) as u8)).collect();
+        cache.commit(|_| {}).unwrap();
+        drop(cache);
+        let cache = open(&fs, Access::ReadOnly, 8);
+        for (index, &page) in pages.iter().enumerate() {
+            assert_eq!(fill_of(&cache, page), (index % 251) as u8);
+        }
+    }
+
+    #[test]
+    fn without_an_opener_a_full_cache_still_refuses() {
+        let fs = SimFileSystem::new();
+        let cache = create(&fs, 2);
+        allocate_filled(&cache, 1);
+        allocate_filled(&cache, 2);
+        assert!(matches!(cache.allocate(leaf()), Err(StorageError::CacheFull { .. })));
     }
 
     #[test]

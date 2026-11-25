@@ -1357,3 +1357,4 @@ its full title with its status.
 - [D1330](decisions/D1330.md) Code-only batch 985 (M4): PostgreSQL's bit strings
 - [D1331](decisions/D1331.md) Code-only batch 986 (M4): PostgreSQL's geometric types
 - [D1332](decisions/D1332.md) Code-only batch 987 (M4): PostgreSQL's multiranges
+- [D1333](decisions/D1333.md) Code-only batch 988 (M2): changed pages spill before the commit, and a commit writes its log ahead

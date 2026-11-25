@@ -386,6 +386,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   mode, 2026-11-13, D1119); the bake-off is left to the build-and-fix pass.
 - Dirty pages spill before commit, so a write needn't fit the cache (D86, D167). Check: a 1 GiB
   `put_reader` peaks near 32 MiB, the 16 MiB default cache plus snapshots (`eggdb/src/options.rs`).
+  **Code written, unbuilt** (code-only mode, 2026-11-25, D1333): changed pages spill to `<database>-spill`, and a
+  commit writes its log ahead in whole blocks; the measurement is left to the build-and-fix pass.
 - A Zstandard-class codec of our own (RFC 8878) for cold data (D171). Check: RFC test vectors and
   a fuzzer. **Code written, unbuilt** (code-only mode, 2026-11-10, D357): decoder, a simple encoder,
   overflow layout 3; Huffman-coded literals in the encoder: **code written, unbuilt** (code-only mode,
