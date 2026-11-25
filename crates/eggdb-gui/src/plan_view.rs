@@ -743,7 +743,25 @@ impl Plan {
             return String::new();
         };
         let mut parts = Vec::new();
-        if self.analyze {
+        let looped = node.loops.filter(|loops| *loops > 1.0);
+        if self.analyze && let Some(loops) = looped {
+            if let Some((_, per_loop)) = node.actual_time_ms {
+                parts.push(milliseconds_text(per_loop));
+            }
+            if let Some(rows) = node.actual_rows {
+                parts.push(format!("rows {}", rows_count(rows)));
+            }
+            parts.push(format!("loops {}", rows_count(loops)));
+            if let Some(pages) = node.buffers {
+                parts.push(format!(
+                    "buffers {}",
+                    thousands(usize::try_from(pages).unwrap_or(usize::MAX))
+                ));
+            }
+            if let Some(total) = self.own_time_ms(index) {
+                parts.push(format!("{} total", milliseconds_text(total)));
+            }
+        } else if self.analyze {
             if let Some(time) = self.own_time_ms(index) {
                 parts.push(milliseconds_text(time));
             }
@@ -755,6 +773,9 @@ impl Plan {
                     "buffers {}",
                     thousands(usize::try_from(pages).unwrap_or(usize::MAX))
                 ));
+            }
+            if index > 0 && node.actual_time_ms.is_none() && !node.never_executed {
+                parts.push("not measured".to_owned());
             }
         } else {
             if let Some((startup, total)) = node.cost {
@@ -1907,6 +1928,7 @@ Execution Time: 10.400 ms";
         let own_root = plan.own_time_ms(0).unwrap();
         assert!((own_root - 0.8).abs() < 1e-9, "{own_root}");
         assert_eq!(plan.facts(1), "6.2 ms · rows 1,204 · buffers 20");
+        assert_eq!(plan.facts(2), "0.00 ms · rows 1 · loops 1,000 · 3.0 ms total");
         assert_eq!(plan.misestimate(1), Some((10.0, 1204.0)));
         let pieces = plan.second_row(1);
         assert_eq!(pieces[1], (" · 62 %".to_owned(), Ink::Error));

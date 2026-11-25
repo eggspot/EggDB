@@ -1174,7 +1174,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   reduced-motion change notifications, the browser's `prefers-reduced-motion`, Wayland's settings
   portal and `View > Reduce motion` (D311).
 - Showing in the plan view the join-step times and Oracle's measured plans (`DISPLAY_CURSOR`)
-  once M6c's `EXPLAIN` builds them, and the plan tooltip in the accessibility tree (D277, D312).
+  once M6c's `EXPLAIN` builds them, and the plan tooltip in the accessibility tree (D277, D312). The join steps' loops and totals, and unmeasured steps: **code written, unbuilt** (code-only mode,
+  2026-11-25, D1372). Left: Oracle's `DISPLAY_CURSOR` and the tooltip's role.
 - Connecting over the MySQL and TDS protocols, recent connections in the sidebar, the password
   field's `Show` button, and `verify-ca`/`verify-full` certificate checks in the GUI (D274);
   RESP connections are built (D329).
