@@ -761,7 +761,21 @@ impl<'t> Parser<'t> {
             "timestamp" => self.oracle_timestamp(start)?,
             "json" => SqlType::Jsonb,
             "interval" => self.oracle_interval_type(start)?,
-            "long" | "bfile" | "rowid" | "urowid" | "xmltype" | "vector" | "sdo_geometry" => {
+            "long" => {
+                self.expect_word("raw")?;
+                SqlType::Bytea
+            }
+            "rowid" => SqlType::Text,
+            "urowid" | "xmltype" => {
+                self.skip_type_arguments()?;
+                SqlType::Text
+            }
+            "vector" => {
+                self.skip_type_arguments()?;
+                SqlType::Defined(crate::types::DefinedType::VECTOR)
+            }
+            "sdo_geometry" => SqlType::Defined(crate::types::DefinedType::GEOMETRY),
+            "bfile" => {
                 return Err(SqlError::not_supported(format!(
                     "type {} is not supported yet",
                     word.to_ascii_uppercase()
@@ -777,6 +791,23 @@ impl<'t> Parser<'t> {
             }
         };
         Ok(sql_type)
+    }
+
+    fn skip_type_arguments(&mut self) -> SqlResult<()> {
+        if !self.take(&TokenKind::LeftParen) {
+            return Ok(());
+        }
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.peek_kind() {
+                TokenKind::End | TokenKind::Semicolon => return Err(self.unexpected()),
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => depth -= 1,
+                _ => {}
+            }
+            self.at += 1;
+        }
+        Ok(())
     }
 
     fn oracle_type_argument(&mut self) -> SqlResult<i64> {

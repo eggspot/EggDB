@@ -1243,3 +1243,23 @@ fn dbms_metadata_get_ddl_writes_tables_and_views_in_oracle_form() {
     assert!(function.contains("RETURN n * 2"), "{function}");
     failure(&mut session, "SELECT DBMS_METADATA.GET_DDL('PROCEDURE', 'DOUBLE_IT') FROM dual");
 }
+
+#[test]
+fn rowid_xmltype_vector_spatial_and_long_raw_columns_take_their_values() {
+    let store = MemoryStore::default();
+    let mut session = Session::with_dialect(&store, Dialect::Oracle);
+    values(
+        &mut session,
+        "CREATE TABLE things (id NUMBER PRIMARY KEY, kept UROWID(4000), doc XMLTYPE, embedding VECTOR(3, FLOAT32), shape SDO_GEOMETRY, raw LONG RAW)",
+    );
+    values(
+        &mut session,
+        "INSERT INTO things (id, kept, doc, raw) VALUES (1, 'AAAR3sAAEAAAACXAAA', '<a>1</a>', HEXTORAW('00FF'))",
+    );
+    assert_eq!(
+        values(&mut session, "SELECT kept, doc FROM things"),
+        vec![vec![text("AAAR3sAAEAAAACXAAA"), text("<a>1</a>")]]
+    );
+    let refused = failure(&mut session, "CREATE TABLE files (f BFILE)");
+    assert!(refused.message().contains("BFILE"), "{refused}");
+}

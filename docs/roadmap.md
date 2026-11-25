@@ -1611,7 +1611,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   (code-only mode, 2026-11-12, D604); `KEEP` on `LISTAGG` is not in Oracle's reference (D604). Window functions, `RATIO_TO_REPORT`, `KEEP` and
   `REGEXP_*` are built (D332). Check: Oracle-dialect tests of each.
 - Oracle's types: `TIMESTAMP WITH TIME ZONE` keeping its offset, `BFILE`, `UROWID`, `XMLType`,
-  object types and schema-level collection types (D19).
+  object types and schema-level collection types (D19). `ROWID`, `UROWID(n)` and `XMLTYPE` as text, `VECTOR(...)` as a vector, `SDO_GEOMETRY` as a geometry
+  and `LONG RAW` as bytes: **code written, unbuilt** (code-only mode, 2026-11-25, D1373). Left: `TIMESTAMP WITH TIME
+  ZONE` keeping its offset, `BFILE`, object types and collection types.
 - `UTL_RAW`, `DBMS_LOB` and the other Oracle-supplied packages (sql.md). `UTL_RAW`'s and `DBMS_LOB`'s
   functions: **code written, unbuilt** (code-only mode, 2026-11-11, D434); `DBMS_LOB`'s locator procedures:
   **code written, unbuilt** (code-only mode, 2026-11-12, D658); `DBMS_RANDOM`, `DBMS_ASSERT` and `UTL_MATCH`:

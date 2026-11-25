@@ -1397,3 +1397,4 @@ its full title with its status.
 - [D1370](decisions/D1370.md) Code-only batch 1025 (M6e): the full-value view reads a RESP aggregate's elements
 - [D1371](decisions/D1371.md) Code-only batch 1026 (M6e): the client follows the system's light, dark and high-contrast theme
 - [D1372](decisions/D1372.md) Code-only batch 1027 (M6e): the plan view prints a looped step's loops and total
+- [D1373](decisions/D1373.md) Code-only batch 1028 (M10): Oracle's ROWID, UROWID, XMLTYPE, VECTOR, SDO_GEOMETRY and LONG RAW columns
