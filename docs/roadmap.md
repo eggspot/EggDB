@@ -1201,7 +1201,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - The client's speed measured like the engine's: opening a database, running a query and
   scrolling a large result (D15).
 - Small screens, remembered window size and position, and the OS's theme (D15, D256). Remembered size: **code written,
-  unbuilt** (code-only mode, 2026-11-12, D570). Left: position, small screens and the OS's theme.
+  unbuilt** (code-only mode, 2026-11-12, D570). The OS's light, dark and high-contrast theme on X11, Windows and
+  macOS: **code written, unbuilt** (code-only mode, 2026-11-25, D1371). Left: position and small screens.
 - The `eggdb gui` command in the command model (D191). **Code written, unbuilt** (code-only mode, 2026-11-12, D571).
 - The interactive ER view, with diagrams across schemas, views, indexes and checks (D237).
 - An admin web console served by the server (D42).

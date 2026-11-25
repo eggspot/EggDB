@@ -819,6 +819,60 @@ pub fn xsettings_integer(data: &[u8], name: &str) -> Option<i32> {
     None
 }
 
+/// The string value of the setting `name` in an XSETTINGS manager's `_XSETTINGS_SETTINGS`
+/// property, `None` when the data lacks it, holds it as another type or is malformed.
+pub fn xsettings_string(data: &[u8], name: &str) -> Option<String> {
+    let mut reader = XsettingsReader {
+        data,
+        at: 0,
+        big_endian: *data.first()? == 1,
+    };
+    reader.take(4)?;
+    reader.u32()?;
+    let settings = reader.u32()?;
+    for _ in 0..settings {
+        let kind = *reader.take(2)?.first()?;
+        let length = usize::from(reader.u16()?);
+        let found = reader.padded(length)? == name.as_bytes();
+        reader.u32()?;
+        match kind {
+            XSETTING_INTEGER => {
+                reader.u32()?;
+            }
+            XSETTING_STRING => {
+                let length = usize::try_from(reader.u32()?).ok()?;
+                let value = reader.padded(length)?;
+                if found {
+                    return String::from_utf8(value.to_vec()).ok();
+                }
+            }
+            XSETTING_COLOR => {
+                reader.take(8)?;
+            }
+            _ => return None,
+        }
+        if found {
+            return None;
+        }
+    }
+    None
+}
+
+/// The look an XSETTINGS manager's settings ask for: high contrast or dark when `Net/ThemeName`
+/// names such a theme (`HighContrast`, `Adwaita-dark`), dark when GTK's
+/// `Gtk/ApplicationPreferDarkTheme` is 1, light for any other theme name; `None` without either.
+pub fn xsettings_theme(data: &[u8]) -> Option<super::SystemTheme> {
+    let name = xsettings_string(data, "Net/ThemeName").map(|name| name.to_ascii_lowercase());
+    if name.as_deref().is_some_and(|name| name.contains("highcontrast") || name.contains("high-contrast")) {
+        return Some(super::SystemTheme::HighContrast);
+    }
+    let prefers_dark = xsettings_integer(data, "Gtk/ApplicationPreferDarkTheme") == Some(1);
+    if prefers_dark || name.as_deref().is_some_and(|name| name.ends_with("-dark") || name.ends_with(":dark")) {
+        return Some(super::SystemTheme::Dark);
+    }
+    name.map(|_| super::SystemTheme::Light)
+}
+
 /// Whether an XSETTINGS manager's settings ask to reduce motion: `Gtk/EnableAnimations` is
 /// present and 0.
 pub fn xsettings_reduce_motion(data: &[u8]) -> bool {
@@ -1731,6 +1785,32 @@ mod tests {
             data.extend_from_slice(value);
         }
         data
+    }
+
+    fn string_value(text: &str) -> Vec<u8> {
+        let mut value = (text.len() as u32).to_le_bytes().to_vec();
+        value.extend_from_slice(text.as_bytes());
+        value.resize(value.len() + (4 - text.len() % 4) % 4, 0);
+        value
+    }
+
+    #[test]
+    fn xsettings_theme_names_tell_dark_light_and_high_contrast() {
+        let dark = xsettings(false, &[(1, "Net/ThemeName", &string_value("Adwaita-dark"))]);
+        assert_eq!(xsettings_theme(&dark), Some(crate::window::SystemTheme::Dark));
+        let light = xsettings(false, &[(1, "Net/ThemeName", &string_value("Adwaita"))]);
+        assert_eq!(xsettings_theme(&light), Some(crate::window::SystemTheme::Light));
+        let contrast = xsettings(false, &[(1, "Net/ThemeName", &string_value("HighContrast"))]);
+        assert_eq!(xsettings_theme(&contrast), Some(crate::window::SystemTheme::HighContrast));
+        let preferred = xsettings(
+            false,
+            &[
+                (1, "Net/ThemeName", &string_value("Yaru")),
+                (0, "Gtk/ApplicationPreferDarkTheme", &1u32.to_le_bytes()),
+            ],
+        );
+        assert_eq!(xsettings_theme(&preferred), Some(crate::window::SystemTheme::Dark));
+        assert_eq!(xsettings_theme(&xsettings(false, &[])), None);
     }
 
     #[test]

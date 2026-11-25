@@ -352,6 +352,49 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn RegGetValueW(
+        key: Handle,
+        sub_key: *const u16,
+        value: *const u16,
+        flags: u32,
+        kind: *mut u32,
+        data: *mut u32,
+        size: *mut u32,
+    ) -> i32;
+}
+
+const HKEY_CURRENT_USER: usize = 0x8000_0001;
+const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
+const PERSONALIZE_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn apps_use_light_theme() -> Option<bool> {
+    let key = wide(PERSONALIZE_KEY);
+    let value = wide("AppsUseLightTheme");
+    let mut data: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: both names are NUL-terminated UTF-16 strings alive for the call, the root key is
+    // the predefined `HKEY_CURRENT_USER` handle, and `data` and `size` describe one live `u32`
+    // that `RRF_RT_REG_DWORD` writes.
+    let status = unsafe {
+        RegGetValueW(
+            std::ptr::without_provenance_mut(HKEY_CURRENT_USER),
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &raw mut data,
+            &raw mut size,
+        )
+    };
+    (status == 0).then_some(data != 0)
+}
+
 #[link(name = "gdi32")]
 unsafe extern "system" {
     fn StretchDIBits(
@@ -1116,6 +1159,10 @@ impl Window for Win32Window {
         // SAFETY: `window` is ours; this sends `WM_PAINT` now, which draws the stored frame.
         unsafe { UpdateWindow(self.window) };
         Ok(())
+    }
+
+    fn system_theme(&mut self) -> Option<super::SystemTheme> {
+        apps_use_light_theme().map(|light| if light { super::SystemTheme::Light } else { super::SystemTheme::Dark })
     }
 
     fn reduced_motion(&mut self) -> bool {

@@ -1091,6 +1091,42 @@ impl WindowState {
         reduce != NO
     }
 
+    fn system_theme(&self) -> Option<super::SystemTheme> {
+        let runtime = &self.runtime;
+        if let Ok(workspace_class) = runtime.class(c"NSWorkspace") {
+            // SAFETY: `sharedWorkspace` is a class method returning the shared workspace.
+            let workspace = unsafe { (runtime.send_id)(workspace_class, runtime.selector(c"sharedWorkspace")) };
+            // SAFETY: `workspace` is the shared `NSWorkspace`, and
+            // `accessibilityDisplayShouldIncreaseContrast` takes no arguments and returns a `BOOL`.
+            let contrast = !workspace.is_null()
+                && unsafe {
+                    (runtime.send_bool)(workspace, runtime.selector(c"accessibilityDisplayShouldIncreaseContrast"))
+                } != NO;
+            if contrast {
+                return Some(super::SystemTheme::HighContrast);
+            }
+        }
+        let class = runtime.class(c"NSApplication").ok()?;
+        // SAFETY: `sharedApplication` is a class method returning the shared application.
+        let application = unsafe { (runtime.send_id)(class, runtime.selector(c"sharedApplication")) };
+        if application.is_null() {
+            return None;
+        }
+        // SAFETY: `application` is the shared `NSApplication`; `effectiveAppearance` takes no
+        // arguments and returns an `NSAppearance`.
+        let appearance = unsafe { (runtime.send_id)(application, runtime.selector(c"effectiveAppearance")) };
+        if appearance.is_null() {
+            return None;
+        }
+        // SAFETY: `appearance` is a live `NSAppearance`; `name` returns its `NSString` name.
+        let name = unsafe { (runtime.send_id)(appearance, runtime.selector(c"name")) };
+        Some(if runtime.text(name).contains("Dark") {
+            super::SystemTheme::Dark
+        } else {
+            super::SystemTheme::Light
+        })
+    }
+
     fn show_cursor(&self, cursor: super::PointerCursor) {
         let runtime = &self.runtime;
         let Ok(class) = runtime.class(c"NSCursor") else {
@@ -1498,6 +1534,11 @@ impl Window for CocoaWindow {
         let state = &self.state;
         state.runtime.with_pool(|| state.show_cursor(cursor));
         Ok(())
+    }
+
+    fn system_theme(&mut self) -> Option<super::SystemTheme> {
+        let state = &self.state;
+        state.runtime.with_pool(|| state.system_theme())
     }
 
     fn size(&self) -> (u32, u32) {

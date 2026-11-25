@@ -25,7 +25,7 @@ use eggdb_gui::settings::{ClientSettings, SETTINGS_VARIABLE, settings_path};
 use eggdb_gui::workspace::{Screen, Workspace, WorkspaceCommand};
 use eggdb_gui::{BoxFace, Canvas, SystemFaces, Theme, ThemeKind};
 use eggdb_platform::window::{
-    AccessNode, Window, WindowEvent, WindowOptions, has_file_dialog, open_window,
+    AccessNode, SystemTheme, Window, WindowEvent, WindowOptions, has_file_dialog, open_window,
 };
 
 const USAGE: &str = "Usage: eggdb-gui [--window] [--png <file>] [--open <path>] [--no-create] [--read-only] [--no-file-dialog] [--run <sql>] [--explain <sql>] [--theme light|dark|high-contrast] [--layout <layout>] [--reduced-motion] [--scale <n>] [--size <width>x<height>] [--box-text] [--frames <n>]
@@ -39,7 +39,7 @@ Shows EggDB's connect screen.
   --no-file-dialog  lay the card out as on a system without an open-file dialog (with --png)
   --run <sql>       after --open, put <sql> in the editor and run it as Ctrl/Cmd+Enter does (with --png)
   --explain <sql>   after --open and --run, put <sql> in the editor and explain it as Ctrl/Cmd+E does (with --png)
-  --theme <theme>   light (the default), dark or high-contrast
+  --theme <theme>   light, dark or high-contrast; the system's theme without it
   --layout <layout> lay the main window out as eggdb, ssms, pgadmin, dbeaver, datagrip,
                     mysql-workbench, mongodb-compass or redis-insight for this run, without
                     keeping it in the settings
@@ -63,6 +63,7 @@ struct Options {
     png: Option<OsString>,
     window: bool,
     theme: ThemeKind,
+    theme_chosen: bool,
     scale: f32,
     size: (u32, u32),
     box_text: bool,
@@ -88,6 +89,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
         png: None,
         window: false,
         theme: ThemeKind::Light,
+        theme_chosen: false,
         scale: 1.0,
         size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         box_text: false,
@@ -145,6 +147,7 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<Option<Opti
             }
             "--theme" => {
                 let theme = value("a theme")?;
+                options.theme_chosen = true;
                 options.theme = theme.to_str().and_then(ThemeKind::parse).ok_or_else(|| {
                     format!(
                         "--theme {} is not light, dark or high-contrast",
@@ -311,6 +314,19 @@ fn remember_size(logical: (u32, u32)) {
     let _ = settings.save(&path);
 }
 
+/// The theme a window draws: the one `--theme` chose, else the system's
+/// (`docs/ux/localization-and-window.md` section 3), else light.
+fn followed_theme(options: &Options, window: &mut dyn Window) -> ThemeKind {
+    if options.theme_chosen {
+        return options.theme;
+    }
+    match window.system_theme() {
+        Some(SystemTheme::Dark) => ThemeKind::Dark,
+        Some(SystemTheme::HighContrast) => ThemeKind::HighContrast,
+        Some(SystemTheme::Light) | None => options.theme,
+    }
+}
+
 fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
     let (width, height) = if options.frames.is_some() {
         (DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -329,7 +345,7 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?,
     ));
-    let theme = Theme::of(options.theme);
+    let mut theme = Theme::of(followed_theme(options, &mut **window.borrow_mut()));
     let mut workspace = workspace(options, has_file_dialog(), true);
     workspace.set_clipboard(Box::new(SystemClipboard::new(Rc::clone(&window))));
     workspace.start_caret_blink(Instant::now());
@@ -462,6 +478,11 @@ fn run_window(options: &Options, faces: Faces<'_>) -> Result<(), String> {
                 if active {
                     let system_reduced_motion = window.borrow_mut().reduced_motion();
                     workspace.set_reduced_motion(options.reduced_motion || system_reduced_motion);
+                    let followed = Theme::of(followed_theme(options, &mut **window.borrow_mut()));
+                    if followed != theme {
+                        theme = followed;
+                        dirty = true;
+                    }
                 }
                 dirty |= workspace.set_window_active(active, now);
                 continue;

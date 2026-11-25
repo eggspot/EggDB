@@ -431,18 +431,22 @@ impl X11Window {
         Ok(x11::scale_from_resources(resources).unwrap_or(1.0))
     }
 
-    fn read_reduced_motion(&mut self) -> Result<bool, WindowError> {
+    fn read_xsettings(&mut self) -> Result<Option<Vec<u8>>, WindowError> {
         let selection = self.intern(&x11::xsettings_selection(self.screen_number))?;
         let sequence = self.send(&x11::get_selection_owner(selection)?)?;
         let reply = self.reply(sequence)?;
         let owner = x11::parse_selection_owner_reply(&reply)?;
         if owner == 0 {
-            return Ok(false);
+            return Ok(None);
         }
         let settings = self.intern("_XSETTINGS_SETTINGS")?;
         let sequence = self.send(&x11::get_property(owner, settings, XSETTINGS_UNITS)?)?;
         let reply = self.reply(sequence)?;
-        Ok(x11::parse_property_reply(&reply).is_ok_and(x11::xsettings_reduce_motion))
+        Ok(x11::parse_property_reply(&reply).ok().map(<[u8]>::to_vec))
+    }
+
+    fn read_reduced_motion(&mut self) -> Result<bool, WindowError> {
+        Ok(self.read_xsettings()?.is_some_and(|data| x11::xsettings_reduce_motion(&data)))
     }
 
     fn refresh_keyboard(&mut self) -> Result<(), WindowError> {
@@ -1142,6 +1146,10 @@ impl Window for X11Window {
 
     fn reduced_motion(&mut self) -> bool {
         self.read_reduced_motion().unwrap_or(false)
+    }
+
+    fn system_theme(&mut self) -> Option<super::SystemTheme> {
+        self.read_xsettings().ok().flatten().and_then(|data| x11::xsettings_theme(&data))
     }
 
     fn put_clipboard_text(&mut self, text: &str) -> Result<(), WindowError> {

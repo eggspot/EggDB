@@ -665,6 +665,17 @@ impl PointerCursor {
     }
 }
 
+/// The light or dark look the system asks applications for, and its high contrast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemTheme {
+    /// A light look.
+    Light,
+    /// A dark look.
+    Dark,
+    /// High contrast, which wins over light and dark.
+    HighContrast,
+}
+
 pub trait Window: fmt::Debug {
     /// The drawable area in device pixels.
     fn size(&self) -> (u32, u32);
@@ -723,6 +734,11 @@ pub trait Window: fmt::Debug {
     /// `Gtk/EnableAnimations` set to 0. Backends that cannot tell answer `false`.
     fn reduced_motion(&mut self) -> bool {
         false
+    }
+
+    /// The look the system asks for, read now; `None` when this backend cannot tell.
+    fn system_theme(&mut self) -> Option<SystemTheme> {
+        None
     }
 
     /// Shows `cursor` while the pointer is over the window. Backends that cannot change the
