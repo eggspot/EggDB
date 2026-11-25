@@ -33,6 +33,7 @@ pub(super) struct TenantFiles {
     used: Mutex<BTreeMap<String, u64>>,
     tick: AtomicU64,
     refused: Mutex<BTreeSet<String>>,
+    keyring: Option<Result<super::serve_tenant_keys::TenantKeyring, String>>,
 }
 
 impl TenantFiles {
@@ -45,6 +46,44 @@ impl TenantFiles {
             used: Mutex::new(BTreeMap::new()),
             tick: AtomicU64::new(0),
             refused: Mutex::new(refused),
+            keyring: None,
+        }
+    }
+
+    /// Gives each tenant database its own key, kept in a keyring sealed under `server_key`
+    /// (D1366); a keyring that cannot be read leaves every tenant unopened.
+    fn use_keyring(&mut self, server_key: &[u8; 32]) {
+        self.keyring = Some(super::serve_tenant_keys::TenantKeyring::open(&self.root, server_key));
+    }
+
+    /// Tenant `name`'s key: `Ok(None)` without a keyring, an error when the keyring cannot be
+    /// read or holds no key for the tenant.
+    fn key_of(&self, name: &str) -> Result<Option<[u8; 32]>, String> {
+        match &self.keyring {
+            None => Ok(None),
+            Some(Err(error)) => Err(error.clone()),
+            Some(Ok(ring)) => ring
+                .key_of(name)
+                .map(Some)
+                .ok_or_else(|| format!("tenant \"{name}\" has no key in the keyring: its data was shredded")),
+        }
+    }
+
+    /// Makes tenant `name` a new key when there is a keyring.
+    fn new_key(&self, name: &str) -> Result<Option<[u8; 32]>, String> {
+        match &self.keyring {
+            None => Ok(None),
+            Some(Err(error)) => Err(error.clone()),
+            Some(Ok(ring)) => ring.add(name).map(Some),
+        }
+    }
+
+    /// Forgets tenant `name`'s key, when there is a keyring.
+    fn shred(&self, name: &str) -> Result<(), String> {
+        match &self.keyring {
+            Some(Ok(ring)) => ring.shred(name).map(|_| ()),
+            Some(Err(error)) => Err(error.clone()),
+            None => Ok(()),
         }
     }
 
@@ -99,6 +138,13 @@ impl<'d> ServedDirectory<'d> {
             .into_iter()
             .map(|(name, db)| (name, Arc::new(OwnedStore(db))))
             .collect();
+        let server_key = setup.options.encryption_key.as_ref().map(|key| key.0);
+        let tenants = setup.tenants.map(|mut tenants| {
+            if let Some(key) = &server_key {
+                tenants.use_keyring(key);
+            }
+            tenants
+        });
         Self {
             default_name: setup.default_name.to_owned(),
             default: setup.default,
@@ -107,7 +153,14 @@ impl<'d> ServedDirectory<'d> {
             read_only: setup.read_only,
             others: Mutex::new(others),
             listing_version: AtomicU64::new(0),
-            tenants: setup.tenants,
+            tenants,
+        }
+    }
+
+    fn tenant_options(&self, key: Option<[u8; 32]>) -> eggdb::Options {
+        match key {
+            Some(key) => self.options.clone().encryption_key(key),
+            None => self.options.clone(),
         }
     }
 
@@ -193,7 +246,8 @@ impl<'d> ServedDirectory<'d> {
         if !path.is_file() {
             return None;
         }
-        let options = self.options.clone().create_if_missing(false).read_only(self.read_only);
+        let key = tenants.key_of(name).ok()?;
+        let options = self.tenant_options(key).create_if_missing(false).read_only(self.read_only);
         let db = Database::open_with(&path, options).ok()?;
         let store = Arc::new(OwnedStore(db));
         let mut others = self.others();
@@ -282,11 +336,11 @@ impl ServedDatabases for ServedDirectory<'_> {
                 ServedDatabaseError::Failed(format!("cannot create {}: {error}", parent.display()))
             })?;
         }
-        let options = self
-            .options
-            .clone()
-            .create_if_missing(true)
-            .read_only(false);
+        let key = match &self.tenants {
+            Some(tenants) => tenants.new_key(name).map_err(ServedDatabaseError::Failed)?,
+            None => None,
+        };
+        let options = self.tenant_options(key).create_if_missing(true).read_only(false);
         let db = Database::open_with(&path, options).map_err(|error| {
             ServedDatabaseError::Failed(format!("cannot create {}: {error}", path.display()))
         })?;
@@ -334,7 +388,26 @@ impl ServedDatabases for ServedDirectory<'_> {
         copied.map_err(|error| {
             ServedDatabaseError::Failed(format!("cannot copy {template} to {}: {error}", path.display()))
         })?;
-        let options = self.options.clone().create_if_missing(false).read_only(false);
+        let key = match &self.tenants {
+            Some(tenants) if tenants.keyring.is_some() => {
+                let template_key = if template.eq_ignore_ascii_case(&self.default_name) {
+                    self.options.encryption_key.as_ref().map(|key| key.0)
+                } else {
+                    tenants.key_of(template).map_err(ServedDatabaseError::Failed)?
+                };
+                let key = tenants.new_key(name).map_err(ServedDatabaseError::Failed)?;
+                if let Some(key) = key {
+                    Database::open_with(&path, self.tenant_options(template_key).create_if_missing(false).read_only(false))
+                        .and_then(|copy| copy.compact_with_key(key))
+                        .map_err(|error| {
+                            ServedDatabaseError::Failed(format!("cannot seal {} under its own key: {error}", path.display()))
+                        })?;
+                }
+                key
+            }
+            _ => None,
+        };
+        let options = self.tenant_options(key).create_if_missing(false).read_only(false);
         let db = Database::open_with(&path, options).map_err(|error| {
             ServedDatabaseError::Failed(format!("cannot open {}: {error}", path.display()))
         })?;
@@ -372,6 +445,9 @@ impl ServedDatabases for ServedDirectory<'_> {
         self.changed_listing();
         let path = store.0.path().to_path_buf();
         let closed = store.close();
+        if let Some(tenants) = &self.tenants {
+            tenants.shred(&key).map_err(ServedDatabaseError::Failed)?;
+        }
         std::fs::remove_file(&path).map_err(|error| {
             ServedDatabaseError::Failed(format!("cannot remove {}: {error}", path.display()))
         })?;

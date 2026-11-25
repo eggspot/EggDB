@@ -1390,3 +1390,4 @@ its full title with its status.
 - [D1363](decisions/D1363.md) Code-only batch 1018 (M6c): EXPLAIN ANALYZE measures the scan inside a subplan
 - [D1364](decisions/D1364.md) Code-only batch 1019 (M6b): stored roles log in to the RESP listener
 - [D1365](decisions/D1365.md) Code-only batch 1020 (M6b): encrypting a file and rotating its key by compacting it under the new key
+- [D1366](decisions/D1366.md) Code-only batch 1021 (M6b): a key per tenant database, and crypto-shredding

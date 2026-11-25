@@ -955,7 +955,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   key-value store and Transit engine, and AWS KMS: **code written, unbuilt** (code-only mode, 2026-11-17, D1196); Azure
   Key Vault, Google Secret Manager and Cloud KMS: **code written, unbuilt** (code-only mode, 2026-11-17, D1197). Left: a
   native PKCS#11 source.
-- Per-column and per-tenant keys (D23, D187, D234).
+- Per-column and per-tenant keys (D23, D187, D234). Per-tenant keys with crypto-shredding for
+  `eggdb serve --tenant-databases`: **code written, unbuilt** (code-only mode, 2026-11-25, D1366). Left: per-column
+  keys and keys for tenants isolated by row.
 - A mode that uses FIPS-approved algorithms only (D23). In TLS (`EGGDB_FIPS=1`, `fips_only`): **code written, unbuilt**
   (code-only mode, 2026-11-12, D812); logins (MySQL's `mysql_native_password` switched to `caching_sha2_password`) and
   `serve --fips`: **code written, unbuilt** (code-only mode, 2026-11-12, D855). Left: a validated-module claim, which
