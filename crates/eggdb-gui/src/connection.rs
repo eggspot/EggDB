@@ -356,7 +356,7 @@ impl RespLink {
             if stopped() {
                 return Err(StatementFailure::cancelled());
             }
-            let client = RespClient::connect_watched(&self.options, |stopper| {
+            let client = RespClient::connect_stoppable(&self.options, &stopped, |stopper| {
                 if let Some(cancel) = cancel {
                     cancel.arm(Stopper::Resp(stopper));
                 }

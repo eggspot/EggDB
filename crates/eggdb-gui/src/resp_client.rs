@@ -476,7 +476,18 @@ impl RespClient {
         options: &RespOptions,
         opened: impl FnOnce(RespStopper),
     ) -> Result<Self, RespConnectError> {
-        let stream = open_stream(options).map_err(RespConnectError::Io)?;
+        Self::connect_stoppable(options, &|| false, opened)
+    }
+
+    /// Connects as [`RespClient::connect_watched`] does, and gives up the TCP connect itself
+    /// within [`STOP_POLL_INTERVAL`] once `stopped` answers true, failing with
+    /// [`io::ErrorKind::Interrupted`]; the abandoned connect ends on its own thread.
+    pub fn connect_stoppable(
+        options: &RespOptions,
+        stopped: &dyn Fn() -> bool,
+        opened: impl FnOnce(RespStopper),
+    ) -> Result<Self, RespConnectError> {
+        let stream = open_stream_stoppable(options, stopped).map_err(RespConnectError::Io)?;
         let stopped = Arc::new(AtomicBool::new(false));
         let mut client = Self {
             reader: BufReader::new(StoppableReader {
@@ -571,6 +582,35 @@ impl RespClient {
 
 fn refuses_credentials(line: &[u8]) -> bool {
     line.starts_with(b"NOAUTH") || line.starts_with(b"WRONGPASS")
+}
+
+fn open_stream_stoppable(options: &RespOptions, stopped: &dyn Fn() -> bool) -> io::Result<TcpStream> {
+    if stopped() {
+        return Err(connect_stopped());
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let target = options.clone();
+    std::thread::Builder::new()
+        .name("eggdb-resp-connect".to_owned())
+        .spawn(move || {
+            let _ = sender.send(open_stream(&target));
+        })?;
+    loop {
+        match receiver.recv_timeout(STOP_POLL_INTERVAL) {
+            Ok(opened) => return opened,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if stopped() => {
+                return Err(connect_stopped());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("the connecting thread ended without an answer"));
+            }
+        }
+    }
+}
+
+fn connect_stopped() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "the connect was stopped")
 }
 
 fn open_stream(options: &RespOptions) -> io::Result<TcpStream> {
@@ -758,5 +798,26 @@ mod tests {
         assert!(!shown.contains("hunter2"));
         assert!(shown.contains("***"));
         assert_eq!(options.place(), "cache:6379");
+    }
+
+    #[test]
+    fn a_stopped_connect_gives_up_at_once() {
+        let options = RespOptions {
+            host: "127.0.0.1".to_owned(),
+            port: 9,
+            user: None,
+            password: None,
+        };
+        let started = Instant::now();
+        let failed = RespClient::connect_stoppable(&options, &|| true, |_| {});
+        assert!(matches!(failed, Err(RespConnectError::Io(ref error)) if error.kind() == io::ErrorKind::Interrupted));
+        assert!(started.elapsed() < CONNECT_TIMEOUT);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let reachable = RespOptions {
+            port: listener.local_addr().unwrap().port(),
+            ..options
+        };
+        let opened = open_stream_stoppable(&reachable, &|| false);
+        assert!(opened.is_ok());
     }
 }

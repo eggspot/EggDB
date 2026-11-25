@@ -1148,7 +1148,7 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - `menu`, `menuitem` and `searchbox` roles in the platform layer's accessibility (D329). **Code written,
   unbuilt** (code-only mode, 2026-11-11, D551).
 - `Stop` interrupting a RESP reconnect's TCP connect itself, which now takes effect when that
-  connect ends (D329).
+  connect ends (D329). **Code written, unbuilt** (code-only mode, 2026-11-25, D1361).
 - Rows streamed into the grid with pages fetched on scroll (D275).
 - The value view's text selection and SQL type names; menu, dialog and scroll bar accessibility
   roles; scrollbars that hide and fade; the editor's draggable and horizontal scrollbars; the
