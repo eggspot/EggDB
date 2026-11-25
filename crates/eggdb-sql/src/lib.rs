@@ -256,6 +256,7 @@ mod sqlserver_numbers;
 mod sqlserver_strings;
 mod sqlserver_types;
 mod square_root;
+mod masking;
 mod math_functions;
 mod mysql_strings;
 mod mysql_json;
@@ -361,6 +362,8 @@ mod joined_dml_tests;
 mod json_path_tests;
 #[cfg(test)]
 mod lateral_tests;
+#[cfg(test)]
+mod masking_tests;
 #[cfg(test)]
 mod materialized_view_tests;
 #[cfg(test)]

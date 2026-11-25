@@ -30,6 +30,7 @@ mod backup;
 mod incremental;
 mod dynamic_policies;
 mod full_text_tables;
+mod masking;
 mod invisible;
 mod logical_slots;
 pub(crate) mod freshness;
@@ -2121,6 +2122,19 @@ impl<'s> Session<'s> {
         let text = federated.as_deref().unwrap_or(text);
         let full_text = self.prepare_full_text_tables(text)?;
         let text = full_text.as_deref().unwrap_or(text);
+        if self.prepare_masking_commands(text, on_result)? {
+            return Ok(());
+        }
+        let masked_create = self.masked_columns_declared(text)?;
+        let text = masked_create.as_ref().map_or(text, |create| create.text.as_str());
+        let result_masks = self.result_masks(text)?;
+        let mut masking_results = |mut result: QueryResult| {
+            if let Some(masks) = &result_masks {
+                masks.apply(&mut result);
+            }
+            on_result(result)
+        };
+        let on_result: &mut dyn FnMut(QueryResult) -> bool = &mut masking_results;
         if self.prepare_backup(text, on_result)?
             || self.prepare_switchover(text, on_result)?
             || self.prepare_shard_move(text, on_result)?
@@ -2145,6 +2159,11 @@ impl<'s> Session<'s> {
             && let Some((table, columns)) = invisible
         {
             self.record_invisible_columns(&table, &columns)?;
+        }
+        if outcome.is_ok()
+            && let Some(create) = &masked_create
+        {
+            self.record_masks(create)?;
         }
         outcome
     }

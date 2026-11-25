@@ -1,0 +1,122 @@
+use crate::memory_store::MemoryStore;
+use crate::session::Session;
+use crate::tests::render;
+use crate::Dialect;
+
+fn run(session: &mut Session<'_>, sql: &str) -> String {
+    let mut out = Vec::new();
+    session
+        .execute(sql, &mut |result| out.push(render(&result)))
+        .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    out.join("\n")
+}
+
+fn customers() -> MemoryStore {
+    let store = MemoryStore::default();
+    let mut tsql = Session::with_dialect(&store, Dialect::SqlServer);
+    run(
+        &mut tsql,
+        "CREATE TABLE customers (id int PRIMARY KEY, name varchar(40), email varchar(100) MASKED WITH (FUNCTION = 'email()'), salary int MASKED WITH (FUNCTION = 'default()'))",
+    );
+    run(
+        &mut tsql,
+        "INSERT INTO customers VALUES (1, 'Ada', 'ada@example.com', 9000), (2, 'Grace', 'grace@example.com', 8000)",
+    );
+    tsql.close().unwrap();
+    let mut owner = Session::new(&store);
+    run(&mut owner, "CREATE ROLE support");
+    run(&mut owner, "GRANT SELECT ON customers TO support");
+    owner.close().unwrap();
+    store
+}
+
+fn as_support(store: &MemoryStore, sql: &str) -> String {
+    let mut session = Session::new(store);
+    run(&mut session, "SET ROLE support");
+    let shown = run(&mut session, sql);
+    session.close().unwrap();
+    shown
+}
+
+#[test]
+fn a_role_without_unmask_sees_masked_values_and_filters_on_real_ones() {
+    let store = customers();
+    assert_eq!(
+        as_support(&store, "SELECT id, name, email, salary FROM customers ORDER BY id"),
+        "id|name|email|salary\n1|Ada|aXXX@XXXX.com|0\n2|Grace|gXXX@XXXX.com|0\nSELECT 2"
+    );
+    assert_eq!(
+        as_support(&store, "SELECT name FROM customers WHERE email = 'grace@example.com'"),
+        "name\nGrace\nSELECT 1"
+    );
+    assert_eq!(
+        as_support(&store, "SELECT upper(email) AS shout, sum(salary) AS total FROM customers GROUP BY email ORDER BY 1"),
+        "shout|total\nxxxx|0\nxxxx|0\nSELECT 2"
+    );
+    let mut owner = Session::new(&store);
+    assert_eq!(
+        run(&mut owner, "SELECT email FROM customers WHERE id = 1"),
+        "email\nada@example.com\nSELECT 1"
+    );
+    run(&mut owner, "GRANT UNMASK TO support");
+    owner.close().unwrap();
+    assert_eq!(
+        as_support(&store, "SELECT email, salary FROM customers WHERE id = 2"),
+        "email|salary\ngrace@example.com|8000\nSELECT 1"
+    );
+    let mut owner = Session::new(&store);
+    run(&mut owner, "REVOKE UNMASK FROM support");
+    run(&mut owner, "ALTER TABLE customers ALTER COLUMN salary DROP MASKED");
+    run(
+        &mut owner,
+        "ALTER TABLE customers ALTER COLUMN name ADD MASKED WITH (FUNCTION = 'partial(1, \"***\", 0)')",
+    );
+    owner.close().unwrap();
+    assert_eq!(
+        as_support(&store, "SELECT name, salary FROM customers WHERE id = 1"),
+        "name|salary\nA***|9000\nSELECT 1"
+    );
+}
+
+#[test]
+fn only_a_superuser_or_the_owner_changes_masks() {
+    let store = customers();
+    let mut session = Session::new(&store);
+    run(&mut session, "SET ROLE support");
+    for sql in [
+        "ALTER TABLE customers ALTER COLUMN email DROP MASKED",
+        "GRANT UNMASK TO support",
+    ] {
+        let error = session.execute(sql, &mut |_| {}).expect_err(sql);
+        assert_eq!(error.state(), crate::SqlState::INSUFFICIENT_PRIVILEGE, "{sql}: {error}");
+    }
+    session.close().unwrap();
+    let mut owner = Session::new(&store);
+    let wrong = owner
+        .execute("ALTER TABLE customers ALTER COLUMN email ADD MASKED WITH (FUNCTION = 'mask()')", &mut |_| {})
+        .expect_err("an unknown mask function");
+    assert_eq!(wrong.state(), crate::SqlState::INVALID_PARAMETER_VALUE);
+    run(&mut owner, "DROP TABLE customers");
+    run(&mut owner, "CREATE TABLE customers (id int PRIMARY KEY, email text)");
+    run(&mut owner, "INSERT INTO customers VALUES (1, 'ada@example.com')");
+    run(&mut owner, "GRANT SELECT ON customers TO support");
+    owner.close().unwrap();
+    assert_eq!(
+        as_support(&store, "SELECT email FROM customers"),
+        "email\nada@example.com\nSELECT 1"
+    );
+}
+
+#[test]
+fn a_mask_follows_its_table_and_column_when_they_are_renamed() {
+    let store = customers();
+    let mut owner = Session::new(&store);
+    run(&mut owner, "ALTER TABLE customers RENAME COLUMN email TO mail");
+    run(&mut owner, "ALTER TABLE customers RENAME TO clients");
+    run(&mut owner, "GRANT SELECT ON clients TO support");
+    owner.close().unwrap();
+    assert_eq!(
+        as_support(&store, "SELECT mail FROM clients WHERE id = 1"),
+        "mail\naXXX@XXXX.com\nSELECT 1"
+    );
+}

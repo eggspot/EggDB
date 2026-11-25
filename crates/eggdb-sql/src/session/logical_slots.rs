@@ -4,7 +4,7 @@ use crate::logical_decoding::{DecodedTransaction, capture_lsn, decode_after, num
 use crate::store::KeyValueRead;
 
 impl Session<'_> {
-    fn with_block_reader<T>(&mut self, read: impl FnOnce(&dyn KeyValueRead) -> SqlResult<T>) -> SqlResult<T> {
+    pub(super) fn with_block_reader<T>(&mut self, read: impl FnOnce(&dyn KeyValueRead) -> SqlResult<T>) -> SqlResult<T> {
         match &self.block {
             Block::Reading(reader) => read(reader.as_ref()),
             Block::Writing(writer) => read(&**writer),

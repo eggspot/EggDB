@@ -1386,3 +1386,4 @@ its full title with its status.
 - [D1359](decisions/D1359.md) Code-only batch 1014 (M6d): key grants per agent on eggdb serve's MCP endpoint
 - [D1360](decisions/D1360.md) Code-only batch 1015 (M6d): DELETE removes whole rows of a table listed with columns
 - [D1361](decisions/D1361.md) Code-only batch 1016 (M6e): Stop interrupts a RESP connect in the client
+- [D1362](decisions/D1362.md) Code-only batch 1017 (M6b): dynamic data masking, first slice: SQL Server's masks and UNMASK

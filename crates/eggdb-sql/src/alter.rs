@@ -1394,6 +1394,7 @@ fn rename_column(
     if table.column_index(&to.text).is_some() {
         return Err(duplicate_column(&table, to));
     }
+    crate::masking::rename_column(writer, &table.name, &table.columns[index].name, &to.text)?;
     table.columns[index].name = to.text.clone();
     for check in &mut table.checks {
         let renamed =
@@ -1599,6 +1600,7 @@ fn rename_table(
     crate::roles::forget_relation_access(writer, &to.text)?;
     crate::roles::move_table(writer, &old_name, &to.text)?;
     crate::row_security::move_table(writer, &old_name, &to.text)?;
+    crate::masking::move_table(writer, &old_name, &to.text)?;
     crate::partitions::rename(writer, &old_name, &to.text)?;
     crate::statistics::rename(writer, &old_name, &to.text)?;
     constraints::refresh_flags(writer, tables, &to.text)

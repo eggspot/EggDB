@@ -940,7 +940,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   **code written, unbuilt** (D1321). Left: column-level VPD and policy groups.
 - Dynamic data masking: SQL Server's `MASKED WITH` and Oracle's redaction, after its decision
   (D22, D285). Decided (D1348): masks in their own catalog space, `UNMASK` as an object grant, masking of returned
-  values only; the code is left.
+  values only. SQL Server's masks, `UNMASK` database-wide and masked results: **code written, unbuilt** (code-only
+  mode, 2026-11-25, D1362). Left: `UNMASK` per schema, table and column, `datetime()`, Oracle's `DBMS_REDACT`,
+  the catalogs, and result columns traced to their source instead of matched by name.
 - Redis ACLs, MongoDB roles, Elasticsearch roles and Cassandra roles mapped onto the one role
   model (D22). Check: the same user has the same rights over every protocol.
 - Authenticated page encryption, with a tag per page (D187).

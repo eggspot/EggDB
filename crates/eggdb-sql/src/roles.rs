@@ -924,6 +924,7 @@ pub(crate) fn forget_table(writer: &mut dyn KeyValueWrite, table: &str) -> SqlRe
             writer.delete(&key)?;
         }
     }
+    crate::masking::forget_table(writer, table)?;
     columns::forget_table_columns(writer, table)
 }
 
