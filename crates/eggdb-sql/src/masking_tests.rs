@@ -160,7 +160,7 @@ fn a_role_without_unmask_cannot_copy_masked_values_or_run_dynamic_sql() {
         assert_eq!(error.state(), crate::SqlState::INSUFFICIENT_PRIVILEGE, "{sql}: {error}");
     }
     run(&mut session, "INSERT INTO notes VALUES (1, 'called Ada')");
-    run(&mut session, "UPDATE customers SET name = 'Ada L.' WHERE email = 'ada@example.com'");
+    run(&mut session, "UPDATE customers SET name = 'Ada L.' WHERE id = 1");
     session.close().unwrap();
     assert_eq!(
         as_support(&store, "SELECT name FROM customers WHERE id = 1"),
