@@ -1150,7 +1150,11 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - SQL notebooks with charts (D42).
 - A visual query builder (D42).
 - Console screens for the catalog, lineage and master data (D42, D244).
-- Onboarding: a migration guide per source database, sample datasets and tutorials (D42).
+- Onboarding: a migration guide per source database, sample datasets and tutorials (D42). The migration guide
+  ([migrate.md](migrate.md)) covers PostgreSQL, SQL Server, Oracle, MySQL and MariaDB, Redis, MongoDB and now SQLite;
+  a sample bookshop ([samples/bookshop.sql](samples/bookshop.sql)) and a first tour ([tutorial.md](tutorial.md)):
+  **written** (2026-11-25). Left: guides for Elasticsearch, Cassandra and InfluxDB, larger sample datasets, and
+  tutorials per data model.
 - A documentation site, generated as static pages by our own Rust tool (D32).
 - A research check of whether EggOS's GUI and `eggdb-gui` can share one toolkit, recorded as a
   new decision that refines D15 (D15).

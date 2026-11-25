@@ -604,3 +604,25 @@ with `eggdb serve app.eggdb --mongo-listen` and point `mongosh` or your driver a
 
 Not read yet: `mongodump --gzip` output (run `gunzip -r dump/` first), `--archive` files (dump
 to a directory instead), and unique indexes other than `_id`, which are reported as left out.
+
+## From SQLite: the database file itself
+
+An SQLite file needs no export. Either keep using it in place, or move it into an EggDB file:
+
+- `eggdb sql app.sqlite --dialect sqlite -c "..."` (and `eggdb shell app.sqlite`) open the file
+  as a copy in memory, run the statements, and write the changes back into it when the command
+  ends, through SQLite's rollback journal, so SQLite programs keep reading it (D1309). A journal
+  a crash left beside the file is rolled back first, as SQLite would.
+- `eggdb restore --create app.eggdb app.sqlite` writes its tables, rows, indexes, views and
+  triggers, and the committed pages of its `-wal` file, into a new EggDB file, and lists anything
+  EggDB refused (D568). Serve it with `eggdb serve app.eggdb`; applications that link SQLite can
+  link EggDB's `libsqlite3` replacement instead (D790) and keep their code.
+
+`VACUUM INTO 'copy.sqlite'` in an EggDB session writes an SQLite file back out, for programs that
+only read SQLite (D631).
+
+## Sample data and a first tour
+
+[tutorial.md](tutorial.md) walks through a first session on the sample bookshop in
+[samples/bookshop.sql](samples/bookshop.sql): the same data read through SQL in two dialects,
+the key-value commands, full-text search and serving it to `psql`.
