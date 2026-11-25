@@ -222,6 +222,7 @@ mod row_locks;
 mod routine_settings;
 mod routines;
 mod row_security;
+mod row_stream;
 mod row_values;
 mod schema;
 mod schemas;

@@ -562,7 +562,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   left: spilling to disk, and `PERCENT` and `DISTINCT ON`. `DISTINCT ON`: **code written, unbuilt** (code-only mode,
   2026-11-25, D1339); spilling waits for the streaming executor (D1339), `PERCENT` for the row count.
 - A resumable executor that streams rows, so portals, the C API and `COPY TO` send rows as they
-  come (D284, D287, D293).
+  come (D284, D287, D293). Plain scans streamed through `Session::execute_streamed`: **code written, unbuilt**
+  (code-only mode, 2026-11-25, D1340); pausing scans for portals and the protocol, C API and `COPY TO` users are
+  left.
 - Set-returning functions stopped by a `LIMIT` given as a parameter or an expression, joined with
   other tables, or filtered as their rows arrive (D287). A parameter or a fixed expression: **code written, unbuilt** (code-only mode,
   2026-11-14, D1139); left: joined and filtered functions, which need the streaming executor.

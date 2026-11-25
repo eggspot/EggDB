@@ -4512,6 +4512,15 @@ fn unsorted_rows(
     if take == 0 && source.has_rows_to_read() {
         return Ok(output);
     }
+    let mut claim = match &source.rows {
+        RowSource::Table(table, _)
+            if distinct_on.is_empty() && !window.distinct && window.limit.percent.is_none() =>
+        {
+            crate::row_stream::claim(&table.name)
+        }
+        _ => None,
+    };
+    let mut sent = 0usize;
     let scope = source.scope;
     let correlation = source.correlation;
     let mut skipped = 0;
@@ -4544,6 +4553,10 @@ fn unsorted_rows(
         if skipped < window.skip {
             skipped += 1;
             return Ok(true);
+        }
+        if let Some(claim) = &mut claim {
+            sent += 1;
+            return Ok(claim.send(&projected)? && sent < take);
         }
         if output.len() < take {
             memory.charge_row(&projected)?;

@@ -1364,3 +1364,4 @@ its full title with its status.
 - [D1337](decisions/D1337.md) Code-only batch 992 (M2): concurrent transactions spill their changes to sorted scratch runs
 - [D1338](decisions/D1338.md) Code-only batch 993 (M5): lookup joins switch to a hash table when their outer side turns out large
 - [D1339](decisions/D1339.md) Code-only batch 994 (M5): a top-N for DISTINCT ON with LIMIT
+- [D1340](decisions/D1340.md) Code-only batch 995 (M5): rows streamed from plain scans, first step of the streaming executor

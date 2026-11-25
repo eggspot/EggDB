@@ -1795,6 +1795,83 @@ impl<'s> Session<'s> {
         !self.block_is_implicit && !matches!(self.block, Block::None)
     }
 
+    /// Runs the statements in `text` as [`Session::execute`] does, but hands every row to
+    /// `on_row` instead of putting it in the [`QueryResult`] (D1340): `on_columns` first gets
+    /// the columns of each result with rows, then `on_row` its rows, then `on_result` the result
+    /// itself, its rows left empty. A query that reads one table without joins, sorting,
+    /// grouping, `DISTINCT` or subqueries sends its rows as the scan finds them, so its result
+    /// never sits in memory whole; others send theirs when they finish. `on_row` returning
+    /// `false` stops the scan.
+    pub fn execute_streamed(
+        &mut self,
+        text: &str,
+        on_columns: &mut dyn FnMut(&[OutputColumn]),
+        on_row: &mut dyn FnMut(&[Value]) -> SqlResult<bool>,
+        on_result: &mut dyn FnMut(QueryResult),
+    ) -> SqlResult<()> {
+        let streamed_table = self.streamable_table(text);
+        let described = match &streamed_table {
+            Some(_) => self.describe(text, &[]).ok().and_then(|description| description.columns),
+            None => None,
+        };
+        let mut results = Vec::new();
+        let mut sent = 0u64;
+        let claimed = match (&streamed_table, &described) {
+            (Some(table), Some(columns)) => {
+                on_columns(columns);
+                let mut counting = |row: &[Value]| {
+                    sent += 1;
+                    on_row(row)
+                };
+                let armed = crate::row_stream::arm(table, &mut counting);
+                let ran = self.execute(text, &mut |result| results.push(result));
+                let claimed = armed.was_claimed();
+                drop(armed);
+                ran?;
+                claimed
+            }
+            _ => {
+                self.execute(text, &mut |result| results.push(result))?;
+                false
+            }
+        };
+        for mut result in results {
+            if claimed && result.columns.is_some() {
+                result.tag = format!("SELECT {sent}");
+                on_result(result);
+                continue;
+            }
+            if let Some(columns) = &result.columns {
+                on_columns(columns);
+                for row in std::mem::take(&mut result.rows) {
+                    if !on_row(&row)? {
+                        break;
+                    }
+                }
+            }
+            on_result(result);
+        }
+        Ok(())
+    }
+
+    fn streamable_table(&self, text: &str) -> Option<String> {
+        let tokens = tokenize_in(text, self.dialect).ok()?;
+        let settings = Arc::clone(&self.settings);
+        let mut parser = Parser::new(text, &tokens)
+            .with_context(Parameters::Absent, &settings)
+            .in_dialect(self.dialect);
+        parser.skip_empty_statements();
+        let statement = parser.statement().ok()?;
+        parser.skip_empty_statements();
+        if !parser.at_end() {
+            return None;
+        }
+        match statement {
+            Statement::Select(select) => crate::row_stream::streamable(&select),
+            _ => None,
+        }
+    }
+
     /// Runs every statement in `text`, separated by semicolons, in order, and hands each
     /// result to `on_result`. It stops at the first statement that fails and returns its
     /// error, whose [`position`](SqlError::position) is a byte offset into `text`. Statements
