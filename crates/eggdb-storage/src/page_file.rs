@@ -94,7 +94,7 @@ pub struct PageFile<F: File> {
     staged: BTreeMap<u64, (PageHeader, Vec<u8>)>,
     log: Option<LogWriter>,
     log_pages: BTreeMap<u64, u64>,
-    unwritten: BTreeMap<u64, u64>,
+    unwritten: BTreeMap<u64, (u64, usize)>,
     durability: Durability,
     auto_checkpoint_bytes: Option<u64>,
     log_stats: LogStats,
@@ -641,8 +641,10 @@ impl<F: File> PageFile<F> {
         self.check_length(page)?;
         if let Some((_, staged)) = self.staged.get(&page_id) {
             page.copy_from_slice(staged);
-        } else if let Some(&offset) = self.unwritten.get(&page_id) {
-            self.file.read_exact_at(page, offset)?;
+        } else if let Some(&(offset, length)) = self.unwritten.get(&page_id) {
+            let length = length.min(page.len());
+            page[length..].fill(0);
+            self.file.read_exact_at(&mut page[..length], offset)?;
         } else {
             self.file.read_exact_at(page, self.offset(page_id))?;
         }
@@ -845,11 +847,14 @@ impl<F: File> PageFile<F> {
         let compressed = (self.compress_pages && self.cipher.is_none() && header.page_type == PageType::BTreeLeaf)
             .then(|| compressed_form(page))
             .flatten();
+        let logged_bytes = compressed
+            .as_ref()
+            .map_or(page.len(), |stored| PAGE_HEADER_SIZE + 4 + read_u32(stored, PAGE_HEADER_SIZE) as usize);
         let log = self.log.as_mut().ok_or(StorageError::NeedsReopen)?;
         if log.buffered_bytes() >= WRITE_AHEAD_BYTES {
             log.write_ahead(&self.file)?;
         }
-        log.reserve(8 + page.len(), &mut self.page_count)?;
+        log.reserve(8 + logged_bytes, &mut self.page_count)?;
         let lsn = log.lsn();
         let header = PageHeader { lsn, ..*header };
         self.checksums.write(page, page_id, &header)?;
@@ -859,7 +864,7 @@ impl<F: File> PageFile<F> {
                 ..header
             };
             self.checksums.write(&mut stored, page_id, &flagged)?;
-            log.put_image(page_id, &stored);
+            log.put_image(page_id, &stored[..logged_bytes]);
             return Ok(lsn);
         }
         match &self.cipher {
@@ -960,7 +965,7 @@ impl<F: File> PageFile<F> {
         }
         log.write(&self.file)?;
         for image in log.written_ahead() {
-            self.unwritten.insert(image.page_id, image.file_offset);
+            self.unwritten.insert(image.page_id, (image.file_offset, image.length));
         }
         match self.durability {
             Durability::Full => {
@@ -981,12 +986,12 @@ impl<F: File> PageFile<F> {
                     let lsn = log.lsn();
                     log.sync_to(&self.file, lsn)?;
                     for image in log.images() {
-                        self.unwritten.insert(image.page_id, image.file_offset);
+                        self.unwritten.insert(image.page_id, (image.file_offset, image.length));
                     }
                     return self.drain_unwritten();
                 }
                 for image in log.images() {
-                    self.unwritten.insert(image.page_id, image.file_offset);
+                    self.unwritten.insert(image.page_id, (image.file_offset, image.length));
                 }
                 Ok(())
             }
@@ -998,9 +1003,17 @@ impl<F: File> PageFile<F> {
             return Ok(());
         };
         let page_bytes = self.page_size().bytes();
+        let mut whole = Vec::new();
         for image in log.images() {
-            let bytes = &log.buffer()[image.buffer_start..image.buffer_start + page_bytes];
-            self.write_in_place(image.page_id, bytes)?;
+            let bytes = &log.buffer()[image.buffer_start..image.buffer_start + image.length];
+            if image.length == page_bytes {
+                self.write_in_place(image.page_id, bytes)?;
+            } else {
+                whole.clear();
+                whole.extend_from_slice(bytes);
+                whole.resize(page_bytes, 0);
+                self.write_in_place(image.page_id, &whole)?;
+            }
         }
         Ok(())
     }
@@ -1024,8 +1037,10 @@ impl<F: File> PageFile<F> {
         }
         let mut page = core::mem::take(&mut self.scratch);
         page.resize(self.page_size().bytes(), 0);
-        for (&page_id, &offset) in &self.unwritten {
-            self.file.read_exact_at(&mut page, offset)?;
+        for (&page_id, &(offset, length)) in &self.unwritten {
+            let length = length.min(page.len());
+            page[length..].fill(0);
+            self.file.read_exact_at(&mut page[..length], offset)?;
             self.write_in_place(page_id, &page)?;
         }
         self.unwritten.clear();
@@ -1282,7 +1297,7 @@ impl<F: File> PageFile<F> {
             {
                 return Err(self.corrupt_log_at(image.file_offset));
             }
-            self.unwritten.insert(image.page_id, image.file_offset);
+            self.unwritten.insert(image.page_id, (image.file_offset, image.length));
         }
         self.superblock = state;
         self.page_count = state.page_count;

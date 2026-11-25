@@ -1359,3 +1359,4 @@ its full title with its status.
 - [D1332](decisions/D1332.md) Code-only batch 987 (M4): PostgreSQL's multiranges
 - [D1333](decisions/D1333.md) Code-only batch 988 (M2): changed pages spill before the commit, and a commit writes its log ahead
 - [D1334](decisions/D1334.md) Code-only batch 989 (M2): leaf pages stored compressed, with their freed blocks punched out
+- [D1335](decisions/D1335.md) Code-only batch 990 (M2): compressed pages logged without their zero tail

@@ -72,6 +72,7 @@ enum RecordType {
     PageImage,
     Commit,
     Link,
+    ShortPageImage,
 }
 
 impl RecordType {
@@ -82,6 +83,7 @@ impl RecordType {
             Self::PageImage => 3,
             Self::Commit => 4,
             Self::Link => 5,
+            Self::ShortPageImage => 6,
         }
     }
 
@@ -92,6 +94,7 @@ impl RecordType {
             3 => Some(Self::PageImage),
             4 => Some(Self::Commit),
             5 => Some(Self::Link),
+            6 => Some(Self::ShortPageImage),
             _ => None,
         }
     }
@@ -202,6 +205,9 @@ fn parse_record<'a>(
             .checked_sub(RECORD_HEADER)
             .is_some_and(|room| length <= room),
         RecordType::PageImage => length == IMAGE_PAGE_AT + geometry.page_size.bytes(),
+        RecordType::ShortPageImage => {
+            length > IMAGE_PAGE_AT + crate::format::PAGE_HEADER_SIZE && length < IMAGE_PAGE_AT + geometry.page_size.bytes()
+        }
         RecordType::Commit => length == COMMIT_PAYLOAD,
         RecordType::Link => length == LINK_PAYLOAD,
     };
@@ -312,6 +318,7 @@ pub(crate) struct StagedImage {
     pub(crate) page_id: u64,
     pub(crate) buffer_start: usize,
     pub(crate) file_offset: u64,
+    pub(crate) length: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -462,6 +469,7 @@ impl LogWriter {
                 written_ahead.push(LoggedImage {
                     page_id: image.page_id,
                     file_offset: image.file_offset,
+                    length: image.length,
                 });
                 false
             } else {
@@ -556,15 +564,23 @@ impl LogWriter {
         Ok(())
     }
 
+    /// Logs `page`, the image of page `page_id`: a whole page, or the start of a page stored
+    /// compressed (D1335), whose zero tail is left out of the record.
     pub(crate) fn put_image(&mut self, page_id: u64, page: &[u8]) {
         let record_start = self.buffer.len();
         let file_offset = self.file_offset_of(record_start) + (RECORD_HEADER + 8) as u64;
-        self.put(RecordType::PageImage, &[&page_id.to_le_bytes(), page]);
+        let kind = if page.len() < self.geometry.page_size.bytes() {
+            RecordType::ShortPageImage
+        } else {
+            RecordType::PageImage
+        };
+        self.put(kind, &[&page_id.to_le_bytes(), page]);
         self.records_left = self.records_left.saturating_sub(1);
         self.images.push(StagedImage {
             page_id,
             buffer_start: record_start + RECORD_HEADER + 8,
             file_offset,
+            length: page.len(),
         });
     }
 
@@ -731,6 +747,7 @@ impl LogWriter {
 pub(crate) struct LoggedImage {
     pub(crate) page_id: u64,
     pub(crate) file_offset: u64,
+    pub(crate) length: usize,
 }
 
 #[derive(Debug)]
@@ -927,12 +944,17 @@ pub(crate) fn scan<F: File>(
                     resume.offset = next;
                 }
             }
-            RecordType::PageImage => {
+            RecordType::PageImage | RecordType::ShortPageImage => {
                 let page_id = read_u64(payload, 0);
-                if checksums
-                    .verify(&payload[IMAGE_PAGE_AT..], page_id)
-                    .is_err()
-                {
+                let stored = &payload[IMAGE_PAGE_AT..];
+                let verified = if kind == RecordType::ShortPageImage {
+                    let mut page = vec![0u8; geometry.page_size.bytes()];
+                    page[..stored.len()].copy_from_slice(stored);
+                    checksums.verify(&page, page_id)
+                } else {
+                    checksums.verify(stored, page_id)
+                };
+                if verified.is_err() {
                     return Err(corrupt(&segment, offset));
                 }
                 let file_offset = geometry.file_offset(segment.first_page)
@@ -940,6 +962,7 @@ pub(crate) fn scan<F: File>(
                 images.push(LoggedImage {
                     page_id,
                     file_offset,
+                    length: stored.len(),
                 });
                 at_commit_boundary = false;
             }

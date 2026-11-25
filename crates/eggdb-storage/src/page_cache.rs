@@ -1447,6 +1447,33 @@ mod tests {
     }
 
     #[test]
+    fn compressed_pages_are_logged_short_and_replayed_after_a_crash() {
+        let fs = SimFileSystem::new();
+        let options = CreateOptions {
+            page_size: PageSize::from_log2(14).unwrap(),
+            file_id: FileId(*b"page-cache-tests"),
+        };
+        let file = PageFile::create(&fs, Path::new(DB), options).unwrap();
+        let mut cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(8)).unwrap();
+        cache.set_page_compression(true);
+        let page_id = {
+            let mut page = cache.allocate(leaf()).unwrap();
+            page[16..].fill(0);
+            page[100] = 42;
+            page.page_id()
+        };
+        cache.commit(|_| {}).unwrap();
+        assert!(cache.log_stats().bytes_since_checkpoint < (1 << 14) as u64);
+        drop(cache);
+        fs.crash(CrashMode::DropUnsynced);
+        let file = PageFile::open(&fs, Path::new(DB), Access::ReadWrite).unwrap();
+        let cache = PageCache::new(file, &SimMemory::new(), CacheSize::Pages(8)).unwrap();
+        let page = cache.read(page_id).unwrap();
+        assert_eq!(page[100], 42);
+        assert!(page[16..100].iter().chain(&page[101..]).all(|&byte| byte == 0));
+    }
+
+    #[test]
     fn without_an_opener_a_full_cache_still_refuses() {
         let fs = SimFileSystem::new();
         let cache = create(&fs, 2);
