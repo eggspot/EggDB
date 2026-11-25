@@ -1081,6 +1081,19 @@ A command that writes fails on the read-only open; one that blocks (`BLPOP` and 
 the connection (`SELECT`, `MULTI`, `CLIENT`) is refused; both are `resp_error`. The same command is the MCP tool
 `resp_get` of `eggdb mcp`, offered where the key-value tools are (not under `--tables` or an agent role) (D1355).
 
+## Text-to-SQL: `eggdb question`
+
+```
+eggdb question get <file> <endpoint> <model> <question> [--dialect <name>]
+```
+
+Asks `<model>` at `<endpoint>` (an OpenAI-compatible chat-completions base URL) for one read-only query that answers
+`<question>` from the tables and columns the database shows, in `--dialect` (postgresql by default), through
+`eggdb_ai.text_to_sql` (D779), and prints the answer: the SQL, whether it was checked (PostgreSQL answers are checked
+with `EXPLAIN`) and any problem. It never runs the query. The endpoint must be allowed by `EGGDB_MODEL_ENDPOINTS`
+(D777) and the database needs `CREATE EXTENSION eggdb_ai`. The same command is the MCP tool `question_get` of
+`eggdb mcp`, for every agent; give the server a `--time-limit` long enough for the model to answer (D1356).
+
 ## `eggdb shell`
 
 ```
@@ -1674,7 +1687,8 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   `graph_run` (Cypher on the property graph, `graph_run` with `--allow-write`, D1352), `document_get`
   (a filter or a reading pipeline on a document collection, D1353), `search_get` (one search
   request body on a full-text index, D1354), `resp_get` (one Redis-compatible command that reads,
-  not under `--tables`, D1355), and the resource
+  not under `--tables`, D1355), `question_get` (text-to-SQL through an allowed model endpoint,
+  D1356), and the resource
   `eggdb://schema`.
 - **Every call is recorded** in `<file>.mcp-audit.jsonl` before its result is sent; if that file
   cannot be written, `eggdb mcp` does not start.

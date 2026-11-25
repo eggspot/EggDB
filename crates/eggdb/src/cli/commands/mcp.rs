@@ -223,6 +223,7 @@ impl DatabaseOpener for FileOpener {
 }
 
 pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, Failure> {
+    super::model_endpoints::allow_from_environment();
     let file_display = request.file.display().to_string();
     let file = render::text(file_display.as_bytes());
     let opener = FileOpener {

@@ -41,6 +41,7 @@ mod dbf_io;
 mod mainframe_io;
 mod avro_io;
 mod parquet_io;
+mod question;
 mod restore;
 mod restore_aof;
 mod restore_mongodump;
@@ -242,6 +243,7 @@ fn execute_on(
         CommandName::Document => session.document_command(),
         CommandName::Search => session.search_command(),
         CommandName::Resp => session.resp_command(),
+        CommandName::Question => session.question_command(),
     };
     let flushed = session.out.finish();
     let _ = session.messages.finish();

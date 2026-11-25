@@ -398,7 +398,7 @@ fn run_sql_and_write_sql_return_what_sql_prints() {
 fn the_tools_list_carries_the_registry_s_names_and_annotations() {
     let file = key_value_file("parity-tools");
     let _audit = audit_of(file.path());
-    for (options, offered) in [(&[][..], 16), (&["--allow-write"][..], 28)] {
+    for (options, offered) in [(&[][..], 17), (&["--allow-write"][..], 29)] {
         let mut mcp = Mcp::start(file.path(), options);
         let listed = mcp.request("tools/list", "{}");
         let Json::Array(tools) = &at(&listed, &["result", "tools"]).value else {
@@ -685,6 +685,32 @@ fn resp_get_returns_what_resp_get_prints() {
     mcp.finish();
     let get = lines(&succeeded(&eggdb(&["resp", "get", &path, "GET session:42", "--json"])));
     assert_eq!(canonical(&get[0]), r#"{"reply":"ada"}"#);
+}
+
+#[test]
+fn question_get_fails_as_question_get_does_without_eggdb_ai() {
+    let file = catalog_file("parity-question");
+    let _audit = audit_of(file.path());
+    let path = file.path().to_str().unwrap().to_owned();
+    let endpoint = "http://127.0.0.1:9/v1";
+    let question = "how many users are there?";
+    let twin = eggdb(&["question", "get", &path, endpoint, "tiny", question, "--json"]);
+    assert_eq!(twin.status.code(), Some(3));
+    let printed = code_and_category(&one_error(&twin));
+    assert_eq!(printed.0, "sql_error");
+    let mut mcp = Mcp::start(file.path(), &[]);
+    let answer = mcp.call(
+        "question_get",
+        &format!(r#"{{"endpoint":{endpoint:?},"model":"tiny","question":{question:?}}}"#),
+    );
+    assert_eq!(code_and_category(structured(&answer, true)), printed);
+    let wrong = mcp.call(
+        "question_get",
+        &format!(r#"{{"endpoint":{endpoint:?},"model":"tiny","question":"x","dialect":"cobol"}}"#),
+    );
+    let (code, _) = code_and_category(structured(&wrong, true));
+    assert_eq!(code, "invalid_arguments");
+    mcp.finish();
 }
 
 fn catalog_file(name: &str) -> TempPath {

@@ -61,13 +61,14 @@ pub(crate) enum Tool {
     DocumentGet,
     SearchGet,
     RespGet,
+    QuestionGet,
     Stats,
     Check,
     Backup,
 }
 
 impl Tool {
-    const ALL: [Self; 28] = [
+    const ALL: [Self; 29] = [
         Self::ListTables,
         Self::DescribeTable,
         Self::RunSql,
@@ -93,6 +94,7 @@ impl Tool {
         Self::DocumentGet,
         Self::SearchGet,
         Self::RespGet,
+        Self::QuestionGet,
         Self::Stats,
         Self::Check,
         Self::Backup,
@@ -812,6 +814,7 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::RespGet if call.tables.is_some() => Err(limited_to_tables()),
         Tool::RespGet if call.agent_role.is_some() => Err(limited_to_role()),
         Tool::RespGet => resp_get(arguments, call),
+        Tool::QuestionGet => question_get(arguments, call),
         Tool::Stats | Tool::Check | Tool::Backup if call.tables.is_some() || call.agent_role.is_some() => {
             Err(whole_file_refused(call))
         }
@@ -1261,6 +1264,28 @@ fn memory_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) 
     call.with_database(|store, limits| {
         let result = one_statement(store, limits, call, Dialect::PostgreSql, &sql, Some(limit.saturating_add(1)))?;
         Ok(statement_success(result, Dialect::PostgreSql, limit))
+    })
+}
+
+fn question_get<O: DatabaseOpener>(arguments: &Arguments<'_>, call: &Call<'_, O>) -> Result<ToolSuccess, ToolError> {
+    arguments.allow_tool(Tool::QuestionGet)?;
+    let endpoint = arguments.required_string("endpoint")?;
+    let model = arguments.required_string("model")?;
+    let question = arguments.required_string("question")?;
+    let dialect = arguments.dialect()?;
+    if question.len() > MAX_SQL_BYTES {
+        return Err(ToolError::invalid("question is longer than 1 MiB"));
+    }
+    let sql = format!(
+        "SELECT eggdb_ai.text_to_sql({}, {}, {}, {}) AS answer",
+        sql_text(endpoint),
+        sql_text(model),
+        sql_text(question),
+        sql_text(dialect.name())
+    );
+    call.with_database(|store, limits| {
+        let result = one_statement(store, limits, call, Dialect::PostgreSql, &sql, Some(2))?;
+        Ok(statement_success(result, Dialect::PostgreSql, 1))
     })
 }
 
@@ -2714,6 +2739,7 @@ mod tests {
                 | Tool::DocumentGet
                 | Tool::SearchGet
                 | Tool::RespGet
+                | Tool::QuestionGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2762,6 +2788,7 @@ mod tests {
                 | Tool::DocumentGet
                 | Tool::SearchGet
                 | Tool::RespGet
+                | Tool::QuestionGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2818,6 +2845,7 @@ mod tests {
                 | Tool::DocumentGet
                 | Tool::SearchGet
                 | Tool::RespGet
+                | Tool::QuestionGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),
@@ -2963,6 +2991,7 @@ mod tests {
                 | Tool::DocumentGet
                 | Tool::SearchGet
                 | Tool::RespGet
+                | Tool::QuestionGet
                 | Tool::Stats
                 | Tool::Check
                 | Tool::Backup => not_shipped(),

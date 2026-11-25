@@ -503,7 +503,8 @@ fn every_command_is_a_kept_name_or_a_noun_and_its_core_verbs() {
             | CommandName::Graph
             | CommandName::Document
             | CommandName::Search
-            | CommandName::Resp => {
+            | CommandName::Resp
+            | CommandName::Question => {
                 help::definitions(command).iter().all(|definition| {
                     definition.words.len() == 2 && is_core_verb(definition.words[1])
                 })

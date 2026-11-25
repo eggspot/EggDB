@@ -11,6 +11,7 @@ mod graph;
 mod keys;
 mod memory;
 mod programs;
+mod question;
 mod rdf;
 mod resp;
 mod search;
@@ -90,7 +91,7 @@ pub const KEPT_NAMES: &[&str] = &[
 
 /// The nouns of `eggdb`'s `<noun> <verb>` commands: `collection` (D139), `table` and `row`
 /// (D145).
-pub const NOUNS: &[&str] = &["collection", "table", "row", "memory", "rdf", "graph", "document", "search", "resp"];
+pub const NOUNS: &[&str] = &["collection", "table", "row", "memory", "rdf", "graph", "document", "search", "resp", "question"];
 
 /// The MCP tools that shipped before the command model, which keep their names (D119, D121).
 pub const SHIPPED_TOOL_NAMES: &[&str] = &[
@@ -635,6 +636,7 @@ pub const COMMANDS: &[CommandDefinition] = &[
     document::DOCUMENT_GET,
     search::SEARCH_GET,
     resp::RESP_GET,
+    question::QUESTION_GET,
 ];
 
 const SQL_ARGUMENT: ArgumentDefinition = ArgumentDefinition {
@@ -1561,6 +1563,48 @@ pub const TOOLS: &[ToolDefinition] = &[
         confirm: None,
         result: &[NOTICE, field("reply", FieldType::Object)],
         envelope: &["notice"],
+    },
+    ToolDefinition {
+        name: "question_get",
+        title: "Write SQL for a question",
+        description: "Asks a language model at an endpoint the server allows (EGGDB_MODEL_ENDPOINTS) for one read-only query that answers a question about this database, from the tables and columns it shows, in the dialect you name, and returns the SQL with whether it was checked (PostgreSQL answers are checked with EXPLAIN) and any problem. It never runs the query: read the answer, then run it with run_sql. The database needs CREATE EXTENSION eggdb_ai, and the server a --time-limit long enough for the model to answer.",
+        read_only_server_description: None,
+        command: Some(&["question", "get"]),
+        fixed: &["--format", "json"],
+        arguments: &[
+            ArgumentDefinition {
+                name: "endpoint",
+                kind: ArgumentType::String,
+                description: "An OpenAI-compatible chat-completions base URL the server allows, such as http://127.0.0.1:11434/v1.",
+                required: true,
+                maps_to: ArgumentTarget::Operand("endpoint"),
+            },
+            ArgumentDefinition {
+                name: "model",
+                kind: ArgumentType::String,
+                description: "The model's name at that endpoint.",
+                required: true,
+                maps_to: ArgumentTarget::Operand("model"),
+            },
+            ArgumentDefinition {
+                name: "question",
+                kind: ArgumentType::String,
+                description: "The question, in words.",
+                required: true,
+                maps_to: ArgumentTarget::Operand("question"),
+            },
+            ArgumentDefinition {
+                description: "The dialect the query should be written in.",
+                ..DIALECT_ARGUMENT
+            },
+        ],
+        max_effect: Effect::Read,
+        grant: Grant::Nothing,
+        idempotent: false,
+        open_world: true,
+        confirm: None,
+        result: STATEMENT_RESULT,
+        envelope: STATEMENT_ENVELOPE,
     },
     ToolDefinition {
         name: "stats",

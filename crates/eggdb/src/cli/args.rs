@@ -54,6 +54,7 @@ pub(crate) enum CommandName {
     Document,
     Search,
     Resp,
+    Question,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +107,7 @@ impl TableAction {
 
 impl CommandName {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 35] = [
+    pub(crate) const ALL: [Self; 36] = [
         Self::Create,
         Self::Put,
         Self::Get,
@@ -136,6 +137,7 @@ impl CommandName {
         Self::Document,
         Self::Search,
         Self::Resp,
+        Self::Question,
         Self::Serve,
         Self::Shell,
         Self::Restore,
@@ -187,6 +189,7 @@ impl CommandName {
             b"document" => Self::Document,
             b"search" => Self::Search,
             b"resp" => Self::Resp,
+            b"question" => Self::Question,
             _ => return None,
         })
     }
@@ -229,6 +232,7 @@ impl CommandName {
             Self::Document => "document",
             Self::Search => "search",
             Self::Resp => "resp",
+            Self::Question => "question",
         }
     }
 
@@ -244,6 +248,7 @@ impl CommandName {
                 | Self::Document
                 | Self::Search
                 | Self::Resp
+                | Self::Question
         )
     }
 
@@ -435,7 +440,7 @@ impl CommandName {
             OptionName::Command => matches!(self, Self::Sql | Self::Shell | Self::Explain),
             OptionName::Dialect => matches!(
                 self,
-                Self::Sql | Self::Shell | Self::Restore | Self::Import | Self::Explain
+                Self::Sql | Self::Shell | Self::Restore | Self::Import | Self::Explain | Self::Question
             ),
             OptionName::Define => matches!(self, Self::Restore | Self::Sql),
             OptionName::KeepGoing => matches!(self, Self::Shell | Self::Restore),
@@ -1088,6 +1093,7 @@ pub(crate) struct Request {
     pub(crate) document: Option<(String, Option<String>)>,
     pub(crate) search: Option<(String, Option<String>)>,
     pub(crate) resp: Option<String>,
+    pub(crate) question: Option<(String, String, String)>,
     pub(crate) table: Option<OsString>,
     pub(crate) schema: Option<String>,
     pub(crate) after: Option<String>,
@@ -1571,6 +1577,7 @@ fn noun_needs_a_verb(noun: CommandName) -> Failure {
         CommandName::Document => DOCUMENT_NEEDS_A_VERB,
         CommandName::Search => SEARCH_NEEDS_A_VERB,
         CommandName::Resp => RESP_NEEDS_A_VERB,
+        CommandName::Question => QUESTION_NEEDS_A_VERB,
         _ => COLLECTION_NEEDS_A_VERB,
     };
     Failure::usage(message, Some(noun))
@@ -1632,6 +1639,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         document: None,
         search: None,
         resp: None,
+        question: None,
         archive_changes: None,
         differential: false,
         clone_copy: false,
@@ -2649,6 +2657,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
     if command == CommandName::Resp {
         return resp_request(request, arguments);
     }
+    if command == CommandName::Question {
+        return question_request(request, arguments);
+    }
     if request.swap.if_absent && request.swap.delete {
         return Err(usage(
             "--if-absent with --delete would change nothing: an absent key cannot be deleted"
@@ -2678,7 +2689,8 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         | CommandName::Graph
         | CommandName::Document
         | CommandName::Search
-        | CommandName::Resp => (1, 1),
+        | CommandName::Resp
+        | CommandName::Question => (1, 1),
         CommandName::Export | CommandName::Import | CommandName::Sql | CommandName::Restore => {
             (1, 2)
         }
@@ -3039,6 +3051,30 @@ const GRAPH_NEEDS_A_VERB: &str = "graph needs get or run";
 const DOCUMENT_NEEDS_A_VERB: &str = "document needs get";
 const SEARCH_NEEDS_A_VERB: &str = "search needs get";
 const RESP_NEEDS_A_VERB: &str = "resp needs get";
+const QUESTION_NEEDS_A_VERB: &str = "question needs get";
+
+fn question_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
+    let command = CommandName::Question;
+    let usage = |message: String| Failure::usage(message, Some(command));
+    if arguments.first().map(|verb| verb.as_encoded_bytes()) != Some(b"get") {
+        return Err(usage(QUESTION_NEEDS_A_VERB.to_owned()));
+    }
+    if arguments.len() < 5 {
+        return Err(usage("eggdb question get needs a file, an endpoint, a model and a question".to_owned()));
+    }
+    if arguments.len() > 5 {
+        return Err(too_many_arguments(&arguments[5..], Some(command)));
+    }
+    let text = |at: usize| -> Result<String, Failure> {
+        arguments[at]
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| usage("the endpoint, the model and the question are UTF-8".to_owned()))
+    };
+    request.file = PathBuf::from(arguments[1]);
+    request.question = Some((text(2)?, text(3)?, text(4)?));
+    Ok(request)
+}
 
 fn resp_request(mut request: Request, arguments: &[&OsStr]) -> Result<Request, Failure> {
     let command = CommandName::Resp;

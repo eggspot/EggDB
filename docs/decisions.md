@@ -1380,3 +1380,4 @@ its full title with its status.
 - [D1353](decisions/D1353.md) Code-only batch 1008 (M6d): documents queried in MongoDB's query language from the CLI and MCP
 - [D1354](decisions/D1354.md) Code-only batch 1009 (M6d): search indices queried with the query DSL from the CLI and MCP
 - [D1355](decisions/D1355.md) Code-only batch 1010 (M6d): RESP keys read with Redis-compatible commands; vectors through the existing tools
+- [D1356](decisions/D1356.md) Code-only batch 1011 (M6d): text-to-SQL as an MCP tool and a command
