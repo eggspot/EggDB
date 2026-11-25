@@ -125,3 +125,34 @@ fn first_and_last_take_the_value_at_the_earliest_and_latest_time() {
         "VALUES (1, 'a', 'c'), (2, 'q', 'q')",
     );
 }
+
+#[test]
+fn refresh_continuous_aggregate_recomputes_only_the_buckets_of_its_window() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    let mut run = |text: &str| {
+        let mut out = Vec::new();
+        session
+            .execute(text, &mut |result| out.push(render(&result)))
+            .unwrap_or_else(|error| panic!("{text}: {error}"));
+        out.pop().unwrap_or_default()
+    };
+    run("CREATE EXTENSION timescaledb");
+    run("CREATE TABLE readings (at timestamptz NOT NULL, value integer)");
+    run("INSERT INTO readings VALUES ('2026-01-01 00:10+00', 1), ('2026-01-01 01:10+00', 2)");
+    run(
+        "CREATE MATERIALIZED VIEW hourly WITH (timescaledb.continuous) AS \
+         SELECT time_bucket('1 hour', at) AS bucket, sum(value) AS total FROM readings GROUP BY 1",
+    );
+    run("INSERT INTO readings VALUES ('2026-01-01 00:20+00', 10), ('2026-01-01 01:20+00', 20)");
+    run("CALL refresh_continuous_aggregate('hourly', '2026-01-01 01:00+00', '2026-01-01 02:00+00')");
+    assert_eq!(
+        run("SELECT extract(hour FROM bucket AT TIME ZONE 'UTC') AS h, total FROM hourly ORDER BY bucket"),
+        "h|total\n0|1\n1|22\nSELECT 2"
+    );
+    run("CALL refresh_continuous_aggregate('hourly', NULL, NULL)");
+    assert_eq!(
+        run("SELECT total FROM hourly ORDER BY bucket"),
+        "total\n11\n22\nSELECT 2"
+    );
+}

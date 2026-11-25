@@ -1,6 +1,7 @@
 /// The statements `CREATE EXTENSION timescaledb` runs: hypertables recorded by their time column,
-/// `drop_chunks` deleting rows older than an interval, and retention and continuous-aggregate
-/// refresh policies run by the pg_cron scheduler (D200).
+/// `drop_chunks` deleting rows older than an interval, `refresh_continuous_aggregate` refreshing
+/// the buckets of a window (D1317), and retention and continuous-aggregate refresh policies run
+/// by the pg_cron scheduler (D200).
 pub(crate) const TIMESCALE_SCRIPT: &str = r#"
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE SCHEMA _timescaledb_catalog;
@@ -109,9 +110,33 @@ BEGIN
         END IF;
         RAISE EXCEPTION 'continuous aggregate policy already exists for "%"', continuous_aggregate USING ERRCODE = '42710';
     END IF;
-    job := cron.schedule('timescaledb_refresh_' || parts[1] || '.' || parts[2], _timescaledb_catalog.cron_of(schedule_interval), format('REFRESH MATERIALIZED VIEW %I.%I', parts[1], parts[2]));
+    job := cron.schedule('timescaledb_refresh_' || parts[1] || '.' || parts[2], _timescaledb_catalog.cron_of(schedule_interval), format('CALL public.refresh_continuous_aggregate(%L, %s, %s)', parts[1] || '.' || parts[2], CASE WHEN start_offset IS NULL THEN 'NULL' ELSE format('now() - %L::interval', start_offset) END, CASE WHEN end_offset IS NULL THEN 'NULL' ELSE format('now() - %L::interval', end_offset) END));
     INSERT INTO _timescaledb_catalog.policy VALUES (job, 'policy_refresh_continuous_aggregate', parts[1], parts[2], NULL, schedule_interval);
     RETURN job;
+END
+$$;
+CREATE PROCEDURE public.refresh_continuous_aggregate(continuous_aggregate text, window_start timestamptz, window_end timestamptz) LANGUAGE plpgsql AS $$
+DECLARE
+    parts text[] := _timescaledb_catalog.split(continuous_aggregate);
+    stored_name text;
+    defining_query text;
+    bucket text;
+BEGIN
+    stored_name := CASE WHEN parts[1] = 'public' THEN parts[2] ELSE '"' || replace(parts[1], '"', '""') || '"."' || replace(parts[2], '"', '""') || '"' END;
+    SELECT m.query INTO defining_query FROM eggdb_internal.materialized_views m WHERE m.name = stored_name;
+    IF defining_query IS NULL THEN
+        RAISE EXCEPTION 'relation "%" is not a continuous aggregate', continuous_aggregate USING ERRCODE = '42809';
+    END IF;
+    IF window_start IS NOT NULL AND window_end IS NOT NULL AND window_start >= window_end THEN
+        RAISE EXCEPTION 'invalid refresh window' USING ERRCODE = '22023', DETAIL = 'The start of the window must be before the end.';
+    END IF;
+    bucket := substring(lower(defining_query) FROM 'time_bucket\s*\([^)]*\)\s+(?:as\s+)?"?([a-z_][a-z0-9_$]*)');
+    IF bucket IS NULL THEN
+        EXECUTE format('REFRESH MATERIALIZED VIEW %I.%I', parts[1], parts[2]);
+        RETURN;
+    END IF;
+    EXECUTE format('DELETE FROM %I.%I WHERE ($1 IS NULL OR %I >= $1) AND ($2 IS NULL OR %I < $2)', parts[1], parts[2], bucket, bucket) USING window_start, window_end;
+    EXECUTE format('INSERT INTO %I.%I SELECT * FROM (%s) AS fresh WHERE ($1 IS NULL OR fresh.%I >= $1) AND ($2 IS NULL OR fresh.%I < $2)', parts[1], parts[2], defining_query, bucket, bucket) USING window_start, window_end;
 END
 $$;
 CREATE FUNCTION public.remove_continuous_aggregate_policy(continuous_aggregate text, if_exists boolean DEFAULT false) RETURNS void LANGUAGE plpgsql AS $$

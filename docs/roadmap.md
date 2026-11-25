@@ -1618,7 +1618,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - Retention, downsampling and continuous aggregates for time series and observability data (D39,
   D202, D220). Check: a TSBS benchmark. TimescaleDB's `first` and `last` aggregates: **code written,
   unbuilt** (code-only mode, 2026-11-12, D647); retention and continuous-aggregate policies (`CREATE EXTENSION
-  timescaledb`): **code written, unbuilt** (code-only mode, 2026-11-12, D736). Left: incremental refresh.
+  timescaledb`): **code written, unbuilt** (code-only mode, 2026-11-12, D736); incremental refresh by window
+  (`refresh_continuous_aggregate`): **code written, unbuilt** (D1317). Left: invalidation logs and real-time aggregates.
 - ASOF and window joins (D50, D243). ASOF joins: **code written, unbuilt** (code-only mode, 2026-11-11,
   D447); the `ASOF JOIN ... USING (keys, time)` form: **code written, unbuilt** (code-only mode, 2026-11-12, D637).
   Left: window joins.
