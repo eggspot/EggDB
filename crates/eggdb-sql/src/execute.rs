@@ -4289,6 +4289,14 @@ struct Window {
     distinct: bool,
 }
 
+fn distinct_top_n_wanted(window: Window, distinct_on: &[SortKey<'_>]) -> Option<usize> {
+    if distinct_on.is_empty() || window.limit.percent.is_some() || window.limit.with_ties {
+        return None;
+    }
+    let count = usize::try_from(window.limit.count?).ok()?;
+    count.checked_add(window.skip)
+}
+
 fn top_n_wanted(window: Window, distinct_on: &[SortKey<'_>]) -> Option<usize> {
     if window.limit.percent.is_some() || !distinct_on.is_empty() {
         return None;
@@ -4591,6 +4599,8 @@ fn sorted_rows(
             crate::top_n::TopRows::new(order_by, wanted)
         }
     });
+    let mut distinct_top = distinct_top_n_wanted(window, keys_of.distinct_on)
+        .map(|wanted| crate::top_n::DistinctTopRows::new(order_by, wanted, sort_keys.len()));
     let mut sortable = crate::top_n::SortabilityCheck::new(order_by.len());
     source.for_each_row(&mut |row| {
         let output = projection.project(&row)?;
@@ -4626,6 +4636,11 @@ fn sorted_rows(
             top.offer(keys, output, memory)?;
             return Ok(true);
         }
+        if let Some(top) = &mut distinct_top {
+            sortable.check(order_by, &keys);
+            top.offer(keys, output, memory)?;
+            return Ok(true);
+        }
         memory.charge_row(&output)?;
         memory.charge_row(&keys)?;
         rows.push((keys, output));
@@ -4644,6 +4659,12 @@ fn sorted_rows(
             None
         };
         return Ok(rows_within_limit(kept.into_iter(), window.skip, take, ties));
+    }
+    if let Some(top) = distinct_top {
+        sortable.finish()?;
+        let kept = top.into_sorted();
+        let take = window.limit.rows_to_take(kept.len());
+        return Ok(rows_within_limit(kept.into_iter(), window.skip, take, None));
     }
     check_sortable(order_by, &rows)?;
     rows.sort_by(|(left, _), (right, _)| compare_sort_keys(order_by, left, right));

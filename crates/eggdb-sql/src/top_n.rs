@@ -3,8 +3,9 @@ use crate::error::{SqlError, SqlResult};
 use crate::eval::compare_truth;
 use crate::execute::compare_sort_keys;
 use crate::memory::WorkMemory;
-use crate::types::Value;
+use crate::types::{Value, equality_key};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 const FIRST_CAPACITY: usize = 1024;
 
@@ -162,6 +163,96 @@ impl<'o> TopRows<'o> {
         let mut held = std::mem::take(&mut self.held);
         held.extend(self.ties.take().unwrap_or_default());
         held.sort_unstable_by(|left, right| self.order(left, right));
+        held.into_iter().map(|row| (row.keys, row.output)).collect()
+    }
+}
+
+/// The first `wanted` groups of a `DISTINCT ON` query in sort order, each with its first row,
+/// for `DISTINCT ON (...) ... LIMIT n` (D1339): it holds at most `wanted` rows, however many
+/// the query reads.
+pub(crate) struct DistinctTopRows<'o> {
+    order_by: &'o [OrderItem],
+    wanted: usize,
+    sort_key_count: usize,
+    groups: HashMap<Vec<u8>, HeldRow>,
+    arrivals: u64,
+}
+
+impl<'o> DistinctTopRows<'o> {
+    pub(crate) fn new(order_by: &'o [OrderItem], wanted: usize, sort_key_count: usize) -> Self {
+        Self {
+            order_by,
+            wanted,
+            sort_key_count,
+            groups: HashMap::new(),
+            arrivals: 0,
+        }
+    }
+
+    fn order(&self, left: &HeldRow, right: &HeldRow) -> Ordering {
+        compare_sort_keys(self.order_by, &left.keys, &right.keys)
+            .then(left.arrival.cmp(&right.arrival))
+    }
+
+    /// Offers a row whose `keys` are its sort keys followed by its `DISTINCT ON` values.
+    pub(crate) fn offer(
+        &mut self,
+        mut keys: Vec<Value>,
+        output: Vec<Value>,
+        memory: &mut WorkMemory,
+    ) -> SqlResult<()> {
+        let arrival = self.arrivals;
+        self.arrivals += 1;
+        if self.wanted == 0 {
+            return Ok(());
+        }
+        let distinct = keys.split_off(self.sort_key_count.min(keys.len()));
+        let mut group = Vec::new();
+        for value in &distinct {
+            equality_key(&mut group, value);
+        }
+        let bytes = WorkMemory::row_bytes(&keys) + WorkMemory::row_bytes(&output) + group.len();
+        let entering = HeldRow {
+            keys,
+            output,
+            arrival,
+            bytes,
+        };
+        if let Some(current) = self.groups.get(&group) {
+            if compare_sort_keys(self.order_by, &entering.keys, &current.keys) != Ordering::Less {
+                return Ok(());
+            }
+            memory.charge(bytes)?;
+            if let Some(replaced) = self.groups.insert(group, entering) {
+                memory.release(replaced.bytes);
+            }
+            return Ok(());
+        }
+        if self.groups.len() >= self.wanted {
+            let largest = self
+                .groups
+                .iter()
+                .max_by(|(_, left), (_, right)| self.order(left, right))
+                .map(|(group, row)| (group.clone(), self.order(&entering, row)));
+            match largest {
+                Some((largest, Ordering::Less)) => {
+                    if let Some(evicted) = self.groups.remove(&largest) {
+                        memory.release(evicted.bytes);
+                    }
+                }
+                _ => return Ok(()),
+            }
+        }
+        memory.charge(bytes)?;
+        self.groups.insert(group, entering);
+        Ok(())
+    }
+
+    pub(crate) fn into_sorted(self) -> Vec<(Vec<Value>, Vec<Value>)> {
+        let mut held: Vec<HeldRow> = self.groups.into_values().collect();
+        held.sort_unstable_by(|left, right| {
+            compare_sort_keys(self.order_by, &left.keys, &right.keys).then(left.arrival.cmp(&right.arrival))
+        });
         held.into_iter().map(|row| (row.keys, row.output)).collect()
     }
 }

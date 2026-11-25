@@ -209,3 +209,34 @@ fn distinct_on_in_a_grouped_query_takes_an_expression_of_the_select_list() {
         "DISTINCT ON an expression outside the select list of a grouped query"
     );
 }
+
+#[test]
+fn distinct_on_with_a_limit_keeps_only_the_wanted_groups_and_matches_the_full_sort() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    last(
+        &mut session,
+        "CREATE TABLE readings (id INT, sensor INT, value INT); \
+         INSERT INTO readings SELECT n, (n * 7) % 40, (n * 13) % 97 FROM generate_series(1, 2000) AS n",
+    );
+    for (limit, offset) in [(5, 0), (3, 2), (0, 0), (100, 0)] {
+        let limited = last(
+            &mut session,
+            &format!(
+                "SELECT DISTINCT ON (sensor) sensor, value, id FROM readings ORDER BY sensor DESC, value, id LIMIT {limit} OFFSET {offset}"
+            ),
+        );
+        let full = last(
+            &mut session,
+            "SELECT DISTINCT ON (sensor) sensor, value, id FROM readings ORDER BY sensor DESC, value, id",
+        );
+        let mut lines: Vec<&str> = full.lines().collect();
+        let header = lines.remove(0);
+        lines.pop();
+        let expected: Vec<&str> = lines.into_iter().skip(offset).take(limit).collect();
+        let mut wanted = vec![header.to_owned()];
+        wanted.extend(expected.iter().map(|line| (*line).to_owned()));
+        wanted.push(format!("SELECT {}", expected.len()));
+        assert_eq!(limited, wanted.join("\n"), "LIMIT {limit} OFFSET {offset}");
+    }
+}
