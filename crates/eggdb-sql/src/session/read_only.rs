@@ -287,6 +287,11 @@ impl KeyValueWrite for ReadOnlyTransactionWrite<'_> {
         self.inner.delete(key)
     }
 
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.allowed(key)?;
+        self.inner.delete_whole_row(key)
+    }
+
     fn restore(&mut self, key: &[u8], previous: Option<&[u8]>) -> SqlResult<()> {
         self.allowed(key)?;
         self.inner.restore(key, previous)

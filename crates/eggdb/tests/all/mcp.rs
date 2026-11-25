@@ -1226,7 +1226,12 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
         "write_sql",
         r#"{"sql":"DELETE FROM users WHERE id = 2","confirm":true}"#,
     );
-    let (state, message) = sql_failure(&deleted);
+    assert_eq!(text_at(ok(&deleted), &["committed"]), "true");
+    let rekeyed = mcp.call(
+        "write_sql",
+        r#"{"sql":"UPDATE users SET id = 9 WHERE id = 3","confirm":true}"#,
+    );
+    let (state, message) = sql_failure(&rekeyed);
     assert_eq!(state, "42501");
     assert!(
         message.starts_with("cannot delete rows of \"users\""),
@@ -1245,7 +1250,7 @@ fn an_agent_limited_to_some_columns_sees_and_changes_nothing_else() {
         "SELECT 'row=' || name || '/' || coalesce(email, '-') FROM users WHERE id IN (2, 3) ORDER BY id",
     ]);
     assert!(check.status.success(), "{}", stderr(&check));
-    assert!(stdout(&check).contains("row=Grace/-"), "{}", stdout(&check));
+    assert!(!stdout(&check).contains("row=Grace"), "{}", stdout(&check));
     assert!(
         stdout(&check).contains("row=Hedy/mh@example.com"),
         "{}",

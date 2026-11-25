@@ -178,6 +178,11 @@ impl KeyValueWrite for NonatomicWrite<'_, '_> {
         self.routed()?.delete(key)
     }
 
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.refuse_when_read_only(key)?;
+        self.routed()?.delete_whole_row(key)
+    }
+
     fn commit(self) -> SqlResult<()> {
         Err(SqlError::new(
             SqlState::INTERNAL_ERROR,

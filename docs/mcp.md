@@ -207,9 +207,10 @@ them are hidden below the SQL engine, as hidden tables are.
   defaults, and an `UPDATE` or upsert of the listed columns keeps their values; the indexes over
   them are kept up to date, and their checks and `NOT NULL` run on the new row, with errors that
   name neither the column nor its value. `RETURNING`, triggers and every error show only the
-  listed columns.
-- **What stays refused** (`42501`): deleting rows or changing their key (the row would take the
-  hidden values with it), `TRUNCATE`, `ALTER`, comments, policies and `ANALYZE`; an insert when
+  listed columns. A `DELETE` removes whole rows, hidden values and index entries included, unless
+  a foreign key points at the table; a rollback brings the hidden values back (D1360).
+- **What stays refused** (`42501`): changing a row's key, and deleting rows of a table a foreign
+  key points at (the outcome could turn on hidden values), `TRUNCATE`, `ALTER`, comments, policies and `ANALYZE`; an insert when
   a hidden column takes a generated value (identity, `serial`, a sequence default), has a domain,
   or has a default that calls a routine or holds a subquery, or when a unique index or foreign key
   over a hidden column would have to be checked against other rows; and a change to a listed

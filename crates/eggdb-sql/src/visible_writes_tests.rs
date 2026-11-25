@@ -571,12 +571,10 @@ fn a_table_listed_with_columns_takes_inserts_and_changes_to_its_listed_columns()
         "INSERT INTO secrets VALUES (1) ON CONFLICT (id) DO NOTHING",
     );
     assert_eq!(
-        refused(&mut session, "DELETE FROM secrets WHERE id = 1"),
+        refused(&mut session, "UPDATE secrets SET id = 5 WHERE id = 1"),
         "cannot delete rows of \"secrets\" or change their key: this session may read only some of its columns (--tables), and the row would take the others with it"
     );
     for sql in [
-        "UPDATE secrets SET id = 5 WHERE id = 1",
-        "DELETE FROM secrets",
         "TRUNCATE secrets",
         "DROP TABLE secrets",
     ] {
@@ -1734,4 +1732,35 @@ fn a_view_listed_with_columns_keeps_its_stored_record_free_of_the_narrowed_mark(
     );
     assert!(text.contains("secret"), "{text}");
     assert!(!text.contains("eggdb_shown_columns"), "{text}");
+}
+
+#[test]
+fn a_delete_removes_whole_rows_of_a_table_listed_with_columns_and_a_rollback_brings_them_back() {
+    let store = staff();
+    let mut owner = Session::new(&store);
+    runs(
+        &mut owner,
+        "INSERT INTO staff VALUES (2, 'Grace', 'core', 8000, 'b-2', 'kept', 20), (3, 'Hedy', 'lab', 7000, 'b-3', 'third', NULL)",
+    );
+    owner.close().unwrap();
+    assert_eq!(index_entries(&store, "staff_by_note"), 3);
+    let limited = staff_limited(&store);
+    let mut session = Session::new(&limited);
+    runs(&mut session, "BEGIN");
+    runs(&mut session, "SAVEPOINT before_delete");
+    runs(&mut session, "DELETE FROM staff WHERE id = 2");
+    runs(&mut session, "ROLLBACK TO SAVEPOINT before_delete");
+    runs(&mut session, "DELETE FROM staff WHERE id = 3");
+    runs(&mut session, "COMMIT");
+    session.close().unwrap();
+    assert_eq!(
+        shown(&store, "SELECT id, salary, badge, note FROM staff ORDER BY id"),
+        "id|salary|badge|note\n1|9000|b-1|secret note\n2|8000|b-2|kept\nSELECT 2"
+    );
+    assert_eq!(index_entries(&store, "staff_by_note"), 2);
+    assert_eq!(index_entries(&store, "staff_by_team_and_salary"), 2);
+    let mut session = Session::new(&limited);
+    let changed = refused(&mut session, "UPDATE staff SET id = 9 WHERE id = 1");
+    assert!(changed.starts_with("cannot delete rows of \"staff\""), "{changed}");
+    session.close().unwrap();
 }

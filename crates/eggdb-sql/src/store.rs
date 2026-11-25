@@ -152,6 +152,14 @@ pub trait KeyValueWrite: KeyValueRead {
     /// Removes `key`; whether it was there.
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool>;
 
+    /// Removes the row under `key` that a `DELETE` (or a `MERGE`'s delete) removes, never as
+    /// half of changing its key; whether it was there. A store that shows only some columns of
+    /// a table (D306) can remove such a row whole where a plain [`delete`](Self::delete) may
+    /// be a key change it must refuse (D1360). The default is [`delete`](Self::delete).
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.delete(key)
+    }
+
     /// Keeps every key that starts with `prefix` in an LSM tree of its own from now on, for a
     /// table created `WITH (storage = lsm)` (D1119); `false` when it already is. The keys read,
     /// scan and write as before. A store without LSM trees, the default, refuses with `0A000`.
@@ -651,6 +659,10 @@ impl KeyValueWrite for Box<dyn BoxedWrite + '_> {
         (**self).delete(key)
     }
 
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        (**self).delete_whole_row(key)
+    }
+
     fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
         (**self).put_with_expiry(key, value, ttl)
     }
@@ -869,6 +881,11 @@ impl KeyValueWrite for ConcurrentBoxed<'_> {
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {
         lock_written_row(key)?;
         self.0.delete(key)
+    }
+
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        lock_written_row(key)?;
+        self.0.delete_whole_row(key)
     }
 
     fn commit(self) -> SqlResult<()> {

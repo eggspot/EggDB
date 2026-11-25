@@ -427,6 +427,13 @@ impl KeyValueWrite for TemporaryWrite<'_> {
         self.inner.delete(key)
     }
 
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        if is_temporary_key(key) {
+            return Ok(self.objects.delete(key));
+        }
+        self.inner.delete_whole_row(key)
+    }
+
     fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
         self.inner.put_with_expiry(key, value, ttl)
     }

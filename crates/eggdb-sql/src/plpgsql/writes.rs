@@ -104,6 +104,11 @@ impl KeyValueWrite for UndoWrite<'_> {
         self.inner.delete(key)
     }
 
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        self.log.record(&*self.inner, key)?;
+        self.inner.delete_whole_row(key)
+    }
+
     fn commit(self) -> SqlResult<()> {
         Ok(())
     }

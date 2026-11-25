@@ -279,6 +279,16 @@ impl KeyValueWrite for UndoWrite<'_> {
         Ok(deleted)
     }
 
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        let previous = self.inner.get(key)?;
+        self.hold(key, previous.as_deref())?;
+        let deleted = self.inner.delete_whole_row(key)?;
+        if deleted {
+            self.logged(UndoEntry::statement(key, previous));
+        }
+        Ok(deleted)
+    }
+
     fn put_with_expiry(&mut self, key: &[u8], value: &[u8], ttl: Duration) -> SqlResult<()> {
         self.journaled(|inner| inner.put_with_expiry(key, value, ttl))
     }

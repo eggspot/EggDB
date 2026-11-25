@@ -1384,3 +1384,4 @@ its full title with its status.
 - [D1357](decisions/D1357.md) Code-only batch 1012 (M6d): MCP 2026-07-28 beside the handshake versions
 - [D1358](decisions/D1358.md) Code-only batch 1013 (M6d): a key allow-list for the MCP key tools, eggdb mcp --keys
 - [D1359](decisions/D1359.md) Code-only batch 1014 (M6d): key grants per agent on eggdb serve's MCP endpoint
+- [D1360](decisions/D1360.md) Code-only batch 1015 (M6d): DELETE removes whole rows of a table listed with columns

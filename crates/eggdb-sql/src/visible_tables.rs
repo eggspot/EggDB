@@ -293,6 +293,7 @@ impl VisibleTables {
                 keys_to_hidden_columns,
                 narrowed_writes,
                 inserted_here: HashSet::new(),
+                deleted_whole: HashMap::new(),
                 refused: false,
                 dropped_trigger_records: Vec::new(),
                 dropped_definitions: Vec::new(),
@@ -1698,6 +1699,7 @@ struct Confined {
     keys_to_hidden_columns: HashMap<u32, KeysToHiddenColumns>,
     narrowed_writes: HashMap<u32, NarrowedWrites>,
     inserted_here: HashSet<Vec<u8>>,
+    deleted_whole: HashMap<Vec<u8>, Vec<u8>>,
     refused: bool,
     dropped_trigger_records: Vec<Vec<u8>>,
     dropped_definitions: Vec<Vec<u8>>,
@@ -2309,7 +2311,11 @@ impl<W: KeyValueWrite> VisibleWrite<W> {
             return Err(crate::encoding::corrupt("row"));
         };
         let shown_values = decode_row(value, &writes.shown_columns)?;
-        let planned = match self.inner.get(key)? {
+        let stored = match self.inner.get(key)? {
+            Some(stored) => Some(stored),
+            None => confined.deleted_whole.get(key).cloned(),
+        };
+        let planned = match stored {
             Some(stored) => {
                 let old = row_of_width(&stored, &narrowed.full.columns)?;
                 narrowed_update(narrowed, writes, old, &shown_values)
@@ -2359,6 +2365,38 @@ impl<W: KeyValueWrite> VisibleWrite<W> {
             self.inner.put(&new, &[])?;
         }
         Ok(())
+    }
+
+    fn delete_whole_narrowed_row(&mut self, id: u32, key: &[u8]) -> SqlResult<bool> {
+        let Some(stored) = self.inner.get(key)? else {
+            return Ok(false);
+        };
+        let Some(confined) = &mut self.confined else {
+            return self.inner.delete(key);
+        };
+        let (Some(narrowed), Some(writes)) = (
+            confined.shown.narrowed.get(&id),
+            confined.narrowed_writes.get(&id),
+        ) else {
+            return Err(crate::encoding::corrupt("row"));
+        };
+        if narrowed.full.referenced {
+            let refusal = Refusal::NarrowedDelete(Confined::shown(&narrowed.name));
+            confined.refused = true;
+            return Err(refusal.error());
+        }
+        let row = row_of_width(&stored, &narrowed.full.columns)?;
+        let entries: Vec<Vec<u8>> = writes
+            .maintained
+            .iter()
+            .map(|index| crate::indexes::entry_key(&narrowed.full, index, &row, key))
+            .collect();
+        confined.inserted_here.remove(key);
+        confined.deleted_whole.insert(key.to_vec(), stored);
+        for entry in entries {
+            self.inner.delete(&entry)?;
+        }
+        self.inner.delete(key)
     }
 
     fn delete_narrowed_row(&mut self, id: u32, key: &[u8]) -> SqlResult<bool> {
@@ -2566,6 +2604,13 @@ impl<W: KeyValueWrite> KeyValueWrite for VisibleWrite<W> {
             return self.inner.put_if_absent(key, value);
         }
         self.put_checked(key, value, false)
+    }
+
+    fn delete_whole_row(&mut self, key: &[u8]) -> SqlResult<bool> {
+        match self.narrowed_id(key) {
+            Some(id) => self.delete_whole_narrowed_row(id, key),
+            None => self.delete(key),
+        }
     }
 
     fn delete(&mut self, key: &[u8]) -> SqlResult<bool> {

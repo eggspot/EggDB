@@ -1095,7 +1095,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   `resultType`, the cache fields and `UnsupportedProtocolVersion` on stdio: **code written, unbuilt**
   (code-only mode, 2026-11-25, D1357). Left: the HTTP transport's headers without sessions,
   `subscriptions/listen`, multi round-trip requests for confirmations, and `-32602` for a missing resource.
-- `eggdb mcp --tables`: deleting rows of a table listed with columns, inserts whose hidden column
+- `eggdb mcp --tables`: deleting rows of a table listed with columns (**code written, unbuilt**,
+  code-only mode, 2026-11-25, D1360, for tables no foreign key points at), inserts whose hidden column
   takes a generated value, unique indexes and foreign keys over a hidden column checked without
   an oracle, and checking a listed child's keys against a hidden column of a listed parent
   (refused with 42501 for now); writes to tables listed with columns, foreign keys to unlisted

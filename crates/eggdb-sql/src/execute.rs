@@ -5196,7 +5196,7 @@ pub(crate) fn delete_rows(
         if !table.indexes.is_empty() {
             indexes::delete_entries(writer, table, row, key)?;
         }
-        writer.delete(key)?;
+        writer.delete_whole_row(key)?;
         on_deleted(row)?;
     }
     let count = rows.len();
