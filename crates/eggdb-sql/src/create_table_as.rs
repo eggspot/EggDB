@@ -518,7 +518,9 @@ fn sqlite_declared_type(expr: Option<&Expr>, sql_type: Option<SqlType>) -> (&'st
         Some(_) => None,
     };
     match affinity_of {
-        Some(SqlType::SmallInt | SqlType::Integer | SqlType::BigInt) => ("INT", SqlType::BigInt),
+        Some(SqlType::SmallInt | SqlType::Integer | SqlType::BigInt | SqlType::Dynamic(TypeAffinity::Integer)) => {
+            ("INT", SqlType::Dynamic(TypeAffinity::Integer))
+        }
         Some(
             SqlType::Text
             | SqlType::Varchar(_)

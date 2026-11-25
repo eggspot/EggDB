@@ -363,3 +363,23 @@ fn concatenating_a_real_spells_it_as_sqlite_does() {
         "typeof(n)|n\ntext|-Inf\ntext|Inf\nSELECT 2"
     );
 }
+
+#[test]
+fn integer_columns_keep_text_and_reals_but_the_row_id_and_strict_tables_stay_integers() {
+    let store = MemoryStore::default();
+    let mut session = sqlite(&store);
+    last(
+        &mut session,
+        "CREATE TABLE counts (id INTEGER PRIMARY KEY, n INT, big BIGINT); \
+         INSERT INTO counts (n, big) VALUES ('12', 7), ('abc', 2.5), (3.0, '4')",
+    );
+    assert_eq!(
+        last(&mut session, "SELECT id, n, typeof(n), big, typeof(big) FROM counts ORDER BY id"),
+        "id|n|typeof(n)|big|typeof(big)\n1|12|integer|7|integer\n2|abc|text|2.5|real\n3|3|integer|4|integer\nSELECT 3"
+    );
+    assert!(run(&mut session, "INSERT INTO counts (id) VALUES ('x')").is_err());
+    last(&mut session, "CREATE TABLE keyed (a INT, b TEXT, PRIMARY KEY (a)); INSERT INTO keyed VALUES ('k', 'text key')");
+    assert_eq!(last(&mut session, "SELECT typeof(a) FROM keyed"), "typeof(a)\ntext\nSELECT 1");
+    last(&mut session, "CREATE TABLE ruled (n INTEGER) STRICT");
+    assert!(run(&mut session, "INSERT INTO ruled VALUES ('abc')").is_err());
+}

@@ -691,7 +691,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   giving integers, view columns keeping their source's affinity, and per-value classes in the C
   API's column kinds; the other affinities, untyped
   columns and keys on every dynamic column are built (D305). Check: keyed lookups on `TEXT` keys
-  benchmarked against SQLite.
+  benchmarked against SQLite. `INTEGER` columns: **code written, unbuilt** (code-only mode, 2026-11-25, D1346); the
+  comparison rules, `CAST(x AS NUMERIC)`, views and the C API's per-value classes are left.
 - SQLite's `VACUUM` in SQL, blob, JSON and math functions, `group_concat`, `total` and
   temporary triggers (PR #86, sql.md); `group_concat`, `total` and MySQL's `GROUP_CONCAT`:
   **code written, unbuilt** (code-only mode, 2026-11-10, D376); the math functions, `unhex`,

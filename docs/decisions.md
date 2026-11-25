@@ -1370,3 +1370,4 @@ its full title with its status.
 - [D1343](decisions/D1343.md) Code-only batch 998 (M5): GiST, GIN, SP-GiST and BRIN indexes accepted and kept
 - [D1344](decisions/D1344.md) Code-only batch 999 (M5): SELECT ... INTO keeps NOT NULL through inner joins and of non-null expressions
 - [D1345](decisions/D1345.md) Code-only batch 1000 (M5): the Unicode Collation Algorithm over DUCET, and PostgreSQL's ICU-style COLLATE names
+- [D1346](decisions/D1346.md) Code-only batch 1001 (M4): SQLite's INTEGER affinity for INT columns other than the row id

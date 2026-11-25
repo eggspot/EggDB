@@ -13,12 +13,15 @@ pub enum TypeAffinity {
     Real,
     /// `BLOB` (and a column without a declared type): every value is kept in its class.
     Blob,
+    /// `INTEGER` (any declared type naming `INT`, but an `INTEGER PRIMARY KEY`, which is the row
+    /// id): stores as `NUMERIC` does (D1346).
+    Integer,
 }
 
 const LARGEST_WHOLE_REAL: f64 = 9_223_372_036_854_775_808.0;
 
 impl TypeAffinity {
-    pub(crate) const ALL: [Self; 4] = [Self::Text, Self::Numeric, Self::Real, Self::Blob];
+    pub(crate) const ALL: [Self; 5] = [Self::Text, Self::Numeric, Self::Real, Self::Blob, Self::Integer];
 
     pub(crate) fn code(self) -> u8 {
         match self {
@@ -26,6 +29,7 @@ impl TypeAffinity {
             Self::Numeric => 2,
             Self::Real => 3,
             Self::Blob => 4,
+            Self::Integer => 5,
         }
     }
 
@@ -41,6 +45,7 @@ impl TypeAffinity {
             Self::Numeric => "NUMERIC",
             Self::Real => "REAL",
             Self::Blob => "BLOB",
+            Self::Integer => "INTEGER",
         }
     }
 
@@ -50,6 +55,7 @@ impl TypeAffinity {
             Self::Numeric => "numeric",
             Self::Real => "real",
             Self::Blob => "blob",
+            Self::Integer => "integer",
         }
     }
 
@@ -57,7 +63,7 @@ impl TypeAffinity {
         match self {
             Self::Blob => value,
             Self::Text => as_text(value),
-            Self::Numeric => as_number(value),
+            Self::Numeric | Self::Integer => as_number(value),
             Self::Real => match as_number(value) {
                 Value::BigInt(number) => Value::Double(number as f64),
                 other => other,
@@ -171,7 +177,7 @@ mod tests {
             assert_eq!(TypeAffinity::of_code(affinity.code()), Some(affinity));
         }
         assert_eq!(TypeAffinity::of_code(0), None);
-        assert_eq!(TypeAffinity::of_code(5), None);
+        assert_eq!(TypeAffinity::of_code(6), None);
         assert_eq!(TypeAffinity::of_code(0xFF), None);
     }
 

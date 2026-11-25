@@ -634,6 +634,9 @@ impl<'t> Parser<'t> {
             .with_sqlite_code(1)
             .at(position));
         }
+        if column.sql_type == SqlType::BigInt && !column.auto_increment {
+            column.sql_type = SqlType::Dynamic(TypeAffinity::Integer);
+        }
         Ok((column, exact_integer))
     }
 
@@ -660,8 +663,10 @@ impl<'t> Parser<'t> {
             && integer_columns.get(index) == Some(&true)
         {
             columns[index].auto_increment = true;
+            columns[index].sql_type = SqlType::BigInt;
         }
         let mut without_rowid = false;
+        let mut strict = false;
         loop {
             if self.take_word("without") {
                 let position = self.position();
@@ -673,7 +678,9 @@ impl<'t> Parser<'t> {
                     ));
                 }
                 without_rowid = true;
-            } else if !self.take_word("strict") {
+            } else if self.take_word("strict") {
+                strict = true;
+            } else {
                 break;
             }
             if !self.take(&TokenKind::Comma) {
@@ -692,6 +699,13 @@ impl<'t> Parser<'t> {
             }
             for column in columns.iter_mut() {
                 column.auto_increment = false;
+            }
+        }
+        if strict {
+            for column in columns.iter_mut() {
+                if column.sql_type == SqlType::Dynamic(TypeAffinity::Integer) {
+                    column.sql_type = SqlType::BigInt;
+                }
             }
         }
         Ok(())
