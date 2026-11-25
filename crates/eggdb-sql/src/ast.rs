@@ -2299,10 +2299,12 @@ pub(crate) enum AggregateFunction {
     CorrK,
     AnyValue,
     Native,
+    RangeAgg,
+    RangeIntersectAgg,
 }
 
 impl AggregateFunction {
-    pub(crate) const ALL: [Self; 46] = [
+    pub(crate) const ALL: [Self; 48] = [
         Self::Count,
         Self::Sum,
         Self::Avg,
@@ -2349,6 +2351,8 @@ impl AggregateFunction {
         Self::CorrS,
         Self::CorrK,
         Self::AnyValue,
+        Self::RangeAgg,
+        Self::RangeIntersectAgg,
     ];
 
     pub(crate) fn bivariate_named(name: &str) -> Option<Self> {
@@ -2461,6 +2465,8 @@ impl AggregateFunction {
             "bool_and" => Self::BoolAnd,
             "bool_or" => Self::BoolOr,
             "every" => Self::Every,
+            "range_agg" => Self::RangeAgg,
+            "range_intersect_agg" => Self::RangeIntersectAgg,
             _ => return None,
         })
     }
@@ -2514,6 +2520,8 @@ impl AggregateFunction {
             Self::CorrK => "corr_k",
             Self::AnyValue => "any_value",
             Self::Native => "native_aggregate",
+            Self::RangeAgg => "range_agg",
+            Self::RangeIntersectAgg => "range_intersect_agg",
         }
     }
 

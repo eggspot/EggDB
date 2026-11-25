@@ -74,6 +74,11 @@ pub(crate) fn held_bytes(value: &Value) -> usize {
             crate::types::DefinedValue::Money(_) => 0,
             crate::types::DefinedValue::Bits(bits) => bits.bits.len(),
             crate::types::DefinedValue::Geometric(geometric) => geometric.numbers.len() * 8,
+            crate::types::DefinedValue::Multirange(multirange) => multirange
+                .ranges
+                .iter()
+                .map(|range| held_bytes(&Value::Defined(Box::new(crate::types::DefinedValue::Range(range.clone())))))
+                .sum(),
         },
         _ => 0,
     }

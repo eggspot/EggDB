@@ -2037,6 +2037,7 @@ const MONEY_TAG: u8 = 39;
 const BIT_TAG: u8 = 40;
 const VARBIT_TAG: u8 = 41;
 const GEOMETRIC_TAGS: std::ops::RangeInclusive<u8> = 42..=48;
+const MULTIRANGE_TAG: u8 = 49;
 const HSTORE_NULL_VALUE: u8 = 0;
 const HSTORE_TEXT_VALUE: u8 = 1;
 const RANGE_EMPTY: u8 = 1;
@@ -2133,7 +2134,8 @@ fn put_nested(out: &mut Vec<u8>, value: &Value) {
             | DefinedValue::Network(_)
             | DefinedValue::Money(_)
             | DefinedValue::Bits(_)
-            | DefinedValue::Geometric(_) => encode_row_value(out, value),
+            | DefinedValue::Geometric(_)
+            | DefinedValue::Multirange(_) => encode_row_value(out, value),
         },
         other => encode_row_value(out, other),
     }
@@ -2231,6 +2233,14 @@ fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Geometric(geometric) => {
                 out.push(GEOMETRIC_TAGS.start() + geometric.kind.index());
                 put_bytes(out, &crate::geometric_types::encoded(geometric));
+            }
+            DefinedValue::Multirange(multirange) => {
+                out.push(MULTIRANGE_TAG);
+                out.extend_from_slice(&multirange.type_oid.to_le_bytes());
+                put_varint(out, multirange.ranges.len() as u64);
+                for range in &multirange.ranges {
+                    put_range(out, range);
+                }
             }
         },
         Value::Null => out.push(0),
@@ -2409,6 +2419,10 @@ pub(crate) fn decode_row_into(
             MONEY_TAG => {
                 let cents = i64::from_le_bytes(reader.array()?);
                 if wanted { crate::money::value(cents) } else { Value::Null }
+            }
+            MULTIRANGE_TAG => {
+                let multirange = reader.multirange_body(0)?;
+                if wanted { multirange } else { Value::Null }
             }
             tag if GEOMETRIC_TAGS.contains(&tag) => {
                 let length = reader.count()?;
@@ -2598,6 +2612,9 @@ fn value_tag(sql_type: SqlType) -> u8 {
     }
     if let Some(kind) = crate::geometric_types::kind_of(sql_type) {
         return GEOMETRIC_TAGS.start() + kind.index();
+    }
+    if crate::ranges::multiranges::is_multirange_type(sql_type) {
+        return MULTIRANGE_TAG;
     }
     if let SqlType::Defined(defined) = sql_type
         && let Some(kind) = crate::network_types::kind_of(defined)
@@ -3157,6 +3174,24 @@ impl<'b> Reader<'b> {
         Ok(crate::records::record_value(type_oid, fields, names))
     }
 
+    fn multirange_body(&mut self, depth: usize) -> SqlResult<Value> {
+        let type_oid = self.u32()?;
+        let found = crate::ranges::multiranges::builtin(type_oid).ok_or_else(|| self.damaged())?;
+        let count = self.count()?;
+        let mut ranges = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            let range = self.range_body(found.range, depth + 1)?;
+            let Value::Defined(defined) = range else {
+                return Err(self.damaged());
+            };
+            let DefinedValue::Range(range) = *defined else {
+                return Err(self.damaged());
+            };
+            ranges.push(range);
+        }
+        Ok(crate::ranges::multiranges::value(crate::ranges::multiranges::MultirangeValue { type_oid, ranges }))
+    }
+
     fn range_body(&mut self, type_oid: u32, depth: usize) -> SqlResult<Value> {
         use crate::ranges::{RangeBound, RangeBounds, RangeValue};
         if depth > MAX_NESTING {
@@ -3301,6 +3336,7 @@ impl<'b> Reader<'b> {
             }
             CITEXT_TAG => crate::citext::value(self.text()?),
             MONEY_TAG => crate::money::value(i64::from_le_bytes(self.array()?)),
+            MULTIRANGE_TAG => self.multirange_body(depth)?,
             tag if GEOMETRIC_TAGS.contains(&tag) => {
                 let length = self.count()?;
                 let bytes = self.take(length)?;

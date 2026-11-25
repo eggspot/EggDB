@@ -602,6 +602,9 @@ fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
     if let Some(kind) = crate::geometric_types::kind_of(SqlType::Defined(defined)) {
         return crate::geometric_types::parse(text, kind).map(crate::geometric_types::value);
     }
+    if crate::ranges::multiranges::builtin(defined.oid).is_some() {
+        return crate::ranges::multiranges::parse(text, defined.oid).map(crate::ranges::multiranges::value);
+    }
     if defined == DefinedType::CITEXT {
         Ok(crate::citext::value(text.to_owned()))
     } else if defined == DefinedType::HSTORE {
@@ -621,6 +624,20 @@ fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) ->
         Value::Bpchar(text) => Some(crate::types::without_trailing_spaces(text)),
         other => crate::citext::text_of(other),
     };
+    if crate::ranges::multiranges::builtin(target.oid).is_some() {
+        if let Some(converted) = crate::ranges::multiranges::function("multirange", std::slice::from_ref(&value))
+            && crate::types::Value::sql_type(&value).and_then(crate::ranges::multiranges::type_of_range)
+                == Some(SqlType::Defined(target))
+        {
+            return converted;
+        }
+        return match (text, conversion) {
+            (Some(text), Conversion::Explicit | Conversion::Assignment) => {
+                crate::ranges::multiranges::parse(text, target.oid).map(crate::ranges::multiranges::value)
+            }
+            _ => Err(cannot_cast(&value, target)),
+        };
+    }
     if let Some(kind) = crate::geometric_types::kind_of(SqlType::Defined(target)) {
         if let Some(found) = crate::geometric_types::geometric_of(&value) {
             return match crate::geometric_types::convert(found, kind) {

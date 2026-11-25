@@ -1,3 +1,5 @@
+pub(crate) mod multiranges;
+
 use crate::ast::{BinaryOperator, Expr};
 use crate::error::{SqlError, SqlResult, SqlState};
 use crate::eval::Evaluator;

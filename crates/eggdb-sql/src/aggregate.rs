@@ -432,6 +432,8 @@ fn result_type(function: AggregateFunction, argument: Option<SqlType>) -> Option
         | AggregateFunction::CorrK => Some(SqlType::Double),
         AggregateFunction::AnyValue => argument.map(SqlType::without_modifier),
         AggregateFunction::Native => None,
+        AggregateFunction::RangeAgg => crate::ranges::multiranges::aggregate_type(argument),
+        AggregateFunction::RangeIntersectAgg => argument,
     }
 }
 
@@ -542,6 +544,11 @@ fn check_argument_type(function: AggregateFunction, sql_type: SqlType) -> SqlRes
             }
         }
         AggregateFunction::Sum if crate::money::is_money(sql_type) => Ok(()),
+        AggregateFunction::RangeAgg | AggregateFunction::RangeIntersectAgg
+            if crate::ranges::multiranges::aggregate_type(Some(sql_type)).is_none() =>
+        {
+            Err(undefined_aggregate(function, &name()))
+        }
         AggregateFunction::Sum | AggregateFunction::Avg if !sql_type.is_numeric() => {
             Err(undefined_aggregate(function, &name()))
         }
@@ -1221,10 +1228,12 @@ impl Call {
             | AggregateFunction::JsonbAgg
             | AggregateFunction::JsonObjectAgg
             | AggregateFunction::JsonbObjectAgg => Accumulator::JsonParts(None),
-            AggregateFunction::ArrayAgg => Accumulator::Collected {
-                values: Vec::new(),
-                bytes: 0,
-            },
+            AggregateFunction::ArrayAgg | AggregateFunction::RangeAgg | AggregateFunction::RangeIntersectAgg => {
+                Accumulator::Collected {
+                    values: Vec::new(),
+                    bytes: 0,
+                }
+            }
             AggregateFunction::BoolAnd | AggregateFunction::BoolOr | AggregateFunction::Every => {
                 Accumulator::Truth(None)
             }
@@ -1690,6 +1699,11 @@ impl Call {
                 crate::json_functions::finish_list(&text, self.function.builds_jsonb())?
             }
             Accumulator::Collected { values, .. } if values.is_empty() => Value::Null,
+            Accumulator::Collected { values, .. }
+                if matches!(self.function, AggregateFunction::RangeAgg | AggregateFunction::RangeIntersectAgg) =>
+            {
+                crate::ranges::multiranges::aggregate(self.function == AggregateFunction::RangeIntersectAgg, values)?
+            }
             Accumulator::Collected { values, .. } => {
                 crate::arrays::from_rows(values, self.argument_type.map(SqlType::without_modifier))?
             }

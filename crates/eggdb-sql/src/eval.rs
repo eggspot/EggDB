@@ -994,6 +994,13 @@ impl Evaluator<'_> {
             }
             BinaryOperator::JsonContains | BinaryOperator::JsonContainedIn => {
                 let (left, right) = self.pair(left, right)?;
+                if let Some(result) = crate::ranges::multiranges::containment(
+                    operator == BinaryOperator::JsonContains,
+                    &left,
+                    &right,
+                ) {
+                    return result;
+                }
                 if let Some(result) = crate::ranges::containment(
                     operator == BinaryOperator::JsonContains,
                     &left,
@@ -1634,6 +1641,9 @@ impl Evaluator<'_> {
         {
             return Ok(crate::oracle_system_triggers::attribute(name, &values));
         }
+        if let Some(result) = crate::ranges::multiranges::function(name, &values) {
+            return result;
+        }
         if let Some(result) = crate::ranges::function(name, &values) {
             return result;
         }
@@ -1644,6 +1654,11 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::geometric_types::operator(name, &values) {
+            return result;
+        }
+        if name == crate::ranges::OVERLAPS
+            && let Some(result) = crate::ranges::multiranges::overlap(&values)
+        {
             return result;
         }
         if let Some(result) = crate::ranges::operator(name, &values) {
@@ -2682,6 +2697,9 @@ pub(crate) fn arithmetic(
         return result;
     }
     if let Some(result) = crate::geometric_types::arithmetic(operator, left, right) {
+        return result;
+    }
+    if let Some(result) = crate::ranges::multiranges::arithmetic(operator, left, right) {
         return result;
     }
     refuse_infinite_date_without_infinities(left)?;

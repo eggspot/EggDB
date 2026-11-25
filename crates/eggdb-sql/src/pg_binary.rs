@@ -112,6 +112,9 @@ pub fn encode_pg_binary(value: &Value, oid: u32, zone: TimeZone) -> SqlResult<Op
         match defined.as_ref() {
             crate::types::DefinedValue::Record(record) => return record_binary(record, zone).map(Some),
             crate::types::DefinedValue::Range(range) => return range_binary(range, zone).map(Some),
+            crate::types::DefinedValue::Multirange(multirange) => {
+                return multirange_binary(multirange, zone).map(Some);
+            }
             _ => {}
         }
     }
@@ -302,6 +305,35 @@ fn range_binary(range: &crate::ranges::RangeValue, zone: TimeZone) -> SqlResult<
     }
     out[0] = flags;
     Ok(out)
+}
+
+fn multirange_binary(multirange: &crate::ranges::multiranges::MultirangeValue, zone: TimeZone) -> SqlResult<Vec<u8>> {
+    let count = i32::try_from(multirange.ranges.len()).map_err(|_| incorrect_binary())?;
+    let mut out = count.to_be_bytes().to_vec();
+    for range in &multirange.ranges {
+        let bytes = range_binary(range, zone)?;
+        let length = i32::try_from(bytes.len()).map_err(|_| incorrect_binary())?;
+        out.extend_from_slice(&length.to_be_bytes());
+        out.extend_from_slice(&bytes);
+    }
+    Ok(out)
+}
+
+fn multirange_text(bytes: &[u8], subtype: u32) -> SqlResult<String> {
+    let count = usize::try_from(header_word(bytes, 0)?).map_err(|_| incorrect_binary())?;
+    let mut at = 4usize;
+    let mut ranges = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let length = usize::try_from(header_word(bytes, at)?).map_err(|_| incorrect_binary())?;
+        at += 4;
+        let range = bytes.get(at..at + length).ok_or_else(incorrect_binary)?;
+        at += length;
+        ranges.push(range_text(range, subtype)?);
+    }
+    if at != bytes.len() {
+        return Err(incorrect_binary());
+    }
+    Ok(format!("{{{}}}", ranges.join(",")))
 }
 
 fn range_text(bytes: &[u8], subtype: u32) -> SqlResult<String> {
@@ -729,6 +761,12 @@ fn decode_text(bytes: &[u8], oid: u32, depth: usize) -> SqlResult<String> {
             return crate::network_types::text_from_binary(bytes, kind).ok_or_else(incorrect_binary);
         }
         oid if TEXT_INPUT_OIDS.contains(&oid) => return text_of(bytes),
+        oid if crate::ranges::multiranges::builtin(oid).is_some() => {
+            let subtype = crate::ranges::multiranges::builtin(oid)
+                .and_then(|found| crate::ranges::builtin(found.range))
+                .map_or(TEXT_OID, |builtin| crate::pg_catalog::type_oid(builtin.subtype));
+            return multirange_text(bytes, subtype);
+        }
         oid if crate::ranges::builtin(oid).is_some() => {
             let subtype = crate::ranges::builtin(oid).map_or(TEXT_OID, |builtin| crate::pg_catalog::type_oid(builtin.subtype));
             return range_text(bytes, subtype);
