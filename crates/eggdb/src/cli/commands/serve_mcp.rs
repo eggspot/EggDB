@@ -362,6 +362,7 @@ impl<'d> McpEndpoint<'d> {
             audit: AuditLog::new(self.audit.clone()),
             allow_write: self.writes_allowed(&role),
             tables: self.tables.clone(),
+            key_prefixes: None,
             call_gap: Duration::ZERO,
             agent_role: role,
             exit_process: None,

@@ -238,6 +238,11 @@ pub const ERROR_CODES: &[ErrorCode] = &[
         "the server was started with --tables, which leaves out the key-value store",
     ),
     code(
+        "outside_key_prefixes",
+        Category::NeedsGrant,
+        "eggdb mcp --keys reaches only keys of the default key space under the listed prefixes",
+    ),
+    code(
         "limited_to_role",
         Category::NeedsGrant,
         "the server acts as a database role, which leaves out the key-value store",

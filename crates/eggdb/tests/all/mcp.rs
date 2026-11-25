@@ -1575,3 +1575,40 @@ fn a_modern_client_is_served_statelessly_without_initialize() {
     let (status, _) = mcp.finish();
     assert!(status.success());
 }
+
+#[test]
+fn keys_listed_with_keys_are_reachable_under_tables_and_no_others() {
+    let (file, _audit) = sample("mcp-keys", 0);
+    let path = file.path().to_str().unwrap().to_owned();
+    for (key, value) in [("session:1", "ada"), ("session:2", "grace"), ("secret:1", "hidden")] {
+        let put = eggdb(&["put", &path, key, value]);
+        assert!(put.status.success(), "{}", stderr(&put));
+    }
+    let mut mcp = Mcp::start(
+        file.path(),
+        &["--tables", "users", "--keys", "session:,greet", "--allow-write"],
+    );
+    mcp.initialize();
+    let read = mcp.call("kv_get", r#"{"key":"session:1"}"#);
+    assert_eq!(text_at(ok(&read), &["entry", "value"]), "ada");
+    let hidden = mcp.call("kv_get", r#"{"key":"secret:1"}"#);
+    assert_eq!(error_code(&hidden), "outside_key_prefixes");
+    let scanned = mcp.call("kv_scan", "{}");
+    let listed: Vec<String> = match &get(ok(&scanned), &["entries"]).value {
+        Json::Array(entries) => entries.iter().map(|entry| text_at(entry, &["key"])).collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(listed, ["greeting", "session:1", "session:2"]);
+    let stored = mcp.call("put", r#"{"key":"session:3","value":"katherine"}"#);
+    ok(&stored);
+    let refused = mcp.call("put", r#"{"key":"secret:2","value":"x"}"#);
+    assert_eq!(error_code(&refused), "outside_key_prefixes");
+    let collection = mcp.call("kv_get", r#"{"key":"session:1","collection":"other"}"#);
+    assert_eq!(error_code(&collection), "outside_key_prefixes");
+    let resp = mcp.call("resp_get", r#"{"command":"GET session:1"}"#);
+    assert_eq!(error_code(&resp), "outside_key_prefixes");
+    let (status, _) = mcp.finish();
+    assert!(status.success());
+    let unchanged = eggdb(&["get", &path, "secret:2"]);
+    assert_eq!(unchanged.status.code(), Some(1));
+}

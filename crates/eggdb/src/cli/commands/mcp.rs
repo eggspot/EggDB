@@ -303,6 +303,7 @@ pub(super) fn run(request: Request, console: &mut Console<'_>) -> Result<Exit, F
         audit: AuditLog::new(audit_path),
         allow_write: request.allow_write,
         tables,
+        key_prefixes: (!request.key_prefixes.is_empty()).then(|| request.key_prefixes.clone()),
         call_gap: Duration::from_millis(call_gap_ms),
         agent_role: None,
         exit_process: Some(std::process::exit),

@@ -164,6 +164,10 @@ pub struct ServerConfig {
     /// (`--tables`), each table perhaps with the only columns they see, or `None` for every
     /// table and the key-value store.
     pub tables: Option<VisibleTables>,
+    /// The only keys of the default key space the key tools reach (`--keys`): those starting
+    /// with one of these prefixes, even with [`ServerConfig::tables`] or
+    /// [`ServerConfig::agent_role`]; `None` for every key, or none under those limits (D1358).
+    pub key_prefixes: Option<Vec<Vec<u8>>>,
     /// The pause after a call before the next call opens the database (`--call-gap`), so
     /// other programs get the file between an agent's calls; zero for none.
     pub call_gap: Duration,
@@ -595,7 +599,8 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
     fn grants(&self) -> Grants {
         Grants {
             allow_write: self.config.allow_write,
-            key_value_store: self.config.tables.is_none() && self.config.agent_role.is_none(),
+            key_value_store: self.config.key_prefixes.is_some()
+                || (self.config.tables.is_none() && self.config.agent_role.is_none()),
         }
     }
 
@@ -609,6 +614,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
             tables: self.config.tables.as_ref(),
             watchdog: self.watchdog.as_ref(),
             agent_role: self.config.agent_role.as_deref(),
+            key_prefixes: self.config.key_prefixes.as_deref(),
         }
     }
 
@@ -919,7 +925,7 @@ impl<'o, O: DatabaseOpener> Server<'o, O> {
         link: Option<&mut Connection<'_, '_>>,
     ) -> Option<String> {
         let pending = self.pending_write(id, tool, arguments_text);
-        let request = match tools::key_write_request(tool, arguments) {
+        let request = match tools::key_write_request(tool, arguments, self.config.key_prefixes.as_deref()) {
             Ok(request) => request,
             Err(error) => {
                 return Some(self.finish_write(&pending, unwritten(Err(error)), None));

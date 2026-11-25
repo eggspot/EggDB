@@ -227,7 +227,15 @@ them are hidden below the SQL engine, as hidden tables are.
 
 The audit's `server_started` record lists the names (`"tables"`), and `eggdb audit` shows them.
 
-### Letting the agent write only some tables
+### Letting the agent reach some keys
+
+`--keys session:,cart:` (comma-separated prefixes, `0x..` for hex, repeatable) limits the key tools to keys of the
+default key space that start with a listed prefix, and offers them even with `--tables`, so an agent can read the
+listed tables and a few key families and nothing else. `kv_scan` lists only keys under the prefixes; any other key,
+any `collection` and `resp_get` answer `outside_key_prefixes`. With `--allow-write` the key writes follow the same
+list (D1358).
+
+## Letting the agent write only some tables
 
 ```sh
 claude mcp add mydb -- eggdb mcp /path/to/app.db --allow-write --tables orders,order_lines

@@ -1676,6 +1676,10 @@ claude mcp add mydb -- eggdb mcp /path/to/app.db --time-limit 30
   the primary key, the other columns are unknown to the agent everywhere (`42703`), and that
   table cannot be changed; a list the server cannot serve stops it (exit 1,
   `column_not_found`) (D281).
+- **`--keys <prefixes>`** (comma-separated, `0x..` for hex; repeat it to add more) lets the key tools
+  (`kv_get`, `kv_scan`, and with `--allow-write` `put`, `del`, `incr`, `cas`, `expire`, `persist`) reach only
+  keys of the default key space that start with one of the prefixes, and does so even with `--tables`; any other
+  key, a `collection`, and `resp_get` are refused with `outside_key_prefixes` (D1358).
 - **`--call-gap <ms>`** (default 100, 0 to 10000, 0 for none): after each call the next one that
   opens the file waits that long, so your own writers get the file between an agent's calls.
 - **Tools:** `list_tables`, `describe_table`, `run_sql` (one statement, in `postgresql`, `mysql`,

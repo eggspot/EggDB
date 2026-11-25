@@ -542,6 +542,7 @@ pub(crate) struct Call<'a, O: DatabaseOpener> {
     pub(crate) tables: Option<&'a VisibleTables>,
     pub(crate) watchdog: Option<&'a Watchdog>,
     pub(crate) agent_role: Option<&'a str>,
+    pub(crate) key_prefixes: Option<&'a [Vec<u8>]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -797,8 +798,12 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::WriteSql => Err(writes_not_allowed()),
         Tool::ExplainQuery => explain_query(arguments, call),
         Tool::SampleRows => sample_rows(arguments, call),
-        Tool::KvGet | Tool::KvScan if call.tables.is_some() => Err(limited_to_tables()),
-        Tool::KvGet | Tool::KvScan if call.agent_role.is_some() => Err(limited_to_role()),
+        Tool::KvGet | Tool::KvScan if call.tables.is_some() && call.key_prefixes.is_none() => {
+            Err(limited_to_tables())
+        }
+        Tool::KvGet | Tool::KvScan if call.agent_role.is_some() && call.key_prefixes.is_none() => {
+            Err(limited_to_role())
+        }
         Tool::KvGet => kv_get(arguments, call),
         Tool::KvScan => kv_scan(arguments, call),
         Tool::RowList => row_list(arguments, call),
@@ -811,6 +816,7 @@ pub(crate) fn run<O: DatabaseOpener>(
         Tool::GraphGet => graph_get(arguments, call),
         Tool::DocumentGet => document_get(arguments, call),
         Tool::SearchGet => search_get(arguments, call),
+        Tool::RespGet if call.key_prefixes.is_some() => Err(outside_key_prefixes()),
         Tool::RespGet if call.tables.is_some() => Err(limited_to_tables()),
         Tool::RespGet if call.agent_role.is_some() => Err(limited_to_role()),
         Tool::RespGet => resp_get(arguments, call),
@@ -1317,6 +1323,43 @@ pub(crate) fn built_write_request(sql: &str) -> WriteRequest<'_> {
         max_rows: 1,
         confirm: false,
     }
+}
+
+fn outside_key_prefixes() -> ToolError {
+    ToolError::new(
+        "outside_key_prefixes",
+        "This server reaches only the keys that start with the prefixes the user listed (--keys), in the default key space. Nothing was read or changed.",
+    )
+    .with_fix("Use a key under one of the listed prefixes, without collection.")
+}
+
+fn check_key_prefixes(prefixes: Option<&[Vec<u8>]>, key: &[u8], collection: Option<&str>) -> Result<(), ToolError> {
+    match prefixes {
+        None => Ok(()),
+        Some(_) if collection.is_some() => Err(outside_key_prefixes()),
+        Some(prefixes) if prefixes.iter().any(|prefix| key.starts_with(prefix)) => Ok(()),
+        Some(_) => Err(outside_key_prefixes()),
+    }
+}
+
+fn clipped_to_prefixes(ranges: Vec<(Vec<u8>, Vec<u8>)>, prefixes: &[Vec<u8>], far_end: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut allowed: Vec<(Vec<u8>, Vec<u8>)> = prefixes
+        .iter()
+        .map(|prefix| (prefix.clone(), after_prefix(prefix).unwrap_or_else(|| far_end.to_vec())))
+        .collect();
+    allowed.sort();
+    let mut clipped = Vec::new();
+    for (from, to) in &ranges {
+        for (low, high) in &allowed {
+            let start = from.max(low).clone();
+            let end = to.min(high).clone();
+            if start < end {
+                clipped.push((start, end));
+            }
+        }
+    }
+    clipped.sort();
+    clipped
 }
 
 pub(crate) fn key_writes_refused<O: DatabaseOpener>(call: &Call<'_, O>) -> ToolError {
@@ -2174,6 +2217,7 @@ fn kv_get<O: DatabaseOpener>(
         .bytes("key", "key_hex")?
         .ok_or_else(|| ToolError::invalid("give key or key_hex"))?;
     let collection = arguments.string("collection")?;
+    check_key_prefixes(call.key_prefixes, &key, collection)?;
     if collection.is_none() && in_sql_key_space(&key) {
         return Err(ToolError::invalid(
             "that key is in SQL's key space; read tables with run_sql",
@@ -2241,6 +2285,9 @@ fn kv_scan<O: DatabaseOpener>(
         }
     }
     let collection = arguments.string("collection")?;
+    if call.key_prefixes.is_some() && collection.is_some() {
+        return Err(outside_key_prefixes());
+    }
     let ranges = match collection {
         Some(_) => vec![(low, high)],
         None => {
@@ -2250,6 +2297,10 @@ fn kv_scan<O: DatabaseOpener>(
                 (low.max(reserved_end), high),
             ]
         }
+    };
+    let ranges = match call.key_prefixes {
+        Some(prefixes) => clipped_to_prefixes(ranges, prefixes, &far_end),
+        None => ranges,
     };
     let mut out = JsonOut::new();
     out.begin_object().key("notice").string(NOTICE);
@@ -2353,12 +2404,14 @@ pub(crate) struct KeyWriteRequest<'n> {
 pub(crate) fn key_write_request<'n>(
     tool: Tool,
     arguments: &Arguments<'n>,
+    key_prefixes: Option<&[Vec<u8>]>,
 ) -> Result<KeyWriteRequest<'n>, ToolError> {
     arguments.allow_tool(tool)?;
     let key = arguments
         .bytes("key", "key_hex")?
         .ok_or_else(|| ToolError::invalid("give key or key_hex"))?;
     let collection = arguments.string("collection")?;
+    check_key_prefixes(key_prefixes, &key, collection)?;
     if collection.is_none() && in_sql_key_space(&key) {
         return Err(ToolError::invalid(
             "that key is in SQL's key space; change tables with write_sql",

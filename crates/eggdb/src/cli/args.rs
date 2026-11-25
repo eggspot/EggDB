@@ -494,6 +494,7 @@ impl CommandName {
             OptionName::TimeLimit
             | OptionName::AllowWrite
             | OptionName::Tables
+            | OptionName::Keys
             | OptionName::CallGap => self == Self::Mcp,
             OptionName::Prefix
             | OptionName::From
@@ -742,6 +743,7 @@ enum OptionName {
     TimeLimit,
     AllowWrite,
     Tables,
+    Keys,
     CallGap,
     Define,
     Collection,
@@ -942,6 +944,7 @@ impl OptionName {
             b"time-limit" => Self::TimeLimit,
             b"allow-write" => Self::AllowWrite,
             b"tables" => Self::Tables,
+            b"keys" => Self::Keys,
             b"call-gap" => Self::CallGap,
             b"define" => Self::Define,
             b"collection" => Self::Collection,
@@ -1081,6 +1084,7 @@ pub(crate) struct Request {
     pub(crate) time_limit: Option<u64>,
     pub(crate) allow_write: bool,
     pub(crate) tables: Vec<String>,
+    pub(crate) key_prefixes: Vec<Vec<u8>>,
     pub(crate) call_gap_ms: Option<u64>,
     pub(crate) collection: Option<String>,
     pub(crate) new_collection_name: Option<String>,
@@ -1618,6 +1622,7 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
         time_limit: None,
         allow_write: false,
         tables: Vec::new(),
+        key_prefixes: Vec::new(),
         call_gap_ms: None,
         collection: None,
         new_collection_name: None,
@@ -2532,6 +2537,9 @@ fn build_request(command: CommandName, tokens: &Tokens<'_>) -> Result<Request, F
             }
             OptionName::Tables => {
                 add_table_names(&mut request.tables, &option.spelled, value).map_err(usage)?;
+            }
+            OptionName::Keys => {
+                add_key_prefixes(&mut request.key_prefixes, &option.spelled, value).map_err(usage)?;
             }
             OptionName::CallGap => {
                 request.call_gap_ms = Some(
@@ -3735,6 +3743,44 @@ fn parse_page_size(option: &str, value: &OsStr) -> Result<usize, String> {
 fn parse_limit(option: &str, value: &OsStr) -> Result<u64, String> {
     parse_whole_number(value.as_encoded_bytes())
         .ok_or_else(|| format!("{option} needs a whole number, not '{}'", shown(value)))
+}
+
+const MOST_KEY_PREFIXES: usize = 256;
+
+fn add_key_prefixes(listed: &mut Vec<Vec<u8>>, spelled: &str, value: &OsStr) -> Result<(), String> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| format!("{spelled} takes UTF-8 text: key prefixes as text, or 0x.. for hex"))?;
+    for part in text.split(',') {
+        let prefix = match part.strip_prefix("0x") {
+            Some(hex) => hex_bytes(hex).ok_or_else(|| {
+                format!("{spelled}: '{part}' is not hexadecimal: give pairs of digits after 0x")
+            })?,
+            None => part.as_bytes().to_vec(),
+        };
+        if prefix.is_empty() {
+            return Err(format!(
+                "{spelled} takes non-empty key prefixes, comma-separated, such as session:,cart:"
+            ));
+        }
+        if !listed.contains(&prefix) {
+            listed.push(prefix);
+        }
+    }
+    if listed.len() > MOST_KEY_PREFIXES {
+        return Err(format!("{spelled} takes at most {MOST_KEY_PREFIXES} key prefixes"));
+    }
+    Ok(())
+}
+
+fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| hex.get(at..at + 2).and_then(|pair| u8::from_str_radix(pair, 16).ok()))
+        .collect()
 }
 
 fn add_table_names(listed: &mut Vec<String>, spelled: &str, value: &OsStr) -> Result<(), String> {

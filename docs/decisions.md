@@ -1382,3 +1382,4 @@ its full title with its status.
 - [D1355](decisions/D1355.md) Code-only batch 1010 (M6d): RESP keys read with Redis-compatible commands; vectors through the existing tools
 - [D1356](decisions/D1356.md) Code-only batch 1011 (M6d): text-to-SQL as an MCP tool and a command
 - [D1357](decisions/D1357.md) Code-only batch 1012 (M6d): MCP 2026-07-28 beside the handshake versions
+- [D1358](decisions/D1358.md) Code-only batch 1013 (M6d): a key allow-list for the MCP key tools, eggdb mcp --keys

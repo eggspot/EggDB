@@ -534,6 +534,14 @@ Examples:
             )
         },
         OptionDefinition {
+            repeatable: true,
+            ..valued(
+                "keys",
+                "prefixes",
+                "the key tools work, even with --tables, on keys of the default key space that start with these prefixes only, comma-separated, 0x.. for hex; repeat it for more",
+            )
+        },
+        OptionDefinition {
             default: Some("5"),
             ..valued(
                 "time-limit",
