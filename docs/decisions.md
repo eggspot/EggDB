@@ -1372,3 +1372,4 @@ its full title with its status.
 - [D1345](decisions/D1345.md) Code-only batch 1000 (M5): the Unicode Collation Algorithm over DUCET, and PostgreSQL's ICU-style COLLATE names
 - [D1346](decisions/D1346.md) Code-only batch 1001 (M4): SQLite's INTEGER affinity for INT columns other than the row id
 - [D1347](decisions/D1347.md) Code-only batch 1002 (M6): asynchronous C API calls, one callback per batch
+- [D1348](decisions/D1348.md) Code-only batch 1003 (M6a): dynamic data masking, the design
