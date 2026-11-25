@@ -1344,3 +1344,4 @@ its full title with its status.
 - [D1317](decisions/D1317.md) Code-only batch 973 (M11): incremental refresh of continuous aggregates
 - [D1318](decisions/D1318.md) Code-only batch 974 (M5): set-returning WebAssembly functions
 - [D1319](decisions/D1319.md) Code-only batch 975 (M5): per-role limits for WebAssembly functions
+- [D1320](decisions/D1320.md) Code-only batch 976 (M5): WebAssembly functions returning a table

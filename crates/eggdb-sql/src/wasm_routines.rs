@@ -221,7 +221,21 @@ fn result_type(definition: &RoutineDefinition) -> SqlResult<Option<SqlType>> {
 }
 
 fn returns_set(definition: &RoutineDefinition) -> bool {
-    matches!(definition.returns, RoutineReturns::Set(_))
+    matches!(definition.returns, RoutineReturns::Set(_) | RoutineReturns::Table(_))
+}
+
+fn set_columns(definition: &RoutineDefinition) -> Vec<(String, SqlType)> {
+    match &definition.returns {
+        RoutineReturns::Table(columns) => columns.clone(),
+        RoutineReturns::Set(ReturnType::Type(sql_type)) => vec![(String::new(), *sql_type)],
+        _ => Vec::new(),
+    }
+}
+
+fn unsupported_result() -> SqlError {
+    SqlError::not_supported(
+        "LANGUAGE wasm functions return only boolean, smallint, integer, bigint, real, double precision, text, varchar or bytea",
+    )
 }
 
 /// Checks a `LANGUAGE wasm` routine when it is created: its module parses, exports the named
@@ -262,18 +276,19 @@ pub(crate) fn check(definition: &RoutineDefinition) -> SqlResult<()> {
             )
         })?);
     }
-    let mut returned = match result_type(definition)? {
-        Some(sql_type) => wasm_types_of(sql_type).ok_or_else(|| {
-            SqlError::not_supported(
-                "LANGUAGE wasm functions return only boolean, smallint, integer, bigint, real, double precision, text, varchar or bytea",
-            )
-        })?,
-        None => Vec::new(),
-    };
-    if returns_set(definition) {
+    let returned = if returns_set(definition) {
         wanted.push(ValueType::I32);
-        returned.insert(0, ValueType::I32);
-    }
+        let mut returned = vec![ValueType::I32];
+        for (_, sql_type) in set_columns(definition) {
+            returned.extend(wasm_types_of(sql_type).ok_or_else(unsupported_result)?);
+        }
+        returned
+    } else {
+        match result_type(definition)? {
+            Some(sql_type) => wasm_types_of(sql_type).ok_or_else(unsupported_result)?,
+            None => Vec::new(),
+        }
+    };
     if params != wanted || results != returned {
         return Err(invalid(format!(
             "the WebAssembly function \"{export}\" takes ({}) and returns {}, which does not match the SQL declaration",
@@ -435,17 +450,37 @@ pub(crate) fn invoke(definition: &RoutineDefinition, arguments: Vec<Value>, limi
         }
     }
     if returns_set(definition) {
-        return set_rows(&mut instance, export, values, result_type(definition)?, limits);
+        return set_rows(&mut instance, export, values, &set_columns(definition), limits);
     }
     let results = instance.call_values(export, &values, limits).map_err(trapped)?;
     Ok(Returned::Value(result_value(&results, result_type(definition)?, &instance)?))
+}
+
+fn row_value(results: &[eggdb_wasm_vm::Value], columns: &[(String, SqlType)], instance: &Instance) -> SqlResult<Value> {
+    if let [(_, sql_type)] = columns {
+        return result_value(results, Some(*sql_type), instance);
+    }
+    let mut fields = Vec::with_capacity(columns.len());
+    let mut at = 0;
+    for (_, sql_type) in columns {
+        let width = if through_memory(*sql_type) { 2 } else { 1 };
+        let part = results.get(at..at + width).ok_or_else(|| {
+            SqlError::new(
+                SqlState::EXTERNAL_ROUTINE_EXCEPTION,
+                "a LANGUAGE wasm function returned fewer values than its table has columns",
+            )
+        })?;
+        fields.push(result_value(part, Some(*sql_type), instance)?);
+        at += width;
+    }
+    Ok(crate::plpgsql::row_record(columns, fields))
 }
 
 fn set_rows(
     instance: &mut Instance,
     export: &str,
     mut values: Vec<eggdb_wasm_vm::Value>,
-    element: Option<SqlType>,
+    columns: &[(String, SqlType)],
     limits: &Limits,
 ) -> SqlResult<Returned> {
     let mut rows = Vec::new();
@@ -466,7 +501,7 @@ fn set_rows(
         if *more == 0 {
             return Ok(Returned::Set(rows));
         }
-        let value = result_value(value_results, element, instance)?;
+        let value = row_value(value_results, columns, instance)?;
         held.add(&value)?;
         rows.push(value);
     }

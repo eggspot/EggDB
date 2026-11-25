@@ -18,7 +18,7 @@ pub(crate) use collections::{
     too_many_elements,
 };
 pub(crate) use conditions::{condition_name, condition_states};
-pub(crate) use frame::{FrameVariable, RoutineFrame};
+pub(crate) use frame::{FrameVariable, RoutineFrame, row_record};
 pub(crate) use raise::{push_statement_notices, take_raised_notices};
 pub(crate) use run::{
     Call, DynamicCursors, OpenCursor, PlsqlTriggerCall, PlsqlTriggerEnd, Returned, TransactionControl,

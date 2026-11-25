@@ -191,3 +191,28 @@ fn a_role_with_a_small_wasm_fuel_ceiling_traps_where_others_finish() {
     assert_eq!(error.state().code(), "38000", "{error}");
     assert_eq!(run(&mut admin, "SELECT count(*) AS n FROM wseries(2)").expect("ran"), "n\n2\nSELECT 1");
 }
+
+const SQUARES_MODULE: &str = "\\x0061736d0100000001090160027f7f037f7f7e03020100070b0107737175617265730000\
+0a1b0119002001200048200141016a200141016aac200141016aac7e0b";
+
+#[test]
+fn a_wasm_function_returning_a_table_yields_a_column_per_value() {
+    let store = MemoryStore::default();
+    let mut session = Session::new(&store);
+    run(
+        &mut session,
+        &format!(
+            "CREATE FUNCTION wsquares(n integer) RETURNS TABLE (base integer, square bigint) LANGUAGE wasm AS '{SQUARES_MODULE}', 'squares'"
+        ),
+    )
+    .expect("created");
+    assert_eq!(
+        run(&mut session, "SELECT base, square FROM wsquares(3) ORDER BY base").expect("called"),
+        "base|square\n1|1\n2|4\n3|9\nSELECT 3"
+    );
+    assert!(run(
+        &mut session,
+        &format!("CREATE FUNCTION wrong_table(n integer) RETURNS TABLE (base integer, square integer) LANGUAGE wasm AS '{SQUARES_MODULE}', 'squares'"),
+    )
+    .is_err());
+}
