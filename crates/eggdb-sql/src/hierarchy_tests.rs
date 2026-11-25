@@ -417,3 +417,26 @@ fn a_path_longer_than_4000_bytes_is_ora_01489() {
         vec!["292"]
     );
 }
+
+#[test]
+fn order_siblings_by_what_siblings_share_keeps_the_next_key_in_charge() {
+    let store = MemoryStore::default();
+    let mut session = hr_employees(&store);
+    let ordered = |session: &mut Session<'_>, keys: &str| {
+        lines(
+            session,
+            &format!(
+                "SELECT last_name FROM employees START WITH manager_id IS NULL \
+                 CONNECT BY PRIOR employee_id = manager_id ORDER SIBLINGS BY {keys}"
+            ),
+        )
+    };
+    let by_name = ordered(&mut session, "last_name");
+    assert_eq!(ordered(&mut session, "LEVEL, last_name"), by_name);
+    assert_eq!(ordered(&mut session, "PRIOR last_name, last_name"), by_name);
+    assert_eq!(ordered(&mut session, "CONNECT_BY_ROOT last_name DESC, last_name"), by_name);
+    error(
+        &mut session,
+        "SELECT last_name FROM employees CONNECT BY PRIOR employee_id = manager_id ORDER SIBLINGS BY CONNECT_BY_ISLEAF",
+    );
+}

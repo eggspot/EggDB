@@ -1520,8 +1520,9 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
   without one, the `ROWID` type, and links to Oracle databases.
 - `CONNECT BY` over a join (the join's conditions in `WHERE` applied first): **code written, unbuilt**
   (code-only mode, 2026-11-17, D1213); a sequence's `NEXTVAL` advancing once per source row of
-  `INSERT ALL`: **code written, unbuilt** (code-only mode, 2026-11-17, D1214). Left: `PRIOR` beside a
-  subquery and `ORDER SIBLINGS BY` a pseudo-column; `CONNECT BY`, `INSERT ALL` and `INSERT FIRST` are built (D304).
+  `INSERT ALL`: **code written, unbuilt** (code-only mode, 2026-11-17, D1214); `ORDER SIBLINGS BY` `LEVEL`, `PRIOR` and
+  `CONNECT_BY_ROOT`: **code written, unbuilt** (D1316). Left: `PRIOR` beside a subquery and `ORDER SIBLINGS BY`
+  `CONNECT_BY_ISLEAF` and `SYS_CONNECT_BY_PATH`; `CONNECT BY`, `INSERT ALL` and `INSERT FIRST` are built (D304).
   Check: a deep hierarchy against a recursive `WITH` on SQLite.
 - Oracle's XML functions (the SQL/XML publishing functions: **code written, unbuilt**, D454;
   `EXTRACTVALUE` and `EXISTSNODE`: **code written, unbuilt**, D690; `XMLTABLE`: **code written, unbuilt**, D692;

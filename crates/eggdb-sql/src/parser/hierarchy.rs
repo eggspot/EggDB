@@ -344,6 +344,9 @@ impl HierarchyBuilder<'_> {
             self.hierarchy.siblings.push((input, direction));
             return Ok(());
         }
+        if matches!(hierarchical_operator(&key), Some(LEVEL | PRIOR | CONNECT_BY_ROOT)) {
+            return Ok(());
+        }
         if mentions_hidden_column(&key) || mentions_hierarchy(&key) {
             return Err(refused_here(
                 "ORDER SIBLINGS BY a hierarchical pseudo-column or operator",
