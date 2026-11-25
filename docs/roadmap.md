@@ -1158,7 +1158,8 @@ Databricks, Microsoft, Splunk, SAP or IBM services comes after D58's legal check
 - A documentation site, generated as static pages by our own Rust tool (D32). `eggdb-docsite`: **code written, unbuilt**
   (D1322). Left: publishing it from the release workflow, and search.
 - A research check of whether EggOS's GUI and `eggdb-gui` can share one toolkit, recorded as a
-  new decision that refines D15 (D15).
+  new decision that refines D15 (D15). **Recorded** (D1323): two toolkits, with the client reaching EggOS as a
+  Wayland client through `eggway`; the Wayland window backend is left with the item on Wayland windows.
 
 ### M6f Network drivers, ORMs and connectors
 - The MySQL and TDS protocols as backends of the C API's network session (D192). MySQL's (`mysql://` in
