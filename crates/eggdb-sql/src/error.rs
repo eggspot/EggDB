@@ -87,6 +87,8 @@ impl SqlState {
     pub const INVALID_XML_DOCUMENT: Self = Self(*b"2200M");
     /// `22011` substring_error.
     pub const SUBSTRING_ERROR: Self = Self(*b"22011");
+    /// `22026` string_data_length_mismatch.
+    pub const STRING_DATA_LENGTH_MISMATCH: Self = Self(*b"22026");
     /// `22004` null_value_not_allowed.
     pub const NULL_VALUE_NOT_ALLOWED: Self = Self(*b"22004");
     /// `22015` interval_field_overflow.

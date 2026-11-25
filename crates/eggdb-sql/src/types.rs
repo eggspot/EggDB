@@ -185,6 +185,18 @@ impl DefinedType {
         oid: crate::network_types::MACADDR8_OID,
     };
 
+    /// The type `bit`: a fixed-length bit string.
+    pub const BIT: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::bit_strings::BIT_OID,
+    };
+
+    /// The type `bit varying`: a bit string of any length up to its limit.
+    pub const VARBIT: Self = Self {
+        kind: DefinedKind::Base,
+        oid: crate::bit_strings::VARBIT_OID,
+    };
+
     /// The type `money`: a currency amount in cents.
     pub const MONEY: Self = Self {
         kind: DefinedKind::Base,
@@ -194,6 +206,8 @@ impl DefinedType {
     pub(crate) fn builtin_base_named(name: &str) -> Option<Self> {
         match name {
             "money" => Some(Self::MONEY),
+            "bit" => Some(Self::BIT),
+            "varbit" | "bit varying" => Some(Self::VARBIT),
             "inet" => Some(Self::INET),
             "cidr" => Some(Self::CIDR),
             "macaddr" => Some(Self::MACADDR),
@@ -221,6 +235,8 @@ impl DefinedType {
             crate::geometry_type::GEOMETRY_OID => Some("geometry"),
             crate::network_types::INET_OID => Some("inet"),
             crate::money::MONEY_OID => Some("money"),
+            crate::bit_strings::BIT_OID => Some("bit"),
+            crate::bit_strings::VARBIT_OID => Some("bit varying"),
             crate::network_types::CIDR_OID => Some("cidr"),
             crate::network_types::MACADDR_OID => Some("macaddr"),
             crate::network_types::MACADDR8_OID => Some("macaddr8"),
@@ -272,6 +288,8 @@ pub enum DefinedValue {
     Network(crate::network_types::NetworkValue),
     /// A `money` amount in cents.
     Money(i64),
+    /// A `bit` or `bit varying` value.
+    Bits(crate::bit_strings::BitString),
 }
 
 impl DefinedValue {
@@ -294,6 +312,7 @@ impl DefinedValue {
             Self::RefCursor(_) => SqlType::Defined(DefinedType::REFCURSOR),
             Self::Network(network) => SqlType::Defined(crate::network_types::defined_type(network.kind)),
             Self::Money(_) => SqlType::Defined(DefinedType::MONEY),
+            Self::Bits(bits) => SqlType::Defined(if bits.varying { DefinedType::VARBIT } else { DefinedType::BIT }),
         }
     }
 
@@ -312,6 +331,7 @@ impl DefinedValue {
             }
             Self::Network(network) => network.text.clone(),
             Self::Money(cents) => crate::money::to_text(*cents),
+            Self::Bits(bits) => bits.bits.clone(),
         }
     }
 }
@@ -1538,6 +1558,9 @@ fn compare_defined(left: &DefinedValue, right: &DefinedValue) -> Ordering {
         (DefinedValue::Money(a), DefinedValue::Money(b)) => a.cmp(b),
         (DefinedValue::Money(_), _) => Ordering::Greater,
         (_, DefinedValue::Money(_)) => Ordering::Less,
+        (DefinedValue::Bits(a), DefinedValue::Bits(b)) => a.bits.as_bytes().cmp(b.bits.as_bytes()),
+        (DefinedValue::Bits(_), _) => Ordering::Greater,
+        (_, DefinedValue::Bits(_)) => Ordering::Less,
         (DefinedValue::Enum(a), DefinedValue::Enum(b)) => {
             compare_floats(a.sort_order, b.sort_order)
         }
@@ -1602,6 +1625,11 @@ pub(crate) fn equality_key(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Money(cents) => {
                 out.push(27);
                 out.extend_from_slice(&cents.to_le_bytes());
+            }
+            DefinedValue::Bits(bits) => {
+                out.push(28);
+                out.extend_from_slice(&(bits.bits.len() as u64).to_le_bytes());
+                out.extend_from_slice(bits.bits.as_bytes());
             }
             DefinedValue::Network(network) => {
                 let key = crate::network_types::ordered_key(network);

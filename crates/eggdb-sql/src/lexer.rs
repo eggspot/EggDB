@@ -373,6 +373,14 @@ impl<'t> Lexer<'t> {
                 self.at += 1;
                 self.string(true)
             }
+            b'b' | b'B' | b'x' | b'X' if self.peek(1) == Some(b'\'') => {
+                self.at += 1;
+                let TokenKind::String(digits) = self.string(false)? else {
+                    return Err(SqlError::syntax("syntax error in bit string", self.at));
+                };
+                let bits = crate::bit_strings::digits(&digits, matches!(byte, b'x' | b'X'))?;
+                Ok(TokenKind::Binary(bits.into()))
+            }
             _ if is_identifier_start(byte) => Ok(self.word()),
             _ if is_operator_char(byte) => Ok(self.operator()),
             _ => {

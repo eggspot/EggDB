@@ -2034,6 +2034,8 @@ const CIDR_TAG: u8 = 36;
 const MACADDR_TAG: u8 = 37;
 const MACADDR8_TAG: u8 = 38;
 const MONEY_TAG: u8 = 39;
+const BIT_TAG: u8 = 40;
+const VARBIT_TAG: u8 = 41;
 const HSTORE_NULL_VALUE: u8 = 0;
 const HSTORE_TEXT_VALUE: u8 = 1;
 const RANGE_EMPTY: u8 = 1;
@@ -2128,7 +2130,8 @@ fn put_nested(out: &mut Vec<u8>, value: &Value) {
             | DefinedValue::JsonPath(_)
             | DefinedValue::RefCursor(_)
             | DefinedValue::Network(_)
-            | DefinedValue::Money(_) => encode_row_value(out, value),
+            | DefinedValue::Money(_)
+            | DefinedValue::Bits(_) => encode_row_value(out, value),
         },
         other => encode_row_value(out, other),
     }
@@ -2218,6 +2221,10 @@ fn encode_row_value(out: &mut Vec<u8>, value: &Value) {
             DefinedValue::Money(cents) => {
                 out.push(MONEY_TAG);
                 out.extend_from_slice(&cents.to_le_bytes());
+            }
+            DefinedValue::Bits(bits) => {
+                out.push(if bits.varying { VARBIT_TAG } else { BIT_TAG });
+                put_bytes(out, bits.bits.as_bytes());
             }
         },
         Value::Null => out.push(0),
@@ -2398,13 +2405,13 @@ pub(crate) fn decode_row_into(
                 if wanted { crate::money::value(cents) } else { Value::Null }
             }
             TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG | INET_TAG | CIDR_TAG | MACADDR_TAG
-            | MACADDR8_TAG
+            | MACADDR8_TAG | BIT_TAG | VARBIT_TAG
                 if wanted =>
             {
                 stored_text_value(tag, reader.text()?).ok_or_else(|| reader.damaged())?
             }
             7 | 13 | 14 | 18 | 20 | 21 | CITEXT_TAG | TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG
-            | INET_TAG | CIDR_TAG | MACADDR_TAG | MACADDR8_TAG => {
+            | INET_TAG | CIDR_TAG | MACADDR_TAG | MACADDR8_TAG | BIT_TAG | VARBIT_TAG => {
                 reader.skip_text()?;
                 Value::Null
             }
@@ -2540,6 +2547,7 @@ fn stored_text_value(tag: u8, text: String) -> Option<Value> {
         CIDR_TAG => network(crate::network_types::NetworkKind::Cidr, text),
         MACADDR_TAG => network(crate::network_types::NetworkKind::MacAddr, text),
         MACADDR8_TAG => network(crate::network_types::NetworkKind::MacAddr8, text),
+        BIT_TAG | VARBIT_TAG => DefinedValue::Bits(crate::bit_strings::BitString { varying: tag == VARBIT_TAG, bits: text }),
         _ => return None,
     };
     Some(Value::Defined(Box::new(value)))
@@ -2561,6 +2569,12 @@ fn network_tag(kind: crate::network_types::NetworkKind) -> u8 {
 fn value_tag(sql_type: SqlType) -> u8 {
     if crate::money::is_money(sql_type) {
         return MONEY_TAG;
+    }
+    if sql_type == SqlType::Defined(DefinedType::BIT) {
+        return BIT_TAG;
+    }
+    if sql_type == SqlType::Defined(DefinedType::VARBIT) {
+        return VARBIT_TAG;
     }
     if let SqlType::Defined(defined) = sql_type
         && let Some(kind) = crate::network_types::kind_of(defined)
@@ -2913,6 +2927,7 @@ impl<'b> Reader<'b> {
                 self.escaped_key_text_width()?
             }
             SqlType::Defined(_) if crate::money::is_money(sql_type) => 8,
+            SqlType::Defined(_) if crate::bit_strings::is_bit_type(sql_type) => self.escaped_key_text_width()?,
             SqlType::Defined(defined) if crate::network_types::kind_of(defined).is_some() => {
                 self.escaped_key_text_width()?
             }
@@ -3039,6 +3054,11 @@ impl<'b> Reader<'b> {
             }
             SqlType::Defined(_) if crate::money::is_money(sql_type) => {
                 crate::money::value((u64::from_be_bytes(self.array()?) ^ 0x8000_0000_0000_0000) as i64)
+            }
+            SqlType::Defined(defined) if crate::bit_strings::is_bit_type(sql_type) => {
+                let bytes = self.escaped_key_bytes()?;
+                let bits = String::from_utf8(bytes).map_err(|_| self.damaged())?;
+                crate::bit_strings::value(crate::bit_strings::BitString { varying: defined == DefinedType::VARBIT, bits })
             }
             SqlType::Defined(defined) if crate::network_types::kind_of(defined).is_some() => {
                 let kind = crate::network_types::kind_of(defined).ok_or_else(|| self.damaged())?;
@@ -3251,7 +3271,7 @@ impl<'b> Reader<'b> {
             MONEY_TAG => crate::money::value(i64::from_le_bytes(self.array()?)),
             HSTORE_TAG => self.hstore()?,
             TSVECTOR_TAG | TSQUERY_TAG | JSONPATH_TAG | REFCURSOR_TAG | INET_TAG | CIDR_TAG | MACADDR_TAG
-            | MACADDR8_TAG => {
+            | MACADDR8_TAG | BIT_TAG | VARBIT_TAG => {
                 let text = self.text()?;
                 stored_text_value(tag, text).ok_or_else(|| self.damaged())?
             }

@@ -954,6 +954,10 @@ pub fn builtin_type_name(type_oid: u32, type_modifier: i32) -> Option<String> {
         1184 => "timestamp with time zone".to_owned(),
         1186 => "interval".to_owned(),
         1266 => "time with time zone".to_owned(),
+        1560 | 1562 => {
+            let name = if type_oid == 1560 { "bit" } else { "bit varying" };
+            if type_modifier > 0 { format!("{name}({type_modifier})") } else { name.to_owned() }
+        }
         1700 => match length {
             Some(length) => format!("numeric({}, {})", length >> 16, length & 0xFFFF),
             None => "numeric".to_owned(),

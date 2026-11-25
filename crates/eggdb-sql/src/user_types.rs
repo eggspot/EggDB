@@ -596,6 +596,9 @@ fn parse_base(text: &str, defined: DefinedType) -> SqlResult<Value> {
     if defined == DefinedType::MONEY {
         return crate::money::parse(text).map(crate::money::value);
     }
+    if defined == DefinedType::BIT || defined == DefinedType::VARBIT {
+        return crate::bit_strings::parse(text, defined == DefinedType::VARBIT).map(crate::bit_strings::value);
+    }
     if defined == DefinedType::CITEXT {
         Ok(crate::citext::value(text.to_owned()))
     } else if defined == DefinedType::HSTORE {
@@ -615,6 +618,16 @@ fn convert_to_base(value: Value, target: DefinedType, conversion: Conversion) ->
         Value::Bpchar(text) => Some(crate::types::without_trailing_spaces(text)),
         other => crate::citext::text_of(other),
     };
+    if target == DefinedType::BIT || target == DefinedType::VARBIT {
+        let varying = target == DefinedType::VARBIT;
+        let allowed = crate::bit_strings::bits_of(&value).is_some()
+            || conversion == Conversion::Explicit
+            || (conversion == Conversion::Assignment && text.is_some());
+        return match crate::bit_strings::convert(&value, varying) {
+            Some(converted) if allowed => converted,
+            _ => Err(cannot_cast(&value, target)),
+        };
+    }
     if target == DefinedType::MONEY {
         if let Some(cents) = crate::money::from_number(&value) {
             return cents.map(crate::money::value);
@@ -734,6 +747,10 @@ pub(crate) fn comparable(defined: DefinedType, other: SqlType) -> bool {
     };
     let address = |oid: u32| oid == crate::network_types::INET_OID || oid == crate::network_types::CIDR_OID;
     if address(defined.oid) && address(other.oid) {
+        return true;
+    }
+    let bits = |oid: u32| oid == crate::bit_strings::BIT_OID || oid == crate::bit_strings::VARBIT_OID;
+    if bits(defined.oid) && bits(other.oid) {
         return true;
     }
     defined.oid == other.oid

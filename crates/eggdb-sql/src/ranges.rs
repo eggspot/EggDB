@@ -56,9 +56,9 @@ pub(crate) const RIGHT_OF: &str = "*range_right_of*";
 pub(crate) const NOT_RIGHT_OF: &str = "*range_not_right_of*";
 pub(crate) const NOT_LEFT_OF: &str = "*range_not_left_of*";
 pub(crate) const ADJACENT: &str = "*range_adjacent*";
-const INTEGER_AND: &str = "*integer_and*";
-const INTEGER_OR: &str = "*integer_or*";
-const INTEGER_XOR: &str = "*integer_xor*";
+pub(crate) const INTEGER_AND: &str = "*integer_and*";
+pub(crate) const INTEGER_OR: &str = "*integer_or*";
+pub(crate) const INTEGER_XOR: &str = "*integer_xor*";
 pub(crate) const INTEGER_NOT: &str = "*integer_not*";
 
 pub(crate) const OPERATORS: [(&str, &str); 9] = [

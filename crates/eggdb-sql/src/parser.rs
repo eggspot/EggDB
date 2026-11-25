@@ -458,6 +458,7 @@ pub(crate) struct Parser<'t> {
     system_versioning_on: Option<Option<crate::ast::Name>>,
     system_versioning_retention: Option<String>,
     vector_dimensions: Option<u32>,
+    bit_length: Option<u32>,
     geometry_typmod: Option<(String, Option<i64>)>,
     rowversion_column: Option<String>,
     stored_conditions: bool,
@@ -594,6 +595,7 @@ impl<'t> Parser<'t> {
             system_versioning_on: None,
             system_versioning_retention: None,
             vector_dimensions: None,
+            bit_length: None,
             geometry_typmod: None,
             rowversion_column: None,
             stored_conditions: false,
@@ -2342,6 +2344,7 @@ impl<'t> Parser<'t> {
         };
         let implicit_check = if serial.is_none() && !untyped { self.mysql_column_check.take() } else { None };
         let vector_dimensions = self.vector_dimensions.take();
+        let bit_length = self.bit_length.take();
         let geometry_typmod = self.geometry_typmod.take();
         let mut column = ColumnDefinition {
             name,
@@ -2369,6 +2372,11 @@ impl<'t> Parser<'t> {
             column
                 .constraints
                 .push(crate::vector_type::dimensions_check(&column.name, dimensions));
+        }
+        if let Some(length) = bit_length
+            && crate::bit_strings::is_bit_type(column.sql_type)
+        {
+            column.constraints.push(crate::bit_strings::length_check(&column.name, length));
         }
         if let Some((subtype, srid)) = geometry_typmod
             && let Some(check) = crate::geometry_type::typmod_check(&column.name, &subtype, srid)?
@@ -2706,8 +2714,10 @@ impl<'t> Parser<'t> {
             return self.sqlserver_type();
         }
         let position = self.position();
+        self.bit_length = None;
         let sql_type = self.element_type()?;
         if self.peek_kind() == &TokenKind::LeftBracket || self.is_word("array") {
+            self.bit_length = None;
             return self.array_column_type(sql_type, position);
         }
         Ok(sql_type)
@@ -2940,6 +2950,20 @@ impl<'t> Parser<'t> {
             "xml" if self.postgresql() => SqlType::Text,
             "inet" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::INET),
             "money" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::MONEY),
+            "bit" if self.postgresql() => {
+                let varying = self.take_word("varying");
+                let length = self.varchar_length(token.start)?;
+                self.bit_length = if varying { length } else { Some(length.unwrap_or(1)) };
+                SqlType::Defined(if varying {
+                    crate::types::DefinedType::VARBIT
+                } else {
+                    crate::types::DefinedType::BIT
+                })
+            }
+            "varbit" if self.postgresql() => {
+                self.bit_length = self.varchar_length(token.start)?;
+                SqlType::Defined(crate::types::DefinedType::VARBIT)
+            }
             "cidr" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::CIDR),
             "macaddr" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::MACADDR),
             "macaddr8" if self.postgresql() => SqlType::Defined(crate::types::DefinedType::MACADDR8),
@@ -4828,7 +4852,9 @@ impl<'t> Parser<'t> {
                     continue;
                 }
                 let type_position = self.position();
+                self.bit_length = None;
                 let (sql_type, array) = self.cast_target()?;
+                let bit_length = self.bit_length.take();
                 let position = expr.position;
                 if array && crate::arrays::ArrayElement::of(sql_type).is_none() {
                     let Some(cast) = elements_cast(expr, sql_type) else {
@@ -4855,6 +4881,10 @@ impl<'t> Parser<'t> {
                 };
                 if array {
                     expr = cast_with_element_modifier(expr, element_type);
+                } else if let Some(length) = bit_length
+                    && crate::bit_strings::is_bit_type(sql_type)
+                {
+                    expr = crate::bit_strings::fitted_cast(expr, length);
                 }
             } else if self.peek_kind() == &TokenKind::LeftBracket && self.postgresql() {
                 self.depth += 1;
@@ -4943,6 +4973,21 @@ impl<'t> Parser<'t> {
         {
             self.at += 1;
             return sqlserver_functions::binary_literal(digits, position);
+        }
+        if self.postgresql()
+            && let TokenKind::Binary(bits) = &token.kind
+        {
+            self.at += 1;
+            return Ok(Expr {
+                kind: ExprKind::Cast {
+                    expr: Box::new(Expr {
+                        kind: ExprKind::Literal(Literal::String(bits.as_ref().to_owned())),
+                        position,
+                    }),
+                    sql_type: SqlType::Defined(crate::types::DefinedType::BIT),
+                },
+                position,
+            });
         }
         if self.oracle()
             && let Some(expr) = self.oracle_primary(&token.kind, position)?
@@ -6266,7 +6311,9 @@ impl<'t> Parser<'t> {
             self.expect(&TokenKind::RightParen)?;
             return Ok(regclass_cast(expr, position));
         }
+        self.bit_length = None;
         let sql_type = self.cast_type()?;
+        let bit_length = self.bit_length.take();
         if self.oracle() && self.take_word("default") {
             let fallback = self.expression()?;
             self.expect_word("on")?;
@@ -6287,12 +6334,16 @@ impl<'t> Parser<'t> {
             ));
         }
         self.expect(&TokenKind::RightParen)?;
-        Ok(Expr {
+        let cast = Expr {
             kind: ExprKind::Cast {
                 expr: Box::new(expr),
                 sql_type,
             },
             position,
+        };
+        Ok(match bit_length {
+            Some(length) if crate::bit_strings::is_bit_type(sql_type) => crate::bit_strings::fitted_cast(cast, length),
+            _ => cast,
         })
     }
 

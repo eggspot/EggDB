@@ -310,6 +310,20 @@ fn name_and_whether_it_names_a_value(expr: &Expr) -> (String, bool) {
             }
         }
         ExprKind::Function { name, .. } if name == "array_constructor" => ("array".into(), true),
+        ExprKind::Function { name, arguments } if name == crate::bit_strings::FIT_FUNCTION => {
+            match arguments.first().map(name_and_whether_it_names_a_value) {
+                Some((name, true)) => (name, true),
+                _ => (
+                    if crate::bit_strings::fitted_type(arguments) == SqlType::Defined(crate::types::DefinedType::VARBIT) {
+                        "varbit"
+                    } else {
+                        "bit"
+                    }
+                    .to_owned(),
+                    false,
+                ),
+            }
+        }
         ExprKind::Function { name, arguments }
             if name == "array_subscript" || name == "array_slice" || name == "collate" =>
         {
@@ -1056,6 +1070,9 @@ impl Evaluator<'_> {
         ) {
             return joined.map(Concatenated::scalar);
         }
+        if let Some(joined) = crate::bit_strings::concatenated(&left_operand.value, &right_operand.value) {
+            return joined.map(Concatenated::scalar);
+        }
         let jsonb_pair = match (&left_operand.value, &right_operand.value) {
             (Value::Jsonb(_), Value::Jsonb(_) | Value::Null) | (Value::Null, Value::Jsonb(_)) => {
                 true
@@ -1549,6 +1566,9 @@ impl Evaluator<'_> {
         if let Some(result) = crate::native_functions::call(name, &values) {
             return result;
         }
+        if let Some(result) = crate::bit_strings::function(name, &values) {
+            return result;
+        }
         let unknown = || {
             if crate::set_returning::named(name).is_some() {
                 return SqlError::not_supported("set-returning functions are not allowed here")
@@ -1603,6 +1623,9 @@ impl Evaluator<'_> {
             return result;
         }
         if let Some(result) = crate::network_types::range_operator(name, &values) {
+            return result;
+        }
+        if let Some(result) = crate::bit_strings::operator(name, &values) {
             return result;
         }
         if let Some(result) = crate::ranges::operator(name, &values) {

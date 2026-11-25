@@ -316,6 +316,14 @@ fn defined_function_type(
 }
 
 fn function_type(name: &str, arguments: &[Expr], scope: Scope<'_>) -> Option<SqlType> {
+    if name == crate::bit_strings::FIT_FUNCTION {
+        return Some(crate::bit_strings::fitted_type(arguments));
+    }
+    if let Some(sql_type) =
+        crate::bit_strings::result_type(name, arguments.first().and_then(|argument| static_type(argument, scope)))
+    {
+        return Some(sql_type);
+    }
     if name == crate::oracle_collections::IS_A_SET || name == crate::oracle_collections::IS_EMPTY {
         return Some(SqlType::Boolean);
     }
@@ -533,6 +541,9 @@ fn concatenation_type(left: &Expr, right: &Expr, scope: Scope<'_>) -> SqlType {
         || (jsonb(right_type) && is_untyped_literal(left))
     {
         return SqlType::Jsonb;
+    }
+    if left_type.is_some_and(crate::bit_strings::is_bit_type) && right_type.is_some_and(crate::bit_strings::is_bit_type) {
+        return SqlType::Defined(crate::types::DefinedType::VARBIT);
     }
     let hstore = crate::hstore_functions::is_hstore_type;
     if (hstore(left_type) && (hstore(right_type) || is_untyped_literal(right)))
