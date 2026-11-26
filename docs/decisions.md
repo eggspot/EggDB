@@ -1,5 +1,9 @@
 # Architecture decisions
 
+**Frozen on 2026-11-26.** New decisions live in GitHub issues (label `decision`) and the commits
+that close them (CLAUDE.md, "Work tracking"). This index and `decisions/` are the history of D1 to
+D1374; only the owner's licence instructions (D36) are still added here.
+
 The index of the numbered, append-only decisions. Each decision is a file of its own in
 [decisions/](decisions/), named `D<number>.md` with the number zero-padded to three digits
 (`decisions/D007.md`), so a reader opens only the decisions it needs. The first line of a file is
