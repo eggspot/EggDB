@@ -24,7 +24,7 @@ agreement.
   values, and parsers get fuzz targets (D9).
 - No comments in code except rustdoc on public items and one `// SAFETY:` line per `unsafe`
   block, each block holding one unsafe operation. Names, small functions, types and tests carry
-  the explanations; reasons go in the PR and in `docs/decisions/`.
+  the explanations; reasons go in the commit or PR and its GitHub issue.
 - Platform code lives only in `crates/eggdb-platform` (D8). The engine never depends on a
   protocol or a platform.
 - Every hot path gets a benchmark (D7). Sizes and start time may only shrink (D6).
@@ -36,12 +36,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo doc --workspace --no-deps
 ```
-Describe what users can now do and how it was tested. An architecture decision gets a new file in
-`docs/decisions/` and a line in `docs/decisions.md`; the roadmap line moves with the work.
+Describe what users can now do and how it was tested, and close its issue (`Closes #<n>`). Open
+work is tracked in [GitHub issues](https://github.com/eggspot/EggDB/issues?q=is%3Aopen+label%3Aroadmap)
+(label `roadmap`, one milestone per roadmap milestone); an architecture decision is written in its
+issue, labelled `decision`, and in the closing commit or PR. `docs/decisions/` is the frozen history
+of D1 to D1374.
 Security-critical changes (cryptography, authentication, the file format) also get a
 security-focused review (D35).
 
 ## Governance
-The owner decides, and every decision is public in `docs/decisions/`. Security reports go
+The owner decides, and every decision is public: D1 to D1374 in `docs/decisions/`, later ones in
+the GitHub issues labelled `decision`. Security reports go
 privately through [SECURITY.md](SECURITY.md). Everyone follows the
 [code of conduct](CODE_OF_CONDUCT.md).

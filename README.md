@@ -52,7 +52,7 @@ access. What is in it:
 [docs/releases/v0.5.0.md](docs/releases/v0.5.0.md); everything it doesn't do yet, in one list:
 its [Limits](docs/releases/v0.5.0.md#limits);
 what is tested and what is not: [docs/correctness.md](docs/correctness.md); the plan:
-[docs/roadmap.md](docs/roadmap.md) and [docs/decisions.md](docs/decisions.md).
+[docs/roadmap.md](docs/roadmap.md), the [open issues](https://github.com/eggspot/EggDB/issues?q=is%3Aopen+label%3Aroadmap) and [docs/decisions.md](docs/decisions.md).
 
 ### Install: download one file
 
