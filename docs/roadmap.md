@@ -5,6 +5,11 @@ before v0.2.0, when releases are batched into it (D76). The order puts the core 
 the models and protocols that most applications use (D5). The build loop may refine it through
 research, recorded in docs/decisions/ (indexed in docs/decisions.md).
 
+Open work is tracked in [GitHub issues](https://github.com/eggspot/EggDB/issues?q=is%3Aopen+label%3Aroadmap),
+one per feature, grouped by milestone (CLAUDE.md, "Work tracking"). This page keeps the milestone
+table; a milestone is marked **done** here when its last issue closes. The lists below are history
+up to 2026-11-26.
+
 ## Milestones
 What is still to build for each milestone is listed in [What is left, per milestone](#what-is-left-per-milestone).
 
@@ -321,6 +326,9 @@ From the third gap review (D47–D58), each after its foundations:
   differences in `CREATE EXTENSION eggdb_migration` (D251).
 
 ## What is left, per milestone
+Frozen on 2026-11-26: every open item below is now a GitHub issue labelled `roadmap`, and new work
+is tracked only there.
+
 What each milestone still has to build: the vision (CLAUDE.md, D1 to D58) compared with what is
 built (the tables above, D59 to D334 and PR #86), with every "Left:", "Next:" and "Not yet" line
 of the decisions. Work from the tracks is listed under the milestone it builds on. Left out: D45's

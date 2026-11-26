@@ -184,7 +184,7 @@ Check each task against these before starting and again before opening the PR.
   protocol documentation. Reading other databases' source to learn how they work is allowed,
   copyleft and source-available ones included (owner, 2026-11-13: "all code here we write ourself
   only, could we read other code or learn from them"), but every line is written by us: never copy,
-  paste, translate or closely paraphrase their code, and name the source in the decision when a part was
+  paste, translate or closely paraphrase their code, and name the source in the issue or commit when a part was
   learned from someone else's code. No third-party crates in
   what we ship (Rust's standard library and our own OS API declarations are fine); the session's own
   research may approve a permissive (MIT, Apache-2.0, BSD) crate for tests, benchmarks or build
@@ -204,9 +204,9 @@ Check each task against these before starting and again before opening the PR.
 - `crates/eggdb`: the library and the `eggdb` binary. New subsystems become workspace crates
   under `crates/` when they have their own boundary (storage, transactions, query, protocols,
   platform layer); the engine core never depends on a protocol or a platform.
-- `docs/decisions.md`: the index and rules of the numbered, append-only decisions, one line each.
-  Each decision is a file of its own, `docs/decisions/D<number>.md` (zero-padded to three digits),
-  so read only the ones a task needs. `docs/roadmap.md`: milestones and status.
+- `docs/decisions.md` and `docs/decisions/`: the frozen history of decisions D1 to D1374, one file
+  each (`docs/decisions/D<number>.md`), so read only the ones a task needs. New decisions live in
+  GitHub issues ("Work tracking" below). `docs/roadmap.md`: the milestone table.
 
 ## Testing
 - Integration tests go in the package's single `tests/all` program; never add a new top-level
@@ -251,6 +251,53 @@ take orders from Main Chat"):
   accounts, passwords, license changes and anything else this file leaves to the owner still go back
   to the owner.
 
+## Work tracking: GitHub issues, the code as the docs
+Owner, 2026-11-26: "instead of add them to md in code -> what if we use the github issue and just use
+the code as docs?". Open work and the reasons behind it live in GitHub issues. The code, its tests
+and the commit history document what is built. Markdown in the repo is kept only for what users read
+and for what the code is built from.
+
+**What lives where**
+- **Open work:** one issue per buildable feature, label `roadmap`, milestone `M<n> <name>` (the
+  roadmap's milestone). An item that needs money or accounts carries `needs-owner` and no milestone;
+  agents skip it.
+- **Decisions:** the issue body (what users get, the design) and the commit or PR that closes it
+  (what was built, the choice made and why, the source it was learned from). An architecture choice
+  also gets the label `decision`, so `gh issue list --label decision --state all` lists them all.
+- **Frozen history:** `docs/decisions/` (D1 to D1374, indexed in `docs/decisions.md`) and the
+  "What is left, per milestone" lists in `docs/roadmap.md` take no new entries. Read them only to
+  trace an old choice; code and docs that cite a D-number keep it, and the docs site still builds
+  them. The one exception is the owner's licence instructions (D36), which are still added there.
+- **Kept in the repo:** README, the user docs in `docs/` (the CLI, SQL, C API, drivers, tutorial,
+  migration guides: the docs site is built from them), the GUI designs in `docs/ux/` (the client's
+  screens are built from them), NOTICE files, `docs/releases/`, and `docs/roadmap.md` as the
+  milestone table: a milestone is marked done there when its last issue closes. A change users see
+  still updates its user doc in the same commit.
+- **Progress files** (`.git/progress-*.md`) hold only what a session needs to resume: the issue in
+  hand, the next few issues, and facts that took effort to find. A few dozen lines, not a history.
+
+**The flow**
+1. **Pick** the next issue: the oldest open milestone first, skipping `needs-owner`:
+   `gh issue list --label roadmap --state open --milestone "<milestone>"`. Read it with
+   `gh issue view <n>`.
+2. **Write the code and its tests.** A large issue may take several commits; each one ends its body
+   with `Part of #<n>`.
+3. **Close it with the commit or PR that finishes it.** The subject says what was built; the body
+   says the choice made and why and names any source learned from (also in the module's NOTICE file);
+   the last line is `Closes #<n>`. Pushed to `main`, or merged in a PR, GitHub closes the issue.
+4. **Found more to do?** Open a new issue with the same label and milestone instead of writing a
+   "Left:", "Not yet" or "Follow-up" line anywhere, and name it in the closing commit
+   (`Left: #<m>`).
+5. **Code-only mode:** commit subjects start with "Code written, unbuilt:" and contain `[skip ci]`
+   and never carry a `Release:` line, as before. After the issue closes, label it: `gh issue edit <n> --add-label
+   "code written (unbuilt)"`. The build-and-fix pass works from
+   `gh issue list --label "code written (unbuilt)" --state closed` and removes the label once that
+   code builds and its tests pass, reopening the issue if it doesn't.
+6. **A milestone is finished** when it has no open `roadmap` issue: close the GitHub milestone and
+   follow "Releases" below.
+7. **Open questions** are researched as before ("Pull requests" below); the answer goes in an
+   issue comment and the closing commit or PR.
+
 ## Pull requests: merge them yourself
 The owner doesn't merge PRs by hand. After opening a PR, in the same session:
 1. Review it twice yourself (global PR workflow), then do a final independent review pass yourself over
@@ -265,7 +312,7 @@ same way, but need one more review pass of their own, focused only on security, 
 fuzzing and the format compatibility tests in CI (D35).
 
 An open question is never a reason to leave a PR unmerged: research it yourself,
-record the answer in the PR under "Decided by research" (and in docs/decisions/ for architecture),
+record the answer in the PR under "Decided by research" (and in the issue, labelled `decision`, for architecture),
 and merge. Only credentials, money, new accounts and going against an owner rule wait for the owner.
 A PR that changes the license is merged only on the owner's explicit instruction (D36).
 
@@ -299,6 +346,7 @@ registries (crates.io and others) needs accounts and tokens, so the owner sets t
 
 ## Owner decisions
 The decisions above are recorded in `docs/decisions/` (D1 to D101), one file each, indexed in
-`docs/decisions.md`. Record every further architecture decision as a new file there with the next
-free number (the highest in the index plus one) and a line in the index; a later entry may
-supersede an earlier one, with a note in both.
+`docs/decisions.md`; that folder stops at D1374 ("Work tracking"). Record every further architecture
+decision in its GitHub issue with the label `decision` (open one when the work has none); one that
+supersedes an entry in `docs/decisions/` names it in the issue. Only the owner's licence
+instructions (D36) are still added there as new files.
