@@ -277,9 +277,11 @@ and for what the code is built from.
   hand, the next few issues, and facts that took effort to find. A few dozen lines, not a history.
 
 **The flow**
-1. **Pick** the next issue: the oldest open milestone first, skipping `needs-owner`:
+1. **Pick** the next issue: a `P0` or `P1` issue first, then the oldest open milestone, then
+   `roadmap` issues with no milestone, always skipping `needs-owner`:
    `gh issue list --label roadmap --state open --milestone "<milestone>"`. Read it with
-   `gh issue view <n>`.
+   `gh issue view <n>`. Issues filed by the CTO review get the `roadmap` label too, so they are on
+   the same list.
 2. **Write the code and its tests.** A large issue may take several commits; each one ends its body
    with `Part of #<n>`.
 3. **Close it with the commit or PR that finishes it.** The subject says what was built; the body
