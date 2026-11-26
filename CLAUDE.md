@@ -277,7 +277,7 @@ and for what the code is built from.
   hand, the next few issues, and facts that took effort to find. A few dozen lines, not a history.
 
 **The flow**
-1. **Pick** the next issue: a `P0` or `P1` issue first, then the oldest open milestone, then
+1. **Pick** the next issue: a `P0` or `P1` issue first, then the open milestone with the lowest M-number (M2 before M10), then
    `roadmap` issues with no milestone, always skipping `needs-owner`:
    `gh issue list --label roadmap --state open --milestone "<milestone>"`. Read it with
    `gh issue view <n>`. Issues filed by the CTO review get the `roadmap` label too, so they are on
